@@ -98,10 +98,12 @@ impl<'a> MarkApply<'a> {
                 while arena.next_tuple(*root, plan_arena)? {
                     let right = arena.result_tuple();
                     if Self::predicates_matched(self.op.predicates(), left, right, plan_arena)? {
-                        let mut output = left.clone();
-                        output.pk = output.pk.or_else(|| right.pk.clone());
-                        output.values.extend(right.values.iter().cloned());
-                        arena.produce_tuple(output);
+                        let output = arena.result_tuple_mut();
+                        let right_len = output.values.len();
+                        output.values.extend(left.values.iter().cloned());
+                        output.values.rotate_left(right_len);
+                        output.pk = left.pk.clone().or(output.pk.take());
+                        arena.resume();
                         return Ok(());
                     }
                 }
@@ -197,7 +199,7 @@ impl<'a> MarkApply<'a> {
                 Ok(DataValue::Boolean(false))
             }
             MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => {
-                if let Some(probe_value) = self.parameterized_probe_value(left_tuple, plan_arena)? {
+                if let Some(probe_value) = probe {
                     if !probe_value.is_null() {
                         let right_input =
                             self.build_right_input(arena, plan_arena, Some(probe_value));
@@ -507,7 +509,7 @@ mod tests {
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
-        let mut arena = ExecArena::new();
+        let mut arena = ExecArena::with_capacity(0);
         arena.init_context(cache, &transaction);
         let root = <MarkApply as ReadExecutor<_>>::into_executor(
             (&op, &left, &right),
@@ -597,7 +599,7 @@ mod tests {
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let context = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
-        let mut arena = ExecArena::new();
+        let mut arena = ExecArena::with_capacity(0);
         arena.init_context(context, &transaction);
         let root = <MarkApply as ReadExecutor<_>>::into_executor(
             (&op, &left, &right),
@@ -724,7 +726,7 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let mut arena = ExecArena::new();
+        let mut arena = ExecArena::with_capacity(0);
         arena.init_context(
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             &transaction,
@@ -777,7 +779,7 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let mut arena = ExecArena::new();
+        let mut arena = ExecArena::with_capacity(0);
         arena.init_context(
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             &transaction,
@@ -830,7 +832,7 @@ mod tests {
 
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let mut arena = ExecArena::new();
+        let mut arena = ExecArena::with_capacity(0);
         arena.init_context(
             crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
             &transaction,

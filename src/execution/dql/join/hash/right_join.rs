@@ -39,9 +39,9 @@ impl JoinProbeState for RightJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(FullJoinState::full_right_row(
+            return Ok(Some(FullJoinState::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         }
 
@@ -52,9 +52,9 @@ impl JoinProbeState for RightJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(FullJoinState::full_right_row(
+            return Ok(Some(FullJoinState::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         };
 
@@ -85,9 +85,9 @@ impl JoinProbeState for RightJoinState {
         if !probe_state.produced && !probe_state.emitted_unmatched {
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(FullJoinState::full_right_row(
+            return Ok(Some(FullJoinState::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         }
 

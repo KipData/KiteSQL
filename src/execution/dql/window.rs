@@ -131,17 +131,16 @@ impl<'a> Window<'a> {
         for (index, field) in self.sort_fields.iter().enumerate() {
             let value = plan_arena
                 .expression(field.expr)
-                .eval(plan_arena, Some(tuple))?
-                .into_owned();
-            if self.state.started && self.state.sort_values[index] != value {
+                .eval(plan_arena, Some(tuple))?;
+            if self.state.started && self.state.sort_values[index] != *value {
                 if index < self.partition_by_len {
                     boundary = Some(Boundary::Partition);
                 } else if boundary.is_none() {
                     boundary = Some(Boundary::Peer);
                 }
-                self.state.sort_values[index] = value;
+                self.state.sort_values[index] = value.into_owned();
             } else if !self.state.started {
-                self.state.sort_values.push(value);
+                self.state.sort_values.push(value.into_owned());
             }
         }
         self.state.started = true;

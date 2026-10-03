@@ -469,6 +469,16 @@ impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
         unsafe { (&mut *self.transaction, &mut *self.table_codec) }
     }
 
+    pub(crate) fn tuple_transaction_codec_mut(&mut self) -> (&Tuple, &mut T, &mut TableCodec) {
+        unsafe {
+            (
+                &self.result.tuple,
+                &mut *self.transaction,
+                &mut *self.table_codec,
+            )
+        }
+    }
+
     pub(crate) fn index_values_transaction_codec_mut(
         &mut self,
     ) -> (&[DataValue], &mut T, &mut TableCodec) {
@@ -503,10 +513,10 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         self.table_codec.set_stamp(stamp);
     }
 
-    pub(crate) fn new() -> Self {
+    pub(crate) fn with_capacity(node_capacity: usize) -> Self {
         Self {
             nodes: ExecNodes {
-                items: Vec::new(),
+                items: Vec::with_capacity(node_capacity),
                 pos: 0,
                 executing: 0,
             },
@@ -955,7 +965,7 @@ mod test_utils {
         T: Transaction + 'a,
         E: ReadExecutor<'a, T>,
     {
-        let mut arena = ExecArena::new();
+        let mut arena = ExecArena::with_capacity(0);
         arena.init_context(cache, transaction);
         let root = <E as ReadExecutor<'a, T>>::into_executor(
             input,
@@ -981,7 +991,7 @@ mod test_utils {
         T: Transaction + 'a,
         E: WriteExecutor<'a, T>,
     {
-        let mut arena = ExecArena::new();
+        let mut arena = ExecArena::with_capacity(0);
         arena.init_context(cache, transaction);
         let root = <E as WriteExecutor<'a, T>>::into_executor(
             input,
@@ -1023,7 +1033,7 @@ mod test {
     fn active_nodes_cannot_be_overwritten_or_relocated() {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
-        let mut arena = ExecArena::<'_, MemoryTransaction>::new();
+        let mut arena = ExecArena::<'_, MemoryTransaction>::with_capacity(0);
         arena.push(ExecNode::Dummy(Dummy::default()));
         let slot =
             &arena.nodes.items[0] as *const std::cell::RefCell<ExecNode<'_, MemoryTransaction>>;

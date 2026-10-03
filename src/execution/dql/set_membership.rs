@@ -61,10 +61,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
     ) -> Result<(), DatabaseError> {
         if !self.built {
             while arena.next_tuple(self.right_input, plan_arena)? {
-                *self
-                    .right_counts
-                    .entry(arena.materialize_tuple())
-                    .or_insert(0) += 1;
+                if let Some(count) = self.right_counts.get_mut(arena.result_tuple()) {
+                    *count += 1;
+                } else {
+                    self.right_counts.insert(arena.materialize_tuple(), 1);
+                }
             }
             self.built = true;
         }

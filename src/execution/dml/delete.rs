@@ -21,7 +21,7 @@ use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
-use crate::types::index::Index;
+use crate::types::index::{Index, IndexType};
 use crate::types::tuple_builder::TupleBuilder;
 
 pub struct Delete<'a> {
@@ -68,6 +68,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
                 .ok_or(DatabaseError::TableNotFound)?;
             table
                 .indexes()
+                .filter(|index_meta| {
+                    !matches!(
+                        plan_arena.index(**index_meta).ty,
+                        IndexType::PrimaryKey { .. }
+                    )
+                })
                 .map(|index_meta| {
                     let index_meta = plan_arena.index(*index_meta);
                     Ok((
@@ -83,11 +89,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
         let mut deleted_count = 0;
 
         while arena.next_tuple(input, plan_arena)? {
-            let Some(tuple_id) = arena.result_tuple().pk.clone() else {
+            let tuple = arena.materialize_tuple();
+            let Some(tuple_id) = tuple.pk.as_ref() else {
                 continue;
             };
-
-            let tuple = arena.materialize_tuple();
             for (index_id, index_ty, exprs) in index_templates.iter() {
                 arena.rewrite(exprs, plan_arena, Some(&tuple))?;
                 let mut state = arena.local_state(plan_arena);

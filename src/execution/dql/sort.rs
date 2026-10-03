@@ -86,7 +86,7 @@ pub(crate) fn sort_tuples(
 ) -> Result<(), DatabaseError> {
     // Extract the results of calculating SortFields to avoid double calculation
     // of data during comparison.
-    let mut eval_values = vec![Vec::with_capacity(tuples.len()); sort_fields.len()];
+    let mut eval_values = vec![Vec::new(); sort_fields.len()];
 
     for (x, SortField { expr, .. }) in sort_fields.iter().enumerate() {
         for (_, tuple) in tuples.iter() {

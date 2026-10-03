@@ -323,7 +323,7 @@ mod tests {
             }
             let mut execution_arena = crate::execution::ExecArena::<
                 <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
-            >::new();
+            >::with_capacity(0);
             let executor = crate::execution::dql::index_scan::IndexScan::new(
                 scan_op,
                 info,
@@ -551,7 +551,7 @@ mod tests {
         };
         let mut execution_arena = crate::execution::ExecArena::<
             <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
-        >::new();
+        >::with_capacity(0);
         let ranges = crate::execution::dql::index_scan::IndexScan::new(
             scan_op,
             info,

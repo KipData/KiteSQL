@@ -234,7 +234,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let mut recursive_arena = ExecArena::new();
+        let mut recursive_arena = ExecArena::with_capacity(recursive_plan.exec_capacity_hint());
         recursive_arena.init_context(arena.context(), arena.transaction());
         let anchor_input = build_read(arena, plan_arena, anchor_plan, cache, transaction);
         arena.push(ExecNode::RecursiveCte(Self::new(

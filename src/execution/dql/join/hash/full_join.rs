@@ -44,9 +44,9 @@ impl JoinProbeState for FullJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(Self::full_right_row(
+            return Ok(Some(Self::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         }
 
@@ -57,9 +57,9 @@ impl JoinProbeState for FullJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(Self::full_right_row(
+            return Ok(Some(Self::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         };
 
@@ -91,9 +91,9 @@ impl JoinProbeState for FullJoinState {
         probe_state.finished = true;
         if !probe_state.produced && !probe_state.emitted_unmatched {
             probe_state.emitted_unmatched = true;
-            return Ok(Some(Self::full_right_row(
+            return Ok(Some(Self::take_full_right_row(
                 self.left_schema_len,
-                &probe_state.probe_tuple,
+                &mut probe_state.probe_tuple,
             )));
         }
         Ok(None)
@@ -131,13 +131,12 @@ impl JoinProbeState for FullJoinState {
 }
 
 impl FullJoinState {
-    pub(crate) fn full_right_row(left_schema_len: usize, probe_tuple: &Tuple) -> Tuple {
-        let full_values = Vec::from_iter(
-            (0..left_schema_len)
-                .map(|_| DataValue::Null)
-                .chain(probe_tuple.values.iter().cloned()),
-        );
-
-        Tuple::new(probe_tuple.pk.clone(), full_values)
+    pub(crate) fn take_full_right_row(left_schema_len: usize, probe_tuple: &mut Tuple) -> Tuple {
+        let mut tuple = std::mem::take(probe_tuple);
+        tuple
+            .values
+            .resize(tuple.values.len() + left_schema_len, DataValue::Null);
+        tuple.values.rotate_right(left_schema_len);
+        tuple
     }
 }

@@ -21,6 +21,7 @@ use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
+use crate::types::value::DataValue;
 
 pub struct ChangeColumn<'a> {
     op: &'a ChangeColumnOperator,
@@ -127,8 +128,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
                     })
                 },
                 |tuple| {
-                    tuple.values[column_index] =
-                        tuple.values[column_index].clone().cast(&target_data_type)?;
+                    let value = std::mem::replace(&mut tuple.values[column_index], DataValue::Null);
+                    tuple.values[column_index] = value.cast(&target_data_type)?;
                     if needs_not_null_validation && tuple.values[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));
                     }

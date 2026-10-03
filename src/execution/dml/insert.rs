@@ -110,6 +110,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 .map(|table| table.dml_snapshot(plan_arena))
                 .transpose()?
         };
+        let mut inserted_count = 0;
         if let Some(table_snapshot) = table_snapshot {
             if table_snapshot.primary_key_indices.is_empty() {
                 return Err(DatabaseError::not_null());
@@ -121,11 +122,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 .map(|column| plan_arena.column(*column).datatype().serializable())
                 .collect_vec();
             let mut tuple = Tuple::new(None, Vec::with_capacity(table_snapshot.columns_len));
-            let mut inserted_count = 0;
 
             while arena.next_tuple(input, plan_arena)? {
                 let mut tuple_map = HashMap::with_capacity(self.input_schema.len());
-                for (i, value) in arena.materialize_tuple().values.into_iter().enumerate() {
+                for (i, value) in arena.result_tuple_mut().values.drain(..).enumerate() {
                     let column = plan_arena.column(self.input_schema[i]);
                     tuple_map.insert(Self::column_key(column, self.is_mapping_by_name), value);
                 }
@@ -133,16 +133,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 tuple.values.clear();
                 for column in table_snapshot.columns.iter() {
                     let column = plan_arena.column(*column);
-                    let mut value = {
-                        let mut value =
-                            tuple_map.remove(&Self::column_key(column, self.is_mapping_by_name));
-
-                        if value.is_none() {
-                            value = column.default_value(plan_arena)?;
-                        }
-                        value.unwrap_or(DataValue::Null)
-                    };
-                    value = value.cast(column.datatype())?;
+                    let value = match tuple_map
+                        .remove(&Self::column_key(column, self.is_mapping_by_name))
+                    {
+                        Some(value) => value,
+                        None => column.default_value(plan_arena)?.unwrap_or(DataValue::Null),
+                    }
+                    .cast(column.datatype())?;
                     value.check_len(column.datatype())?;
                     if value.is_null() && !column.nullable() {
                         return Err(DatabaseError::not_null_column(column.name().to_string()));
@@ -153,7 +150,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                     table_snapshot.primary_key_indices,
                     &tuple.values,
                 ));
-
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
                     let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
@@ -175,14 +171,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 )?;
                 inserted_count += 1;
             }
-
-            arena.produce_tuple(TupleBuilder::build_result(inserted_count.to_string()));
-            arena.resume();
-            Ok(())
-        } else {
-            arena.produce_tuple(TupleBuilder::build_result("0".to_string()));
-            arena.resume();
-            Ok(())
         }
+        arena.produce_tuple(TupleBuilder::build_result(inserted_count.to_string()));
+        arena.resume();
+        Ok(())
     }
 }

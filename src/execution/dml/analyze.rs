@@ -107,11 +107,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
         while arena.next_tuple(input, plan_arena)? {
             let tuple = arena.materialize_tuple();
             for State { exprs, builder, .. } in builders.iter_mut() {
-                arena.rewrite(exprs, plan_arena, Some(&tuple))?;
-                let key = arena.materialize_tuple().values;
-                let value = match <[DataValue; 1]>::try_from(key) {
-                    Ok([value]) => value,
-                    Err(key) => DataValue::Tuple(key),
+                let value = match exprs.as_slice() {
+                    [expr] => expr.eval(plan_arena, Some(&tuple))?.into_owned(),
+                    _ => {
+                        arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                        DataValue::Tuple(arena.materialize_tuple().values)
+                    }
                 };
                 builder.append(value)?;
             }
