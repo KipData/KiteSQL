@@ -595,6 +595,9 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             name: function_name.into(),
             arg_types,
         };
+        // TODO: a NULL literal argument has type `SqlNull`, so the exact lookup
+        // misses e.g. `upper(null)` (FunctionNotFound). PostgreSQL treats it as
+        // an unknown type that matches any parameter and returns NULL.
         if let Some(function) = self.context.scala_functions.get(&summary) {
             return Ok(ScalarExpression::ScalaFunction(ScalarFunction {
                 args,

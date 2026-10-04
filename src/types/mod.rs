@@ -219,7 +219,6 @@ impl LogicalType {
             (LogicalType::SqlNull, _) => return Ok(Cow::Borrowed(right)),
             (_, LogicalType::SqlNull) => return Ok(Cow::Borrowed(left)),
             (LogicalType::Tuple(types_0), LogicalType::Tuple(types_1)) => {
-                // Rows of different degrees cannot be compared.
                 if types_0.len() != types_1.len() {
                     return Err(DatabaseError::Incomparable(left.clone(), right.clone()));
                 }
