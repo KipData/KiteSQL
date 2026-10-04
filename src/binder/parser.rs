@@ -2289,16 +2289,18 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                 else_result,
                 ..
             } => {
-                let fn_check_ty = |ty: &mut LogicalType, result_ty| {
+                // Branches of different types are unified like `l = r` (e.g.
+                // `then bigint else int` => bigint), as in PostgreSQL.
+                let fn_check_ty = |ty: &mut LogicalType, result_ty: LogicalType| {
                     if result_ty != LogicalType::SqlNull {
                         if ty == &LogicalType::SqlNull {
                             *ty = result_ty;
                         } else if ty != &result_ty {
-                            return Err(DatabaseError::Incomparable(ty.clone(), result_ty));
+                            *ty = LogicalType::max_logical_type(ty, &result_ty)?.into_owned();
                         }
                     }
 
-                    Ok(())
+                    Ok::<(), DatabaseError>(())
                 };
                 let mut operand_expr = None;
                 let mut ty = LogicalType::SqlNull;
@@ -2329,6 +2331,14 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
 
                     fn_check_ty(&mut ty, else_ty)?;
                     else_expr = Some(temp_expr);
+                }
+                if ty != LogicalType::SqlNull {
+                    for (_, result) in expr_pairs.iter_mut() {
+                        *result = result.type_cast(Cow::Borrowed(&ty), arena)?;
+                    }
+                    if let Some(expr) = else_expr.as_mut() {
+                        *expr = expr.type_cast(Cow::Borrowed(&ty), arena)?;
+                    }
                 }
 
                 Ok(ScalarExpression::CaseWhen {
