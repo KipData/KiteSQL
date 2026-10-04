@@ -48,8 +48,13 @@ SELECT * FROM kv WHERE k IN (SELECT k FROM kv)
 5 6
 7 8
 
-statement error 1065
+query II
 SELECT * FROM kv WHERE (k,v) IN (SELECT * FROM kv)
+----
+1 2
+3 4
+5 6
+7 8
 
 query II
 SELECT * FROM kv WHERE k IN (SELECT k FROM kv)
@@ -107,3 +112,14 @@ query
 SELECT a, b FROM ab WHERE (a, b) IN ((1, 10), (4, NULL), (NULL, 50))
 ----
 1 10
+
+statement ok
+drop table ab
+
+statement ok
+drop table kv
+
+statement ok
+drop table kvstring
+
+control sortmode nosort

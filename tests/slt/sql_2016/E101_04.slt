@@ -17,3 +17,9 @@ INSERT INTO TABLE_E101_04_01_02 VALUES ( 0, 1, 2 );
 
 statement ok
 DELETE FROM TABLE_E101_04_01_02 WHERE A = 1
+
+statement ok
+drop table table_e101_04_01_01
+
+statement ok
+drop table table_e101_04_01_02

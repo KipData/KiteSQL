@@ -8,3 +8,6 @@ CREATE VIEW VIEW_F031_16_01_01 AS SELECT A FROM TABLE_F031_16_01_01;
 
 statement ok
 DROP VIEW VIEW_F031_16_01_01
+
+statement ok
+drop table table_f031_16_01_01

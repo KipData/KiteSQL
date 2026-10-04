@@ -7,3 +7,6 @@ query T
 SELECT TIMESTAMP '2016-03-26 01:02:03'
 ----
 2016-03-26 01:02:03
+
+statement ok
+drop table table_f051_03_01_011

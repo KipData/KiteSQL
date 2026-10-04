@@ -18,3 +18,6 @@ INSERT INTO large_numbers VALUES (0, -9223372036854775808), (1, -1)
 
 query error
 SELECT sum(a) FROM large_numbers
+
+statement ok
+drop table large_numbers

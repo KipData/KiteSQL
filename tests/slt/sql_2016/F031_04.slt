@@ -11,3 +11,9 @@ CREATE TABLE TABLE_F031_04_01_02 ( ID INT PRIMARY KEY, A INTEGER );
 
 statement ok
 ALTER TABLE TABLE_F031_04_01_02 ADD COLUMN B INT
+
+statement ok
+drop table table_f031_04_01_01
+
+statement ok
+drop table table_f031_04_01_02

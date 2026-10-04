@@ -531,3 +531,30 @@ query IITITTITTTTIRRI
 SELECT * FROM wide
 ----
 0 null null null null null null null null null null null null null 10
+
+statement ok
+drop table xyzw
+
+statement ok
+drop table wide
+
+statement ok
+drop table c
+
+statement ok
+drop table a
+
+statement ok
+drop table abc
+
+statement ok
+drop table b
+
+statement ok
+drop table boolean_table
+
+statement ok
+drop table maxinttest
+
+statement ok
+drop table kv

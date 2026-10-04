@@ -139,3 +139,6 @@ select id from window_test where row_number() over () = 1
 statement error
 select row_number() over (named_window order by id) from window_test
 window named_window as (partition by k)
+
+statement ok
+drop table window_test

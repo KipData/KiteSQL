@@ -238,3 +238,6 @@ SELECT * FROM recursive_cte
 statement error
 WITH selected AS (SELECT 1) FROM cte_source
 SELECT * FROM selected
+
+statement ok
+drop table cte_source

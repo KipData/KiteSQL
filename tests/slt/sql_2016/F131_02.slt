@@ -11,3 +11,12 @@ CREATE VIEW VIEW_F131_02_01_01 AS SELECT A FROM TABLE_F131_02_01_011 GROUP BY A;
 
 query I
 SELECT A FROM VIEW_F131_02_01_01 JOIN TABLE_F131_02_01_012 USING ( A )
+
+statement ok
+drop view view_f131_02_01_01
+
+statement ok
+drop table table_f131_02_01_011
+
+statement ok
+drop table table_f131_02_01_012

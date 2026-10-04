@@ -41,3 +41,6 @@ drop view v2
 query I
 show views
 ----
+
+statement ok
+drop table t1

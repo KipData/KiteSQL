@@ -11,3 +11,9 @@ CREATE TABLE TABLE_E061_06_01_02 ( ID INT PRIMARY KEY, A INT );
 
 query I
 SELECT A FROM TABLE_E061_06_01_02 WHERE A IS NULL
+
+statement ok
+drop table table_e061_06_01_02
+
+statement ok
+drop table table_e061_06_01_01

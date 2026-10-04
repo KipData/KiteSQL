@@ -32,3 +32,9 @@ SELECT id, val FROM t1 WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE 1 = 0)
 1 10
 2 20
 3 30
+
+statement ok
+drop table t1
+
+statement ok
+drop table t2

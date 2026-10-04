@@ -17,3 +17,21 @@ CREATE TABLE TABLE_E141_03_02_01 ( A INT NOT NULL CONSTRAINT CONST_E141_03_02_01
 
 statement ok
 CREATE TABLE TABLE_E141_03_02_02 ( A INT NOT NULL PRIMARY KEY )
+
+statement ok
+drop table table_e141_03_01_02
+
+statement ok
+drop table table_e141_03_01_03
+
+statement ok
+drop table table_e141_03_01_04
+
+statement ok
+drop table table_e141_03_02_02
+
+statement ok
+drop table table_e141_03_02_01
+
+statement ok
+drop table table_e141_03_01_01

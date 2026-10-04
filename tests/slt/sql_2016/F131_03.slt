@@ -22,3 +22,15 @@ CREATE VIEW VIEW_F131_03_01_02 AS SELECT A, MIN ( B ) AS C FROM TABLE_F131_03_01
 query I
 SELECT A, SUM ( C ) FROM VIEW_F131_03_01_02 GROUP BY A
 ----
+
+statement ok
+drop view view_f131_03_01_01
+
+statement ok
+drop view view_f131_03_01_02
+
+statement ok
+drop table table_f131_03_01_021
+
+statement ok
+drop table table_f131_03_01_011

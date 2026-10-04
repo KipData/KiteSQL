@@ -107,3 +107,57 @@ CREATE TABLE TABLE_E061_07_01_18 ( ID INT PRIMARY KEY, A INT );
 
 query I
 SELECT A FROM TABLE_E061_07_01_18 WHERE A >= SOME ( SELECT 1 )
+
+statement ok
+drop table table_e061_07_01_16
+
+statement ok
+drop table table_e061_07_01_07
+
+statement ok
+drop table table_e061_07_01_11
+
+statement ok
+drop table table_e061_07_01_03
+
+statement ok
+drop table table_e061_07_01_10
+
+statement ok
+drop table table_e061_07_01_12
+
+statement ok
+drop table table_e061_07_01_14
+
+statement ok
+drop table table_e061_07_01_06
+
+statement ok
+drop table table_e061_07_01_04
+
+statement ok
+drop table table_e061_07_01_05
+
+statement ok
+drop table table_e061_07_01_18
+
+statement ok
+drop table table_e061_07_01_15
+
+statement ok
+drop table table_e061_07_01_17
+
+statement ok
+drop table table_e061_07_01_08
+
+statement ok
+drop table table_e061_07_01_13
+
+statement ok
+drop table table_e061_07_01_01
+
+statement ok
+drop table table_e061_07_01_02
+
+statement ok
+drop table table_e061_07_01_09

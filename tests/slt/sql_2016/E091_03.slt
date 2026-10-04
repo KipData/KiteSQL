@@ -7,3 +7,6 @@ query F
 SELECT MAX ( A ) FROM TABLE_E091_03_01_01
 ----
 null
+
+statement ok
+drop table table_e091_03_01_01

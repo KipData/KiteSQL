@@ -53,3 +53,39 @@ CREATE TABLE TABLE_F041_08_01_062 ( ID INT PRIMARY KEY, B INTEGER );
 
 query II
 SELECT TABLE_F041_08_01_061.A, TABLE_F041_08_01_062.B FROM TABLE_F041_08_01_061 JOIN TABLE_F041_08_01_062 ON TABLE_F041_08_01_061.A >= TABLE_F041_08_01_062.B
+
+statement ok
+drop table table_f041_08_01_052
+
+statement ok
+drop table table_f041_08_01_031
+
+statement ok
+drop table table_f041_08_01_042
+
+statement ok
+drop table table_f041_08_01_012
+
+statement ok
+drop table table_f041_08_01_021
+
+statement ok
+drop table table_f041_08_01_041
+
+statement ok
+drop table table_f041_08_01_011
+
+statement ok
+drop table table_f041_08_01_061
+
+statement ok
+drop table table_f041_08_01_062
+
+statement ok
+drop table table_f041_08_01_022
+
+statement ok
+drop table table_f041_08_01_051
+
+statement ok
+drop table table_f041_08_01_032

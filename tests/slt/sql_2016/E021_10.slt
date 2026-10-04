@@ -10,3 +10,6 @@ query B
 SELECT A = B FROM TABLE_E021_10_01_01
 ----
 false
+
+statement ok
+drop table table_e021_10_01_01

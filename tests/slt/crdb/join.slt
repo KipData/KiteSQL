@@ -1118,3 +1118,72 @@ select * from onecolumn as a left join twocolumn as b on a.x = b.x where b.x > 4
 
 # query
 # SELECT abcd.*, dxby.* FROM abcd INNER JOIN dxby USING (d, b)
+
+statement ok
+drop table xyv
+
+statement ok
+drop table pkba
+
+statement ok
+drop table othercolumn
+
+statement ok
+drop table r
+
+statement ok
+drop table s
+
+statement ok
+drop table pkbc
+
+statement ok
+drop table str2
+
+statement ok
+drop table othertype
+
+statement ok
+drop table a
+
+statement ok
+drop table empty
+
+statement ok
+drop table l
+
+statement ok
+drop table pkbac
+
+statement ok
+drop table t1
+
+statement ok
+drop table xyu
+
+statement ok
+drop table twocolumn
+
+statement ok
+drop table b
+
+statement ok
+drop table pairs
+
+statement ok
+drop table square
+
+statement ok
+drop table t2
+
+statement ok
+drop table pkbad
+
+statement ok
+drop table onecolumn
+
+statement ok
+drop table onecolumn_w
+
+statement ok
+drop table str1

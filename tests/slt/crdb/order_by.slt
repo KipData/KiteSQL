@@ -398,3 +398,21 @@ null 6
 2 null
 2 5
 4 8
+
+statement ok
+drop table xy
+
+statement ok
+drop table abcd
+
+statement ok
+drop table abc
+
+statement ok
+drop table t
+
+statement ok
+drop table bar
+
+statement ok
+drop table store

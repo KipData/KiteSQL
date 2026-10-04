@@ -5,3 +5,6 @@ CREATE TABLE TABLE_E101_01_01_01 ( ID INT PRIMARY KEY, A INT, B INT );
 
 statement ok
 INSERT INTO TABLE_E101_01_01_01 VALUES ( 0, 1, 2 )
+
+statement ok
+drop table table_e101_01_01_01

@@ -27,3 +27,9 @@ create table if not exists t(id int primary key, v1 int, v2 int, v3 int)
 
 statement error
 create table test_default_expr(id int primary key, v1 int, v2 int, v3 int default (v1 + 1))
+
+statement ok
+drop table t_m
+
+statement ok
+drop table t

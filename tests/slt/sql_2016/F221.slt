@@ -11,3 +11,9 @@ CREATE TABLE TABLE_F221_02_011 ( ID INT PRIMARY KEY, A INTEGER DEFAULT 123 );
 
 statement ok
 UPDATE TABLE_F221_02_011 SET A = DEFAULT
+
+statement ok
+drop table table_f221_02_011
+
+statement ok
+drop table table_f221_01_011

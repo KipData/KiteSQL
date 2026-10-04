@@ -5,3 +5,6 @@ CREATE TABLE TABLE_E061_14_01_01 ( ID INT PRIMARY KEY, A INT );
 
 query I
 SELECT A FROM TABLE_E061_14_01_01 WHERE A = 1
+
+statement ok
+drop table table_e061_14_01_01

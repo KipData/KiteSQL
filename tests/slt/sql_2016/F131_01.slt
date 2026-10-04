@@ -53,3 +53,39 @@ CREATE VIEW VIEW_F131_01_01_06 AS SELECT A FROM TABLE_F131_01_01_06 GROUP BY A;
 
 query I
 SELECT A FROM VIEW_F131_01_01_06 WHERE A = 1 GROUP BY A HAVING A = 2
+
+statement ok
+drop view view_f131_01_01_06
+
+statement ok
+drop view view_f131_01_01_04
+
+statement ok
+drop view view_f131_01_01_01
+
+statement ok
+drop view view_f131_01_01_03
+
+statement ok
+drop view view_f131_01_01_05
+
+statement ok
+drop view view_f131_01_01_02
+
+statement ok
+drop table table_f131_01_01_03
+
+statement ok
+drop table table_f131_01_01_01
+
+statement ok
+drop table table_f131_01_01_02
+
+statement ok
+drop table table_f131_01_01_04
+
+statement ok
+drop table table_f131_01_01_05
+
+statement ok
+drop table table_f131_01_01_06

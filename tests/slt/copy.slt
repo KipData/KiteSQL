@@ -31,3 +31,9 @@ query I
 SELECT * FROM test_copy_query
 ----
 1 two
+
+statement ok
+drop table test_copy
+
+statement ok
+drop table test_copy_query

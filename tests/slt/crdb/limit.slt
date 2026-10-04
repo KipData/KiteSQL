@@ -195,3 +195,12 @@ SELECT * FROM t ORDER BY v, w LIMIT 3
 2 -4 8
 4 -16 94
 6 -36 216
+
+statement ok
+drop table t
+
+statement ok
+drop table t65171
+
+statement ok
+drop table t_47283

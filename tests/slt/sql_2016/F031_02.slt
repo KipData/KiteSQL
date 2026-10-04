@@ -5,3 +5,9 @@ CREATE TABLE TABLE_F031_02_01_01 ( ID INT PRIMARY KEY, A INTEGER );
 
 statement ok
 CREATE VIEW VIEW_F031_02_01_01 AS SELECT A FROM TABLE_F031_02_01_01
+
+statement ok
+drop view view_f031_02_01_01
+
+statement ok
+drop table table_f031_02_01_01

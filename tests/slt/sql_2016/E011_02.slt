@@ -261,3 +261,15 @@ query R
 SELECT 2E2
 ----
 200.0
+
+statement ok
+drop table table_e011_02_01_04
+
+statement ok
+drop table table_e011_02_01_02
+
+statement ok
+drop table table_e011_02_01_01
+
+statement ok
+drop table table_e011_02_01_03

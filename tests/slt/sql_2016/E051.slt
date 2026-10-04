@@ -23,3 +23,15 @@ CREATE TABLE TABLE_E051_01_04 ( ID INT PRIMARY KEY, A INT );
 
 query I
 SELECT ALL A FROM TABLE_E051_01_04 WHERE A = 1
+
+statement ok
+drop table table_e051_01_04
+
+statement ok
+drop table table_e051_01_03
+
+statement ok
+drop table table_e051_01_02
+
+statement ok
+drop table table_e051_01_01

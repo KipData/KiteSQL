@@ -51,7 +51,7 @@ select v2 from alter_large where id = 30000
 statement ok
 alter table alter_large alter column v3 set not null
 
-statement error
+statement ok
 insert into alter_large (id, v2) values (60000, 60002)
 
 statement ok

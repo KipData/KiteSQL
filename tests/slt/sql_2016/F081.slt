@@ -27,3 +27,27 @@ CREATE TABLE TABLE_F081_01_032 ( ID INT PRIMARY KEY, A INTEGER );
 
 statement ok
 CREATE VIEW VIEW_F081_01_03 AS SELECT A FROM TABLE_F081_01_031 UNION SELECT A FROM TABLE_F081_01_032
+
+statement ok
+drop view view_f081_01_03
+
+statement ok
+drop view view_f081_01_02
+
+statement ok
+drop table table_f081_01_011
+
+statement ok
+drop table table_f081_01_031
+
+statement ok
+drop table table_f081_01_012
+
+statement ok
+drop table table_f081_01_032
+
+statement ok
+drop table table_f081_01_022
+
+statement ok
+drop table table_f081_01_021

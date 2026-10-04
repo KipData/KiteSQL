@@ -7,5 +7,5 @@ edition = "2021"
 clap            = { version = "4" }
 "kite_sql"      = { path = "../..", default-features = false, features = ["copy", "decimal", "lmdb", "macros", "orm", "parser", "spill", "time"] }
 glob            = { version = "0.3" }
-sqllogictest    = { version = "0.14" }
+sqllogictest    = { version = "0.29.1" }
 tempfile        = { version = "3.10" }

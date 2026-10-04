@@ -580,3 +580,12 @@ drop table full_using_l
 
 statement ok
 drop table full_using_r
+
+statement ok
+drop table z
+
+statement ok
+drop table a
+
+statement ok
+drop table b

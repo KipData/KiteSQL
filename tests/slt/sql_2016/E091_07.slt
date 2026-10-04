@@ -39,3 +39,18 @@ query F
 SELECT SUM ( DISTINCT A ) FROM TABLE_E091_07_01_05
 ----
 null
+
+statement ok
+drop table table_e091_07_01_01
+
+statement ok
+drop table table_e091_07_01_05
+
+statement ok
+drop table table_e091_07_01_02
+
+statement ok
+drop table table_e091_07_01_04
+
+statement ok
+drop table table_e091_07_01_03

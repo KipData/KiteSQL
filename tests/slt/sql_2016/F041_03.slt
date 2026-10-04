@@ -55,3 +55,39 @@ CREATE TABLE TABLE_F041_03_01_062 ( ID INT PRIMARY KEY, A INTEGER );
 # sqlparser-rs unsupported
 # query II
 # SELECT TABLE_F041_03_01_061.A, TABLE_F041_03_01_062.A FROM TABLE_F041_03_01_061 LEFT OUTER JOIN TABLE_F041_03_01_062 USING ( A ) AS FOO
+
+statement ok
+drop table table_f041_03_01_052
+
+statement ok
+drop table table_f041_03_01_041
+
+statement ok
+drop table table_f041_03_01_061
+
+statement ok
+drop table table_f041_03_01_032
+
+statement ok
+drop table table_f041_03_01_012
+
+statement ok
+drop table table_f041_03_01_021
+
+statement ok
+drop table table_f041_03_01_022
+
+statement ok
+drop table table_f041_03_01_011
+
+statement ok
+drop table table_f041_03_01_042
+
+statement ok
+drop table table_f041_03_01_062
+
+statement ok
+drop table table_f041_03_01_051
+
+statement ok
+drop table table_f041_03_01_031

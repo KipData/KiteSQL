@@ -77,3 +77,6 @@ null
 
 statement ok
 drop table distinct_alias
+
+statement ok
+drop table test

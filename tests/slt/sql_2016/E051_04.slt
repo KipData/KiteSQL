@@ -35,3 +35,21 @@ CREATE TABLE TABLE_E051_04_01_06 ( ID INT PRIMARY KEY, A INT, B INT );
 
 query I
 SELECT DISTINCT B FROM TABLE_E051_04_01_06 WHERE A = 1 GROUP BY B
+
+statement ok
+drop table table_e051_04_01_04
+
+statement ok
+drop table table_e051_04_01_05
+
+statement ok
+drop table table_e051_04_01_06
+
+statement ok
+drop table table_e051_04_01_03
+
+statement ok
+drop table table_e051_04_01_01
+
+statement ok
+drop table table_e051_04_01_02

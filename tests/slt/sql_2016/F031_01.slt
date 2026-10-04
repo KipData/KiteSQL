@@ -5,3 +5,9 @@ CREATE TABLE TABLE_F031_01_01_01 ( ID INT PRIMARY KEY, A INTEGER )
 
 statement ok
 CREATE TABLE TABLE_F031_01_01_02 ( ID INT PRIMARY KEY, A INTEGER , B INTEGER )
+
+statement ok
+drop table table_f031_01_01_02
+
+statement ok
+drop table table_f031_01_01_01

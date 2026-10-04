@@ -15,3 +15,9 @@ query I
 SELECT COUNT ( A ) FROM TABLE_E091_02_01_02
 ----
 0
+
+statement ok
+drop table table_e091_02_01_02
+
+statement ok
+drop table table_e091_02_01_01

@@ -45,3 +45,33 @@ CREATE TABLE TABLE_E071_06_02_022 ( ID INT PRIMARY KEY, B FLOAT );
 
 query I
 SELECT A FROM TABLE_E071_06_02_021 WHERE EXISTS ( SELECT A FROM TABLE_E071_06_02_021 EXCEPT SELECT B FROM TABLE_E071_06_02_022 )
+
+statement ok
+drop table table_e071_06_02_012
+
+statement ok
+drop table table_e071_06_02_011
+
+statement ok
+drop table table_e071_06_01_021
+
+statement ok
+drop table table_e071_06_01_031
+
+statement ok
+drop table table_e071_06_01_022
+
+statement ok
+drop table table_e071_06_01_012
+
+statement ok
+drop table table_e071_06_01_011
+
+statement ok
+drop table table_e071_06_02_021
+
+statement ok
+drop table table_e071_06_02_022
+
+statement ok
+drop table table_e071_06_01_032

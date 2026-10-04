@@ -27,3 +27,21 @@ CREATE TABLE TABLE_E011_03_01_06 ( ID INT PRIMARY KEY, A DECIMAL )
 
 # statement ok
 # CREATE TABLE TABLE_E011_03_01_09 ( ID INT PRIMARY KEY, A NUMERIC )
+
+statement ok
+drop table table_e011_03_01_03
+
+statement ok
+drop table table_e011_03_01_06
+
+statement ok
+drop table table_e011_03_01_04
+
+statement ok
+drop table table_e011_03_01_01
+
+statement ok
+drop table table_e011_03_01_05
+
+statement ok
+drop table table_e011_03_01_02

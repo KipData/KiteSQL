@@ -17,3 +17,15 @@ CREATE TABLE TABLE_E061_13_01_022 ( ID INT PRIMARY KEY, B INT );
 
 query I
 SELECT A FROM TABLE_E061_13_01_021 WHERE A NOT IN ( SELECT B FROM TABLE_E061_13_01_022 WHERE B = A );
+
+statement ok
+drop table table_e061_13_01_012
+
+statement ok
+drop table table_e061_13_01_022
+
+statement ok
+drop table table_e061_13_01_011
+
+statement ok
+drop table table_e061_13_01_021

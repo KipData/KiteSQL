@@ -7,3 +7,6 @@ query T
 SELECT DATE '2016-03-26'
 ----
 2016-03-26
+
+statement ok
+drop table table_f051_01_01_011

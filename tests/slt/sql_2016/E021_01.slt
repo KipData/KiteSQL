@@ -23,3 +23,27 @@ CREATE TABLE TABLE_E021_01_01_07 ( ID INT PRIMARY KEY, A CHARACTER ( 8 OCTETS ) 
 
 statement ok
 CREATE TABLE TABLE_E021_01_01_08 ( ID INT PRIMARY KEY, A CHARACTER )
+
+statement ok
+drop table table_e021_01_01_07
+
+statement ok
+drop table table_e021_01_01_06
+
+statement ok
+drop table table_e021_01_01_08
+
+statement ok
+drop table table_e021_01_01_05
+
+statement ok
+drop table table_e021_01_01_04
+
+statement ok
+drop table table_e021_01_01_02
+
+statement ok
+drop table table_e021_01_01_03
+
+statement ok
+drop table table_e021_01_01_01
