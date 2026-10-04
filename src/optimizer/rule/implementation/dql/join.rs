@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
+use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::{Operator, PhysicalOption, SortOption};
@@ -21,7 +21,6 @@ use std::sync::LazyLock;
 
 static JOIN_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
     predicate: |op| matches!(op, Operator::Join(_)),
-    children: PatternChildrenPredicate::None,
 });
 
 #[derive(Clone)]

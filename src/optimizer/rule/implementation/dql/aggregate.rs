@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::optimizer::core::pattern::{Pattern, PatternChildrenPredicate};
+use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::BestPhysicalOption;
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
@@ -28,7 +28,6 @@ static GROUP_BY_AGGREGATE_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern 
         }
         false
     },
-    children: PatternChildrenPredicate::None,
 });
 
 static SIMPLE_AGGREGATE_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -38,7 +37,6 @@ static SIMPLE_AGGREGATE_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
         }
         false
     },
-    children: PatternChildrenPredicate::None,
 });
 
 #[derive(Clone)]
