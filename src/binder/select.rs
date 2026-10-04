@@ -1450,10 +1450,26 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             if !fn_not_on_using(column, arena) {
                 continue;
             }
-            exprs.push(arena.alloc_expression(ScalarExpression::column_expr(
-                *column,
-                position_offset + position,
-            )));
+            let expr = context
+                .using
+                .values()
+                .find(|using| {
+                    !is_qualified_wildcard
+                        && matches!(using.join_type, JoinType::Full)
+                        && arena.same_column(using.left_column, *column)
+                })
+                .cloned()
+                .map(|using| {
+                    let alias = AliasType::Name(arena.column(*column).name().to_string());
+                    let expr = using.visible_expr(arena)?;
+                    let expr = arena.alloc_expression(expr);
+                    Ok::<_, DatabaseError>(ScalarExpression::Alias { expr, alias })
+                })
+                .transpose()?
+                .unwrap_or_else(|| {
+                    ScalarExpression::column_expr(*column, position_offset + position)
+                });
+            exprs.push(arena.alloc_expression(expr));
         }
         Ok(())
     }

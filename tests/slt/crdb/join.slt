@@ -776,8 +776,14 @@ SELECT * FROM xyu LEFT OUTER JOIN xyv USING(x, y) WHERE x > 2 order by xyu.uid
 # ----
 # 2 31 7 3 1 31
 
-statement error
+query IIIIII rowsort
 SELECT * FROM xyu FULL OUTER JOIN xyv USING(x, y) WHERE x > 2
+----
+2 3 1 31 7 31
+3 3 2 32 null null
+4 4 4 44 null null
+null 3 3 null 8 33
+null 5 5 null 9 55
 
 query IIIIII
 SELECT * FROM xyu INNER JOIN xyv ON xyu.x = xyv.x AND xyu.y = xyv.y WHERE xyu.x = 1 AND xyu.y < 10
