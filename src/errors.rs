@@ -59,6 +59,7 @@ fn format_not_null_message(column: &Option<String>, span: &Option<SqlErrorSpan>)
 #[derive(Debug)]
 pub enum DatabaseError {
     AggMiss(String),
+    AmbiguousColumn(String),
     CacheSizeOverFlow,
     CastFail {
         from: LogicalType,
@@ -151,6 +152,7 @@ impl fmt::Display for DatabaseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AggMiss(value) => write!(f, "agg miss: {value}"),
+            Self::AmbiguousColumn(value) => write!(f, "column: `{value}` is ambiguous"),
             Self::CacheSizeOverFlow => f.write_str("cache size overflow"),
             Self::CastFail { from, to, span } => {
                 write!(f, "cast fail: {from} -> {to}{}", format_sql_error_loc(span))

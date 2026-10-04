@@ -1444,6 +1444,27 @@ where
                             item.clone_expression(arena)?
                         }
                         expr => {
+                            if let Expr::Identifier(ident) = expr {
+                                let name = lower_ident(ident);
+                                let mut aliased = select_list.iter().filter_map(|item| match arena
+                                    .expression(*item)
+                                {
+                                    ScalarExpression::Alias {
+                                        expr,
+                                        alias: AliasType::Name(alias),
+                                    } if alias.as_str() == name => Some(*expr),
+                                    _ => None,
+                                });
+                                if let Some(first) = aliased.next() {
+                                    if aliased
+                                        .any(|other| !first.eq_ignore_colref_pos(other, arena))
+                                    {
+                                        return Err(DatabaseError::AmbiguousColumn(
+                                            name.into_owned(),
+                                        ));
+                                    }
+                                }
+                            }
                             let expr = binder.bind_expr(expr, arena)?;
                             arena.alloc_expression(expr)
                         }

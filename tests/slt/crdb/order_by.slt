@@ -69,7 +69,7 @@ SELECT a AS foo, b FROM t ORDER BY foo DESC
 2 8
 1 9
 
-statement error 1065
+statement error
 SELECT a AS foo, b AS foo FROM t ORDER BY foo
 
 query II
