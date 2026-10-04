@@ -21,15 +21,15 @@
 //! sqllogictest syntax is stripped first, so `tests/slt` can be used directly
 //! as the seed corpus; plain SQL inputs pass through unchanged.
 //!
-//! `Err` results are expected and ignored. Any panic or sanitizer report is a
-//! bug.
+//! `Err` results are expected and ignored. Any panic, sanitizer report or OOM
+//! is a bug.
 //!
-//! TODO: timeouts and OOMs are skipped (`make fuzz` runs libFuzzer in fork
-//! mode). Mutations easily produce legitimately unbounded queries, e.g. a
-//! recursive CTE that never converges, and KiteSQL cannot interrupt a running
-//! statement, so they are indistinguishable from real hangs. Revisit once the
-//! executor has a cheap interrupt point or the structured generator avoids
-//! unbounded queries.
+//! TODO: timeouts are skipped (`make fuzz` runs libFuzzer in fork mode with
+//! `-ignore_timeouts=1`). Mutations easily produce legitimately unbounded
+//! queries, e.g. a recursive CTE that never converges, and KiteSQL cannot
+//! interrupt a running statement, so they are indistinguishable from real
+//! hangs. Revisit once the executor has a cheap interrupt point or the
+//! structured generator avoids unbounded queries.
 
 #![no_main]
 

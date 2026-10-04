@@ -21,6 +21,8 @@ FUZZ_TARGET ?= sql_exec
 FUZZ_TIME ?= 60
 # Pass the host triple explicitly: prebuilt (musl) cargo-fuzz binaries otherwise default to musl.
 FUZZ_TRIPLE ?= $(shell rustc -vV | sed -n 's/^host: //p')
+FUZZ_TARGET_DIR ?= $(CURDIR)/fuzz/target
+FUZZ_BIN = $(FUZZ_TARGET_DIR)/$(FUZZ_TRIPLE)/release/$(FUZZ_TARGET)
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
 .PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz
@@ -79,14 +81,21 @@ codecov-html:
 
 ## Run a fuzz target for FUZZ_TIME seconds (needs a nightly toolchain and cargo-fuzz).
 ## tests/slt is a read-only seed dir: libFuzzer only writes new inputs to the FIRST dir.
+## Fork mode ignores OOMs by default, hence the explicit -ignore_ooms=0: crashes and OOMs fail the run.
+## It also exits with the LAST child's code, so a trailing ignored timeout (70) is not a failure.
+## The binary is run directly because `cargo fuzz run` turns every non-zero exit into a failure.
+## TODO: stop ignoring timeouts once unbounded queries can be told apart from hangs
+## (see fuzz/fuzz_targets/sql_exec.rs).
 fuzz:
-	@mkdir -p fuzz/corpus/$(FUZZ_TARGET)
-	$(CARGO) +$(FUZZ_TOOLCHAIN) fuzz run --target $(FUZZ_TRIPLE) $(FUZZ_TARGET) \
-		fuzz/corpus/$(FUZZ_TARGET) tests/slt -- \
+	@mkdir -p fuzz/corpus/$(FUZZ_TARGET) fuzz/artifacts/$(FUZZ_TARGET)
+	$(CARGO) +$(FUZZ_TOOLCHAIN) fuzz build --target $(FUZZ_TRIPLE) --target-dir $(FUZZ_TARGET_DIR) $(FUZZ_TARGET)
+	@status=0; $(FUZZ_BIN) fuzz/corpus/$(FUZZ_TARGET) tests/slt \
+		-artifact_prefix=fuzz/artifacts/$(FUZZ_TARGET)/ \
 		-dict=fuzz/sql.dict -max_len=32768 -timeout=10 -rss_limit_mb=4096 -max_total_time=$(FUZZ_TIME) \
-		-fork=1 -ignore_timeouts=1 -ignore_ooms=1
-# TODO: stop ignoring timeouts/OOMs once unbounded queries can be told apart from hangs
-# (see fuzz/fuzz_targets/sql_exec.rs). Crashes still fail the run.
+		-fork=1 -ignore_timeouts=1 -ignore_ooms=0 -timeout_exitcode=70 || status=$$?; \
+	if [ $$status -ne 0 ] && [ $$status -ne 70 ]; then \
+		echo "fuzz: $(FUZZ_TARGET) failed (exit $$status), see fuzz/artifacts/$(FUZZ_TARGET)/"; exit $$status; \
+	fi
 
 ## Run formatting (check mode) across the workspace.
 fmt:
