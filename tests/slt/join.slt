@@ -457,3 +457,62 @@ drop table hj_right;
 
 statement ok
 drop table hj_left;
+
+# Equi-join keys of different types (bigint = int) must still match.
+statement ok
+create table join_ty(id int primary key, a int, b bigint);
+
+statement ok
+insert into join_ty values (0, 0, 0), (1, 1, 1);
+
+query I rowsort
+select y.id from join_ty as x inner join join_ty as y on x.b = y.id;
+----
+0
+1
+
+query I rowsort
+select y.id from join_ty as x inner join join_ty as y on y.id = x.b;
+----
+0
+1
+
+query I rowsort
+select y.id from join_ty as x left join join_ty as y on x.b = y.a;
+----
+0
+1
+
+statement ok
+drop table join_ty
+
+# USING / NATURAL join keys of different types (bigint = int) must still match.
+statement ok
+create table using_a(id int primary key, k bigint);
+
+statement ok
+create table using_b(pk int primary key, k int);
+
+statement ok
+insert into using_a values (0, 0), (1, 1);
+
+statement ok
+insert into using_b values (10, 0), (11, 1);
+
+query I rowsort
+select using_a.id from using_a inner join using_b using (k);
+----
+0
+1
+
+query I rowsort
+select using_a.id from using_a natural join using_b;
+----
+0
+1
+
+statement ok
+drop table using_a
+
+statement ok
+drop table using_b

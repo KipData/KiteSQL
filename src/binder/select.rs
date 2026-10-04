@@ -2131,7 +2131,15 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                         *right_column,
                         left_schema.len() + right_position,
                     ));
-                    on_keys.push((left_expr, right_expr));
+                    let ty = LogicalType::max_logical_type(
+                        &left_expr.return_type(arena),
+                        &right_expr.return_type(arena),
+                    )?
+                    .into_owned();
+                    on_keys.push((
+                        left_expr.type_cast(Cow::Borrowed(&ty), arena)?,
+                        right_expr.type_cast(Cow::Borrowed(&ty), arena)?,
+                    ));
                 }
                 Ok(JoinCondition::On {
                     on: on_keys,
@@ -2179,7 +2187,15 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                             right_column,
                             left_schema.len() + right_position,
                         )?;
-                        on_keys.push((left_expr, right_expr));
+                        let ty = LogicalType::max_logical_type(
+                            &left_expr.return_type(arena),
+                            &right_expr.return_type(arena),
+                        )?
+                        .into_owned();
+                        on_keys.push((
+                            left_expr.type_cast(Cow::Borrowed(&ty), arena)?,
+                            right_expr.type_cast(Cow::Borrowed(&ty), arena)?,
+                        ));
                     }
                 }
                 Ok(JoinCondition::On {
@@ -2207,7 +2223,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         accum_filter: &mut Vec<ExprRef>,
         left_schema: &Schema,
         right_schema: &Schema,
-        arena: &crate::planner::PlanArena,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
         let fn_contains = |schema: &Schema, column: ColumnRef| {
             let summary = arena.column(column).summary();
@@ -2239,14 +2255,33 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                                 ScalarExpression::ColumnRef { column: r, .. },
                             ) => {
                                 // reorder left and right joins keys to pattern: (left, right)
-                                if fn_contains(left_schema, *l) && fn_contains(right_schema, *r) {
-                                    accum.push((*left_expr, *right_expr));
+                                let key = if fn_contains(left_schema, *l)
+                                    && fn_contains(right_schema, *r)
+                                {
+                                    Some((*left_expr, *right_expr))
                                 } else if fn_contains(left_schema, *r)
                                     && fn_contains(right_schema, *l)
                                 {
-                                    accum.push((*right_expr, *left_expr));
-                                } else if fn_or_contains(*l) || fn_or_contains(*r) {
-                                    accum_filter.push(expr);
+                                    Some((*right_expr, *left_expr))
+                                } else {
+                                    if fn_or_contains(*l) || fn_or_contains(*r) {
+                                        accum_filter.push(expr);
+                                    }
+                                    None
+                                };
+                                // Join keys are compared (and hashed) directly, so cast
+                                // both to one type like `l = r` in a filter; otherwise
+                                // e.g. `bigint = int` never matches.
+                                if let Some((left, right)) = key {
+                                    let ty = LogicalType::max_logical_type(
+                                        &left.return_type(arena),
+                                        &right.return_type(arena),
+                                    )?
+                                    .into_owned();
+                                    accum.push((
+                                        left.type_cast(Cow::Borrowed(&ty), arena)?,
+                                        right.type_cast(Cow::Borrowed(&ty), arena)?,
+                                    ));
                                 }
                             }
                             (ScalarExpression::ColumnRef { column, .. }, _)
@@ -2271,8 +2306,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                     }
                     BinaryOperator::And => {
                         // example: foo = bar AND baz > 1
+                        let (left_expr, right_expr) = (*left_expr, *right_expr);
                         Self::extract_join_keys(
-                            *left_expr,
+                            left_expr,
                             accum,
                             accum_filter,
                             left_schema,
@@ -2280,7 +2316,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                             arena,
                         )?;
                         Self::extract_join_keys(
-                            *right_expr,
+                            right_expr,
                             accum,
                             accum_filter,
                             left_schema,
