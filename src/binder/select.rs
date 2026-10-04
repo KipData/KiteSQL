@@ -957,14 +957,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 
         for predicate in predicates {
             if rebind_positions {
-                Self::rebind_split_scope_positions(predicate, &left_schema, &right_schema, arena)?;
+                Self::rebind_split_scope_positions(predicate, left_schema, right_schema, arena)?;
             }
             Self::extract_join_keys(
                 predicate,
                 &mut on_keys,
                 &mut filter,
-                &left_schema,
-                &right_schema,
+                left_schema,
+                right_schema,
                 arena,
             )?;
         }
@@ -1471,7 +1471,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         let left_schema = left.output_schema(arena);
         let right_schema = right.output_schema(arena);
         let mut on =
-            self.bind_join_constraint(join_type, constraint, &left_schema, &right_schema, arena)?;
+            self.bind_join_constraint(join_type, constraint, left_schema, right_schema, arena)?;
         Self::localize_join_condition_from_join_scope(&mut on, left_len, arena)?;
 
         Ok(LJoinOperator::build(
@@ -1701,7 +1701,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         let right_schema = plan.output_schema(arena);
         for expr in &mut apply_predicates {
             RightSidePositionGlobalizer {
-                right_schema: &right_schema,
+                right_schema,
                 left_len,
             }
             .visit(expr, arena)?;

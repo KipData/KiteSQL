@@ -281,13 +281,10 @@ impl<'a> TupleMappingRef<'a> {
 
     #[inline]
     pub fn scan_index(&self, index_pos: usize) -> Option<usize> {
-        self.index_to_scan.get(index_pos).copied().and_then(|slot| {
-            if slot == usize::MAX {
-                None
-            } else {
-                Some(slot)
-            }
-        })
+        self.index_to_scan
+            .get(index_pos)
+            .copied()
+            .filter(|&slot| slot != usize::MAX)
     }
 }
 

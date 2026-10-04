@@ -136,7 +136,7 @@ pub(crate) mod test {
     use crate::db::test::build_table;
     use crate::errors::DatabaseError;
     use crate::expression::ScalarExpression;
-    use crate::planner::{PlanArena, TableArenaCell};
+    use crate::planner::{MetaArena, PlanArena, TableArenaCell};
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::rocksdb::RocksTransaction;

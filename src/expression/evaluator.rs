@@ -17,7 +17,6 @@ use crate::planner::PlanArena;
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TrimWhereField};
-use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::evaluator::binary_create;
 use crate::types::tuple::TupleLike;
@@ -402,6 +401,7 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
 mod tests {
     use super::*;
     use crate::planner::test::PlanArenaTestExt;
+    use crate::planner::ExprRef;
 
     fn const_in(
         arena: &mut PlanArena<'_>,

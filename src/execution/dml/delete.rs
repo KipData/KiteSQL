@@ -98,12 +98,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.index_values_transaction_codec_mut();
                 let index = Index::new(*index_id, values, *index_ty);
-                transaction.del_index(table_codec, self.table_name, &index, &tuple_id)?;
+                transaction.del_index(table_codec, self.table_name, &index, tuple_id)?;
             }
 
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.remove_tuple(table_codec, self.table_name, &tuple_id)?;
+            transaction.remove_tuple(table_codec, self.table_name, tuple_id)?;
             deleted_count += 1;
         }
 

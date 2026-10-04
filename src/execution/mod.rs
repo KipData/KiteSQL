@@ -604,10 +604,6 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
             .expect("runtime probe scope initialized")
     }
 
-    pub(crate) fn runtime_probe_depth(&self) -> usize {
-        self.runtime_probe_stack.len()
-    }
-
     pub(crate) fn set_recursive_input(&mut self, input: RecursiveInput) {
         debug_assert!(self.recursive_input.is_none());
         self.recursive_input = Some(input);

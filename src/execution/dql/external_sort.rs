@@ -437,7 +437,7 @@ mod test {
         let mut runs = Vec::new();
         for position in 0..ROW_COUNT {
             let sequence = (position * 7919) % ROW_COUNT;
-            let key = if sequence % 113 == 0 {
+            let key = if sequence.is_multiple_of(113) {
                 DataValue::Null
             } else {
                 DataValue::Int32((sequence % 257) as i32 - 128)

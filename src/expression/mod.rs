@@ -758,7 +758,7 @@ impl ExprRef {
         }
     }
 
-    pub fn unpack_alias_ref<'a, A: MetaArena + ?Sized>(self, arena: &'a A) -> &'a ScalarExpression {
+    pub fn unpack_alias_ref<A: MetaArena + ?Sized>(self, arena: &A) -> &ScalarExpression {
         arena.expression(self.unpack_alias(arena))
     }
 

@@ -171,7 +171,6 @@ impl HashJoin {
                         Self::own_bump_vec(key),
                         BuildState {
                             tuples: vec![(build_count, tuple)],
-                            ..Default::default()
                         },
                     );
                 }
