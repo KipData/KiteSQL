@@ -28,7 +28,9 @@ pub struct SumAccumulator {
 
 impl SumAccumulator {
     pub fn new(ty: Cow<'_, LogicalType>) -> Result<Self, DatabaseError> {
-        debug_assert!(ty.is_numeric());
+        // `sum(null)` binds with the type of the NULL literal; it never sees a
+        // non-NULL value, so the result is NULL like in release builds.
+        debug_assert!(ty.is_numeric() || matches!(ty.as_ref(), LogicalType::SqlNull));
 
         Ok(Self {
             result: DataValue::Null,
