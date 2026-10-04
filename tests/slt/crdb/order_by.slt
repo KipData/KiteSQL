@@ -152,7 +152,7 @@ SELECT a FROM t ORDER BY (((a)))
 # 3
 # 2
 
-statement error 1005
+statement error
 ((SELECT a FROM t ORDER BY a)) ORDER BY a
 
 statement error

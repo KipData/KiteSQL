@@ -2900,6 +2900,11 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                     }));
                 }
                 SelectItem::Wildcard(_) => {
+                    if self.context.bind_table.is_empty() {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "SELECT * with no tables specified is not valid".to_string(),
+                        ));
+                    }
                     let visible_names = self
                         .context
                         .bind_table
@@ -3128,6 +3133,17 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         } else {
             None
         };
+        if order_by_exprs.is_some() {
+            let mut body = query.body.as_ref();
+            while let SetExpr::Query(inner) = body {
+                if inner.order_by.is_some() {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "multiple ORDER BY clauses not allowed".to_string(),
+                    ));
+                }
+                body = inner.body.as_ref();
+            }
+        }
         let is_plain_select = matches!(query.body.as_ref(), SetExpr::Select(_));
         let mut plan = match query.body.as_ref() {
             SetExpr::Select(select) => self.bind_select(select, order_by_exprs, arena),
