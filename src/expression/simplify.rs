@@ -212,11 +212,15 @@ impl ExprVisitorMut for Simplify {
                 };
 
                 for arg in args.drain(..) {
+                    // Each comparison gets its own copy of the operand: a shared
+                    // node is shifted twice by later in-place position rewrites
+                    // (e.g. predicate pushdown), reading the wrong slot.
+                    let arg_copy = arg_expr.clone_expression(arena)?;
                     new_expr = ScalarExpression::Binary {
                         op: op_2,
                         left_expr: arena.alloc_expression(ScalarExpression::Binary {
                             op: op_1,
-                            left_expr: *arg_expr,
+                            left_expr: arg_copy,
                             right_expr: arg,
                             evaluator: None,
                             ty: LogicalType::Boolean,
@@ -244,6 +248,8 @@ impl ExprVisitorMut for Simplify {
                         BinaryOperator::LtEq,
                     )
                 };
+                // Same as IN: the operand must not be shared by both comparisons.
+                let arg_copy = arg_expr.clone_expression(arena)?;
                 *expr = ScalarExpression::Binary {
                     op,
                     left_expr: arena.alloc_expression(ScalarExpression::Binary {
@@ -255,7 +261,7 @@ impl ExprVisitorMut for Simplify {
                     }),
                     right_expr: arena.alloc_expression(ScalarExpression::Binary {
                         op: right_op,
-                        left_expr: *arg_expr,
+                        left_expr: arg_copy,
                         right_expr: *right_expr,
                         evaluator: None,
                         ty: LogicalType::Boolean,
