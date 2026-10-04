@@ -98,12 +98,11 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
         self.cursor += 1;
         let column = plan_arena.column(column_ref);
         let default = describe_default(column, plan_arena);
-        let mapping = column_ref.to_string();
 
         let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
-        fill_describe_row(&mut output.values, column, default, mapping);
+        fill_describe_row(&mut output.values, column, default);
 
         arena.resume();
         Ok(())
@@ -119,12 +118,7 @@ fn describe_default(column: &ColumnCatalog, arena: &(dyn MetaArena + '_)) -> Str
         .unwrap_or_else(|| "null".to_string())
 }
 
-fn fill_describe_row(
-    values: &mut Vec<DataValue>,
-    column: &ColumnCatalog,
-    default: String,
-    mapping: String,
-) {
+fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog, default: String) {
     let datatype = column.datatype();
 
     values.push(DataValue::Utf8 {
@@ -153,11 +147,6 @@ fn fill_describe_row(
     values.push(key_value(column));
     values.push(DataValue::Utf8 {
         value: default,
-        ty: Utf8Type::Variable(None),
-        unit: CharLengthUnits::Characters,
-    });
-    values.push(DataValue::Utf8 {
-        value: mapping,
         ty: Utf8Type::Variable(None),
         unit: CharLengthUnits::Characters,
     });
