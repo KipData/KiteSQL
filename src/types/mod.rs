@@ -219,11 +219,20 @@ impl LogicalType {
             (LogicalType::SqlNull, _) => return Ok(Cow::Borrowed(right)),
             (_, LogicalType::SqlNull) => return Ok(Cow::Borrowed(left)),
             (LogicalType::Tuple(types_0), LogicalType::Tuple(types_1)) => {
-                if types_0.len() > types_1.len() {
-                    return Ok(Cow::Borrowed(left));
-                } else {
-                    return Ok(Cow::Borrowed(right));
+                if types_0.len() != types_1.len() {
+                    let longer = if types_0.len() > types_1.len() {
+                        left
+                    } else {
+                        right
+                    };
+                    return Ok(Cow::Borrowed(longer));
                 }
+                let types = types_0
+                    .iter()
+                    .zip(types_1)
+                    .map(|(ty_0, ty_1)| Ok(Self::max_logical_type(ty_0, ty_1)?.into_owned()))
+                    .collect::<Result<_, DatabaseError>>()?;
+                return Ok(Cow::Owned(LogicalType::Tuple(types)));
             }
             _ => {}
         }

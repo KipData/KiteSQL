@@ -218,3 +218,130 @@ drop table in_share
 
 statement ok
 drop table in_one
+
+# IN compares the operand and the list in one type, like `=`.
+statement ok
+create table in_ty(id int primary key, b bigint);
+
+statement ok
+insert into in_ty values (0, 0), (2, 2), (3, 1);
+
+query I rowsort
+select id from in_ty where b in (2, 0);
+----
+0
+2
+
+query I rowsort
+select id from in_ty where (b % 2) in (0, null);
+----
+0
+2
+
+query T rowsort
+select (b % 2) in (0, null) from in_ty;
+----
+null
+true
+true
+
+query I rowsort
+select id from in_ty where ((b % 2) in (0, null)) is null;
+----
+3
+
+query I rowsort
+select id from in_ty where b not in (1);
+----
+0
+2
+
+statement ok
+drop table in_ty
+
+# BETWEEN compares all three operands in one type, like `<=`.
+statement ok
+create table between_ty(id int primary key, d double);
+
+statement ok
+insert into between_ty values (0, 1e300), (1, 1.5), (2, null);
+
+query T rowsort
+select d not between 0 and 3 from between_ty;
+----
+false
+null
+true
+
+query I rowsort
+select id from between_ty where (d between 0 and 3) is null;
+----
+2
+
+query I rowsort
+select id from between_ty where d between 1 and 2;
+----
+1
+
+statement ok
+drop table between_ty
+
+# BETWEEN with a NULL bound follows three-valued AND, as in PostgreSQL.
+query TTTTT
+select 1 between 3 and null, 1 not between 3 and null, 5 between 3 and null, -1 not between 2 and null, 5 between null and 3;
+----
+false true null true false
+
+statement ok
+create table between_null(id int primary key, a int);
+
+statement ok
+insert into between_null values (0, 1), (1, 5), (2, null);
+
+query I rowsort
+select id from between_null where a not between 3 and null;
+----
+0
+
+query I rowsort
+select id from between_null where (a between 3 and null) is null;
+----
+1
+2
+
+statement ok
+drop table between_null
+
+# Row values compare element-wise with SQL NULL semantics, as in PostgreSQL.
+statement ok
+create table tuple_in(id int primary key, a int, b bigint);
+
+statement ok
+insert into tuple_in values (0, 1, 10), (1, 4, null), (2, null, 50), (3, null, null);
+
+query I rowsort
+select id from tuple_in where (a, b) in ((1, 10), (4, null), (null, 50));
+----
+0
+
+query T rowsort
+select (a, b) in ((1, 10), (4, null)) from tuple_in;
+----
+null
+null
+null
+true
+
+query I rowsort
+select id from tuple_in where (a, b) = (1, 10);
+----
+0
+
+query I rowsort
+select id from tuple_in where (a, b) <> (1, 10);
+----
+1
+2
+
+statement ok
+drop table tuple_in

@@ -193,6 +193,7 @@ impl ExprVisitorMut for Simplify {
                 negated,
                 expr: arg_expr,
                 args,
+                ..
             } => {
                 if args.is_empty() {
                     return Ok(false);
@@ -238,6 +239,7 @@ impl ExprVisitorMut for Simplify {
                 expr: arg_expr,
                 left_expr,
                 right_expr,
+                ..
             } => {
                 let (op, left_op, right_op) = if *negated {
                     (BinaryOperator::Or, BinaryOperator::Lt, BinaryOperator::Gt)

@@ -107,5 +107,3 @@ query
 SELECT a, b FROM ab WHERE (a, b) IN ((1, 10), (4, NULL), (NULL, 50))
 ----
 1 10
-4 null
-null 50

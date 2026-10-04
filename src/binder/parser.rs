@@ -2150,6 +2150,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                     .map(|expr| arena.alloc_expression(expr))?;
                 Ok(ScalarExpression::In {
                     negated: *negated,
+                    evaluator: None,
                     expr,
                     args,
                 })
@@ -2193,6 +2194,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                     .map(|expr| arena.alloc_expression(expr))?;
                 Ok(ScalarExpression::Between {
                     negated: *negated,
+                    left_evaluator: None,
+                    right_evaluator: None,
                     expr,
                     left_expr,
                     right_expr,

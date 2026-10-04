@@ -24,7 +24,6 @@ use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
 use std::borrow::Cow;
 use std::cmp;
-use std::cmp::Ordering;
 
 macro_rules! eval_to_num {
     ($num_expr:expr, $arena:expr, $tuple:expr) => {
@@ -106,34 +105,31 @@ impl ScalarExpression {
                 expr,
                 args,
                 negated,
+                evaluator,
             } => {
                 let value = arena.expression(*expr).eval(arena, tuple)?;
                 if value.is_null() {
                     return Ok(Cow::Owned(DataValue::Null));
                 }
 
-                let mut matched = false;
+                let eq = evaluator.as_ref().ok_or(DatabaseError::EvaluatorNotFound)?;
                 let mut saw_null = false;
                 for arg in args {
                     let arg_value = arena.expression(*arg).eval(arena, tuple)?;
-
-                    if arg_value.is_null() {
-                        saw_null = true;
-                        continue;
-                    }
-                    if arg_value == value {
-                        matched = true;
-                        break;
+                    match eq.binary_eval(&value, &arg_value)? {
+                        DataValue::Boolean(true) => {
+                            return Ok(Cow::Owned(DataValue::Boolean(!negated)))
+                        }
+                        DataValue::Null => saw_null = true,
+                        _ => {}
                     }
                 }
 
-                if matched {
-                    Ok(Cow::Owned(DataValue::Boolean(!negated)))
-                } else if saw_null {
-                    Ok(Cow::Owned(DataValue::Null))
+                Ok(Cow::Owned(if saw_null {
+                    DataValue::Null
                 } else {
-                    Ok(Cow::Owned(DataValue::Boolean(*negated)))
-                }
+                    DataValue::Boolean(*negated)
+                }))
             }
             ScalarExpression::Unary {
                 expr, evaluator, ..
@@ -155,23 +151,27 @@ impl ScalarExpression {
                 left_expr,
                 right_expr,
                 negated,
+                left_evaluator,
+                right_evaluator,
             } => {
                 let value = arena.expression(*expr).eval(arena, tuple)?;
                 let left = arena.expression(*left_expr).eval(arena, tuple)?;
                 let right = arena.expression(*right_expr).eval(arena, tuple)?;
 
-                let mut is_between = match (
-                    value.partial_cmp(&left).map(Ordering::is_ge),
-                    value.partial_cmp(&right).map(Ordering::is_le),
-                ) {
-                    (Some(true), Some(true)) => true,
-                    (None, _) | (_, None) => return Ok(Cow::Owned(DataValue::Null)),
-                    _ => false,
+                let ge = left_evaluator
+                    .as_ref()
+                    .ok_or(DatabaseError::EvaluatorNotFound)?
+                    .binary_eval(&value, &left)?;
+                let le = right_evaluator
+                    .as_ref()
+                    .ok_or(DatabaseError::EvaluatorNotFound)?
+                    .binary_eval(&value, &right)?;
+                let is_between = match (ge, le) {
+                    (DataValue::Boolean(false), _) | (_, DataValue::Boolean(false)) => false,
+                    (DataValue::Boolean(true), DataValue::Boolean(true)) => true,
+                    _ => return Ok(Cow::Owned(DataValue::Null)),
                 };
-                if *negated {
-                    is_between = !is_between;
-                }
-                Ok(Cow::Owned(DataValue::Boolean(is_between)))
+                Ok(Cow::Owned(DataValue::Boolean(is_between != *negated)))
             }
             ScalarExpression::SubString {
                 expr,
@@ -415,6 +415,10 @@ mod tests {
             negated,
             expr,
             args,
+            // The tests only use Int32 operands (plus NULL).
+            evaluator: Some(
+                binary_create(Cow::Owned(LogicalType::Integer), BinaryOperator::Eq).unwrap(),
+            ),
         })
     }
 

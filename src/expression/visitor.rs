@@ -325,12 +325,14 @@ pub fn walk_expr<A: MetaArena + ?Sized, V: ExprVisitor<A>>(
             negated,
             expr,
             args,
+            ..
         } => visitor.visit_in(*negated, *expr, args, arena),
         ScalarExpression::Between {
             negated,
             expr,
             left_expr,
             right_expr,
+            ..
         } => visitor.visit_between(*negated, *expr, *left_expr, *right_expr, arena),
         ScalarExpression::SubString {
             expr,

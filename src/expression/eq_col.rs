@@ -250,6 +250,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
                 negated: rhs_negated,
                 expr: rhs_expr,
                 args: rhs_args,
+                ..
             } => {
                 lhs_negated == *rhs_negated
                     && Self::equals(lhs_expr, *rhs_expr, self.arena)
@@ -274,6 +275,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
                 expr: rhs_expr,
                 left_expr: rhs_left,
                 right_expr: rhs_right,
+                ..
             } => {
                 lhs_negated == *rhs_negated
                     && Self::equals(lhs_expr, *rhs_expr, self.arena)
@@ -727,16 +729,19 @@ mod tests {
                 negated: false,
                 expr: lhs_child,
                 args: vec![lhs_one],
+                evaluator: None,
             },
             ScalarExpression::In {
                 negated: false,
                 expr: rhs_child,
                 args: vec![rhs_one],
+                evaluator: None,
             },
             ScalarExpression::In {
                 negated: true,
                 expr: rhs_child,
                 args: vec![rhs_one],
+                evaluator: None,
             },
         );
         assert_case(
@@ -746,18 +751,24 @@ mod tests {
                 expr: lhs_child,
                 left_expr: lhs_one,
                 right_expr: lhs_three,
+                left_evaluator: None,
+                right_evaluator: None,
             },
             ScalarExpression::Between {
                 negated: false,
                 expr: rhs_child,
                 left_expr: rhs_one,
                 right_expr: rhs_three,
+                left_evaluator: None,
+                right_evaluator: None,
             },
             ScalarExpression::Between {
                 negated: true,
                 expr: rhs_child,
                 left_expr: rhs_one,
                 right_expr: rhs_three,
+                left_evaluator: None,
+                right_evaluator: None,
             },
         );
         assert_case(

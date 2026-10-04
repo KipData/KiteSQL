@@ -835,6 +835,7 @@ where
         let scope = self.scope;
         let expr = ScalarExpression::In {
             negated: false,
+            evaluator: None,
             expr: self.expr,
             args: values
                 .into_iter()
@@ -852,6 +853,7 @@ where
         let scope = self.scope;
         let expr = ScalarExpression::In {
             negated: true,
+            evaluator: None,
             expr: self.expr,
             args: values
                 .into_iter()
@@ -869,6 +871,8 @@ where
         let scope = self.scope;
         let expr = ScalarExpression::Between {
             negated: false,
+            left_evaluator: None,
+            right_evaluator: None,
             expr: self.expr,
             left_expr: scope.bind(low.into_orm_expression()),
             right_expr: scope.bind(high.into_orm_expression()),
@@ -884,6 +888,8 @@ where
         let scope = self.scope;
         let expr = ScalarExpression::Between {
             negated: true,
+            left_evaluator: None,
+            right_evaluator: None,
             expr: self.expr,
             left_expr: scope.bind(low.into_orm_expression()),
             right_expr: scope.bind(high.into_orm_expression()),
@@ -1535,6 +1541,7 @@ where
         let scope = self.handle();
         let expr = ScalarExpression::In {
             negated: false,
+            evaluator: None,
             expr: scope.bind(expr.into_orm_expression()),
             args: args
                 .into_iter()
@@ -1556,6 +1563,7 @@ where
         let scope = self.handle();
         let expr = ScalarExpression::In {
             negated: true,
+            evaluator: None,
             expr: scope.bind(expr.into_orm_expression()),
             args: args
                 .into_iter()
@@ -1574,6 +1582,8 @@ where
         let scope = self.handle();
         let expr = ScalarExpression::Between {
             negated: false,
+            left_evaluator: None,
+            right_evaluator: None,
             expr: scope.bind(expr.into_orm_expression()),
             left_expr: scope.bind(low.into_orm_expression()),
             right_expr: scope.bind(high.into_orm_expression()),
@@ -1590,6 +1600,8 @@ where
         let scope = self.handle();
         let expr = ScalarExpression::Between {
             negated: true,
+            left_evaluator: None,
+            right_evaluator: None,
             expr: scope.bind(expr.into_orm_expression()),
             left_expr: scope.bind(low.into_orm_expression()),
             right_expr: scope.bind(high.into_orm_expression()),

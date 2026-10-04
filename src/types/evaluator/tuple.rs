@@ -18,27 +18,46 @@ use crate::types::evaluator::DataValue;
 use std::cmp::Ordering;
 use std::hint;
 
-fn tuple_cmp(v1: &[DataValue], v2: &[DataValue]) -> Option<Ordering> {
-    let mut order = Ordering::Equal;
-    let mut v1_iter = v1.iter();
-    let mut v2_iter = v2.iter();
+fn element_cmp(v1: &DataValue, v2: &DataValue) -> Option<Ordering> {
+    match (v1, v2) {
+        (DataValue::Null, _) | (_, DataValue::Null) => None,
+        (DataValue::Tuple(v1), DataValue::Tuple(v2)) => tuple_cmp(v1, v2),
+        (v1, v2) => v1.partial_cmp(v2),
+    }
+}
 
-    while order == Ordering::Equal {
-        order = match (v1_iter.next(), v2_iter.next()) {
-            (Some(v1), Some(v2)) => v1.partial_cmp(v2)?,
-            (Some(_), None) => Ordering::Greater,
-            (None, Some(_)) => Ordering::Less,
-            (None, None) => break,
+fn tuple_eq(v1: &[DataValue], v2: &[DataValue]) -> Option<bool> {
+    if v1.len() != v2.len() {
+        return Some(false);
+    }
+    let mut unknown = false;
+    for (v1, v2) in v1.iter().zip(v2) {
+        match element_cmp(v1, v2) {
+            Some(Ordering::Equal) => {}
+            Some(_) => return Some(false),
+            None => unknown = true,
         }
     }
-    Some(order)
+    (!unknown).then_some(true)
+}
+
+fn tuple_cmp(v1: &[DataValue], v2: &[DataValue]) -> Option<Ordering> {
+    for (v1, v2) in v1.iter().zip(v2) {
+        match element_cmp(v1, v2)? {
+            Ordering::Equal => {}
+            order => return Some(order),
+        }
+    }
+    Some(v1.len().cmp(&v2.len()))
 }
 pub fn tuple_eq_binary_eval(
     left: &DataValue,
     right: &DataValue,
 ) -> Result<DataValue, DatabaseError> {
     Ok(match (left, right) {
-        (DataValue::Tuple(v1), DataValue::Tuple(v2)) => DataValue::Boolean(*v1 == *v2),
+        (DataValue::Tuple(v1), DataValue::Tuple(v2)) => {
+            tuple_eq(v1, v2).map_or(DataValue::Null, DataValue::Boolean)
+        }
         (DataValue::Null, DataValue::Boolean(_))
         | (DataValue::Boolean(_), DataValue::Null)
         | (DataValue::Null, DataValue::Null) => DataValue::Null,
@@ -50,7 +69,9 @@ pub fn tuple_not_eq_binary_eval(
     right: &DataValue,
 ) -> Result<DataValue, DatabaseError> {
     Ok(match (left, right) {
-        (DataValue::Tuple(v1), DataValue::Tuple(v2)) => DataValue::Boolean(*v1 != *v2),
+        (DataValue::Tuple(v1), DataValue::Tuple(v2)) => {
+            tuple_eq(v1, v2).map_or(DataValue::Null, |eq| DataValue::Boolean(!eq))
+        }
         (DataValue::Null, DataValue::Boolean(_))
         | (DataValue::Boolean(_), DataValue::Null)
         | (DataValue::Null, DataValue::Null) => DataValue::Null,
