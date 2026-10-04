@@ -516,3 +516,35 @@ drop table using_a
 
 statement ok
 drop table using_b
+
+# A join where neither side projects a column still yields one row per pair.
+statement ok
+create table nlj_empty(id int primary key, a int);
+
+statement ok
+insert into nlj_empty values (0, 0), (1, 2), (2, null);
+
+query I
+select count(*) from nlj_empty as x cross join nlj_empty as y;
+----
+9
+
+query I
+select count(*) from nlj_empty as x inner join nlj_empty as y on true;
+----
+9
+
+query I
+select count(*) from nlj_empty as x left join nlj_empty as y on false;
+----
+3
+
+query T rowsort
+select 'b' from nlj_empty as x cross join nlj_empty as y where x.id = 0;
+----
+b
+b
+b
+
+statement ok
+drop table nlj_empty
