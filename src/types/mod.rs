@@ -219,13 +219,9 @@ impl LogicalType {
             (LogicalType::SqlNull, _) => return Ok(Cow::Borrowed(right)),
             (_, LogicalType::SqlNull) => return Ok(Cow::Borrowed(left)),
             (LogicalType::Tuple(types_0), LogicalType::Tuple(types_1)) => {
+                // Rows of different degrees cannot be compared.
                 if types_0.len() != types_1.len() {
-                    let longer = if types_0.len() > types_1.len() {
-                        left
-                    } else {
-                        right
-                    };
-                    return Ok(Cow::Borrowed(longer));
+                    return Err(DatabaseError::Incomparable(left.clone(), right.clone()));
                 }
                 let types = types_0
                     .iter()
@@ -630,22 +626,16 @@ pub(crate) mod test {
             LogicalType::max_logical_type(&LogicalType::Boolean, &LogicalType::SqlNull)?.as_ref(),
             &LogicalType::Boolean
         );
-        assert_eq!(
-            LogicalType::max_logical_type(
-                &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint]),
-                &LogicalType::Tuple(vec![LogicalType::Integer])
-            )?
-            .as_ref(),
+        assert!(LogicalType::max_logical_type(
+            &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint]),
+            &LogicalType::Tuple(vec![LogicalType::Integer])
+        )
+        .is_err());
+        assert!(LogicalType::max_logical_type(
+            &LogicalType::Tuple(vec![LogicalType::Integer]),
             &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint])
-        );
-        assert_eq!(
-            LogicalType::max_logical_type(
-                &LogicalType::Tuple(vec![LogicalType::Integer]),
-                &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint])
-            )?
-            .as_ref(),
-            &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint])
-        );
+        )
+        .is_err());
 
         let numeric_cases = vec![
             (

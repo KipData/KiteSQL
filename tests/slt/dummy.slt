@@ -26,15 +26,11 @@ SELECT (0, 1) != (0, 1)
 ----
 false
 
-query B
+query error
 SELECT (0, 1, 2) = (0, 1)
-----
-false
 
-query B
+query error
 SELECT (0, 1, 2) >= (0, 1)
-----
-true
 
 query B
 SELECT 1::CHAR = 1::VARCHAR
