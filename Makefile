@@ -15,9 +15,15 @@ COVERAGE_PROFILE_DIR ?= target/grcov/profraw
 COVERAGE_HTML_DIR ?= target/grcov/html
 COVERAGE_RUSTFLAGS ?= -Cinstrument-coverage
 COVERAGE_TEST_FEATURES ?= copy,decimal,orm
+# Pinned nightly for fuzzing; keep in sync with the `fuzz` job in .github/workflows/ci.yml.
+FUZZ_TOOLCHAIN ?= nightly-2026-10-04
+FUZZ_TARGET ?= sql_exec
+FUZZ_TIME ?= 60
+# Pass the host triple explicitly: prebuilt (musl) cargo-fuzz binaries otherwise default to musl.
+FUZZ_TRIPLE ?= $(shell rustc -vV | sed -n 's/^host: //p')
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
-.PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy
+.PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -70,6 +76,17 @@ codecov-html:
 		CARGO_INCREMENTAL=0 RUSTFLAGS=\"$${RUSTFLAGS:-} $(COVERAGE_RUSTFLAGS)\" LLVM_PROFILE_FILE='$(COVERAGE_PROFILE_DIR)/kitesql-%p-%m.profraw' $(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'; \
 		$(GRCOV) . --binary-path \"$${CARGO_TARGET_DIR:-target}/debug\" -s . -t html $(COVERAGE_REPORT_ARGS) -o '$(COVERAGE_HTML_DIR)'"
 	@echo "Coverage report: $(COVERAGE_HTML_DIR)/index.html"
+
+## Run a fuzz target for FUZZ_TIME seconds (needs a nightly toolchain and cargo-fuzz).
+## tests/slt is a read-only seed dir: libFuzzer only writes new inputs to the FIRST dir.
+fuzz:
+	@mkdir -p fuzz/corpus/$(FUZZ_TARGET)
+	$(CARGO) +$(FUZZ_TOOLCHAIN) fuzz run --target $(FUZZ_TRIPLE) $(FUZZ_TARGET) \
+		fuzz/corpus/$(FUZZ_TARGET) tests/slt -- \
+		-dict=fuzz/sql.dict -max_len=32768 -timeout=10 -rss_limit_mb=4096 -max_total_time=$(FUZZ_TIME) \
+		-fork=1 -ignore_timeouts=1 -ignore_ooms=1
+# TODO: stop ignoring timeouts/OOMs once unbounded queries can be told apart from hangs
+# (see fuzz/fuzz_targets/sql_exec.rs). Crashes still fail the run.
 
 ## Run formatting (check mode) across the workspace.
 fmt:
