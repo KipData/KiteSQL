@@ -1,0 +1,35 @@
+# char_length / octet_length: integer result, NULL in -> NULL out.
+
+statement ok
+create table s(id int primary key, c varchar);
+
+statement ok
+insert into s values (1, 'ab'), (2, 'abcd'), (3, null);
+
+query R
+select avg(char_length(c)) from s;
+----
+3.0
+
+query I
+select sum(octet_length(c)) from s;
+----
+6
+
+query I rowsort
+select id from s where char_length(c) = 2;
+----
+1
+
+query I rowsort
+select id from s where char_length(c) + 1 > 3;
+----
+2
+
+query I
+select char_length(c) from s where id = 3;
+----
+null
+
+statement ok
+drop table s
