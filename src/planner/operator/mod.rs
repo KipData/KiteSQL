@@ -889,6 +889,7 @@ mod tests {
         let join = Operator::Join(JoinOperator {
             join_type: join::JoinType::Inner,
             force_nested_loop: false,
+            limit_pushed: false,
             on: JoinCondition::On {
                 on: vec![(column_expr(a, 0, &mut arena), column_expr(b, 1, &mut arena))],
                 filter: Some(column_expr(c, 2, &mut arena)),

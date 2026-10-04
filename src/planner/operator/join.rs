@@ -50,6 +50,7 @@ pub struct JoinOperator {
     pub on: JoinCondition,
     pub join_type: JoinType,
     pub force_nested_loop: bool,
+    pub limit_pushed: bool,
 }
 
 impl JoinOperator {
@@ -65,6 +66,7 @@ impl JoinOperator {
                 on,
                 join_type,
                 force_nested_loop,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -143,6 +145,7 @@ mod tests {
             },
             join_type: JoinType::Inner,
             force_nested_loop: false,
+            limit_pushed: false,
         };
         assert_eq!(operator.plan_impl(), PlanImpl::HashJoin);
 

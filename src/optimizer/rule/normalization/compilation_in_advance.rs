@@ -210,6 +210,7 @@ mod tests {
             Operator::Join(JoinOperator {
                 join_type: JoinType::Inner,
                 force_nested_loop: false,
+                limit_pushed: false,
                 on: JoinCondition::On {
                     on: vec![(join_left, join_right)],
                     filter: Some(join_filter),

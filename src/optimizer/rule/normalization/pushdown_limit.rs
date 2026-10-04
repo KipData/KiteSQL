@@ -16,6 +16,7 @@ use crate::errors::DatabaseError;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::join::JoinType;
+use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::Operator;
 use crate::planner::LogicalPlan;
 
@@ -73,23 +74,28 @@ impl NormalizationRule for PushLimitThroughJoin {
         _: &mut crate::planner::PlanArena,
     ) -> Result<bool, DatabaseError> {
         let limit_op = match &plan.operator {
-            Operator::Limit(op) => op.clone(),
+            Operator::Limit(LimitOperator {
+                offset,
+                limit: Some(limit),
+            }) => LimitOperator {
+                offset: None,
+                limit: Some(limit.saturating_add(offset.unwrap_or(0))),
+            },
             _ => return Ok(false),
         };
 
         if let Some(child) = only_child_mut(plan) {
-            if let Operator::Join(join_op) = &child.operator {
-                let mut applied = false;
-                match join_op.join_type {
-                    JoinType::LeftOuter => {
-                        applied |= wrap_child_with(child, 0, Operator::Limit(limit_op.clone()));
-                    }
-                    JoinType::RightOuter => {
-                        applied |= wrap_child_with(child, 1, Operator::Limit(limit_op));
-                    }
-                    _ => {}
+            if let Operator::Join(join_op) = &mut child.operator {
+                if join_op.limit_pushed {
+                    return Ok(false);
                 }
-                return Ok(applied);
+                let side = match join_op.join_type {
+                    JoinType::LeftOuter => 0,
+                    JoinType::RightOuter => 1,
+                    _ => return Ok(false),
+                };
+                join_op.limit_pushed = true;
+                return Ok(wrap_child_with(child, side, Operator::Limit(limit_op)));
             }
         }
 

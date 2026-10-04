@@ -561,6 +561,7 @@ mod test {
                     on: JoinCondition::None,
                     join_type: JoinType::Cross,
                     force_nested_loop: true,
+                    limit_pushed: false,
                 }),
                 Childrens::Twins {
                     left: Box::new(left),
@@ -609,6 +610,7 @@ mod test {
                 },
                 join_type: JoinType::Inner,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -664,6 +666,7 @@ mod test {
                 },
                 join_type: JoinType::LeftOuter,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -748,6 +751,7 @@ mod test {
                 },
                 join_type: JoinType::Cross,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -803,6 +807,7 @@ mod test {
                 },
                 join_type: JoinType::Cross,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -873,6 +878,7 @@ mod test {
                 },
                 join_type: JoinType::Cross,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -918,6 +924,7 @@ mod test {
                 },
                 join_type: JoinType::RightOuter,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -997,6 +1004,7 @@ mod test {
                 },
                 join_type: JoinType::Full,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -1155,6 +1163,7 @@ mod test {
                 },
                 join_type: JoinType::RightOuter,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
