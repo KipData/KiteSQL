@@ -550,3 +550,46 @@ from scalar_eof outer_row order by outer_row.id limit 1;
 
 statement ok
 drop table scalar_eof;
+
+# SELECT-list scalar subqueries are joined in above DISTINCT / GROUP BY /
+# ORDER BY, so those clauses cannot read them yet: reject instead of reading
+# another column (which crashed, or silently returned wrong results).
+statement ok
+create table sq_ref(id int primary key, c varchar);
+
+statement ok
+insert into sq_ref values (0, 'a'), (1, 'b'), (2, 'a');
+
+statement error
+select id, (select count(*) from sq_ref) - id as x from sq_ref order by x;
+
+statement error
+select (select max(id) from sq_ref) + 1 as x from sq_ref order by x;
+
+statement error
+select distinct (select max(id) from sq_ref) from sq_ref;
+
+statement error
+select (select max(id) from sq_ref) as x from sq_ref group by x;
+
+# Not referenced by those clauses: still supported.
+query II
+select id, (select max(id) from sq_ref) as x from sq_ref order by id;
+----
+0 2
+1 2
+2 2
+
+query II
+select (select max(id) from sq_ref), count(*) from sq_ref;
+----
+2 3
+
+query T rowsort
+select distinct c from sq_ref where id < (select max(id) from sq_ref);
+----
+a
+b
+
+statement ok
+drop table sq_ref;

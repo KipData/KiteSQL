@@ -24,7 +24,10 @@ use crate::{
         operator::{join::JoinType, table_scan::TableScanOperator},
     },
 };
-use std::{borrow::Cow, collections::HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use super::{Binder, BinderContext, QueryBindStep, SetOperatorKind, Source, SubQueryType};
 
@@ -66,6 +69,41 @@ impl ExprVisitorMut for RightSidePositionGlobalizer<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether any of `exprs` reads the output of a SELECT-list scalar subquery.
+/// Those subqueries are only joined in at the Project step, above DISTINCT /
+/// GROUP BY / ORDER BY, so such a reference would read another column.
+///
+/// Takes the subquery map rather than the binder so callers can pass
+/// expressions borrowed from the same binder context.
+// TODO(#386): evaluate uncorrelated scalar subqueries once, as constants
+// (like PostgreSQL's InitPlan), so these clauses can use them.
+fn references_select_list_sub_query(
+    sub_queries: &mut HashMap<QueryBindStep, Vec<SubQueryType>>,
+    exprs: impl IntoIterator<Item = ExprRef>,
+    arena: &mut PlanArena,
+) -> Result<bool, DatabaseError> {
+    let Some(sub_queries) = sub_queries.get_mut(&QueryBindStep::Project) else {
+        return Ok(false);
+    };
+    // `exprs` can only be traversed once, so it is the outer loop.
+    for expr in exprs {
+        for sub_query in sub_queries.iter_mut() {
+            let SubQueryType::SubQuery { plan, .. } = sub_query else {
+                continue;
+            };
+            let schema = plan.output_schema(arena);
+            if expr.any_referenced_column(arena, |arena, candidate| {
+                schema
+                    .iter()
+                    .any(|column| arena.same_column(*column, *candidate))
+            })? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 struct AppendedRightOutput {
@@ -531,6 +569,16 @@ where
                 self.arena,
             )?;
         }
+        let context = &mut self.binder.context;
+        if references_select_list_sub_query(
+            &mut context.sub_queries,
+            context.group_by_exprs.iter().copied(),
+            self.arena,
+        )? {
+            return Err(DatabaseError::UnsupportedStmt(
+                "GROUP BY over a scalar subquery in the SELECT list is not supported".to_string(),
+            ));
+        }
         if !self.binder.context.agg_calls.is_empty()
             || !self.binder.context.group_by_exprs.is_empty()
         {
@@ -625,6 +673,16 @@ where
         distinct: bool,
     ) -> Result<BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         if distinct {
+            if references_select_list_sub_query(
+                &mut self.binder.context.sub_queries,
+                self.select_list.iter().copied(),
+                self.arena,
+            )? {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "DISTINCT over a scalar subquery in the SELECT list is not supported"
+                        .to_string(),
+                ));
+            }
             let distinct_outputs = self.select_list.clone();
             self.binder.bind_distinct_output_exprs(
                 &distinct_outputs,
@@ -657,6 +715,16 @@ where
         mut self,
     ) -> Result<BindPlanSorted<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         if let Some(orderby) = self.orderby {
+            if references_select_list_sub_query(
+                &mut self.binder.context.sub_queries,
+                orderby.iter().map(|field| field.expr),
+                self.arena,
+            )? {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "ORDER BY over a scalar subquery in the SELECT list is not supported"
+                        .to_string(),
+                ));
+            }
             self.plan = self.binder.bind_sort(self.plan, orderby, self.arena)?;
         }
 
