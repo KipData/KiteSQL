@@ -41,3 +41,39 @@ SELECT DISTINCT b, a FROM distinct_pos ORDER BY a DESC LIMIT 2;
 
 statement ok
 DROP TABLE distinct_pos;
+
+# DISTINCT over aliased expressions: the select list shares nodes with the
+# DISTINCT group keys, which must not be rewritten into self-references.
+statement ok
+create table distinct_alias(id int primary key, a int, b bigint, c varchar, d double);
+
+statement ok
+insert into distinct_alias values (0, 1, 2, 'a', 1.5), (1, 2, null, null, null), (2, 1, 3, 'A', 0.5);
+
+query TT rowsort
+select distinct lower(c) as x, c from distinct_alias;
+----
+a A
+a a
+null null
+
+query T rowsort
+select distinct (a = 1) as x from distinct_alias;
+----
+false
+true
+
+query I rowsort
+select distinct a + 1 as x from distinct_alias;
+----
+2
+3
+
+query T rowsort
+select distinct upper(c) as x from distinct_alias order by x;
+----
+A
+null
+
+statement ok
+drop table distinct_alias
