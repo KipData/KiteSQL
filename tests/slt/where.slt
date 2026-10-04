@@ -83,3 +83,102 @@ select v2 from t where v1 is null;
 
 statement ok
 drop table t
+
+# Predicates whose arithmetic the optimizer may move across the comparison
+# (Simplify::isolate_column). Each must return the same rows as evaluating
+# the predicate as written.
+
+statement ok
+create table t(id int primary key, a int, b bigint, d double);
+
+statement ok
+insert into t values (1, 1, 2, 1.5), (2, 5, 3, -2.5), (3, -4, -2, null);
+
+# constant on the left of `+` / `-`
+query I rowsort
+select id from t where 2 + b = 4;
+----
+1
+
+query I rowsort
+select id from t where 2 + b > 3;
+----
+1
+2
+
+query I rowsort
+select id from t where 1 + (2 - b) = 1;
+----
+1
+
+query I rowsort
+select id from t where 2 + (b + 1) = 6;
+----
+2
+
+query I rowsort
+select id from t where 2 + -b = 4;
+----
+3
+
+# unary minus over a sum
+query I rowsort
+select id from t where -(b + 1) > 1;
+----
+
+query I rowsort
+select id from t where -(1 - b) > 1;
+----
+2
+
+# `*` / `/` are not rearranged (sign-dependent, not invertible for integers)
+query I rowsort
+select id from t where 3 * b = 6;
+----
+1
+
+query I rowsort
+select id from t where b * -1 > 0;
+----
+3
+
+query I rowsort
+select id from t where b / 2 = 1;
+----
+1
+
+# more than one column
+query I rowsort
+select id from t where (1 - b) * id = -4;
+----
+2
+
+query I rowsort
+select id from t where (b + 1) + (a + 1) = 10;
+----
+2
+
+# mixed types and overflow boundaries
+query I rowsort
+select id from t where -d > 2;
+----
+2
+
+query I rowsort
+select id from t where -b > 1.5;
+----
+3
+
+query I rowsort
+select id from t where -a < -2147483648;
+----
+
+query I rowsort
+select id from t where a + 1 > -2147483648;
+----
+1
+2
+3
+
+statement ok
+drop table t

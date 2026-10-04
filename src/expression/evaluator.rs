@@ -145,7 +145,7 @@ impl ScalarExpression {
                     evaluator
                         .as_ref()
                         .ok_or(DatabaseError::EvaluatorNotFound)?
-                        .unary_eval(&value),
+                        .unary_eval(&value)?,
                 ))
             }
             ScalarExpression::AggCall { .. } => {

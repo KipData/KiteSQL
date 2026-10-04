@@ -84,7 +84,7 @@ impl UnaryEvaluatorRef {
         Self { pos }
     }
 
-    pub fn unary_eval(&self, value: &DataValue) -> DataValue {
+    pub fn unary_eval(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {
         unary::eval_unary(self.pos, value)
     }
 }
