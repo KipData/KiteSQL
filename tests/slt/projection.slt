@@ -11,3 +11,23 @@ select id, v1 from wide_table;
 
 statement ok
 drop table wide_table
+
+# A NULL in an unprojected column must not shift the projected ones.
+statement ok
+create table null_skip(id int primary key, a int, b bigint, c varchar, d double);
+
+statement ok
+insert into null_skip values (4, null, 2, 'a', null);
+
+query TI
+select c, b from null_skip;
+----
+a 2
+
+query T
+select c from null_skip where c like 'a_' or b is not null;
+----
+a
+
+statement ok
+drop table null_skip
