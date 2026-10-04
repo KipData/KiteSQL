@@ -1435,10 +1435,13 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             if !fn_not_on_using(column, arena) {
                 continue;
             }
-            exprs.push(arena.alloc_expression(ScalarExpression::column_expr(
-                *column,
+            exprs.push(Self::wildcard_column_expr(
+                context,
+                arena,
+                column,
                 position_offset + position,
-            )));
+                is_qualified_wildcard,
+            )?);
             pushed_alias_columns = true;
         }
 
@@ -1450,28 +1453,42 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             if !fn_not_on_using(column, arena) {
                 continue;
             }
-            let expr = context
-                .using
-                .values()
-                .find(|using| {
-                    !is_qualified_wildcard
-                        && matches!(using.join_type, JoinType::Full)
-                        && arena.same_column(using.left_column, *column)
-                })
-                .cloned()
-                .map(|using| {
-                    let alias = AliasType::Name(arena.column(*column).name().to_string());
-                    let expr = using.visible_expr(arena)?;
-                    let expr = arena.alloc_expression(expr);
-                    Ok::<_, DatabaseError>(ScalarExpression::Alias { expr, alias })
-                })
-                .transpose()?
-                .unwrap_or_else(|| {
-                    ScalarExpression::column_expr(*column, position_offset + position)
-                });
-            exprs.push(arena.alloc_expression(expr));
+            exprs.push(Self::wildcard_column_expr(
+                context,
+                arena,
+                column,
+                position_offset + position,
+                is_qualified_wildcard,
+            )?);
         }
         Ok(())
+    }
+
+    fn wildcard_column_expr(
+        context: &BinderContext<'a, T>,
+        arena: &mut crate::planner::PlanArena,
+        column: &ColumnRef,
+        position: usize,
+        is_qualified_wildcard: bool,
+    ) -> Result<ExprRef, DatabaseError> {
+        let expr = context
+            .using
+            .values()
+            .find(|using| {
+                !is_qualified_wildcard
+                    && matches!(using.join_type, JoinType::Full)
+                    && arena.same_column(using.left_column, *column)
+            })
+            .cloned()
+            .map(|using| {
+                let alias = AliasType::Name(arena.column(*column).name().to_string());
+                let expr = using.visible_expr(arena)?;
+                let expr = arena.alloc_expression(expr);
+                Ok::<_, DatabaseError>(ScalarExpression::Alias { expr, alias })
+            })
+            .transpose()?
+            .unwrap_or_else(|| ScalarExpression::column_expr(*column, position));
+        Ok(arena.alloc_expression(expr))
     }
 
     pub(crate) fn bind_join_plans(
