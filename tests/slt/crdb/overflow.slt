@@ -2,23 +2,19 @@ statement ok
 drop table if exists large_numbers
 
 statement ok
-CREATE TABLE large_numbers (a TINYINT PRIMARY KEY)
+CREATE TABLE large_numbers (id INT PRIMARY KEY, a BIGINT)
 
-statement error
-INSERT INTO large_numbers VALUES (9223372036854775807),(1)
+statement ok
+INSERT INTO large_numbers VALUES (0, 9223372036854775807), (1, 1)
 
-query I
+query error
 SELECT sum(a) FROM large_numbers
-----
-null
 
 statement ok
 DELETE FROM large_numbers
 
-statement error
-INSERT INTO large_numbers VALUES (-9223372036854775808),(-1)
+statement ok
+INSERT INTO large_numbers VALUES (0, -9223372036854775808), (1, -1)
 
-query I
+query error
 SELECT sum(a) FROM large_numbers
-----
-null

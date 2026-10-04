@@ -2083,6 +2083,15 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             Expr::Function(func) => self.bind_function_sql(func, arena),
             Expr::Nested(expr) => self.bind_expr(expr, arena),
             Expr::UnaryOp { expr, op } => {
+                // Fold `-<number>` into one literal, as PostgreSQL does: parsing
+                // the number first cannot express a type's minimum, e.g.
+                // `-9223372036854775808` (9223372036854775808 overflows bigint).
+                if let (UnaryOperator::Minus, Expr::Value(v)) = (op, expr.as_ref()) {
+                    if let Value::Number(n, long) = &v.value {
+                        let value = DataValue::try_from(&Value::Number(format!("-{n}"), *long))?;
+                        return Ok(ScalarExpression::Constant(value));
+                    }
+                }
                 let expr = self
                     .bind_expr(expr, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
@@ -3380,7 +3389,7 @@ mod tests {
 
         assert!(matches!(
             tables.plan("select * from t1 limit -1").unwrap_err(),
-            DatabaseError::InvalidColumn { .. }
+            DatabaseError::InvalidType
         ));
         assert!(matches!(
             tables.plan("select * from t1 limit 1.5").unwrap_err(),
