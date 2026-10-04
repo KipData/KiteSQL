@@ -398,7 +398,7 @@ where
                 vec![expr],
                 None,
                 None::<Vec<SortField>>,
-                |_binder, _arena, order| Ok(order),
+                |_binder, _arena, _select_list, order| Ok(order),
             )?
             .having()?
             .window()?
@@ -421,7 +421,7 @@ where
                 Vec::new(),
                 None,
                 None::<Vec<SortField>>,
-                |_binder, _arena, order| Ok(order),
+                |_binder, _arena, _select_list, order| Ok(order),
             )?
             .having()?
             .window()?
@@ -544,6 +544,7 @@ where
         mut bind_sort_field: impl FnMut(
             &mut Binder<'a, 'b, T, A>,
             &mut crate::planner::PlanArena<'arena>,
+            &[ExprRef],
             O,
         ) -> Result<SortField, DatabaseError>,
     ) -> Result<BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
@@ -562,10 +563,11 @@ where
 
         let mut having_orderby = (None, None);
         if having.is_some() || orderby.is_some() {
+            let select_list = &self.select_list;
             having_orderby = self.binder.extract_having_orderby_aggregate_exprs(
                 having,
                 orderby,
-                |binder, orderby, arena| bind_sort_field(binder, arena, orderby),
+                |binder, orderby, arena| bind_sort_field(binder, arena, select_list, orderby),
                 self.arena,
             )?;
         }

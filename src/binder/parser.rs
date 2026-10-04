@@ -49,7 +49,7 @@ pub(super) use sqlparser::ast::{
     ObjectType, OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
     SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, TableAlias,
     TableConstraint, TableFactor, TableObject, TableWithJoins, TypedString, UnaryOperator, Value,
-    WindowType,
+    ValueWithSpan, WindowType,
 };
 #[cfg(feature = "copy")]
 pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
@@ -1416,17 +1416,46 @@ where
                 })
             })
             .transpose()?;
-        self.aggregate(group_by, having, orderby, |binder, arena, orderby| {
-            let OrderByExpr { expr, options, .. } = orderby;
-            with_query_bind_step!(binder, QueryBindStep::Sort, {
-                let expr = binder.bind_expr(expr, arena)?;
-                SortField::new(
-                    arena.alloc_expression(expr),
-                    options.asc.is_none_or(|asc| asc),
-                    options.nulls_first.unwrap_or(false),
-                )
-            })
-        })
+        self.aggregate(
+            group_by,
+            having,
+            orderby,
+            |binder, arena, select_list, orderby| {
+                let OrderByExpr { expr, options, .. } = orderby;
+                with_query_bind_step!(binder, QueryBindStep::Sort, {
+                    let expr = match expr {
+                        Expr::Value(ValueWithSpan {
+                            value: Value::Number(n, _),
+                            ..
+                        }) => {
+                            let position = n.parse::<usize>().map_err(|_| {
+                                DatabaseError::InvalidValue(format!(
+                                    "non-integer constant in ORDER BY: {n}"
+                                ))
+                            })?;
+                            let item = position
+                                .checked_sub(1)
+                                .and_then(|i| select_list.get(i))
+                                .ok_or_else(|| {
+                                    DatabaseError::InvalidValue(format!(
+                                        "ORDER BY position {n} is not in select list"
+                                    ))
+                                })?;
+                            item.clone_expression(arena)?
+                        }
+                        expr => {
+                            let expr = binder.bind_expr(expr, arena)?;
+                            arena.alloc_expression(expr)
+                        }
+                    };
+                    SortField::new(
+                        expr,
+                        options.asc.is_none_or(|asc| asc),
+                        options.nulls_first.unwrap_or(false),
+                    )
+                })
+            },
+        )
     }
 }
 

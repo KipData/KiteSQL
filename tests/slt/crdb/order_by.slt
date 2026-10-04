@@ -179,14 +179,8 @@ SELECT * FROM t ORDER BY "a"
 4 7 null
 5 7 null
 
-query III
+query error
 SELECT * FROM t ORDER BY 2.5,a
-----
-1 9 true
-2 8 false
-3 7 null
-4 7 null
-5 7 null
 
 statement error
 SELECT * FROM t ORDER BY foo
