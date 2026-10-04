@@ -31,3 +31,31 @@ a
 
 statement ok
 drop table null_skip
+
+statement ok
+create table alias_order(id int primary key, x int, v int)
+
+statement ok
+create table alias_order_dst(a int primary key, b int, c int)
+
+statement ok
+insert into alias_order values (0, 1, 10)
+
+query III
+select * from alias_order as l (lid, x, lv)
+----
+0 1 10
+
+statement ok
+insert into alias_order_dst select * from alias_order as l (lid, x, lv)
+
+query III
+select a, b, c from alias_order_dst
+----
+0 1 10
+
+statement ok
+drop table alias_order
+
+statement ok
+drop table alias_order_dst

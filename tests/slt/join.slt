@@ -564,9 +564,9 @@ insert into full_using_r values (5, 2, 200), (6, 3, 300)
 query IIIII rowsort
 select * from full_using_l as l (lid, x, lv) full join full_using_r using(x)
 ----
-0 10 1 null null
-1 20 2 5 200
-null null 3 6 300
+0 1 10 null null
+1 2 20 5 200
+null 3 null 6 300
 
 query IIIII rowsort
 select * from full_using_l full join full_using_r using(x)

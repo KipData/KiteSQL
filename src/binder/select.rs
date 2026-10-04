@@ -1414,41 +1414,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                         .any(|using_column| using_column.hides_column(column, arena))
         };
 
-        let mut pushed_alias_columns = false;
-
-        for alias_column in context
-            .expr_aliases
-            .keys()
-            .filter_map(|(alias_table, alias_column)| {
-                matches!(alias_table.as_deref(), Some(alias) if alias == table_name.as_ref())
-                    .then_some(alias_column.as_str())
-            })
-        {
-            let Some((position, column)) = source
-                .schema()
-                .iter()
-                .enumerate()
-                .find(|(_, column)| arena.column(**column).name() == alias_column)
-            else {
-                continue;
-            };
-            if !fn_not_on_using(column, arena) {
-                continue;
-            }
-            exprs.push(Self::wildcard_column_expr(
-                context,
-                arena,
-                column,
-                position_offset + position,
-                is_qualified_wildcard,
-            )?);
-            pushed_alias_columns = true;
-        }
-
-        if pushed_alias_columns {
-            return Ok(());
-        }
-
         for (position, column) in source.schema().iter().enumerate() {
             if !fn_not_on_using(column, arena) {
                 continue;
