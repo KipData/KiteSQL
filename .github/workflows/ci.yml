@@ -154,7 +154,10 @@ jobs:
           tool: cargo-fuzz
 
       - name: Run sql_exec fuzzer
-        run: make fuzz FUZZ_TIME=300
+        run: make fuzz FUZZ_TARGET=sql_exec FUZZ_TIME=150
+
+      - name: Run sql_gen fuzzer
+        run: make fuzz FUZZ_TARGET=sql_gen FUZZ_TIME=150
 
       - name: Upload crash artifacts
         if: failure()

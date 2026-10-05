@@ -9,8 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = { version = "=0.4.10" }
-# In-memory storage only: no RocksDB/LMDB build, no file IO (`copy`/`spill` off).
-kite_sql      = { path = "..", default-features = false, features = ["parser", "macros", "time", "decimal"] }
+# LMDB storage; no RocksDB build, no `copy`/`spill` file IO.
+kite_sql      = { path = "..", default-features = false, features = ["parser", "macros", "time", "decimal", "lmdb"] }
 
 # Standalone workspace: fuzzing needs nightly, the main workspace stays on stable.
 [workspace]
@@ -22,6 +22,13 @@ debug = 1
 [[bin]]
 name  = "sql_exec"
 path  = "fuzz_targets/sql_exec.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "sql_gen"
+path  = "fuzz_targets/sql_gen.rs"
 test  = false
 doc   = false
 bench = false

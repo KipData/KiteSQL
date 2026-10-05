@@ -23,6 +23,17 @@ FUZZ_TIME ?= 60
 FUZZ_TRIPLE ?= $(shell rustc -vV | sed -n 's/^host: //p')
 FUZZ_TARGET_DIR ?= $(CURDIR)/fuzz/target
 FUZZ_BIN = $(FUZZ_TARGET_DIR)/$(FUZZ_TRIPLE)/release/$(FUZZ_TARGET)
+# Per-target libFuzzer args and the exit code that still counts as a pass.
+# sql_exec: tests/slt as read-only seeds (libFuzzer only writes to the FIRST dir); fork mode
+# so timeouts are skipped (TODO in fuzz/fuzz_targets/sql_exec.rs). Fork mode ignores OOMs by
+# default, hence -ignore_ooms=0, and exits with the LAST child's code, so a trailing ignored
+# timeout (70) is not a failure.
+FUZZ_ARGS_sql_exec = tests/slt -dict=fuzz/sql.dict -max_len=32768 \
+	-fork=1 -ignore_timeouts=1 -ignore_ooms=0 -timeout_exitcode=70
+FUZZ_PASS_EXIT_sql_exec = 70
+# sql_gen: bounded generated queries, so crashes, timeouts and OOMs all fail.
+FUZZ_ARGS_sql_gen = -max_len=4096
+FUZZ_PASS_EXIT_sql_gen = 0
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
 .PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz
@@ -79,21 +90,17 @@ codecov-html:
 		$(GRCOV) . --binary-path \"$${CARGO_TARGET_DIR:-target}/debug\" -s . -t html $(COVERAGE_REPORT_ARGS) -o '$(COVERAGE_HTML_DIR)'"
 	@echo "Coverage report: $(COVERAGE_HTML_DIR)/index.html"
 
-## Run a fuzz target for FUZZ_TIME seconds (needs a nightly toolchain and cargo-fuzz).
-## tests/slt is a read-only seed dir: libFuzzer only writes new inputs to the FIRST dir.
-## Fork mode ignores OOMs by default, hence the explicit -ignore_ooms=0: crashes and OOMs fail the run.
-## It also exits with the LAST child's code, so a trailing ignored timeout (70) is not a failure.
-## The binary is run directly because `cargo fuzz run` turns every non-zero exit into a failure.
-## TODO: stop ignoring timeouts once unbounded queries can be told apart from hangs
-## (see fuzz/fuzz_targets/sql_exec.rs).
+## Run fuzz target FUZZ_TARGET (sql_exec | sql_gen) for FUZZ_TIME seconds
+## (needs a nightly toolchain and cargo-fuzz). The binary is run directly because
+## `cargo fuzz run` turns every non-zero exit into a failure.
 fuzz:
 	@mkdir -p fuzz/corpus/$(FUZZ_TARGET) fuzz/artifacts/$(FUZZ_TARGET)
 	$(CARGO) +$(FUZZ_TOOLCHAIN) fuzz build --target $(FUZZ_TRIPLE) --target-dir $(FUZZ_TARGET_DIR) $(FUZZ_TARGET)
-	@status=0; $(FUZZ_BIN) fuzz/corpus/$(FUZZ_TARGET) tests/slt \
+	@status=0; $(FUZZ_BIN) fuzz/corpus/$(FUZZ_TARGET) $(FUZZ_ARGS_$(FUZZ_TARGET)) \
 		-artifact_prefix=fuzz/artifacts/$(FUZZ_TARGET)/ \
-		-dict=fuzz/sql.dict -max_len=32768 -timeout=10 -rss_limit_mb=4096 -max_total_time=$(FUZZ_TIME) \
-		-fork=1 -ignore_timeouts=1 -ignore_ooms=0 -timeout_exitcode=70 || status=$$?; \
-	if [ $$status -ne 0 ] && [ $$status -ne 70 ]; then \
+		-timeout=10 -rss_limit_mb=4096 -max_total_time=$(FUZZ_TIME) || status=$$?; \
+	rm -rf "$${TMPDIR:-/tmp}"/kitesql-fuzz-$(FUZZ_TARGET)-*; \
+	if [ $$status -ne 0 ] && [ $$status -ne $(FUZZ_PASS_EXIT_$(FUZZ_TARGET)) ]; then \
 		echo "fuzz: $(FUZZ_TARGET) failed (exit $$status), see fuzz/artifacts/$(FUZZ_TARGET)/"; exit $$status; \
 	fi
 

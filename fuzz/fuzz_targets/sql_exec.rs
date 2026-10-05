@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! End-to-end SQL fuzzing against an in-memory database.
+//! End-to-end SQL fuzzing against an LMDB database.
 //!
 //! The input is treated as a `;`-separated SQL script. Every chunk is run on
 //! its own, so a mutation that breaks one statement does not discard the rest
@@ -35,21 +35,53 @@
 
 use kite_sql::binder::{command_type, CommandType};
 use kite_sql::db::{prepare_all, DataBaseBuilder, Database, Statement};
-use kite_sql::storage::memory::MemoryStorage;
+use kite_sql::storage::lmdb::LmdbStorage;
+use kite_sql::types::value::DataValue;
 use libfuzzer_sys::fuzz_target;
+use std::cell::RefCell;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(script) = std::str::from_utf8(data) else {
         return;
     };
-    let Ok(mut db) = DataBaseBuilder::path(".").build_in_memory() else {
-        return;
-    };
-
-    for sql in strip_slt(script).split(';') {
-        run_one(&mut db, sql);
-    }
+    DB.with_borrow_mut(|db| {
+        reset(db);
+        for sql in strip_slt(script).split(';') {
+            run_one(db, sql);
+        }
+    });
 });
+
+thread_local! {
+    // One database per process, reused by every input (emptied before each).
+    static DB: RefCell<Database<LmdbStorage>> = RefCell::new(open_db());
+}
+
+fn open_db() -> Database<LmdbStorage> {
+    let path = std::env::temp_dir().join(format!("kitesql-fuzz-sql_exec-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    DataBaseBuilder::path(path)
+        .lmdb_no_sync(true)
+        .build_lmdb()
+        .expect("lmdb database")
+}
+
+/// Drops every view and table the previous input left behind.
+fn reset(db: &mut Database<LmdbStorage>) {
+    for (show, drop) in [("show views", "drop view"), ("show tables", "drop table")] {
+        let mut names = Vec::new();
+        if let Ok(mut iter) = db.run(show) {
+            while let Ok(Some(())) = iter.next_tuple(|_, tuple| {
+                if let Some(DataValue::Utf8 { value, .. }) = tuple.values.first() {
+                    names.push(value.clone());
+                }
+            }) {}
+        }
+        for name in names {
+            let _ = db.ddl(format!("{drop} {name}"));
+        }
+    }
+}
 
 /// sqllogictest record headers and directives; such lines never start SQL.
 const SLT_DIRECTIVES: &[&str] = &[
@@ -102,7 +134,7 @@ fn strip_slt(script: &str) -> String {
     sql
 }
 
-fn run_one(db: &mut Database<MemoryStorage>, sql: &str) {
+fn run_one(db: &mut Database<LmdbStorage>, sql: &str) {
     let Ok(statements) = prepare_all(sql) else {
         return;
     };
