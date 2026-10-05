@@ -106,18 +106,20 @@ impl ExprVisitorMut for DistinctOutputBinder<'_> {
         expr: &mut ExprRef,
         arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
-        if let ScalarExpression::Alias {
-            alias: crate::expression::AliasType::Name(_),
-            ..
-        } = arena.expression(*expr)
-        {
-            return walk_mut_expr(self, expr, arena);
+        let is_named_alias = matches!(
+            arena.expression(*expr),
+            ScalarExpression::Alias {
+                alias: crate::expression::AliasType::Name(_),
+                ..
+            }
+        );
+        if !is_named_alias {
+            if let Some(output_ref) = self.output_ref(*expr, arena) {
+                *expr = arena.alloc_expression(output_ref);
+                return Ok(());
+            }
         }
-
-        if let Some(output_ref) = self.output_ref(*expr, arena) {
-            *expr = arena.alloc_expression(output_ref);
-            return Ok(());
-        }
+        *expr = arena.alloc_expression(arena.expression(*expr).clone());
         walk_mut_expr(self, expr, arena)
     }
 }

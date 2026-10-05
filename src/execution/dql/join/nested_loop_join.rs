@@ -221,26 +221,27 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                             }
                         }
                         active_left.has_matched = true;
-                        if Self::emit_tuple(
+                        // A matched pair is always one output row, even when
+                        // neither side projects a column (e.g. `count(*)`).
+                        Self::emit_tuple(
                             &active_left.left_tuple,
                             arena.result_tuple_mut(),
                             self.ty,
-                        ) {
-                            if matches!(self.ty, JoinType::Full) {
-                                if let Some(bits) = right_bitmap.as_mut() {
-                                    bits.insert(idx);
-                                } else {
-                                    active_left.first_matches.push(idx);
-                                }
+                        );
+                        if matches!(self.ty, JoinType::Full) {
+                            if let Some(bits) = right_bitmap.as_mut() {
+                                bits.insert(idx);
+                            } else {
+                                active_left.first_matches.push(idx);
                             }
-
-                            self.state = NestedLoopJoinState::ScanRight {
-                                active_left,
-                                right_bitmap,
-                            };
-                            arena.resume();
-                            return Ok(());
                         }
+
+                        self.state = NestedLoopJoinState::ScanRight {
+                            active_left,
+                            right_bitmap,
+                        };
+                        arena.resume();
+                        return Ok(());
                     }
 
                     if matches!(self.ty, JoinType::Full) {
@@ -265,7 +266,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                             right_tuple.pk = None;
                             right_tuple.values.clear();
                             right_tuple.values.resize(right_schema_len, DataValue::Null);
-                            Self::emit_tuple(&active_left.left_tuple, right_tuple, self.ty)
+                            Self::emit_tuple(&active_left.left_tuple, right_tuple, self.ty);
+                            true
                         }
                         _ => false,
                     };
@@ -337,7 +339,7 @@ impl<'a> NestedLoopJoin<'a> {
     /// `left_tuple`: retained outer tuple (logical right for RightOuter).
     /// `right_tuple`: current inner tuple (logical left for RightOuter), rewritten in place.
     /// `ty`: the type of join
-    fn emit_tuple(left_tuple: &Tuple, right_tuple: &mut Tuple, ty: JoinType) -> bool {
+    fn emit_tuple(left_tuple: &Tuple, right_tuple: &mut Tuple, ty: JoinType) {
         let right_len = right_tuple.values.len();
         right_tuple.values.extend(left_tuple.values.iter().cloned());
         if matches!(ty, JoinType::RightOuter) {
@@ -350,7 +352,6 @@ impl<'a> NestedLoopJoin<'a> {
                 right_tuple.pk = left_tuple.pk.clone();
             }
         }
-        !right_tuple.values.is_empty()
     }
 }
 
@@ -560,6 +561,7 @@ mod test {
                     on: JoinCondition::None,
                     join_type: JoinType::Cross,
                     force_nested_loop: true,
+                    limit_pushed: false,
                 }),
                 Childrens::Twins {
                     left: Box::new(left),
@@ -608,6 +610,7 @@ mod test {
                 },
                 join_type: JoinType::Inner,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -663,6 +666,7 @@ mod test {
                 },
                 join_type: JoinType::LeftOuter,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -747,6 +751,7 @@ mod test {
                 },
                 join_type: JoinType::Cross,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -802,6 +807,7 @@ mod test {
                 },
                 join_type: JoinType::Cross,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -872,6 +878,7 @@ mod test {
                 },
                 join_type: JoinType::Cross,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -917,6 +924,7 @@ mod test {
                 },
                 join_type: JoinType::RightOuter,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -996,6 +1004,7 @@ mod test {
                 },
                 join_type: JoinType::Full,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),
@@ -1154,6 +1163,7 @@ mod test {
                 },
                 join_type: JoinType::RightOuter,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Childrens::Twins {
                 left: Box::new(left),

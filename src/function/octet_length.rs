@@ -50,6 +50,10 @@ impl ScalarFunctionImpl for OctetLength {
         tuples: Option<&dyn TupleLike>,
     ) -> Result<DataValue, DatabaseError> {
         let mut value = arena.expression(exprs[0]).eval(arena, tuples)?;
+        // SQL: the length of NULL is NULL, not 0.
+        if value.is_null() {
+            return Ok(DataValue::Null);
+        }
         if !matches!(value.logical_type(), LogicalType::Varchar(_, _)) {
             value = std::borrow::Cow::Owned(
                 value
@@ -57,19 +61,20 @@ impl ScalarFunctionImpl for OctetLength {
                     .cast(&LogicalType::Varchar(None, CharLengthUnits::Characters))?,
             );
         }
-        let mut length: u64 = 0;
+        let mut length: i64 = 0;
         if let DataValue::Utf8 { value, ty, unit } = value.as_ref() {
-            length = value.len() as u64;
+            length = value.len() as i64;
         }
-        Ok(DataValue::UInt64(length))
+        Ok(DataValue::Int64(length))
     }
 
     fn monotonicity(&self) -> Option<FuncMonotonicity> {
         todo!()
     }
 
+    // Must match what `eval` produces (see char_length).
     fn return_type(&self) -> &LogicalType {
-        &LogicalType::Varchar(None, CharLengthUnits::Characters)
+        &LogicalType::Bigint
     }
 
     fn summary(&self) -> &FunctionSummary {

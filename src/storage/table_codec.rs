@@ -1803,8 +1803,8 @@ mod tests {
                 .unwrap()
         };
 
-        let value_0 = Bytes::from([b'A'].as_slice());
-        let value_1 = Bytes::from([b'Z'].as_slice());
+        let value_0 = Bytes::from(b"A".as_slice());
+        let value_1 = Bytes::from(b"Z".as_slice());
 
         set.insert(value_0);
         set.insert(value_1);
@@ -1840,8 +1840,8 @@ mod tests {
                 .unwrap()
         };
 
-        let value_0 = Bytes::from([b'A'].as_slice());
-        let value_1 = Bytes::from([b'Z'].as_slice());
+        let value_0 = Bytes::from(b"A".as_slice());
+        let value_1 = Bytes::from(b"Z".as_slice());
 
         set.insert(value_0);
         set.insert(value_1);

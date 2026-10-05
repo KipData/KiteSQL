@@ -7,3 +7,6 @@
 
 statement ok
 CREATE TABLE TABLE_E141_01_01_02 ( ID INT PRIMARY KEY, A INT NOT NULL )
+
+statement ok
+drop table table_e141_01_01_02

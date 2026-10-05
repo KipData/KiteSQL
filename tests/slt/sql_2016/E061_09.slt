@@ -36,3 +36,21 @@ CREATE TABLE TABLE_E061_09_01_06 ( ID INT PRIMARY KEY, A INT );
 
 query I
 SELECT A FROM TABLE_E061_09_01_06 WHERE A >= ( SELECT 1 )
+
+statement ok
+drop table table_e061_09_01_04
+
+statement ok
+drop table table_e061_09_01_02
+
+statement ok
+drop table table_e061_09_01_06
+
+statement ok
+drop table table_e061_09_01_03
+
+statement ok
+drop table table_e061_09_01_05
+
+statement ok
+drop table table_e061_09_01_01

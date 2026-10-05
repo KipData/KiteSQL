@@ -60,3 +60,6 @@ select x from test group by x having x between 1 and 10
 ----
 1
 2
+
+statement ok
+drop table test

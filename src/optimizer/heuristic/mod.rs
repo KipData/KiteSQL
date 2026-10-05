@@ -13,5 +13,4 @@
 // limitations under the License.
 
 pub(crate) mod batch;
-pub(crate) mod matcher;
 pub mod optimizer;

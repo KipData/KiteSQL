@@ -932,7 +932,7 @@ mod tests {
             {
                 info.lookup = lookup;
             }
-            super::mark_sort_preserving_indexes(&mut plan, &[c2.clone()], &arena)?;
+            super::mark_sort_preserving_indexes(&mut plan, std::slice::from_ref(&c2), &arena)?;
             assert!(EliminateRedundantSort.apply(&mut plan, &mut arena)?);
         }
         Ok(())

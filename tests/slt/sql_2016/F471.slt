@@ -12,3 +12,6 @@ query I
 SELECT ( SELECT A FROM TABLE_F471_01_01 ) FROM TABLE_F471_01_01
 ----
 1
+
+statement ok
+drop table table_f471_01_01

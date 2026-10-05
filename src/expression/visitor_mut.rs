@@ -204,6 +204,7 @@ pub trait ExprVisitorMut: Sized {
         _negated: bool,
         expr: &mut ExprRef,
         args: &mut [ExprRef],
+        _evaluator: &mut Option<BinaryEvaluatorRef>,
         arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
@@ -213,12 +214,15 @@ pub trait ExprVisitorMut: Sized {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn visit_between(
         &mut self,
         _negated: bool,
         expr: &mut ExprRef,
         left_expr: &mut ExprRef,
         right_expr: &mut ExprRef,
+        _left_evaluator: &mut Option<BinaryEvaluatorRef>,
+        _right_evaluator: &mut Option<BinaryEvaluatorRef>,
         arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
@@ -424,13 +428,24 @@ pub fn walk_mut_expr<V: ExprVisitorMut>(
             negated,
             expr,
             args,
-        } => visitor.visit_in(*negated, expr, args, arena),
+            evaluator,
+        } => visitor.visit_in(*negated, expr, args, evaluator, arena),
         ScalarExpression::Between {
             negated,
             expr,
             left_expr,
             right_expr,
-        } => visitor.visit_between(*negated, expr, left_expr, right_expr, arena),
+            left_evaluator,
+            right_evaluator,
+        } => visitor.visit_between(
+            *negated,
+            expr,
+            left_expr,
+            right_expr,
+            left_evaluator,
+            right_evaluator,
+            arena,
+        ),
         ScalarExpression::SubString {
             expr,
             for_expr,

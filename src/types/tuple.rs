@@ -216,7 +216,15 @@ impl Tuple {
 
         for (i, deserializer) in deserializers.into_iter().enumerate() {
             if is_null(bytes[i / BITS_MAX_INDEX], i % BITS_MAX_INDEX) {
-                self.values.push(DataValue::Null);
+                // A skipped (unprojected) column yields no value, NULL or not;
+                // pushing one here would shift every later projected column.
+                if !matches!(
+                    deserializer.borrow(),
+                    TupleValueSerializableImpl::SkipFixed(_)
+                        | TupleValueSerializableImpl::SkipVariable
+                ) {
+                    self.values.push(DataValue::Null);
+                }
                 continue;
             }
             deserializer
@@ -535,6 +543,19 @@ mod tests {
                     pk: Some(DataValue::Int32(0)),
                     values: vec![DataValue::Int32(0), DataValue::Int16(1)],
                 }
+            );
+
+            // A NULL in a skipped column must not shift later projected columns.
+            let mut null_skipped = tuples[0].clone();
+            null_skipped.values[1] = DataValue::Null;
+            null_skipped.serialize_to(&serializers, &mut bytes).unwrap();
+            tuple_2
+                .deserialize_from_into(&projection_serializers, &bytes, columns.len())
+                .unwrap();
+
+            assert_eq!(
+                tuple_2.values,
+                vec![DataValue::Int32(0), DataValue::Int16(1)]
             );
         }
         // multiple pk

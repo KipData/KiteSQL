@@ -94,7 +94,7 @@ impl NormalizationRule for SimplifyFilter {
                 }
             }
             ConstantCalculator::new(arena).visit(&mut filter_op.predicate, arena)?;
-            Simplify::default().visit(&mut filter_op.predicate, arena)?;
+            Simplify.visit(&mut filter_op.predicate, arena)?;
             filter_op.is_optimized = true;
             return Ok(true);
         }
@@ -255,7 +255,7 @@ mod test {
                 expression.unpack_val(&arena),
                 Some(DataValue::Boolean(expected))
             );
-            Simplify::default().visit(&mut expression, &mut arena)?;
+            Simplify.visit(&mut expression, &mut arena)?;
             assert_eq!(
                 arena.expression(expression),
                 &ScalarExpression::Constant(DataValue::Boolean(expected))

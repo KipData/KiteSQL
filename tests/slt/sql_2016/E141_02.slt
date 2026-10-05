@@ -17,3 +17,21 @@ CREATE TABLE TABLE_E141_02_02_01 ( ID INT PRIMARY KEY, A INT NOT NULL CONSTRAINT
 
 statement ok
 CREATE TABLE TABLE_E141_02_02_02 ( ID INT PRIMARY KEY, A INT NOT NULL UNIQUE )
+
+statement ok
+drop table table_e141_02_02_02
+
+statement ok
+drop table table_e141_02_01_04
+
+statement ok
+drop table table_e141_02_01_03
+
+statement ok
+drop table table_e141_02_02_01
+
+statement ok
+drop table table_e141_02_01_01
+
+statement ok
+drop table table_e141_02_01_02

@@ -77,3 +77,21 @@ CREATE TABLE TABLE_E051_08_01_12 ( ID INT PRIMARY KEY, A INT, B INT );
 
 query III
 SELECT MYTEMP . * FROM TABLE_E051_08_01_12 AS MYTEMP
+
+statement ok
+drop table table_e051_08_01_12
+
+statement ok
+drop table table_e051_08_01_10
+
+statement ok
+drop table table_e051_08_01_04
+
+statement ok
+drop table table_e051_08_01_06
+
+statement ok
+drop table table_e051_08_01_02
+
+statement ok
+drop table table_e051_08_01_08

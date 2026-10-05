@@ -83,3 +83,265 @@ select v2 from t where v1 is null;
 
 statement ok
 drop table t
+
+# Predicates whose arithmetic the optimizer may move across the comparison
+# (Simplify::isolate_column). Each must return the same rows as evaluating
+# the predicate as written.
+
+statement ok
+create table t(id int primary key, a int, b bigint, d double);
+
+statement ok
+insert into t values (1, 1, 2, 1.5), (2, 5, 3, -2.5), (3, -4, -2, null);
+
+# constant on the left of `+` / `-`
+query I rowsort
+select id from t where 2 + b = 4;
+----
+1
+
+query I rowsort
+select id from t where 2 + b > 3;
+----
+1
+2
+
+query I rowsort
+select id from t where 1 + (2 - b) = 1;
+----
+1
+
+query I rowsort
+select id from t where 2 + (b + 1) = 6;
+----
+2
+
+query I rowsort
+select id from t where 2 + -b = 4;
+----
+3
+
+# unary minus over a sum
+query I rowsort
+select id from t where -(b + 1) > 1;
+----
+
+query I rowsort
+select id from t where -(1 - b) > 1;
+----
+2
+
+# `*` / `/` are not rearranged (sign-dependent, not invertible for integers)
+query I rowsort
+select id from t where 3 * b = 6;
+----
+1
+
+query I rowsort
+select id from t where b * -1 > 0;
+----
+3
+
+query I rowsort
+select id from t where b / 2 = 1;
+----
+1
+
+# more than one column
+query I rowsort
+select id from t where (1 - b) * id = -4;
+----
+2
+
+query I rowsort
+select id from t where (b + 1) + (a + 1) = 10;
+----
+2
+
+# mixed types and overflow boundaries
+query I rowsort
+select id from t where -d > 2;
+----
+2
+
+query I rowsort
+select id from t where -b > 1.5;
+----
+3
+
+query I rowsort
+select id from t where -a < -2147483648;
+----
+
+query I rowsort
+select id from t where a + 1 > -2147483648;
+----
+1
+2
+3
+
+statement ok
+drop table t
+
+# IN / BETWEEN over an expression below a multi-way join: each expanded
+# comparison needs its own operand node, or a later position rewrite shifts a
+# shared node twice and reads the wrong column.
+statement ok
+create table in_one(id int primary key);
+
+statement ok
+create table in_share(id int primary key, a int, d double);
+
+statement ok
+insert into in_one values (0);
+
+statement ok
+insert into in_share values (0, 0, 1.0), (1, 1, 0.0);
+
+query I rowsort
+select y.id from in_one as w cross join in_share as x inner join in_share as y on x.a = y.id where (y.d + 2) not in (1.5, 3);
+----
+1
+
+query I rowsort
+select y.id from in_one as w cross join in_share as x inner join in_share as y on x.a = y.id where (y.d + 2) in (1.5, 3);
+----
+0
+
+query I rowsort
+select y.id from in_one as w cross join in_share as x inner join in_share as y on x.a = y.id where (y.d + 2) between 2.5 and 3;
+----
+0
+
+statement ok
+drop table in_share
+
+statement ok
+drop table in_one
+
+# IN compares the operand and the list in one type, like `=`.
+statement ok
+create table in_ty(id int primary key, b bigint);
+
+statement ok
+insert into in_ty values (0, 0), (2, 2), (3, 1);
+
+query I rowsort
+select id from in_ty where b in (2, 0);
+----
+0
+2
+
+query I rowsort
+select id from in_ty where (b % 2) in (0, null);
+----
+0
+2
+
+query T rowsort
+select (b % 2) in (0, null) from in_ty;
+----
+null
+true
+true
+
+query I rowsort
+select id from in_ty where ((b % 2) in (0, null)) is null;
+----
+3
+
+query I rowsort
+select id from in_ty where b not in (1);
+----
+0
+2
+
+statement ok
+drop table in_ty
+
+# BETWEEN compares all three operands in one type, like `<=`.
+statement ok
+create table between_ty(id int primary key, d double);
+
+statement ok
+insert into between_ty values (0, 1e300), (1, 1.5), (2, null);
+
+query T rowsort
+select d not between 0 and 3 from between_ty;
+----
+false
+null
+true
+
+query I rowsort
+select id from between_ty where (d between 0 and 3) is null;
+----
+2
+
+query I rowsort
+select id from between_ty where d between 1 and 2;
+----
+1
+
+statement ok
+drop table between_ty
+
+# BETWEEN with a NULL bound follows three-valued AND, as in PostgreSQL.
+query TTTTT
+select 1 between 3 and null, 1 not between 3 and null, 5 between 3 and null, -1 not between 2 and null, 5 between null and 3;
+----
+false true null true false
+
+statement ok
+create table between_null(id int primary key, a int);
+
+statement ok
+insert into between_null values (0, 1), (1, 5), (2, null);
+
+query I rowsort
+select id from between_null where a not between 3 and null;
+----
+0
+
+query I rowsort
+select id from between_null where (a between 3 and null) is null;
+----
+1
+2
+
+statement ok
+drop table between_null
+
+# Row values compare element-wise with SQL NULL semantics, as in PostgreSQL.
+statement ok
+create table tuple_in(id int primary key, a int, b bigint);
+
+statement ok
+insert into tuple_in values (0, 1, 10), (1, 4, null), (2, null, 50), (3, null, null);
+
+query I rowsort
+select id from tuple_in where (a, b) in ((1, 10), (4, null), (null, 50));
+----
+0
+
+query T rowsort
+select (a, b) in ((1, 10), (4, null)) from tuple_in;
+----
+null
+null
+null
+true
+
+query I rowsort
+select id from tuple_in where (a, b) = (1, 10);
+----
+0
+
+query I rowsort
+select id from tuple_in where (a, b) <> (1, 10);
+----
+1
+2
+
+statement ok
+drop table tuple_in

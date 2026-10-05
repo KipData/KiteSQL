@@ -16,7 +16,6 @@ use super::SpillCodec;
 use crate::errors::DatabaseError;
 use crate::planner::operator::sort::SortField;
 use crate::planner::MetaArena;
-use crate::planner::PlanArena;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use std::io::{Read, Write};

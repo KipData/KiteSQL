@@ -42,19 +42,19 @@ fn main() {
     let mut file_num = 0;
     let start = Instant::now();
 
+    let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    let mut tester = Runner::new(|| {
+        let db = DataBaseBuilder::path(temp_dir.path()).build_lmdb();
+        std::future::ready(db.map(|db| SQLBase { db }))
+    });
+
     for slt_file in glob::glob(&args.path).expect("failed to find slt files") {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let filepath = slt_file.expect("failed to read slt file");
         println!(
             "-> Now the test file is: {}, num: {}",
             filepath.display(),
             file_num
         );
-
-        let db = DataBaseBuilder::path(temp_dir.path())
-            .build_lmdb()
-            .expect("init db error");
-        let mut tester = Runner::new(SQLBase { db });
 
         if let Err(err) = tester.run_file(filepath) {
             panic!("test error: {}", err);

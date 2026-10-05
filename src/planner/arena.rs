@@ -245,7 +245,6 @@ const DUMMY_COLUMN_NAMES: [&str; DUMMY_COLUMN_COUNT] = [
     "NULL",
     "Key",
     "DEFAULT",
-    "COLUMN_REF",
     "INSERTED",
     "UPDATED",
     "DELETED",
@@ -263,7 +262,7 @@ const DUMMY_COLUMN_NAMES: [&str; DUMMY_COLUMN_COUNT] = [
     "COPY FROM SOURCE",
     "COPY TO TARGET",
 ];
-const DUMMY_COLUMN_COUNT: usize = 26;
+const DUMMY_COLUMN_COUNT: usize = 25;
 const DUMMY_COLUMN_BASE: usize = usize::MAX - DUMMY_COLUMN_COUNT + 1;
 
 impl TableArenaCell {
@@ -336,10 +335,6 @@ impl TableArena {
 
     pub(crate) fn index(&self, index: IndexMetaRef) -> &IndexMeta {
         <Self as MetaArena>::index(self, index)
-    }
-
-    pub(crate) fn expression(&self, expression: ExprRef) -> &ScalarExpression {
-        <Self as MetaArena>::expression(self, expression)
     }
 
     fn dummy_column(&self, column: ColumnRef) -> Option<&ColumnCatalog> {
@@ -570,22 +565,6 @@ impl<'a> PlanArena<'a> {
         parameters
     }
 
-    pub(crate) fn fill_parameters(
-        &mut self,
-        params: &[(usize, crate::types::value::DataValue)],
-    ) -> Result<(), crate::errors::DatabaseError> {
-        for expression in &mut self.expressions {
-            if let ScalarExpression::Constant(value) = &mut *(ArenaExprMut { expr: expression }) {
-                value.bind_parameters(&|id| {
-                    params
-                        .iter()
-                        .find_map(|(candidate, value)| (*candidate == id).then_some(value))
-                })?;
-            }
-        }
-        Ok(())
-    }
-
     pub(crate) fn table_arena_cell(&self) -> &'a TableArenaCell {
         self.table_arena
     }
@@ -685,11 +664,6 @@ impl<'a> PlanArena<'a> {
 
     pub fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef {
         <Self as MetaArena>::alloc_index(self, index)
-    }
-
-    pub(crate) fn alloc_dummy(&mut self, name: &str) -> ColumnRef {
-        self.assert_table_arena_unchanged();
-        self.table_arena.borrow().alloc_dummy(name)
     }
 
     pub(crate) fn temp_table(&mut self) -> TableName {

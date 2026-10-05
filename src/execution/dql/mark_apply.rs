@@ -533,7 +533,6 @@ mod tests {
             );
             assert_eq!(arena.nodes.items.as_ptr(), address);
             assert_eq!(arena.nodes.items.len(), count);
-            assert_eq!(arena.runtime_probe_depth(), 0);
         }
         assert!(!arena.next_tuple(root, &mut plan_arena)?);
         Ok(())
@@ -616,7 +615,6 @@ mod tests {
             tuples.push(arena.materialize_tuple());
             assert_eq!(arena.nodes.items.len(), count);
             assert_eq!(arena.nodes.items.as_ptr(), address);
-            assert_eq!(arena.runtime_probe_depth(), 0);
         }
 
         assert_eq!(

@@ -568,6 +568,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
         })
     }
 
+    #[allow(clippy::result_large_err)]
     fn merge_binary(
         op: BinaryOperator,
         left_binary: Range,
@@ -1003,6 +1004,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn and_scope_merge(
         left_min: Bound<DataValue>,
         left_max: Bound<DataValue>,

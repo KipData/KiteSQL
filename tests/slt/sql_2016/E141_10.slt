@@ -49,3 +49,33 @@ statement ok
 CREATE TABLE TABLE_E141_10_02_021 ( ID INT PRIMARY KEY, A INT NOT NULL, B INT NOT NULL, UNIQUE ( A, B ) );
 
 # CREATE TABLE TABLE_E141_10_02_022 ( C INT NOT NULL, D INT NOT NULL, FOREIGN KEY ( C, D ) REFERENCES TABLE_E141_10_02_021 ( B, A ) ON DELETE NO ACTION ON UPDATE NO ACTION )
+
+statement ok
+drop table table_e141_10_01_061
+
+statement ok
+drop table table_e141_10_01_041
+
+statement ok
+drop table table_e141_10_01_011
+
+statement ok
+drop table table_e141_10_01_081
+
+statement ok
+drop table table_e141_10_02_021
+
+statement ok
+drop table table_e141_10_01_031
+
+statement ok
+drop table table_e141_10_01_051
+
+statement ok
+drop table table_e141_10_01_071
+
+statement ok
+drop table table_e141_10_02_011
+
+statement ok
+drop table table_e141_10_01_021

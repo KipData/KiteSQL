@@ -129,3 +129,6 @@ select c1 from t2;
 0
 1
 2
+
+statement ok
+drop table t2

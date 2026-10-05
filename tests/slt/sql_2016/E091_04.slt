@@ -7,3 +7,6 @@ query F
 SELECT MIN ( A ) FROM TABLE_E091_04_01_01
 ----
 null
+
+statement ok
+drop table table_e091_04_01_01

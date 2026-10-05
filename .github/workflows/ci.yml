@@ -133,3 +133,35 @@ jobs:
 
       - name: Run python binding tests
         run: PYO3_PYTHON="$(which python)" make test-python
+  # 9
+  fuzz:
+    name: Fuzz smoke test (sql_exec)
+    runs-on: ubuntu-latest
+    env:
+      # The fuzz crate is a standalone workspace; keep its build out of the shared target dir.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/fuzz/target
+    steps:
+      - uses: actions/checkout@v4
+      # Pinned; keep in sync with FUZZ_TOOLCHAIN in the Makefile.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-04
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Run sql_exec fuzzer
+        run: make fuzz FUZZ_TARGET=sql_exec FUZZ_TIME=150
+
+      - name: Run sql_gen fuzzer
+        run: make fuzz FUZZ_TARGET=sql_gen FUZZ_TIME=150
+
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts

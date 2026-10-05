@@ -126,10 +126,7 @@ impl NormalizationRule for CollapseProject {
 
         let mut removed = false;
         let mut remapped_positions = Vec::with_capacity(parent_op.exprs.len());
-        loop {
-            let Childrens::Only(child) = plan.childrens.as_mut() else {
-                break;
-            };
+        while let Childrens::Only(child) = plan.childrens.as_mut() {
             match &child.operator {
                 Operator::Project(child_op)
                     if is_passthrough_project(child_op, arena)

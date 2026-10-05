@@ -11,3 +11,9 @@ CREATE TABLE TABLE_E061_05_01_02 ( ID INT PRIMARY KEY, A VARCHAR ( 255 ) );
 
 query T
 SELECT A FROM TABLE_E061_05_01_02 WHERE A NOT LIKE 'foo' ESCAPE 'f'
+
+statement ok
+drop table table_e061_05_01_01
+
+statement ok
+drop table table_e061_05_01_02

@@ -39,3 +39,9 @@ SELECT A FROM TABLE_E061_02_01_04 WHERE A NOT BETWEEN 1 AND 1
 # sqlparser-rs unsupported
 # query I
 # SELECT A FROM TABLE_E061_02_01_06 WHERE A NOT BETWEEN SYMMETRIC 1 AND 1
+
+statement ok
+drop table table_e061_02_01_04
+
+statement ok
+drop table table_e061_02_01_01

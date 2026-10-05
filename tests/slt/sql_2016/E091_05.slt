@@ -7,3 +7,6 @@ query F
 SELECT SUM ( A ) FROM TABLE_E091_05_01_01
 ----
 null
+
+statement ok
+drop table table_e091_05_01_01

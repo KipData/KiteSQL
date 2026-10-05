@@ -87,7 +87,6 @@ impl ReferenceSerialization for usize {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
-    use crate::planner::MetaArena;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
     use std::io::{Cursor, Seek, SeekFrom};

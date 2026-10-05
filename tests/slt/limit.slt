@@ -48,3 +48,41 @@ insert into t values (5, 1, 1)
 query I
 select v1 from t limit 0
 ----
+
+# LIMIT ... OFFSET over an outer join: the pushed-down limit must not apply
+# OFFSET a second time.
+statement ok
+create table limit_join_l(id int primary key);
+
+statement ok
+create table limit_join_r(id int primary key, l int);
+
+statement ok
+insert into limit_join_l values (0), (1), (2), (3);
+
+statement ok
+insert into limit_join_r values (10, 2);
+
+query I
+select count(*) from (select l.id from limit_join_l as l left join limit_join_r as r on l.id = r.l limit 4 offset 1) as s;
+----
+3
+
+query I
+select count(*) from (select l.id from limit_join_l as l left join limit_join_r as r on l.id = r.l limit 2 offset 1) as s;
+----
+2
+
+query I
+select count(*) from (select r.id from limit_join_r as r right join limit_join_l as l on l.id = r.l limit 4 offset 3) as s;
+----
+1
+
+statement ok
+drop table limit_join_l
+
+statement ok
+drop table limit_join_r
+
+statement ok
+drop table t

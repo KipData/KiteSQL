@@ -37,3 +37,21 @@ CREATE TABLE TABLE_F041_07_01_061 ( ID INT PRIMARY KEY, A INTEGER );
 # sqlparser-rs unsupported
 # query I
 # SELECT TABLE_F041_07_01_061.A FROM TABLE_F041_07_01_061 JOIN TABLE_F041_07_01_061 AS TABLE_F041_07_01_062 USING ( A ) AS FOO
+
+statement ok
+drop table table_f041_07_01_011
+
+statement ok
+drop table table_f041_07_01_061
+
+statement ok
+drop table table_f041_07_01_021
+
+statement ok
+drop table table_f041_07_01_051
+
+statement ok
+drop table table_f041_07_01_041
+
+statement ok
+drop table table_f041_07_01_031

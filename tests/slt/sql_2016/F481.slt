@@ -11,3 +11,9 @@ CREATE TABLE TABLE_F481_01_02 ( ID INT PRIMARY KEY, A INTEGER );
 
 query B
 SELECT A + A IS NULL FROM TABLE_F481_01_02
+
+statement ok
+drop table table_f481_01_02
+
+statement ok
+drop table table_f481_01_01

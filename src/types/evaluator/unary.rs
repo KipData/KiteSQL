@@ -38,6 +38,8 @@ const UNARY_FLOAT32_PLUS: u16 = 9;
 const UNARY_FLOAT32_MINUS: u16 = 10;
 const UNARY_FLOAT64_PLUS: u16 = 11;
 const UNARY_FLOAT64_MINUS: u16 = 12;
+// Any unary operator on the NULL literal yields NULL, as in PostgreSQL.
+const UNARY_SQL_NULL: u16 = 13;
 
 // Evaluator positions are serialized ABI. Do not reorder or reuse existing
 // positions; only append new positions at the end of the current layout.
@@ -72,6 +74,7 @@ pub fn unary_create(
         },
         LogicalType::Float => numeric_unary_ref(UNARY_FLOAT32_PLUS, UNARY_FLOAT32_MINUS, ty, op),
         LogicalType::Double => numeric_unary_ref(UNARY_FLOAT64_PLUS, UNARY_FLOAT64_MINUS, ty, op),
+        LogicalType::SqlNull => Ok(UnaryEvaluatorRef::new(UNARY_SQL_NULL)),
         _ => Err(DatabaseError::UnsupportedUnaryOperator(ty.clone(), op)),
     }
 }
@@ -79,23 +82,24 @@ pub fn unary_create(
 pub(crate) fn eval_unary(
     pos: u16,
     value: &crate::types::value::DataValue,
-) -> crate::types::value::DataValue {
-    match pos {
+) -> Result<crate::types::value::DataValue, DatabaseError> {
+    Ok(match pos {
         UNARY_INT8_PLUS => int8_plus_unary_eval(value),
-        UNARY_INT8_MINUS => int8_minus_unary_eval(value),
+        UNARY_INT8_MINUS => int8_minus_unary_eval(value)?,
         UNARY_INT16_PLUS => int16_plus_unary_eval(value),
-        UNARY_INT16_MINUS => int16_minus_unary_eval(value),
+        UNARY_INT16_MINUS => int16_minus_unary_eval(value)?,
         UNARY_INT32_PLUS => int32_plus_unary_eval(value),
-        UNARY_INT32_MINUS => int32_minus_unary_eval(value),
+        UNARY_INT32_MINUS => int32_minus_unary_eval(value)?,
         UNARY_INT64_PLUS => int64_plus_unary_eval(value),
-        UNARY_INT64_MINUS => int64_minus_unary_eval(value),
+        UNARY_INT64_MINUS => int64_minus_unary_eval(value)?,
         UNARY_BOOLEAN_NOT => boolean_not_unary_eval(value),
         UNARY_FLOAT32_PLUS => float32_plus_unary_eval(value),
         UNARY_FLOAT32_MINUS => float32_minus_unary_eval(value),
         UNARY_FLOAT64_PLUS => float64_plus_unary_eval(value),
         UNARY_FLOAT64_MINUS => float64_minus_unary_eval(value),
+        UNARY_SQL_NULL => crate::types::value::DataValue::Null,
         _ => unreachable!("unknown unary evaluator position {pos}"),
-    }
+    })
 }
 
 #[macro_export]
@@ -107,14 +111,20 @@ macro_rules! numeric_unary_evaluator_definition {
             ) -> $crate::types::value::DataValue {
                 value.clone()
             }
+            // `-MIN` does not fit the type: report it like binary `+`/`-` do
+            // instead of panicking (debug) or wrapping (release).
             pub fn [<$value_type:snake _minus_unary_eval>](
                 value: &$crate::types::value::DataValue,
-            ) -> $crate::types::value::DataValue {
-                match value {
-                    $compute_type(value) => $compute_type(-value),
+            ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
+                Ok(match value {
+                    $compute_type(value) => $compute_type(
+                        value
+                            .checked_neg()
+                            .ok_or($crate::errors::DatabaseError::OverFlow)?,
+                    ),
                     $crate::types::value::DataValue::Null => $crate::types::value::DataValue::Null,
                     _ => unsafe { std::hint::unreachable_unchecked() },
-                }
+                })
             }
         }
     };
@@ -242,10 +252,27 @@ mod test {
 
         for (ty, op, value, expected) in cases {
             let evaluator = create(ty, op)?;
-            assert_eq!(evaluator.unary_eval(&value), expected);
-            assert_eq!(evaluator.unary_eval(&DataValue::Null), DataValue::Null);
+            assert_eq!(evaluator.unary_eval(&value)?, expected);
+            assert_eq!(evaluator.unary_eval(&DataValue::Null)?, DataValue::Null);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_integer_minus_overflow_is_an_error() -> Result<(), DatabaseError> {
+        for (ty, min) in [
+            (LogicalType::Tinyint, DataValue::Int8(i8::MIN)),
+            (LogicalType::Smallint, DataValue::Int16(i16::MIN)),
+            (LogicalType::Integer, DataValue::Int32(i32::MIN)),
+            (LogicalType::Bigint, DataValue::Int64(i64::MIN)),
+        ] {
+            let evaluator = create(ty, UnaryOperator::Minus)?;
+            assert!(matches!(
+                evaluator.unary_eval(&min),
+                Err(DatabaseError::OverFlow)
+            ));
+        }
         Ok(())
     }
 
@@ -253,10 +280,10 @@ mod test {
     fn test_boolean_unary_eval() -> Result<(), DatabaseError> {
         let evaluator = create(LogicalType::Boolean, UnaryOperator::Not)?;
         assert_eq!(
-            evaluator.unary_eval(&DataValue::Boolean(true)),
+            evaluator.unary_eval(&DataValue::Boolean(true))?,
             DataValue::Boolean(false)
         );
-        assert_eq!(evaluator.unary_eval(&DataValue::Null), DataValue::Null);
+        assert_eq!(evaluator.unary_eval(&DataValue::Null)?, DataValue::Null);
         Ok(())
     }
 

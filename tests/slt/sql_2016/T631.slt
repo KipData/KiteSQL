@@ -10,3 +10,6 @@ query I
 SELECT A FROM TABLE_T631_01_01 WHERE A IN ( 1 )
 ----
 1
+
+statement ok
+drop table table_t631_01_01

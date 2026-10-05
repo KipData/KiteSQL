@@ -1,0 +1,34 @@
+[package]
+name    = "kite_sql-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = { version = "=0.4.10" }
+# LMDB storage; no RocksDB build, no `copy`/`spill` file IO.
+kite_sql      = { path = "..", default-features = false, features = ["parser", "macros", "time", "decimal", "lmdb"] }
+
+# Standalone workspace: fuzzing needs nightly, the main workspace stays on stable.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name  = "sql_exec"
+path  = "fuzz_targets/sql_exec.rs"
+test  = false
+doc   = false
+bench = false
+
+[[bin]]
+name  = "sql_gen"
+path  = "fuzz_targets/sql_gen.rs"
+test  = false
+doc   = false
+bench = false

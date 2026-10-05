@@ -22,3 +22,9 @@ SELECT A FROM TABLE_E071_03_01_011 EXCEPT ALL SELECT B FROM TABLE_E071_03_01_012
 ----
 1
 1
+
+statement ok
+drop table table_e071_03_01_012
+
+statement ok
+drop table table_e071_03_01_011

@@ -35,3 +35,39 @@ CREATE TABLE TABLE_E021_02_01_11 ( ID INT PRIMARY KEY, A VARCHAR ( 8 OCTETS ) )
 
 statement ok
 CREATE TABLE TABLE_E021_02_01_12 ( ID INT PRIMARY KEY, A VARCHAR )
+
+statement ok
+drop table table_e021_02_01_10
+
+statement ok
+drop table table_e021_02_01_02
+
+statement ok
+drop table table_e021_02_01_08
+
+statement ok
+drop table table_e021_02_01_03
+
+statement ok
+drop table table_e021_02_01_12
+
+statement ok
+drop table table_e021_02_01_06
+
+statement ok
+drop table table_e021_02_01_05
+
+statement ok
+drop table table_e021_02_01_04
+
+statement ok
+drop table table_e021_02_01_01
+
+statement ok
+drop table table_e021_02_01_07
+
+statement ok
+drop table table_e021_02_01_09
+
+statement ok
+drop table table_e021_02_01_11

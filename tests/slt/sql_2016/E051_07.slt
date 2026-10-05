@@ -79,3 +79,21 @@ CREATE TABLE TABLE_E051_07_01_12 ( ID INT PRIMARY KEY, A INT, B INT );
 
 query III
 SELECT TABLE_E051_07_01_12 . * FROM TABLE_E051_07_01_12
+
+statement ok
+drop table table_e051_07_01_10
+
+statement ok
+drop table table_e051_07_01_06
+
+statement ok
+drop table table_e051_07_01_12
+
+statement ok
+drop table table_e051_07_01_08
+
+statement ok
+drop table table_e051_07_01_02
+
+statement ok
+drop table table_e051_07_01_04

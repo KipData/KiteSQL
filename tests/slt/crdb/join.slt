@@ -98,12 +98,12 @@ INSERT INTO onecolumn_w(w_id, w) VALUES (0, 42),(1, 43)
 query II
 SELECT * FROM onecolumn AS a NATURAL JOIN onecolumn_w as b
 ----
-0 44 42 0
-0 44 43 1
-1 null 42 0
-1 null 43 1
-2 42 42 0
-2 42 43 1
+0 44 0 42
+0 44 1 43
+1 null 0 42
+1 null 1 43
+2 42 0 42
+2 42 1 43
 
 statement ok
 drop table if exists othercolumn
@@ -776,8 +776,14 @@ SELECT * FROM xyu LEFT OUTER JOIN xyv USING(x, y) WHERE x > 2 order by xyu.uid
 # ----
 # 2 31 7 3 1 31
 
-statement error
+query IIIIII rowsort
 SELECT * FROM xyu FULL OUTER JOIN xyv USING(x, y) WHERE x > 2
+----
+2 3 1 31 7 31
+3 3 2 32 null null
+4 4 4 44 null null
+null 3 3 null 8 33
+null 5 5 null 9 55
 
 query IIIIII
 SELECT * FROM xyu INNER JOIN xyv ON xyu.x = xyv.x AND xyu.y = xyv.y WHERE xyu.x = 1 AND xyu.y < 10
@@ -810,9 +816,9 @@ null null null null 9 5 5 55
 query IIII rowsort
 SELECT * FROM (SELECT * FROM xyu ORDER BY x, y) AS xyu LEFT OUTER JOIN (SELECT * FROM xyv ORDER BY x, y) AS xyv USING(x, y) WHERE x > 2
 ----
-31 2 3 1 31 7
-32 3 3 2 null null
-44 4 4 4 null null
+2 3 1 31 7 31
+3 3 2 32 null null
+4 4 4 44 null null
 
 # TODO: x > 2 means x on both sides
 # query IIII
@@ -830,19 +836,19 @@ query IIITTT rowsort
 SELECT * FROM (SELECT * FROM xyu ORDER BY x, y) AS xyu LEFT OUTER JOIN (SELECT * FROM xyv ORDER BY x, y) AS xyv ON xyu.x = xyv.x AND xyu.y = xyv.y AND xyu.x = 1 AND xyu.y < 10
 ----
 0 0 0 0 null null null null
-1 1 1 1 1 5 1 1
-31 2 3 1 null null null null
-32 3 3 2 null null null null
-44 4 4 4 null null null null
+1 1 1 1 5 1 1 1
+2 3 1 31 null null null null
+3 3 2 32 null null null null
+4 4 4 44 null null null null
 
 query IIIIII
 SELECT * FROM xyu RIGHT OUTER JOIN (SELECT * FROM xyv ORDER BY x, y) AS xyv ON xyu.x = xyv.x AND xyu.y = xyv.y AND xyu.x = 1 AND xyu.y < 10 ORDER BY v
 ----
-1 1 1 1 1 5 1 1
-null null null null 2 6 2 2
-null null null null 31 7 3 1
-null null null null 33 8 3 3
-null null null null 55 9 5 5
+1 1 1 1 5 1 1 1
+null null null null 6 2 2 2
+null null null null 7 3 1 31
+null null null null 8 3 3 33
+null null null null 9 5 5 55
 
 statement ok
 drop table if exists l
@@ -1112,3 +1118,72 @@ select * from onecolumn as a left join twocolumn as b on a.x = b.x where b.x > 4
 
 # query
 # SELECT abcd.*, dxby.* FROM abcd INNER JOIN dxby USING (d, b)
+
+statement ok
+drop table xyv
+
+statement ok
+drop table pkba
+
+statement ok
+drop table othercolumn
+
+statement ok
+drop table r
+
+statement ok
+drop table s
+
+statement ok
+drop table pkbc
+
+statement ok
+drop table str2
+
+statement ok
+drop table othertype
+
+statement ok
+drop table a
+
+statement ok
+drop table empty
+
+statement ok
+drop table l
+
+statement ok
+drop table pkbac
+
+statement ok
+drop table t1
+
+statement ok
+drop table xyu
+
+statement ok
+drop table twocolumn
+
+statement ok
+drop table b
+
+statement ok
+drop table pairs
+
+statement ok
+drop table square
+
+statement ok
+drop table t2
+
+statement ok
+drop table pkbad
+
+statement ok
+drop table onecolumn
+
+statement ok
+drop table onecolumn_w
+
+statement ok
+drop table str1

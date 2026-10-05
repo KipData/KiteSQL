@@ -24,7 +24,10 @@ use crate::{
         operator::{join::JoinType, table_scan::TableScanOperator},
     },
 };
-use std::{borrow::Cow, collections::HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use super::{Binder, BinderContext, QueryBindStep, SetOperatorKind, Source, SubQueryType};
 
@@ -66,6 +69,41 @@ impl ExprVisitorMut for RightSidePositionGlobalizer<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether any of `exprs` reads the output of a SELECT-list scalar subquery.
+/// Those subqueries are only joined in at the Project step, above DISTINCT /
+/// GROUP BY / ORDER BY, so such a reference would read another column.
+///
+/// Takes the subquery map rather than the binder so callers can pass
+/// expressions borrowed from the same binder context.
+// TODO(#386): evaluate uncorrelated scalar subqueries once, as constants
+// (like PostgreSQL's InitPlan), so these clauses can use them.
+fn references_select_list_sub_query(
+    sub_queries: &mut HashMap<QueryBindStep, Vec<SubQueryType>>,
+    exprs: impl IntoIterator<Item = ExprRef>,
+    arena: &mut PlanArena,
+) -> Result<bool, DatabaseError> {
+    let Some(sub_queries) = sub_queries.get_mut(&QueryBindStep::Project) else {
+        return Ok(false);
+    };
+    // `exprs` can only be traversed once, so it is the outer loop.
+    for expr in exprs {
+        for sub_query in sub_queries.iter_mut() {
+            let SubQueryType::SubQuery { plan, .. } = sub_query else {
+                continue;
+            };
+            let schema = plan.output_schema(arena);
+            if expr.any_referenced_column(arena, |arena, candidate| {
+                schema
+                    .iter()
+                    .any(|column| arena.same_column(*column, *candidate))
+            })? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 struct AppendedRightOutput {
@@ -360,7 +398,7 @@ where
                 vec![expr],
                 None,
                 None::<Vec<SortField>>,
-                |_binder, _arena, order| Ok(order),
+                |_binder, _arena, _select_list, order| Ok(order),
             )?
             .having()?
             .window()?
@@ -383,7 +421,7 @@ where
                 Vec::new(),
                 None,
                 None::<Vec<SortField>>,
-                |_binder, _arena, order| Ok(order),
+                |_binder, _arena, _select_list, order| Ok(order),
             )?
             .having()?
             .window()?
@@ -506,6 +544,7 @@ where
         mut bind_sort_field: impl FnMut(
             &mut Binder<'a, 'b, T, A>,
             &mut crate::planner::PlanArena<'arena>,
+            &[ExprRef],
             O,
         ) -> Result<SortField, DatabaseError>,
     ) -> Result<BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
@@ -524,12 +563,23 @@ where
 
         let mut having_orderby = (None, None);
         if having.is_some() || orderby.is_some() {
+            let select_list = &self.select_list;
             having_orderby = self.binder.extract_having_orderby_aggregate_exprs(
                 having,
                 orderby,
-                |binder, orderby, arena| bind_sort_field(binder, arena, orderby),
+                |binder, orderby, arena| bind_sort_field(binder, arena, select_list, orderby),
                 self.arena,
             )?;
+        }
+        let context = &mut self.binder.context;
+        if references_select_list_sub_query(
+            &mut context.sub_queries,
+            context.group_by_exprs.iter().copied(),
+            self.arena,
+        )? {
+            return Err(DatabaseError::UnsupportedStmt(
+                "GROUP BY over a scalar subquery in the SELECT list is not supported".to_string(),
+            ));
         }
         if !self.binder.context.agg_calls.is_empty()
             || !self.binder.context.group_by_exprs.is_empty()
@@ -625,6 +675,16 @@ where
         distinct: bool,
     ) -> Result<BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         if distinct {
+            if references_select_list_sub_query(
+                &mut self.binder.context.sub_queries,
+                self.select_list.iter().copied(),
+                self.arena,
+            )? {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "DISTINCT over a scalar subquery in the SELECT list is not supported"
+                        .to_string(),
+                ));
+            }
             let distinct_outputs = self.select_list.clone();
             self.binder.bind_distinct_output_exprs(
                 &distinct_outputs,
@@ -657,6 +717,16 @@ where
         mut self,
     ) -> Result<BindPlanSorted<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         if let Some(orderby) = self.orderby {
+            if references_select_list_sub_query(
+                &mut self.binder.context.sub_queries,
+                orderby.iter().map(|field| field.expr),
+                self.arena,
+            )? {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "ORDER BY over a scalar subquery in the SELECT list is not supported"
+                        .to_string(),
+                ));
+            }
             self.plan = self.binder.bind_sort(self.plan, orderby, self.arena)?;
         }
 
@@ -889,14 +959,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 
         for predicate in predicates {
             if rebind_positions {
-                Self::rebind_split_scope_positions(predicate, &left_schema, &right_schema, arena)?;
+                Self::rebind_split_scope_positions(predicate, left_schema, right_schema, arena)?;
             }
             Self::extract_join_keys(
                 predicate,
                 &mut on_keys,
                 &mut filter,
-                &left_schema,
-                &right_schema,
+                left_schema,
+                right_schema,
                 arena,
             )?;
         }
@@ -1346,48 +1416,46 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                         .any(|using_column| using_column.hides_column(column, arena))
         };
 
-        let mut pushed_alias_columns = false;
-
-        for alias_column in context
-            .expr_aliases
-            .keys()
-            .filter_map(|(alias_table, alias_column)| {
-                matches!(alias_table.as_deref(), Some(alias) if alias == table_name.as_ref())
-                    .then_some(alias_column.as_str())
-            })
-        {
-            let Some((position, column)) = source
-                .schema()
-                .iter()
-                .enumerate()
-                .find(|(_, column)| arena.column(**column).name() == alias_column)
-            else {
-                continue;
-            };
-            if !fn_not_on_using(column, arena) {
-                continue;
-            }
-            exprs.push(arena.alloc_expression(ScalarExpression::column_expr(
-                *column,
-                position_offset + position,
-            )));
-            pushed_alias_columns = true;
-        }
-
-        if pushed_alias_columns {
-            return Ok(());
-        }
-
         for (position, column) in source.schema().iter().enumerate() {
             if !fn_not_on_using(column, arena) {
                 continue;
             }
-            exprs.push(arena.alloc_expression(ScalarExpression::column_expr(
-                *column,
+            exprs.push(Self::wildcard_column_expr(
+                context,
+                arena,
+                column,
                 position_offset + position,
-            )));
+                is_qualified_wildcard,
+            )?);
         }
         Ok(())
+    }
+
+    fn wildcard_column_expr(
+        context: &BinderContext<'a, T>,
+        arena: &mut crate::planner::PlanArena,
+        column: &ColumnRef,
+        position: usize,
+        is_qualified_wildcard: bool,
+    ) -> Result<ExprRef, DatabaseError> {
+        let expr = context
+            .using
+            .values()
+            .find(|using| {
+                !is_qualified_wildcard
+                    && matches!(using.join_type, JoinType::Full)
+                    && arena.same_column(using.left_column, *column)
+            })
+            .cloned()
+            .map(|using| {
+                let alias = AliasType::Name(arena.column(*column).name().to_string());
+                let expr = using.visible_expr(arena)?;
+                let expr = arena.alloc_expression(expr);
+                Ok::<_, DatabaseError>(ScalarExpression::Alias { expr, alias })
+            })
+            .transpose()?
+            .unwrap_or_else(|| ScalarExpression::column_expr(*column, position));
+        Ok(arena.alloc_expression(expr))
     }
 
     pub(crate) fn bind_join_plans(
@@ -1403,7 +1471,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         let left_schema = left.output_schema(arena);
         let right_schema = right.output_schema(arena);
         let mut on =
-            self.bind_join_constraint(join_type, constraint, &left_schema, &right_schema, arena)?;
+            self.bind_join_constraint(join_type, constraint, left_schema, right_schema, arena)?;
         Self::localize_join_condition_from_join_scope(&mut on, left_len, arena)?;
 
         Ok(LJoinOperator::build(
@@ -1633,7 +1701,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         let right_schema = plan.output_schema(arena);
         for expr in &mut apply_predicates {
             RightSidePositionGlobalizer {
-                right_schema: &right_schema,
+                right_schema,
                 left_len,
             }
             .visit(expr, arena)?;
@@ -1806,6 +1874,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 if !preserve_projection || Self::is_temp_alias_projection(&op.exprs, arena) {
                     Ok((child, correlated_filters))
                 } else {
+                    for expr in &op.exprs {
+                        if Self::expr_has_correlated_refs(*expr, left_schema, arena)? {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "correlated references in the SELECT list of an IN/ANY/ALL subquery are not supported"
+                                    .to_string(),
+                            ));
+                        }
+                    }
                     let mut binder = ProjectionOutputBinder::new(&op.exprs);
                     for expr in &mut correlated_filters {
                         binder.visit(expr, arena)?;
@@ -2063,7 +2139,15 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                         *right_column,
                         left_schema.len() + right_position,
                     ));
-                    on_keys.push((left_expr, right_expr));
+                    let ty = LogicalType::max_logical_type(
+                        &left_expr.return_type(arena),
+                        &right_expr.return_type(arena),
+                    )?
+                    .into_owned();
+                    on_keys.push((
+                        left_expr.type_cast(Cow::Borrowed(&ty), arena)?,
+                        right_expr.type_cast(Cow::Borrowed(&ty), arena)?,
+                    ));
                 }
                 Ok(JoinCondition::On {
                     on: on_keys,
@@ -2111,7 +2195,15 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                             right_column,
                             left_schema.len() + right_position,
                         )?;
-                        on_keys.push((left_expr, right_expr));
+                        let ty = LogicalType::max_logical_type(
+                            &left_expr.return_type(arena),
+                            &right_expr.return_type(arena),
+                        )?
+                        .into_owned();
+                        on_keys.push((
+                            left_expr.type_cast(Cow::Borrowed(&ty), arena)?,
+                            right_expr.type_cast(Cow::Borrowed(&ty), arena)?,
+                        ));
                     }
                 }
                 Ok(JoinCondition::On {
@@ -2139,7 +2231,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         accum_filter: &mut Vec<ExprRef>,
         left_schema: &Schema,
         right_schema: &Schema,
-        arena: &crate::planner::PlanArena,
+        arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
         let fn_contains = |schema: &Schema, column: ColumnRef| {
             let summary = arena.column(column).summary();
@@ -2171,14 +2263,33 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                                 ScalarExpression::ColumnRef { column: r, .. },
                             ) => {
                                 // reorder left and right joins keys to pattern: (left, right)
-                                if fn_contains(left_schema, *l) && fn_contains(right_schema, *r) {
-                                    accum.push((*left_expr, *right_expr));
+                                let key = if fn_contains(left_schema, *l)
+                                    && fn_contains(right_schema, *r)
+                                {
+                                    Some((*left_expr, *right_expr))
                                 } else if fn_contains(left_schema, *r)
                                     && fn_contains(right_schema, *l)
                                 {
-                                    accum.push((*right_expr, *left_expr));
-                                } else if fn_or_contains(*l) || fn_or_contains(*r) {
-                                    accum_filter.push(expr);
+                                    Some((*right_expr, *left_expr))
+                                } else {
+                                    if fn_or_contains(*l) || fn_or_contains(*r) {
+                                        accum_filter.push(expr);
+                                    }
+                                    None
+                                };
+                                // Join keys are compared (and hashed) directly, so cast
+                                // both to one type like `l = r` in a filter; otherwise
+                                // e.g. `bigint = int` never matches.
+                                if let Some((left, right)) = key {
+                                    let ty = LogicalType::max_logical_type(
+                                        &left.return_type(arena),
+                                        &right.return_type(arena),
+                                    )?
+                                    .into_owned();
+                                    accum.push((
+                                        left.type_cast(Cow::Borrowed(&ty), arena)?,
+                                        right.type_cast(Cow::Borrowed(&ty), arena)?,
+                                    ));
                                 }
                             }
                             (ScalarExpression::ColumnRef { column, .. }, _)
@@ -2203,8 +2314,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                     }
                     BinaryOperator::And => {
                         // example: foo = bar AND baz > 1
+                        let (left_expr, right_expr) = (*left_expr, *right_expr);
                         Self::extract_join_keys(
-                            *left_expr,
+                            left_expr,
                             accum,
                             accum_filter,
                             left_schema,
@@ -2212,7 +2324,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                             arena,
                         )?;
                         Self::extract_join_keys(
-                            *right_expr,
+                            right_expr,
                             accum,
                             accum_filter,
                             left_schema,

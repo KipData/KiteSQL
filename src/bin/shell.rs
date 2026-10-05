@@ -346,12 +346,7 @@ Transaction commands:
             println!("type .help for help, .quit to exit");
         }
 
-        loop {
-            let Some(line) = input.read_line(prompt(tx.is_some(), !buffer.trim().is_empty()))?
-            else {
-                break;
-            };
-
+        while let Some(line) = input.read_line(prompt(tx.is_some(), !buffer.trim().is_empty()))? {
             let trimmed = line.trim();
             if buffer.is_empty() && trimmed.starts_with('.') {
                 match handle_command(trimmed, database, &mut tx) {

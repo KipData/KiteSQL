@@ -5,3 +5,6 @@ CREATE TABLE TABLE_E031_03_01_01 ( ID INT PRIMARY KEY, A_ INT );
 
 query I
 SELECT A_ FROM TABLE_E031_03_01_01
+
+statement ok
+drop table table_e031_03_01_01

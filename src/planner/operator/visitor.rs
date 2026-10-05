@@ -462,6 +462,7 @@ pub(crate) mod tests {
                 },
                 join_type: JoinType::Inner,
                 force_nested_loop: false,
+                limit_pushed: false,
             }),
             Operator::Project(ProjectOperator {
                 exprs: vec![expr(9)],

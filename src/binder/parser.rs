@@ -49,7 +49,7 @@ pub(super) use sqlparser::ast::{
     ObjectType, OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
     SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, TableAlias,
     TableConstraint, TableFactor, TableObject, TableWithJoins, TypedString, UnaryOperator, Value,
-    WindowType,
+    ValueWithSpan, WindowType,
 };
 #[cfg(feature = "copy")]
 pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
@@ -1416,17 +1416,67 @@ where
                 })
             })
             .transpose()?;
-        self.aggregate(group_by, having, orderby, |binder, arena, orderby| {
-            let OrderByExpr { expr, options, .. } = orderby;
-            with_query_bind_step!(binder, QueryBindStep::Sort, {
-                let expr = binder.bind_expr(expr, arena)?;
-                SortField::new(
-                    arena.alloc_expression(expr),
-                    options.asc.is_none_or(|asc| asc),
-                    options.nulls_first.unwrap_or(false),
-                )
-            })
-        })
+        self.aggregate(
+            group_by,
+            having,
+            orderby,
+            |binder, arena, select_list, orderby| {
+                let OrderByExpr { expr, options, .. } = orderby;
+                with_query_bind_step!(binder, QueryBindStep::Sort, {
+                    let expr = match expr {
+                        Expr::Value(ValueWithSpan {
+                            value: Value::Number(n, _),
+                            ..
+                        }) => {
+                            let position = n.parse::<usize>().map_err(|_| {
+                                DatabaseError::InvalidValue(format!(
+                                    "non-integer constant in ORDER BY: {n}"
+                                ))
+                            })?;
+                            let item = position
+                                .checked_sub(1)
+                                .and_then(|i| select_list.get(i))
+                                .ok_or_else(|| {
+                                    DatabaseError::InvalidValue(format!(
+                                        "ORDER BY position {n} is not in select list"
+                                    ))
+                                })?;
+                            item.clone_expression(arena)?
+                        }
+                        expr => {
+                            if let Expr::Identifier(ident) = expr {
+                                let name = lower_ident(ident);
+                                let mut aliased = select_list.iter().filter_map(|item| match arena
+                                    .expression(*item)
+                                {
+                                    ScalarExpression::Alias {
+                                        expr,
+                                        alias: AliasType::Name(alias),
+                                    } if alias.as_str() == name => Some(*expr),
+                                    _ => None,
+                                });
+                                if let Some(first) = aliased.next() {
+                                    if aliased
+                                        .any(|other| !first.eq_ignore_colref_pos(other, arena))
+                                    {
+                                        return Err(DatabaseError::AmbiguousColumn(
+                                            name.into_owned(),
+                                        ));
+                                    }
+                                }
+                            }
+                            let expr = binder.bind_expr(expr, arena)?;
+                            arena.alloc_expression(expr)
+                        }
+                    };
+                    SortField::new(
+                        expr,
+                        options.asc.is_none_or(|asc| asc),
+                        options.nulls_first.unwrap_or(false),
+                    )
+                })
+            },
+        )
     }
 }
 
@@ -2083,6 +2133,15 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             Expr::Function(func) => self.bind_function_sql(func, arena),
             Expr::Nested(expr) => self.bind_expr(expr, arena),
             Expr::UnaryOp { expr, op } => {
+                // Fold `-<number>` into one literal, as PostgreSQL does: parsing
+                // the number first cannot express a type's minimum, e.g.
+                // `-9223372036854775808` (9223372036854775808 overflows bigint).
+                if let (UnaryOperator::Minus, Expr::Value(v)) = (op, expr.as_ref()) {
+                    if let Value::Number(n, long) = &v.value {
+                        let value = DataValue::try_from(&Value::Number(format!("-{n}"), *long))?;
+                        return Ok(ScalarExpression::Constant(value));
+                    }
+                }
                 let expr = self
                     .bind_expr(expr, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
@@ -2150,6 +2209,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                     .map(|expr| arena.alloc_expression(expr))?;
                 Ok(ScalarExpression::In {
                     negated: *negated,
+                    evaluator: None,
                     expr,
                     args,
                 })
@@ -2193,6 +2253,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                     .map(|expr| arena.alloc_expression(expr))?;
                 Ok(ScalarExpression::Between {
                     negated: *negated,
+                    left_evaluator: None,
+                    right_evaluator: None,
                     expr,
                     left_expr,
                     right_expr,
@@ -2289,16 +2351,18 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                 else_result,
                 ..
             } => {
-                let fn_check_ty = |ty: &mut LogicalType, result_ty| {
+                // Branches of different types are unified like `l = r` (e.g.
+                // `then bigint else int` => bigint), as in PostgreSQL.
+                let fn_check_ty = |ty: &mut LogicalType, result_ty: LogicalType| {
                     if result_ty != LogicalType::SqlNull {
                         if ty == &LogicalType::SqlNull {
                             *ty = result_ty;
                         } else if ty != &result_ty {
-                            return Err(DatabaseError::Incomparable(ty.clone(), result_ty));
+                            *ty = LogicalType::max_logical_type(ty, &result_ty)?.into_owned();
                         }
                     }
 
-                    Ok(())
+                    Ok::<(), DatabaseError>(())
                 };
                 let mut operand_expr = None;
                 let mut ty = LogicalType::SqlNull;
@@ -2329,6 +2393,14 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
 
                     fn_check_ty(&mut ty, else_ty)?;
                     else_expr = Some(temp_expr);
+                }
+                if ty != LogicalType::SqlNull {
+                    for (_, result) in expr_pairs.iter_mut() {
+                        *result = result.type_cast(Cow::Borrowed(&ty), arena)?;
+                    }
+                    if let Some(expr) = else_expr.as_mut() {
+                        *expr = expr.type_cast(Cow::Borrowed(&ty), arena)?;
+                    }
                 }
 
                 Ok(ScalarExpression::CaseWhen {
@@ -2828,6 +2900,11 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                     }));
                 }
                 SelectItem::Wildcard(_) => {
+                    if self.context.bind_table.is_empty() {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "SELECT * with no tables specified is not valid".to_string(),
+                        ));
+                    }
                     let visible_names = self
                         .context
                         .bind_table
@@ -3056,6 +3133,17 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         } else {
             None
         };
+        if order_by_exprs.is_some() {
+            let mut body = query.body.as_ref();
+            while let SetExpr::Query(inner) = body {
+                if inner.order_by.is_some() {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "multiple ORDER BY clauses not allowed".to_string(),
+                    ));
+                }
+                body = inner.body.as_ref();
+            }
+        }
         let is_plain_select = matches!(query.body.as_ref(), SetExpr::Select(_));
         let mut plan = match query.body.as_ref() {
             SetExpr::Select(select) => self.bind_select(select, order_by_exprs, arena),
@@ -3367,7 +3455,7 @@ mod tests {
 
         assert!(matches!(
             tables.plan("select * from t1 limit -1").unwrap_err(),
-            DatabaseError::InvalidColumn { .. }
+            DatabaseError::InvalidType
         ));
         assert!(matches!(
             tables.plan("select * from t1 limit 1.5").unwrap_err(),

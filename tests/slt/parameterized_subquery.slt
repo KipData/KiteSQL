@@ -171,3 +171,27 @@ select id from exists_outer where not exists (select 1 from exists_inner where e
 1
 2
 3
+
+statement ok
+drop table in_outer_flag
+
+statement ok
+drop table exists_inner
+
+statement ok
+drop table in_inner
+
+statement ok
+drop table in_inner_nn
+
+statement ok
+drop table exists_outer
+
+statement ok
+drop table in_inner_flag
+
+statement ok
+drop table in_outer
+
+statement ok
+drop table in_inner_flag_nn

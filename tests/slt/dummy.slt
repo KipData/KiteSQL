@@ -26,15 +26,11 @@ SELECT (0, 1) != (0, 1)
 ----
 false
 
-query B
+query error
 SELECT (0, 1, 2) = (0, 1)
-----
-false
 
-query B
+query error
 SELECT (0, 1, 2) >= (0, 1)
-----
-true
 
 query B
 SELECT 1::CHAR = 1::VARCHAR
@@ -199,3 +195,44 @@ SELECT CASE WHEN FALSE THEN 0 WHEN 1=1 THEN 1 WHEN FALSE THEN 9 ELSE 2 END
 
 statement error
 SELECT *
+
+# CASE branches of different types are unified (e.g. bigint / int => bigint),
+# and unary operators on NULL yield NULL, as in PostgreSQL.
+statement ok
+create table case_ty(id int primary key, a int, b bigint, d double);
+
+statement ok
+insert into case_ty values (1, 1, 2, 1.5);
+
+query I
+select case when id > 0 then b else 1 end from case_ty;
+----
+2
+
+query R
+select case when id > 0 then b else 1.5 end from case_ty;
+----
+2.0
+
+query I
+select (case when id > 0 then b else 1 end) + 1 from case_ty;
+----
+3
+
+query T
+select (case when id > 0 then b else 1 end) = 2 from case_ty;
+----
+true
+
+query I
+select - (null) from case_ty;
+----
+null
+
+query T
+select 3 = - null from case_ty;
+----
+null
+
+statement ok
+drop table case_ty

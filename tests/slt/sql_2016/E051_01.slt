@@ -11,3 +11,9 @@ CREATE TABLE TABLE_E051_01_01_02 ( ID INT PRIMARY KEY, A INT );
 
 query I
 SELECT DISTINCT A FROM TABLE_E051_01_01_02 WHERE A = 1
+
+statement ok
+drop table table_e051_01_01_02
+
+statement ok
+drop table table_e051_01_01_01

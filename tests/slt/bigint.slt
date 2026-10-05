@@ -26,3 +26,42 @@ select sum(v2) from t where v2 < 10;
 
 statement ok
 drop table t
+
+# Negating the minimum integer overflows: an error, like `+`/`-` overflow,
+# not a panic (debug) or a wrapped value (release).
+statement ok
+create table neg(id int primary key, a int, b bigint);
+
+statement ok
+insert into neg values (1, -2147483648, -9223372036854775807 - 1), (2, 3, 4);
+
+statement error
+select - a from neg;
+
+statement error
+select - b from neg;
+
+statement error
+select min(- a) from neg;
+
+query II rowsort
+select - a, - b from neg where id = 2;
+----
+-3 -4
+
+statement ok
+drop table neg
+
+statement ok
+create table rem_min(id int primary key, a int, b bigint);
+
+statement ok
+insert into rem_min values (1, -2147483648, -9223372036854775807 - 1);
+
+query II
+select a % -1, b % -1 from rem_min;
+----
+0 0
+
+statement ok
+drop table rem_min

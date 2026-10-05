@@ -75,3 +75,28 @@ select sum(v1) as a, v2 from t group by v2 order by a
 
 statement ok
 drop table t
+
+# sum(NULL) is NULL, not an assertion failure.
+statement ok
+create table sn(id int primary key, a int);
+
+statement ok
+insert into sn values (1, 1), (2, 2);
+
+query I
+select sum(null) from sn;
+----
+null
+
+query I
+select sum(distinct null) from sn;
+----
+null
+
+query I
+select (select sum(null) from sn) from sn where id = 1;
+----
+null
+
+statement ok
+drop table sn

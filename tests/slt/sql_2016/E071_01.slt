@@ -25,3 +25,9 @@ SELECT A FROM TABLE_E071_01_01_011 UNION ALL SELECT B FROM TABLE_E071_01_01_012
 1
 2
 2
+
+statement ok
+drop table table_e071_01_01_012
+
+statement ok
+drop table table_e071_01_01_011

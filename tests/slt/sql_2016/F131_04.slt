@@ -251,3 +251,183 @@ CREATE VIEW VIEW_F131_04_02_12 AS SELECT A FROM TABLE_F131_04_02_121 GROUP BY A 
 
 query B
 SELECT B >= ( SELECT A FROM VIEW_F131_04_02_12 ) FROM TABLE_F131_04_02_122
+
+statement ok
+drop view view_f131_04_02_07
+
+statement ok
+drop view view_f131_04_02_03
+
+statement ok
+drop view view_f131_04_02_02
+
+statement ok
+drop view view_f131_04_02_01
+
+statement ok
+drop view view_f131_04_02_04
+
+statement ok
+drop view view_f131_04_02_09
+
+statement ok
+drop view view_f131_04_02_12
+
+statement ok
+drop view view_f131_04_02_11
+
+statement ok
+drop view view_f131_04_02_06
+
+statement ok
+drop view view_f131_04_02_10
+
+statement ok
+drop view view_f131_04_02_08
+
+statement ok
+drop view view_f131_04_02_05
+
+statement ok
+drop table table_f131_04_02_012
+
+statement ok
+drop table table_f131_04_01_031
+
+statement ok
+drop table table_f131_04_02_041
+
+statement ok
+drop table table_f131_04_02_021
+
+statement ok
+drop table table_f131_04_02_081
+
+statement ok
+drop table table_f131_04_02_111
+
+statement ok
+drop table table_f131_04_02_091
+
+statement ok
+drop table table_f131_04_02_102
+
+statement ok
+drop table table_f131_04_01_072
+
+statement ok
+drop table table_f131_04_02_032
+
+statement ok
+drop table table_f131_04_02_101
+
+statement ok
+drop table table_f131_04_01_122
+
+statement ok
+drop table table_f131_04_02_112
+
+statement ok
+drop table table_f131_04_02_072
+
+statement ok
+drop table table_f131_04_01_051
+
+statement ok
+drop table table_f131_04_01_112
+
+statement ok
+drop table table_f131_04_01_042
+
+statement ok
+drop table table_f131_04_01_071
+
+statement ok
+drop table table_f131_04_02_092
+
+statement ok
+drop table table_f131_04_01_081
+
+statement ok
+drop table table_f131_04_01_011
+
+statement ok
+drop table table_f131_04_02_042
+
+statement ok
+drop table table_f131_04_02_022
+
+statement ok
+drop table table_f131_04_01_022
+
+statement ok
+drop table table_f131_04_02_082
+
+statement ok
+drop table table_f131_04_01_111
+
+statement ok
+drop table table_f131_04_02_062
+
+statement ok
+drop table table_f131_04_01_091
+
+statement ok
+drop table table_f131_04_01_062
+
+statement ok
+drop table table_f131_04_02_071
+
+statement ok
+drop table table_f131_04_01_021
+
+statement ok
+drop table table_f131_04_01_082
+
+statement ok
+drop table table_f131_04_01_092
+
+statement ok
+drop table table_f131_04_02_031
+
+statement ok
+drop table table_f131_04_02_122
+
+statement ok
+drop table table_f131_04_01_101
+
+statement ok
+drop table table_f131_04_02_121
+
+statement ok
+drop table table_f131_04_01_041
+
+statement ok
+drop table table_f131_04_02_061
+
+statement ok
+drop table table_f131_04_01_061
+
+statement ok
+drop table table_f131_04_02_052
+
+statement ok
+drop table table_f131_04_01_102
+
+statement ok
+drop table table_f131_04_01_121
+
+statement ok
+drop table table_f131_04_01_052
+
+statement ok
+drop table table_f131_04_02_011
+
+statement ok
+drop table table_f131_04_02_051
+
+statement ok
+drop table table_f131_04_01_032
+
+statement ok
+drop table table_f131_04_01_012

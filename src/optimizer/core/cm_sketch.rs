@@ -293,9 +293,7 @@ impl<K: Hash> CountMinSketch<K> {
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         for k_i in 0..self.k_num {
-            for counter in &mut self.counters[k_i] {
-                *counter = 0
-            }
+            self.counters[k_i].fill(0);
         }
         self.hashers = Self::new_hashers();
     }

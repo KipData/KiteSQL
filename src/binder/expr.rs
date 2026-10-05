@@ -55,8 +55,9 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
         context: &BinderContext<'a, T>,
         arena: &PlanArena,
         column_name: &str,
-    ) -> Option<ScalarExpression> {
+    ) -> Result<Option<ScalarExpression>, DatabaseError> {
         let mut position_offset = 0;
+        let mut found = None;
 
         for bound_source in &context.bind_table {
             let source = &bound_source.source;
@@ -64,7 +65,10 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             if let Some((position, column)) =
                 Self::find_column_in_schema(source.schema().iter(), arena, column_name)
             {
-                return Some(ScalarExpression::column_expr(
+                if found.is_some() {
+                    return Err(DatabaseError::AmbiguousColumn(column_name.to_string()));
+                }
+                found = Some(ScalarExpression::column_expr(
                     column,
                     position_offset + position,
                 ));
@@ -73,7 +77,7 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             position_offset += source.schema_len();
         }
 
-        None
+        Ok(found)
     }
     pub(crate) fn bind_temp_table(
         &mut self,
@@ -369,12 +373,10 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             // handle col syntax
             let mut find_visible_column =
                 |context: &BinderContext<'a, T>| -> Result<Option<ScalarExpression>, DatabaseError> {
-                    Ok(context
-                        .using
-                        .get(column_name)
-                        .map(|using_column| using_column.visible_expr(arena))
-                        .transpose()?
-                        .or_else(|| Self::find_column_in_scope(context, arena, column_name)))
+                    match context.using.get(column_name) {
+                        Some(using_column) => using_column.visible_expr(arena).map(Some),
+                        None => Self::find_column_in_scope(context, arena, column_name),
+                    }
                 };
             let mut got_column = find_visible_column(&self.context)?;
             if got_column.is_none() {
@@ -595,6 +597,9 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             name: function_name.into(),
             arg_types,
         };
+        // TODO: a NULL literal argument has type `SqlNull`, so the exact lookup
+        // misses e.g. `upper(null)` (FunctionNotFound). PostgreSQL treats it as
+        // an unknown type that matches any parameter and returns NULL.
         if let Some(function) = self.context.scala_functions.get(&summary) {
             return Ok(ScalarExpression::ScalaFunction(ScalarFunction {
                 args,

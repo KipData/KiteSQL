@@ -26,3 +26,15 @@ query I
 SELECT 5
 ----
 5
+
+statement ok
+drop table table_e011_01_01_01
+
+statement ok
+drop table table_e011_01_01_03
+
+statement ok
+drop table table_e011_01_01_04
+
+statement ok
+drop table table_e011_01_01_02

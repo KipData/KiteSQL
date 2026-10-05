@@ -39,3 +39,18 @@ query F
 SELECT SUM ( ALL A ) FROM TABLE_E091_06_05_01
 ----
 null
+
+statement ok
+drop table table_e091_06_05_01
+
+statement ok
+drop table table_e091_06_04_01
+
+statement ok
+drop table table_e091_06_02_01
+
+statement ok
+drop table table_e091_06_03_01
+
+statement ok
+drop table table_e091_06_01_01

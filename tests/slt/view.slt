@@ -75,3 +75,15 @@ select c1, sum(c0) from v1 group by c1
 0 0
 1 1
 2 2
+
+statement ok
+drop view v_alias
+
+statement ok
+drop view v2
+
+statement ok
+drop view v1
+
+statement ok
+drop table t1

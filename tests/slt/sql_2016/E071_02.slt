@@ -8,3 +8,9 @@ CREATE TABLE TABLE_E071_02_01_012 ( ID INT PRIMARY KEY, B INT );
 
 query I
 SELECT A FROM TABLE_E071_02_01_011 UNION ALL SELECT B FROM TABLE_E071_02_01_012
+
+statement ok
+drop table table_e071_02_01_011
+
+statement ok
+drop table table_e071_02_01_012

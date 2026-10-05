@@ -219,11 +219,15 @@ impl LogicalType {
             (LogicalType::SqlNull, _) => return Ok(Cow::Borrowed(right)),
             (_, LogicalType::SqlNull) => return Ok(Cow::Borrowed(left)),
             (LogicalType::Tuple(types_0), LogicalType::Tuple(types_1)) => {
-                if types_0.len() > types_1.len() {
-                    return Ok(Cow::Borrowed(left));
-                } else {
-                    return Ok(Cow::Borrowed(right));
+                if types_0.len() != types_1.len() {
+                    return Err(DatabaseError::Incomparable(left.clone(), right.clone()));
                 }
+                let types = types_0
+                    .iter()
+                    .zip(types_1)
+                    .map(|(ty_0, ty_1)| Ok(Self::max_logical_type(ty_0, ty_1)?.into_owned()))
+                    .collect::<Result<_, DatabaseError>>()?;
+                return Ok(Cow::Owned(LogicalType::Tuple(types)));
             }
             _ => {}
         }
@@ -621,22 +625,16 @@ pub(crate) mod test {
             LogicalType::max_logical_type(&LogicalType::Boolean, &LogicalType::SqlNull)?.as_ref(),
             &LogicalType::Boolean
         );
-        assert_eq!(
-            LogicalType::max_logical_type(
-                &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint]),
-                &LogicalType::Tuple(vec![LogicalType::Integer])
-            )?
-            .as_ref(),
+        assert!(LogicalType::max_logical_type(
+            &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint]),
+            &LogicalType::Tuple(vec![LogicalType::Integer])
+        )
+        .is_err());
+        assert!(LogicalType::max_logical_type(
+            &LogicalType::Tuple(vec![LogicalType::Integer]),
             &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint])
-        );
-        assert_eq!(
-            LogicalType::max_logical_type(
-                &LogicalType::Tuple(vec![LogicalType::Integer]),
-                &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint])
-            )?
-            .as_ref(),
-            &LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Bigint])
-        );
+        )
+        .is_err());
 
         let numeric_cases = vec![
             (

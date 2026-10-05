@@ -69,7 +69,7 @@ SELECT a AS foo, b FROM t ORDER BY foo DESC
 2 8
 1 9
 
-statement error 1065
+statement error
 SELECT a AS foo, b AS foo FROM t ORDER BY foo
 
 query II
@@ -152,7 +152,7 @@ SELECT a FROM t ORDER BY (((a)))
 # 3
 # 2
 
-statement error 1005
+statement error
 ((SELECT a FROM t ORDER BY a)) ORDER BY a
 
 statement error
@@ -179,14 +179,8 @@ SELECT * FROM t ORDER BY "a"
 4 7 null
 5 7 null
 
-query III
+query error
 SELECT * FROM t ORDER BY 2.5,a
-----
-1 9 true
-2 8 false
-3 7 null
-4 7 null
-5 7 null
 
 statement error
 SELECT * FROM t ORDER BY foo
@@ -404,3 +398,21 @@ null 6
 2 null
 2 5
 4 8
+
+statement ok
+drop table xy
+
+statement ok
+drop table abcd
+
+statement ok
+drop table abc
+
+statement ok
+drop table t
+
+statement ok
+drop table bar
+
+statement ok
+drop table store

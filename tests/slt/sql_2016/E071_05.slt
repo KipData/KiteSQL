@@ -27,3 +27,9 @@ SELECT B,D FROM TABLE_E071_05_01_012 UNION ALL SELECT A,C FROM TABLE_E071_05_01_
 1.0 5.4
 2.0 2.3
 2.12 23.0
+
+statement ok
+drop table table_e071_05_01_011
+
+statement ok
+drop table table_e071_05_01_012

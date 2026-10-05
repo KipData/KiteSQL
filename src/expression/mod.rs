@@ -106,12 +106,15 @@ pub enum ScalarExpression {
         negated: bool,
         expr: ExprRef,
         args: Vec<ExprRef>,
+        evaluator: Option<BinaryEvaluatorRef>,
     },
     Between {
         negated: bool,
         expr: ExprRef,
         left_expr: ExprRef,
         right_expr: ExprRef,
+        left_evaluator: Option<BinaryEvaluatorRef>,
+        right_evaluator: Option<BinaryEvaluatorRef>,
     },
     SubString {
         expr: ExprRef,
@@ -344,6 +347,56 @@ impl ExprVisitorMut for BindEvaluator {
 
         Ok(())
     }
+
+    fn visit_in(
+        &mut self,
+        _negated: bool,
+        expr: &mut ExprRef,
+        args: &mut [ExprRef],
+        evaluator: &mut Option<BinaryEvaluatorRef>,
+        arena: &mut (dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        self.visit(expr, arena)?;
+        let mut ty = expr.return_type(arena).into_owned();
+        for arg in args.iter_mut() {
+            self.visit(arg, arena)?;
+            ty = LogicalType::max_logical_type(&ty, &arg.return_type(arena))?.into_owned();
+        }
+        *expr = expr.type_cast(Cow::Borrowed(&ty), arena)?;
+        for arg in args.iter_mut() {
+            *arg = arg.type_cast(Cow::Borrowed(&ty), arena)?;
+        }
+        *evaluator = Some(binary_create(Cow::Owned(ty), BinaryOperator::Eq)?);
+
+        Ok(())
+    }
+
+    fn visit_between(
+        &mut self,
+        _negated: bool,
+        expr: &mut ExprRef,
+        left_expr: &mut ExprRef,
+        right_expr: &mut ExprRef,
+        left_evaluator: &mut Option<BinaryEvaluatorRef>,
+        right_evaluator: &mut Option<BinaryEvaluatorRef>,
+        arena: &mut (dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        self.visit(expr, arena)?;
+        self.visit(left_expr, arena)?;
+        self.visit(right_expr, arena)?;
+
+        let ty =
+            LogicalType::max_logical_type(&expr.return_type(arena), &left_expr.return_type(arena))?
+                .into_owned();
+        let ty = LogicalType::max_logical_type(&ty, &right_expr.return_type(arena))?.into_owned();
+        for operand in [&mut *expr, &mut *left_expr, &mut *right_expr] {
+            *operand = operand.type_cast(Cow::Borrowed(&ty), arena)?;
+        }
+        *left_evaluator = Some(binary_create(Cow::Borrowed(&ty), BinaryOperator::GtEq)?);
+        *right_evaluator = Some(binary_create(Cow::Owned(ty), BinaryOperator::LtEq)?);
+
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -572,6 +625,7 @@ impl Explain for ExprRef {
                 args,
                 negated,
                 expr,
+                ..
             } => {
                 write!(
                     f,
@@ -587,6 +641,7 @@ impl Explain for ExprRef {
                 left_expr,
                 right_expr,
                 negated,
+                ..
             } => write!(
                 f,
                 "{} {} [{}, {}]",
@@ -758,7 +813,7 @@ impl ExprRef {
         }
     }
 
-    pub fn unpack_alias_ref<'a, A: MetaArena + ?Sized>(self, arena: &'a A) -> &'a ScalarExpression {
+    pub fn unpack_alias_ref<A: MetaArena + ?Sized>(self, arena: &A) -> &ScalarExpression {
         arena.expression(self.unpack_alias(arena))
     }
 
@@ -1263,6 +1318,7 @@ mod test {
                 negated: true,
                 expr: empty,
                 args: vec![empty],
+                evaluator: None,
             },
             Some(&context),
             &mut reference_tables,
@@ -1275,6 +1331,8 @@ mod test {
                 expr: empty,
                 left_expr: empty,
                 right_expr: empty,
+                left_evaluator: None,
+                right_evaluator: None,
             },
             Some(&context),
             &mut reference_tables,
