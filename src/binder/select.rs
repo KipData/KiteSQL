@@ -1874,6 +1874,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 if !preserve_projection || Self::is_temp_alias_projection(&op.exprs, arena) {
                     Ok((child, correlated_filters))
                 } else {
+                    for expr in &op.exprs {
+                        if Self::expr_has_correlated_refs(*expr, left_schema, arena)? {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "correlated references in the SELECT list of an IN/ANY/ALL subquery are not supported"
+                                    .to_string(),
+                            ));
+                        }
+                    }
                     let mut binder = ProjectionOutputBinder::new(&op.exprs);
                     for expr in &mut correlated_filters {
                         binder.visit(expr, arena)?;

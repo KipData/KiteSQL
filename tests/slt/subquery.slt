@@ -593,3 +593,46 @@ b
 
 statement ok
 drop table sq_ref;
+
+statement ok
+create table sq_outer(k int primary key, name varchar, id int);
+
+statement ok
+create table sq_inner(b int primary key, c int, e int);
+
+statement ok
+insert into sq_outer values (10, 'a', 1), (20, 'b', 2);
+
+statement ok
+insert into sq_inner values (1, 2, 3), (2, 1, 4);
+
+statement error
+select k from sq_outer where id in (select sq_outer.id from sq_inner);
+
+statement error
+select k from sq_outer where id in (select b * 0 + sq_outer.k from sq_inner);
+
+statement error
+select k from sq_outer where id not in (select b * 0 + sq_outer.id from sq_inner);
+
+query I rowsort
+select k from sq_outer where id in (select b from sq_inner where c = sq_outer.id);
+----
+
+query I rowsort
+select k from sq_outer where id in (select c from sq_inner where e > sq_outer.id);
+----
+10
+20
+
+query I rowsort
+select k from sq_outer where exists (select sq_outer.id from sq_inner);
+----
+10
+20
+
+statement ok
+drop table sq_outer;
+
+statement ok
+drop table sq_inner;
