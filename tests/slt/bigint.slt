@@ -51,3 +51,17 @@ select - a, - b from neg where id = 2;
 
 statement ok
 drop table neg
+
+statement ok
+create table rem_min(id int primary key, a int, b bigint);
+
+statement ok
+insert into rem_min values (1, -2147483648, -9223372036854775807 - 1);
+
+query II
+select a % -1, b % -1 from rem_min;
+----
+0 0
+
+statement ok
+drop table rem_min
