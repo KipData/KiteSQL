@@ -31,7 +31,10 @@ pub trait OperatorVisitor<'a>: Sized {
         Ok(())
     }
 
-    fn visit_scalar_apply(&mut self, _op: &'a ScalarApplyOperator) -> Result<(), DatabaseError> {
+    fn visit_scalar_query_init(
+        &mut self,
+        _op: &'a ScalarQueryInitOperator,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
@@ -338,7 +341,7 @@ pub fn walk_operator<'a, V: OperatorVisitor<'a>>(
     match operator {
         Operator::Dummy => visitor.visit_dummy(),
         Operator::Aggregate(op) => visitor.visit_aggregate(op),
-        Operator::ScalarApply(op) => visitor.visit_scalar_apply(op),
+        Operator::ScalarQueryInit(op) => visitor.visit_scalar_query_init(op),
         Operator::MarkApply(op) => visitor.visit_mark_apply(op),
         Operator::Filter(op) => visitor.visit_filter(op),
         Operator::Join(op) => visitor.visit_join(op),
@@ -448,7 +451,9 @@ pub(crate) mod tests {
                 is_distinct: false,
                 force_spill: false,
             }),
-            Operator::ScalarApply(ScalarApplyOperator),
+            Operator::ScalarQueryInit(ScalarQueryInitOperator {
+                id: arena.alloc_scalar_query_ref(),
+            }),
             Operator::MarkApply(mark_apply),
             Operator::Filter(FilterOperator {
                 predicate: expr(5),

@@ -2870,7 +2870,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             arena.alloc_expression(predicate)
         })?;
 
-        self.bind_where_expr(children, predicate, arena)
+        let plan = self.bind_where_expr(children, predicate, arena)?;
+        Ok(self.init_scalar_queries(plan))
     }
 
     pub(crate) fn normalize_select_item(
@@ -3174,7 +3175,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
 
         self.context.restore_ctes(cte_checkpoint);
         self.context.step(origin_step);
-        Ok(plan)
+        Ok(self.init_scalar_queries(plan))
     }
 
     fn bind_non_negative_limit_value(
@@ -3253,7 +3254,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         stmt: &Statement,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        Ok(self.build_statement(arena).statement(stmt)?.finish())
+        let plan = self.build_statement(arena).statement(stmt)?.finish();
+        Ok(self.init_scalar_queries(plan))
     }
 }
 

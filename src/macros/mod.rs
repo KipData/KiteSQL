@@ -179,7 +179,7 @@ macro_rules! table_function {
                 let mut _index = 0;
 
                 $closure($({
-                    let mut value = arena.expression(args[_index]).eval(arena, None)?.into_owned();
+                    let mut value = arena.expression(args[_index]).eval::<[::kite_sql::types::value::DataValue]>(arena, None)?.into_owned();
                     _index += 1;
 
                     value = value.cast(&$arg_ty)?;

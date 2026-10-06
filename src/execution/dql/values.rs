@@ -19,6 +19,7 @@ use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
+use crate::types::value::DataValue;
 
 pub struct Values<'a> {
     rows: std::slice::Iter<'a, ExprRef>,
@@ -78,7 +79,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values<'a> {
             output.values.push(
                 plan_arena
                     .expression(*expr)
-                    .eval(plan_arena, None)?
+                    .eval::<[DataValue]>(plan_arena, None)?
                     .into_owned()
                     .cast(ty)?,
             );

@@ -67,9 +67,9 @@ pub trait OperatorVisitorMut<'a>: Sized {
         Ok(())
     }
 
-    fn visit_scalar_apply(
+    fn visit_scalar_query_init(
         &mut self,
-        _op: &'a mut ScalarApplyOperator,
+        _op: &'a mut ScalarQueryInitOperator,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -403,7 +403,7 @@ pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
     match operator {
         Operator::Dummy => visitor.visit_dummy(),
         Operator::Aggregate(op) => visitor.visit_aggregate(op),
-        Operator::ScalarApply(op) => visitor.visit_scalar_apply(op),
+        Operator::ScalarQueryInit(op) => visitor.visit_scalar_query_init(op),
         Operator::MarkApply(op) => visitor.visit_mark_apply(op),
         Operator::Filter(op) => visitor.visit_filter(op),
         Operator::Join(op) => visitor.visit_join(op),

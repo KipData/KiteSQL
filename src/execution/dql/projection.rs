@@ -21,6 +21,7 @@ use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
+use crate::types::value::DataValue;
 
 pub struct Projection<'a> {
     exprs: &'a [ExprRef],
@@ -53,7 +54,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
             return Ok(());
         }
 
-        arena.rewrite(self.exprs, plan_arena, None)?;
+        arena.rewrite(self.exprs, plan_arena, None::<&[DataValue]>)?;
         arena.resume();
         Ok(())
     }

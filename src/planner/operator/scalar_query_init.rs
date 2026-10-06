@@ -13,18 +13,20 @@
 // limitations under the License.
 
 use super::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, LogicalPlan, ScalarQueryRef};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
-pub struct ScalarApplyOperator;
+pub struct ScalarQueryInitOperator {
+    pub id: ScalarQueryRef,
+}
 
-impl ScalarApplyOperator {
-    pub fn build(left: LogicalPlan, right: LogicalPlan) -> LogicalPlan {
+impl ScalarQueryInitOperator {
+    pub fn build(left: LogicalPlan, right: LogicalPlan, id: ScalarQueryRef) -> LogicalPlan {
         LogicalPlan::new(
-            Operator::ScalarApply(ScalarApplyOperator),
+            Operator::ScalarQueryInit(ScalarQueryInitOperator { id }),
             Childrens::Twins {
                 left: Box::new(left),
                 right: Box::new(right),
@@ -33,8 +35,8 @@ impl ScalarApplyOperator {
     }
 }
 
-impl fmt::Display for ScalarApplyOperator {
+impl fmt::Display for ScalarQueryInitOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "ScalarApply")
+        write!(f, "ScalarQueryInit #{}", self.id)
     }
 }

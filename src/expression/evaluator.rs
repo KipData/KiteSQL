@@ -41,10 +41,10 @@ macro_rules! eval_to_num {
 }
 
 impl ScalarExpression {
-    pub fn eval<'a>(
+    pub fn eval<'a, T: TupleLike + ?Sized>(
         &'a self,
         arena: &'a (dyn MetaArena + '_),
-        tuple: Option<&'a dyn TupleLike>,
+        tuple: Option<&'a T>,
     ) -> Result<Cow<'a, DataValue>, DatabaseError> {
         match self {
             ScalarExpression::Constant(val) => match val {
@@ -53,6 +53,12 @@ impl ScalarExpression {
                 }
                 val => Ok(Cow::Borrowed(val)),
             },
+            ScalarExpression::Init { id, .. } => {
+                let value = arena.init_value(*id).ok_or_else(|| {
+                    DatabaseError::InvalidValue(format!("scalar query {id} is not initialized"))
+                })?;
+                Ok(Cow::Borrowed(value))
+            }
             ScalarExpression::ColumnRef { position, .. } => {
                 let Some(tuple) = tuple else {
                     return Ok(Cow::Owned(DataValue::Null));
@@ -262,7 +268,7 @@ impl ScalarExpression {
             }
             ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => {
                 let value = match tuple {
-                    Some(tuple) => inner.eval(args, arena, Some(tuple))?,
+                    Some(tuple) => inner.eval(args, arena, Some(&tuple))?,
                     None => inner.eval(args, arena, None)?,
                 };
                 value.cast(inner.return_type()).map(Cow::Owned)
@@ -401,7 +407,7 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
 mod tests {
     use super::*;
     use crate::planner::test::PlanArenaTestExt;
-    use crate::planner::ExprRef;
+    use crate::planner::{ExecArenaView, ExprRef, TableArenaCell};
 
     fn const_in(
         arena: &mut PlanArena<'_>,
@@ -423,11 +429,44 @@ mod tests {
     }
 
     #[test]
+    fn init_reads_execution_view_and_preserves_slot_position() -> Result<(), DatabaseError> {
+        use crate::expression::visitor_mut::{ExprVisitorMut, PositionShift};
+        use crate::types::tuple::Tuple;
+
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let reference = arena.alloc_scalar_query_ref();
+        let mut init = arena.alloc_expression(ScalarExpression::Init {
+            id: reference,
+            ty: LogicalType::Integer,
+        });
+        PositionShift { delta: 5 }.visit(&mut init, &mut arena)?;
+        assert!(matches!(
+            arena.expression(init),
+            ScalarExpression::Init { id, ty: LogicalType::Integer } if *id == reference
+        ));
+        assert!(!init.any_referenced_column(&arena, |_, _| true)?);
+        let row = Tuple::new(None, vec![DataValue::Int32(99)]);
+        assert!(matches!(
+            arena.expression(init).eval(&arena, Some(&row)),
+            Err(DatabaseError::InvalidValue(message)) if message.contains("is not initialized")
+        ));
+        let mut view = ExecArenaView::new(arena);
+        assert!(view.expression(init).eval(&view, Some(&row)).is_err());
+        view.set_init_value(reference, DataValue::Null);
+        let value = view.expression(init).eval(&view, Some(&row))?;
+        assert!(matches!(value, Cow::Borrowed(DataValue::Null)));
+        let value = view.expression(init).eval::<Tuple>(&view, None)?;
+        assert!(matches!(value, Cow::Borrowed(DataValue::Null)));
+        Ok(())
+    }
+
+    #[test]
     fn eval_borrows_leaf_values_and_owns_binary_results() -> Result<(), DatabaseError> {
         use crate::types::evaluator::binary_create;
         use crate::types::tuple::Tuple;
 
-        let table_arena = crate::planner::TableArenaCell::default();
+        let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let value = DataValue::Int64(42);
         let constant = arena.alloc_expression(ScalarExpression::Constant(value.clone()));
@@ -472,7 +511,7 @@ mod tests {
         use crate::types::evaluator::cast_create;
         use crate::types::tuple::Tuple;
 
-        let table_arena = crate::planner::TableArenaCell::default();
+        let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let value = DataValue::Int32(7);
         let column_ref = arena.alloc_column(crate::catalog::ColumnCatalog::new(
@@ -532,7 +571,7 @@ mod tests {
 
     #[test]
     fn in_eval_matches_even_if_null_appears_first() -> Result<(), DatabaseError> {
-        let table_arena = crate::planner::TableArenaCell::default();
+        let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let expr = const_in(
             &mut arena,
@@ -542,7 +581,10 @@ mod tests {
         );
 
         assert_eq!(
-            arena.expression(expr).eval(&arena, None)?.into_owned(),
+            arena
+                .expression(expr)
+                .eval::<crate::types::tuple::Tuple>(&arena, None)?
+                .into_owned(),
             DataValue::Boolean(true)
         );
         Ok(())
@@ -550,7 +592,7 @@ mod tests {
 
     #[test]
     fn in_eval_returns_null_when_only_null_blocks_non_match() -> Result<(), DatabaseError> {
-        let table_arena = crate::planner::TableArenaCell::default();
+        let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let expr = const_in(
             &mut arena,
@@ -560,7 +602,10 @@ mod tests {
         );
 
         assert_eq!(
-            arena.expression(expr).eval(&arena, None)?.into_owned(),
+            arena
+                .expression(expr)
+                .eval::<crate::types::tuple::Tuple>(&arena, None)?
+                .into_owned(),
             DataValue::Null
         );
         Ok(())
@@ -568,7 +613,7 @@ mod tests {
 
     #[test]
     fn not_in_eval_matches_even_if_null_appears_first() -> Result<(), DatabaseError> {
-        let table_arena = crate::planner::TableArenaCell::default();
+        let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let expr = const_in(
             &mut arena,
@@ -578,7 +623,10 @@ mod tests {
         );
 
         assert_eq!(
-            arena.expression(expr).eval(&arena, None)?.into_owned(),
+            arena
+                .expression(expr)
+                .eval::<crate::types::tuple::Tuple>(&arena, None)?
+                .into_owned(),
             DataValue::Boolean(false)
         );
         Ok(())

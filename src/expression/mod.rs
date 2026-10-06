@@ -20,7 +20,7 @@ use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::planner::operator::sort::SortField;
-use crate::planner::{Explain, ExprRef, MetaArena};
+use crate::planner::{Explain, ExprRef, MetaArena, ScalarQueryRef};
 use crate::types::evaluator::{
     binary_create, cast_create, unary_create, BinaryEvaluatorRef, CastEvaluatorRef,
     UnaryEvaluatorRef,
@@ -66,6 +66,10 @@ pub enum AliasType {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum ScalarExpression {
     Constant(DataValue),
+    Init {
+        id: ScalarQueryRef,
+        ty: LogicalType,
+    },
     ColumnRef {
         column: ColumnRef,
         position: usize,
@@ -481,6 +485,7 @@ impl TypeCast for ScalarExpression {
             }
             ScalarExpression::Position { .. } => Cow::Owned(LogicalType::Integer),
             ScalarExpression::Alias { expr, .. } => expr.return_type(arena),
+            ScalarExpression::Init { ty, .. } => Cow::Borrowed(ty),
             ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
             ScalarExpression::Tuple(exprs) => Cow::Owned(LogicalType::Tuple(
                 exprs
@@ -551,6 +556,7 @@ impl Explain for ExprRef {
 
         match arena.expression(*self) {
             ScalarExpression::Constant(value) => write!(f, "{value}"),
+            ScalarExpression::Init { id, .. } => write!(f, "Init({id})"),
             ScalarExpression::ColumnRef { column, .. } => Explain::fmt(column, arena, f),
             ScalarExpression::Alias { alias, expr } => match alias {
                 AliasType::Name(alias) => f.write_str(alias),
@@ -1084,6 +1090,7 @@ mod test {
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
     use crate::function::current_date::CurrentDate;
     use crate::function::numbers::Numbers;
+    use crate::planner::operator::sort::SortField;
     use crate::planner::{ExprRef, MetaArena, PlanArena, TableArenaCell};
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksStorage;
@@ -1544,7 +1551,7 @@ mod test {
                 },
                 spec: WindowSpec {
                     partition_by: vec![two],
-                    order_by: vec![crate::planner::operator::sort::SortField::from(three).desc()],
+                    order_by: vec![SortField::from(three).desc()],
                 },
             }),
             Some(&context),

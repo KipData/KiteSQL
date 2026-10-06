@@ -22,6 +22,7 @@ use crate::planner::LogicalPlan;
 use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
+use crate::types::value::DataValue;
 
 pub struct StreamDistinctExecutor<'a> {
     groupby_exprs: &'a [ExprRef],
@@ -64,7 +65,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a>
                 }
                 return Ok(());
             }
-            arena.rewrite(self.groupby_exprs, plan_arena, None)?;
+            arena.rewrite(self.groupby_exprs, plan_arena, None::<&[DataValue]>)?;
 
             if let Some(last_keys) = &mut self.last_keys {
                 if last_keys.values == arena.result_tuple().values {

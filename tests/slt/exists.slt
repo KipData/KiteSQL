@@ -38,3 +38,42 @@ drop table t1
 
 statement ok
 drop table t2
+
+# A table alias hides the table name, and a correlated EXISTS keeps the alias identity of its
+# columns, so non-equality correlations compare inner and outer rows.
+statement ok
+create table t_corr(pk int primary key, b int)
+
+statement ok
+insert into t_corr values (0, 10), (1, 20), (2, 30), (3, null)
+
+statement error
+select t_corr.b from t_corr as x
+
+query I rowsort
+select b from t_corr where exists(select 1 from t_corr as x where x.b < t_corr.b)
+----
+20
+30
+
+query I rowsort
+select b from t_corr where exists(select 1 from t_corr as x where x.b = t_corr.b)
+----
+10
+20
+30
+
+query I rowsort
+select y.b from t_corr as y where exists(select 1 from t_corr as x where x.b > y.b)
+----
+10
+20
+
+query I rowsort
+select b from t_corr where not exists(select 1 from t_corr as x where x.b < t_corr.b)
+----
+10
+NULL
+
+statement ok
+drop table t_corr

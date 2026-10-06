@@ -42,7 +42,9 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 #[cfg(feature = "orm")]
 use crate::orm::FromQueryRow;
 use crate::planner::operator::Operator;
-use crate::planner::{LogicalPlan, MetaArena, PlanArena, PlanInput, PlanKeeper, TableArenaCell};
+use crate::planner::{
+    ExecArenaView, LogicalPlan, MetaArena, PlanArena, PlanInput, PlanKeeper, TableArenaCell,
+};
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
@@ -582,7 +584,14 @@ impl<S: Storage> State<S> {
         transaction: &'a mut S::TransactionType<'txn>,
         plan: PlanInput<'a>,
         mut plan_arena: A,
-    ) -> Result<(Schema, A, Executor<'a, S::TransactionType<'txn>>), DatabaseError>
+    ) -> Result<
+        (
+            Schema,
+            ExecArenaView<A>,
+            Executor<'a, S::TransactionType<'txn>>,
+        ),
+        DatabaseError,
+    >
     where
         S: 'txn,
     {
@@ -599,6 +608,7 @@ impl<S: Storage> State<S> {
             &self.table_functions,
         );
         let root = build_write(&mut arena, &mut plan_arena, plan, read_context, transaction);
+        let plan_arena = ExecArenaView::new(plan_arena);
         let executor = Executor::new(arena, root, keeper);
 
         Ok((schema, plan_arena, executor))
@@ -612,7 +622,7 @@ impl<S: Storage> State<S> {
     ) -> Result<
         (
             Schema,
-            PlanArena<'a>,
+            ExecArenaView<PlanArena<'a>>,
             Executor<'a, S::TransactionType<'txn>>,
         ),
         DatabaseError,
@@ -675,6 +685,7 @@ impl<S: Storage> State<S> {
             table_functions,
         );
         let root = build_write(&mut arena, &mut plan_arena, plan, cache, transaction);
+        let plan_arena = ExecArenaView::new(plan_arena);
         let executor = Executor::new(arena, root, keeper);
 
         Ok((schema, plan_arena, executor))
@@ -692,7 +703,7 @@ impl DDLApply {
     fn apply_to<S: Storage>(
         self,
         state: &mut State<S>,
-        plan_arena: &PlanArena,
+        plan_arena: &mut PlanArena,
     ) -> Result<bool, DatabaseError> {
         let mut catalog_changed = false;
         match self {
@@ -772,7 +783,7 @@ impl<S: Storage> Database<S> {
                     return Err(err.with_sql_context(context));
                 }
             };
-        let (plan_arena, apply) =
+        let (mut plan_arena, apply) =
             match TransactionIter::new(schema, plan_arena, executor, transaction)
                 .done_with_ddl_apply()
             {
@@ -789,7 +800,7 @@ impl<S: Storage> Database<S> {
 
         let mut catalog_changed = false;
         for apply in apply {
-            catalog_changed |= unsafe { apply.apply_to(&mut *state, &plan_arena) }
+            catalog_changed |= unsafe { apply.apply_to(&mut *state, &mut plan_arena) }
                 .map_err(|err| err.with_sql_context(context))?;
         }
         if catalog_changed {
@@ -1243,13 +1254,14 @@ impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     }
 }
 
-impl<'a, T: Transaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
+impl<'a, T: Transaction + 'a> TransactionIter<'a, T, ExecArenaView<PlanArena<'a>>> {
     fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         Ok((
             self.plan_arena
                 .take()
-                .expect("DDL apply plan arena is unavailable after statement completion"),
+                .expect("DDL apply plan arena is unavailable after statement completion")
+                .into_parent(),
             std::mem::take(&mut self.ddl_apply),
         ))
     }
@@ -1282,13 +1294,12 @@ impl<T: Transaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
 pub(crate) mod test {
     use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc};
-    #[cfg(feature = "unsafe_txdb_checkpoint")]
-    use crate::db::CatalogKind;
-    use crate::db::{DataBaseBuilder, DatabaseError, ResultIter};
+    use crate::db::{CatalogKind, DataBaseBuilder, DatabaseError, ResultIter};
     use crate::expression::ScalarExpression;
     use crate::planner::operator::join::JoinCondition;
     use crate::planner::operator::Operator;
     use crate::planner::PlanArena;
+    use crate::storage::memory::MemoryStorage;
     use crate::storage::{
         table_codec::TableCodec, Storage, TableCache, Transaction, TransactionIsolationLevel,
     };
@@ -1317,6 +1328,47 @@ pub(crate) mod test {
         assert_send_sync::<super::Database<crate::storage::rocksdb::RocksStorage>>();
         #[cfg(feature = "lmdb")]
         assert_send_sync::<super::Database<crate::storage::lmdb::LmdbStorage>>();
+    }
+
+    #[test]
+    fn scalar_query_view_references_survive_catalog_reload() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
+        {
+            let mut db = DataBaseBuilder::path(".").build_with_storage(storage.clone())?;
+            db.ddl("create view scalar_a as select (select 11) as v")?;
+            db.ddl("create view scalar_b as select (select 22) as v")?;
+            db.ddl("create view scalar_nested as select (select (select 33)) as v")?;
+        }
+
+        let mut db = DataBaseBuilder::path(".").build_with_storage(storage)?;
+        // Loading in a different order must preserve the saved initialization references.
+        for name in ["scalar_b", "scalar_a", "scalar_nested"] {
+            db.load(CatalogKind::View(name.into()))?;
+        }
+        let sql = "select a.v, b.v, c.v, (select 44) from scalar_a a \
+                   cross join scalar_b b cross join scalar_nested c";
+        let mut iter = db.run(sql)?;
+        assert_eq!(
+            iter.next_tuple(|_, row| row.values.clone())?,
+            Some(vec![
+                DataValue::Int32(11),
+                DataValue::Int32(22),
+                DataValue::Int32(33),
+                DataValue::Int32(44),
+            ])
+        );
+        assert!(iter.next_tuple(|_, _| ())?.is_none());
+        iter.done()?;
+
+        // New definitions must not reuse references registered by the loaded views.
+        db.ddl("create view scalar_new as select (select 55) as v")?;
+        let mut iter = db.run("select a.v, b.v from scalar_a a cross join scalar_new b")?;
+        assert_eq!(
+            iter.next_tuple(|_, row| row.values.clone())?,
+            Some(vec![DataValue::Int32(11), DataValue::Int32(55)])
+        );
+        iter.done()?;
+        Ok(())
     }
 
     pub(crate) fn build_table<T: Transaction>(

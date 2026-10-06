@@ -22,14 +22,14 @@ use crate::single_mapping;
 use std::sync::LazyLock;
 
 static SCALAR_APPLY_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
-    predicate: |op| matches!(op, Operator::ScalarApply(_)),
+    predicate: |op| matches!(op, Operator::ScalarQueryInit(_)),
 });
 
 #[derive(Clone)]
-pub struct ScalarApplyImplementation;
+pub struct ScalarQueryInitImplementation;
 
 single_mapping!(
-    ScalarApplyImplementation,
+    ScalarQueryInitImplementation,
     SCALAR_APPLY_PATTERN,
-    PhysicalOption::new(PlanImpl::ScalarApply, SortOption::Follow)
+    PhysicalOption::new(PlanImpl::ScalarQueryInit, SortOption::Follow)
 );

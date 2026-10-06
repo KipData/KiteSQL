@@ -68,7 +68,7 @@ use crate::errors::DatabaseError;
 use crate::expression::{ScalarExpression, TypeCast};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
-use crate::planner::{ExprRef, LogicalPlan, PlanArena, PlanRef};
+use crate::planner::{ExprRef, LogicalPlan, PlanArena, PlanRef, ScalarQueryRef};
 use crate::storage::{TableCache, Transaction, ViewCache};
 use crate::types::tuple::Schema;
 use crate::types::LogicalType;
@@ -102,10 +102,6 @@ pub enum QueryBindStep {
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub enum SubQueryType {
-    SubQuery {
-        plan: LogicalPlan,
-        correlated: bool,
-    },
     ExistsSubQuery {
         plan: LogicalPlan,
         correlated: bool,
@@ -151,8 +147,10 @@ pub(crate) struct CteCheckpoint {
 
 impl BoundSource<'_> {
     pub(crate) fn matches_name(&self, table_name: &str) -> bool {
-        self.table_name.as_ref() == table_name
-            || matches!(self.alias.as_ref(), Some(alias) if alias.as_ref() == table_name)
+        match &self.alias {
+            Some(alias) => alias.as_ref() == table_name,
+            None => self.table_name.as_ref() == table_name,
+        }
     }
 
     pub(crate) fn same_binding(
@@ -259,6 +257,7 @@ pub struct BinderContext<'a, T: Transaction> {
 
     bind_step: QueryBindStep,
     sub_queries: HashMap<QueryBindStep, Vec<SubQueryType>>,
+    scalar_queries: Vec<(ScalarQueryRef, LogicalPlan)>,
     has_outer_refs: bool,
 
     pub(crate) allow_default: bool,
@@ -321,6 +320,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             using: Default::default(),
             bind_step: QueryBindStep::From,
             sub_queries: Default::default(),
+            scalar_queries: Vec::new(),
             has_outer_refs: false,
             allow_default: false,
         }
@@ -347,6 +347,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             using: self.using.clone(),
             bind_step: self.bind_step,
             sub_queries: Default::default(),
+            scalar_queries: Vec::new(),
             has_outer_refs: false,
             allow_default: self.allow_default,
         }

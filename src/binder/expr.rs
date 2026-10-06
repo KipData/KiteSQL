@@ -25,7 +25,7 @@ use crate::expression::function::FunctionSummary;
 use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
-use crate::planner::{ExprRef, LogicalPlan, PlanArena};
+use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::storage::Transaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
@@ -208,21 +208,17 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
     {
         let (sub_query, column, correlated) =
             self.bind_subquery_plan_with_output(None, arena, build)?;
-        let sub_query = ScalarSubqueryOperator::build(sub_query);
-        let (expr, sub_query) = match self.context.step_now() {
-            QueryBindStep::Where => (column, sub_query),
-            QueryBindStep::Project => self.bind_temp_table(column, sub_query, arena)?,
-            _ => {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "scalar subqueries can only appear in `WHERE` or SELECT list".to_string(),
-                ))
-            }
-        };
-        self.context.sub_query(SubQueryType::SubQuery {
-            plan: sub_query,
-            correlated,
-        });
-        Ok(expr)
+        if correlated {
+            return Err(DatabaseError::UnsupportedStmt(
+                "correlated scalar subqueries are not supported".to_string(),
+            ));
+        }
+        let id = arena.alloc_scalar_query_ref();
+        let ty = column.return_type(arena).into_owned();
+        self.context
+            .scalar_queries
+            .push((id, ScalarSubqueryOperator::build(sub_query)));
+        Ok(ScalarExpression::Init { id, ty })
     }
 
     pub(crate) fn bind_exists_subquery_plan<'arena, F>(

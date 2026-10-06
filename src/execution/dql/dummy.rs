@@ -49,7 +49,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Dummy {
     fn next_tuple(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _: &mut (dyn MetaArena + 'a),
+        _: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         let Some(row) = self.row.take() else {
             arena.finish();

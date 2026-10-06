@@ -488,11 +488,13 @@ statement error
 select * from users
 where id = (select user_id from orders where amount = age);
 
-# Mark-apply and scalar-join subqueries cannot share one WHERE scope yet.
-statement error
+# Scalar initialization and EXISTS can share a WHERE scope.
+query IT
 select * from users
 where exists(select 1 from orders)
   and id = (select max(user_id) from orders);
+----
+2 30
 
 statement ok
 drop table users;
@@ -500,7 +502,7 @@ drop table users;
 statement ok
 drop table orders;
 
-# ScalarApply must preserve its cached first result while validating scalar cardinality.
+# ScalarQueryInit validates cardinality before publishing the cached result.
 statement ok
 create table scalar_eof (id int primary key, v int, keep_row boolean);
 
@@ -551,26 +553,36 @@ from scalar_eof outer_row order by outer_row.id limit 1;
 statement ok
 drop table scalar_eof;
 
-# SELECT-list scalar subqueries are joined in above DISTINCT / GROUP BY /
-# ORDER BY, so those clauses cannot read them yet: reject instead of reading
-# another column (which crashed, or silently returned wrong results).
+# Scalar results are initialized before sorting, grouping and DISTINCT.
 statement ok
 create table sq_ref(id int primary key, c varchar);
 
 statement ok
 insert into sq_ref values (0, 'a'), (1, 'b'), (2, 'a');
 
-statement error
+query II
 select id, (select count(*) from sq_ref) - id as x from sq_ref order by x;
+----
+2 1
+1 2
+0 3
 
-statement error
+query I
 select (select max(id) from sq_ref) + 1 as x from sq_ref order by x;
+----
+3
+3
+3
 
-statement error
+query I
 select distinct (select max(id) from sq_ref) from sq_ref;
+----
+2
 
-statement error
+query I
 select (select max(id) from sq_ref) as x from sq_ref group by x;
+----
+2
 
 # Not referenced by those clauses: still supported.
 query II
@@ -636,3 +648,147 @@ drop table sq_outer;
 
 statement ok
 drop table sq_inner;
+
+# Uncorrelated scalar initialization across query clauses and DML.
+statement ok
+create table init_rows(id int primary key, v int)
+
+statement ok
+insert into init_rows values (1, 10), (2, 20), (3, 30)
+
+query II
+select id, v + (select max(v) from init_rows) as x from init_rows order by x desc
+----
+3 60
+2 50
+1 40
+
+query II
+select id, v + (select max(v) from init_rows) as x from init_rows order by x desc limit 2
+----
+3 60
+2 50
+
+query I
+select (select (select max(v) from init_rows)) + (select min(v) from init_rows)
+----
+40
+
+query I
+select distinct (select max(v) from init_rows) from init_rows
+----
+30
+
+query II
+select (select max(v) from init_rows), count(*) from init_rows group by (select max(v) from init_rows)
+----
+30 3
+
+query I
+select sum((select max(v) from init_rows)) from init_rows
+----
+90
+
+query I
+select count(*) from init_rows having count(*) > (select 2)
+----
+3
+
+query I
+select id from init_rows where v < (select max(v) from init_rows) order by id
+----
+1
+2
+
+query I
+select id from init_rows where id in (select id from init_rows) and v = (select max(v) from init_rows)
+----
+3
+
+query I
+select id from init_rows where exists(select 1 from init_rows) and v = (select max(v) from init_rows)
+----
+3
+
+query I
+select coalesce((select 9), 0)
+----
+9
+
+query I
+select coalesce((select v from init_rows where id < 0), -1)
+----
+-1
+
+statement error
+select (select v from init_rows)
+
+statement error
+select id from init_rows where v = (select v from init_rows)
+
+statement error
+select (select x.v from init_rows as x where x.id = init_rows.id) from init_rows
+
+statement ok
+create view init_max as select (select max(v) from init_rows) as m
+
+statement ok
+create view init_min as select (select min(v) from init_rows) as m
+
+query II
+select a.m, b.m from init_max as a cross join init_min as b
+----
+30 10
+
+query II
+with q as (select (select max(v) from init_rows) as m) select a.m, b.m from q as a cross join q as b
+----
+30 30
+
+query II
+select id, sum((select 2)) over (order by id) from init_rows order by id
+----
+1 2
+2 4
+3 6
+
+statement ok
+update init_rows set v = 40 where id = (select max(id) from init_rows)
+
+query I
+select (select max(v) from init_rows)
+----
+40
+
+statement ok
+update init_rows set v = (select max(v) from init_rows) + 1 where id = 1
+
+query I
+select v from init_rows where id = 1
+----
+41
+
+statement ok
+insert into init_rows values (4, (select min(v) from init_rows))
+
+query I
+select v from init_rows where id = 4
+----
+20
+
+statement ok
+delete from init_rows where id = (select max(id) from init_rows)
+
+query I
+select count(*) from init_rows
+----
+3
+
+statement ok
+drop view init_max
+
+statement ok
+drop view init_min
+
+statement ok
+drop table init_rows

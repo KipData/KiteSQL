@@ -38,7 +38,7 @@ impl EvaluatorBind {
                 Self::_apply(left, arena)?;
                 let bind_right = matches!(
                     plan.operator,
-                    Operator::ScalarApply(_)
+                    Operator::ScalarQueryInit(_)
                         | Operator::MarkApply(_)
                         | Operator::Join(_)
                         | Operator::Union(_)

@@ -15,6 +15,7 @@
 mod arena;
 pub mod operator;
 mod plan_keeper;
+mod scalar_query_ref;
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
@@ -29,9 +30,10 @@ use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+pub(crate) use arena::{ExecArenaView, ParamArena, PlanRef};
 pub use arena::{ExprRef, MetaArena, PlanArena, TableArena, TableArenaCell};
-pub(crate) use arena::{ParamArena, PlanRef};
 pub(crate) use plan_keeper::{PlanInput, PlanKeeper};
+pub use scalar_query_ref::ScalarQueryRef;
 
 pub(crate) trait Explain {
     fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result;
@@ -253,7 +255,11 @@ impl LogicalPlan {
                 }
                 _ => unreachable!(),
             },
-            Operator::ScalarApply(_) | Operator::Join(_) => match childrens {
+            Operator::ScalarQueryInit(_) => match childrens {
+                Childrens::Twins { left, .. } => left.output_schema(arena).clone(),
+                _ => unreachable!(),
+            },
+            Operator::Join(_) => match childrens {
                 Childrens::Twins { left, right } => {
                     let mut schema = left.output_schema(arena).clone();
                     schema.extend_from_slice(right.output_schema(arena));
