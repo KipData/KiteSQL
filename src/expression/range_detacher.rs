@@ -693,11 +693,12 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                         Ok(Range::Eq(unpack_bound(bound_eq)))
                     }
                     BinaryOperator::Or => {
+                        // NULL sorts after every value, so only an unbounded `max` already covers it.
                         if eq.is_null() {
-                            return Ok(if matches!(min, Bound::Excluded(_)) {
-                                Range::SortedRanges(vec![Range::Eq(eq), Range::Scope { min, max }])
-                            } else {
+                            return Ok(if matches!(max, Bound::Unbounded) {
                                 Range::Scope { min, max }
+                            } else {
+                                Range::SortedRanges(vec![Range::Scope { min, max }, Range::Eq(eq)])
                             });
                         }
                         let bound_eq = Bound::Excluded(eq);
@@ -868,7 +869,12 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                             .then_some(Placement::After)
                     })
             }
-            (Range::Eq(l_val), Range::Eq(r_val)) => match l_val.partial_cmp(r_val) {
+            (Range::Eq(l_val), Range::Eq(r_val)) => match Self::bound_compared(
+                &Bound::Included(l_val),
+                &Bound::Included(r_val),
+                false,
+                false,
+            ) {
                 Some(Ordering::Less) => Some(Placement::Before),
                 Some(Ordering::Greater) => Some(Placement::After),
                 _ => None,
@@ -970,19 +976,13 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                     return;
                 }
                 Placement::After => idx += 1,
-                Placement::Overlap => match (&binary, &ranges[idx]) {
-                    (Range::Scope { .. }, Range::Eq(r_val)) if r_val.is_null() => {
-                        let _ = ranges.remove(idx);
-                    }
-                    (Range::Eq(l_val), Range::Scope { .. }) if l_val.is_null() => {
-                        binary = ranges.remove(idx);
-                    }
-                    _ => match Self::merge_binary(BinaryOperator::Or, binary, ranges.remove(idx)) {
+                Placement::Overlap => {
+                    match Self::merge_binary(BinaryOperator::Or, binary, ranges.remove(idx)) {
                         Ok(range @ (Range::Scope { .. } | Range::Eq(_))) => binary = range,
                         Ok(range) => return Self::union_ranges(range, ranges),
                         Err(_) => return,
-                    },
-                },
+                    }
+                }
             }
         }
         ranges.push(binary);
