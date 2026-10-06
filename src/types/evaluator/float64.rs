@@ -26,9 +26,6 @@ use rust_decimal::prelude::FromPrimitive;
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::hint;
-pub fn float64_plus_unary_eval(value: &DataValue) -> DataValue {
-    value.clone()
-}
 pub fn float64_minus_unary_eval(value: &DataValue) -> DataValue {
     match value {
         DataValue::Float64(value) => DataValue::Float64(-value),
@@ -194,7 +191,6 @@ mod test {
     fn test_float64_binary_and_cast_evaluators() {
         let value = DataValue::Float64(ordered_float::OrderedFloat(1.5));
 
-        assert_eq!(float64_plus_unary_eval(&value), value);
         assert_eq!(
             float64_minus_unary_eval(&value),
             DataValue::Float64(ordered_float::OrderedFloat(-1.5))

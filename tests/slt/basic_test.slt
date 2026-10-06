@@ -3,6 +3,32 @@ select 1
 ----
 1
 
+query IIIII
+select 5/2, -5/2, 5/-2, -5/-2, 66 + 15/-71;
+----
+2 -2 -2 2 66
+
+query I
+select cast(9007199254740993 as bigint)/1;
+----
+9007199254740993
+
+query RRR
+select 5.0/2, 5/cast(2 as double), cast(5 as float)/cast(2 as float) + cast(1 as float);
+----
+2.5 2.5 3.5
+
+query II
+select null/2, 2/null;
+----
+NULL NULL
+
+statement error division by zero
+select 1/0;
+
+statement error over flow
+select cast(-2147483648 as int)/-1;
+
 query R
 select 10000.00::FLOAT + 234.567::FLOAT
 ----

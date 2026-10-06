@@ -561,7 +561,12 @@ macro_rules! numeric_binary_evaluator_definition {
                 right: &$crate::types::value::DataValue,
             ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
                 Ok(match (left, right) {
-                    ($compute_type(v1), $compute_type(v2)) => $crate::types::value::DataValue::Float64(ordered_float::OrderedFloat(*v1 as f64 / *v2 as f64)),
+                    ($compute_type(v1), $compute_type(v2)) => {
+                        if *v2 == 0 {
+                            return Err($crate::errors::DatabaseError::InvalidValue("division by zero".into()));
+                        }
+                        $compute_type(v1.checked_div(*v2).ok_or($crate::errors::DatabaseError::OverFlow)?)
+                    },
                     ($compute_type(_), $crate::types::value::DataValue::Null)
                     | ($crate::types::value::DataValue::Null, $compute_type(_))
                     | ($crate::types::value::DataValue::Null, $crate::types::value::DataValue::Null) => $crate::types::value::DataValue::Null,
@@ -718,6 +723,72 @@ mod test {
             binary_pos(BINARY_UTF8_BASE, UTF8_STRING_CONCAT_OFFSET)
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn integer_division_truncates_and_checks_errors() -> Result<(), DatabaseError> {
+        macro_rules! check_signed {
+            ($ty:expr, $variant:ident, $int:ty) => {{
+                let divide = binary_create(Cow::Owned($ty), BinaryOperator::Divide)?;
+                for (left, right, expected) in [(5, 2, 2), (-5, 2, -2), (5, -2, -2), (-5, -2, 2)] {
+                    assert_eq!(
+                        divide
+                            .binary_eval(&DataValue::$variant(left), &DataValue::$variant(right))?,
+                        DataValue::$variant(expected)
+                    );
+                }
+                assert!(matches!(
+                    divide.binary_eval(&DataValue::$variant(<$int>::MIN), &DataValue::$variant(-1)),
+                    Err(DatabaseError::OverFlow)
+                ));
+                assert!(matches!(
+                    divide.binary_eval(&DataValue::$variant(1), &DataValue::$variant(0)),
+                    Err(DatabaseError::InvalidValue(_))
+                ));
+                assert_eq!(
+                    divide.binary_eval(&DataValue::Null, &DataValue::$variant(0))?,
+                    DataValue::Null
+                );
+            }};
+        }
+        check_signed!(LogicalType::Tinyint, Int8, i8);
+        check_signed!(LogicalType::Smallint, Int16, i16);
+        check_signed!(LogicalType::Integer, Int32, i32);
+        check_signed!(LogicalType::Bigint, Int64, i64);
+        for (ty, left, right, expected) in [
+            (
+                LogicalType::UTinyint,
+                DataValue::UInt8(5),
+                DataValue::UInt8(2),
+                DataValue::UInt8(2),
+            ),
+            (
+                LogicalType::USmallint,
+                DataValue::UInt16(5),
+                DataValue::UInt16(2),
+                DataValue::UInt16(2),
+            ),
+            (
+                LogicalType::UInteger,
+                DataValue::UInt32(5),
+                DataValue::UInt32(2),
+                DataValue::UInt32(2),
+            ),
+            (
+                LogicalType::UBigint,
+                DataValue::UInt64(9007199254740993),
+                DataValue::UInt64(1),
+                DataValue::UInt64(9007199254740993),
+            ),
+        ] {
+            let divide = binary_create(Cow::Owned(ty), BinaryOperator::Divide)?;
+            assert_eq!(divide.binary_eval(&left, &right)?, expected);
+            assert_eq!(
+                divide.binary_eval(&left, &DataValue::Null)?,
+                DataValue::Null
+            );
+        }
         Ok(())
     }
 

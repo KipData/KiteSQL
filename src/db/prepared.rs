@@ -155,18 +155,18 @@ mod tests {
             "select (($1 * 3 + 7) % 97) + ($1 / 2)",
             &[(1, LogicalType::Bigint)],
         )?;
-        for (value, expected) in [(7, 31.5), (23, 87.5)] {
+        for (value, expected) in [(7, 31_i64), (23, 87_i64)] {
             let mut iter = db.execute(&plan, [(1, DataValue::Int64(value))])?;
             iter.schema(|schema| {
                 assert_eq!(schema.len(), 1);
                 assert_eq!(
                     schema.iter().next().unwrap().datatype(),
-                    &LogicalType::Double
+                    &LogicalType::Bigint
                 );
             });
             assert_eq!(
                 iter.next_tuple(|_, row| row.values.clone())?,
-                Some(vec![DataValue::Float64(expected.into())])
+                Some(vec![DataValue::Int64(expected)])
             );
             assert!(iter.next_tuple(|_, _| ())?.is_none());
             iter.done()?;
@@ -175,7 +175,7 @@ mod tests {
         let mut iter = tx.execute(&plan, [(1, DataValue::Int64(7))])?;
         assert_eq!(
             iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Float64(31.5.into())])
+            Some(vec![DataValue::Int64(31)])
         );
         iter.done()?;
         tx.commit()?;

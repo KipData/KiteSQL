@@ -146,6 +146,7 @@ query I rowsort
 select id from t where b / 2 = 1;
 ----
 1
+2
 
 # more than one column
 query I rowsort
