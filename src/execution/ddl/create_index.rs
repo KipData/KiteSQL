@@ -24,6 +24,7 @@ use crate::planner::MetaArena;
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::Schema;
+use crate::types::value::DataValue;
 use crate::types::ColumnId;
 
 pub struct CreateIndex<'a> {
@@ -119,7 +120,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             if arena.result_tuple().pk.is_none() {
                 continue;
             }
-            arena.rewrite(&column_exprs, plan_arena, None)?;
+            arena.rewrite(&column_exprs, plan_arena, None::<&[DataValue]>)?;
             {
                 let mut state = arena.local_state(plan_arena);
                 let (tuple, transaction, table_codec) = state.tuple_transaction_codec_mut();

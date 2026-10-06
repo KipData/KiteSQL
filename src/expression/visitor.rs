@@ -21,7 +21,7 @@ use crate::expression::window::WindowCall;
 use crate::expression::{
     AliasType, BinaryOperator, ScalarExpression, TrimWhereField, UnaryOperator,
 };
-use crate::planner::{ExprRef, MetaArena};
+use crate::planner::{ExprRef, MetaArena, ScalarQueryRef};
 use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -47,6 +47,15 @@ pub trait ExprVisitor<A: MetaArena + ?Sized>: Sized {
         _arena: &A,
     ) -> Result<bool, DatabaseError> {
         Ok(true)
+    }
+
+    fn visit_init(
+        &mut self,
+        _id: ScalarQueryRef,
+        _ty: &LogicalType,
+        _arena: &A,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
     }
 
     fn visit_constant(&mut self, _value: &DataValue) -> Result<(), DatabaseError> {
@@ -294,6 +303,7 @@ pub fn walk_expr<A: MetaArena + ?Sized, V: ExprVisitor<A>>(
 ) -> Result<(), DatabaseError> {
     match arena.expression(expr) {
         ScalarExpression::Constant(value) => visitor.visit_constant(value),
+        ScalarExpression::Init { id, ty } => visitor.visit_init(*id, ty, arena),
         ScalarExpression::ColumnRef { column, .. } => visitor.visit_column_ref(column),
         ScalarExpression::Alias { expr, alias } => visitor.visit_alias(*expr, alias, arena),
         ScalarExpression::TypeCast {

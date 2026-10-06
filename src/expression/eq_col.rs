@@ -22,8 +22,8 @@ use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::window::WindowCall;
 use crate::expression::{BinaryOperator, ScalarExpression, TrimWhereField, UnaryOperator};
-use crate::planner::ExprRef;
 use crate::planner::MetaArena;
+use crate::planner::{ExprRef, ScalarQueryRef};
 use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -81,6 +81,22 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
             return Ok(());
         }
         walk_expr(self, lhs, arena)
+    }
+
+    fn visit_init(
+        &mut self,
+        id: ScalarQueryRef,
+        ty: &LogicalType,
+        _arena: &(dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        self.equal = match self.rhs() {
+            ScalarExpression::Init {
+                id: rhs_id,
+                ty: rhs_ty,
+            } => id == *rhs_id && ty == rhs_ty,
+            _ => false,
+        };
+        Ok(())
     }
 
     fn visit_constant(&mut self, lhs: &DataValue) -> Result<(), DatabaseError> {

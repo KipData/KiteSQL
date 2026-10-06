@@ -108,7 +108,7 @@ impl NormalizationRuleRootTag {
         match operator {
             Operator::Aggregate(_) => Some(Self::Aggregate),
             Operator::MarkApply(_) => Some(Self::MarkApply),
-            Operator::ScalarApply(_) => Some(Self::Any),
+            Operator::ScalarQueryInit(_) => Some(Self::Any),
             Operator::Filter(_) => Some(Self::Filter),
             Operator::Join(_) => Some(Self::Join),
             Operator::Limit(_) => Some(Self::Limit),

@@ -518,7 +518,7 @@ impl ColumnPruning {
             }
             Operator::Sort(_)
             | Operator::Limit(_)
-            | Operator::ScalarApply(_)
+            | Operator::ScalarQueryInit(_)
             | Operator::MarkApply(_)
             | Operator::ScalarSubquery(_)
             | Operator::Join(_)
@@ -527,11 +527,30 @@ impl ColumnPruning {
             | Operator::SetMembership(_)
             | Operator::TopK(_)
             | Operator::Window(_) => {
-                if matches!(operator, Operator::ScalarApply(_) | Operator::MarkApply(_)) {
-                    let mut child_required = required_columns;
-                    Self::extend_operator_referenced_columns(operator, &mut child_required, arena)?;
+                if matches!(operator, Operator::ScalarQueryInit(_)) {
+                    let Childrens::Twins { left, right } = childrens else {
+                        unreachable!("scalar initialization requires two children");
+                    };
+                    Self::_apply_appending(required_columns, all_referenced, left, outcome, arena)?;
+                    changed |= outcome.changed;
+                    let main_removed_end = outcome.removed_positions.len();
+                    Self::_apply_appending(
+                        ReferencedColumns::default(),
+                        true,
+                        right,
+                        outcome,
+                        arena,
+                    )?;
+                    changed |= outcome.changed;
+                    outcome.removed_positions.truncate(main_removed_end);
+                } else if matches!(operator, Operator::MarkApply(_)) {
+                    Self::extend_operator_referenced_columns(
+                        operator,
+                        &mut required_columns,
+                        arena,
+                    )?;
                     changed |= Self::apply_twins(
-                        child_required,
+                        required_columns,
                         true,
                         childrens,
                         outcome,
@@ -541,10 +560,9 @@ impl ColumnPruning {
                     outcome.removed_positions.truncate(output_start);
                 } else if matches!(operator, Operator::Join(_)) {
                     let (old_left_outputs_len, left_removed_start, right_removed_start) = {
-                        let mut child_required = required_columns;
                         Self::extend_operator_referenced_columns(
                             operator,
-                            &mut child_required,
+                            &mut required_columns,
                             arena,
                         )?;
                         let old_left_outputs_len = match childrens {
@@ -559,7 +577,7 @@ impl ColumnPruning {
 
                         let left_removed_start = outcome.removed_positions.len();
                         Self::_apply_appending(
-                            child_required.clone(),
+                            required_columns.clone(),
                             all_referenced,
                             left.as_mut(),
                             outcome,
@@ -568,7 +586,7 @@ impl ColumnPruning {
                         let left_changed = outcome.changed;
                         let right_removed_start = outcome.removed_positions.len();
                         Self::_apply_appending(
-                            child_required,
+                            required_columns,
                             all_referenced,
                             right.as_mut(),
                             outcome,
@@ -657,10 +675,13 @@ impl ColumnPruning {
                         outcome.removed_positions.truncate(output_start);
                     }
                 } else if matches!(operator, Operator::Union(_) | Operator::SetMembership(_)) {
-                    let mut child_required = required_columns;
-                    Self::extend_operator_referenced_columns(operator, &mut child_required, arena)?;
+                    Self::extend_operator_referenced_columns(
+                        operator,
+                        &mut required_columns,
+                        arena,
+                    )?;
                     changed |= Self::apply_twins(
-                        child_required,
+                        required_columns,
                         all_referenced,
                         childrens,
                         outcome,
@@ -671,14 +692,13 @@ impl ColumnPruning {
                 } else {
                     let child_start = outcome.removed_positions.len();
                     let child_changed = {
-                        let mut child_required = required_columns;
                         Self::extend_operator_referenced_columns(
                             operator,
-                            &mut child_required,
+                            &mut required_columns,
                             arena,
                         )?;
                         Self::apply_only_child(
-                            child_required,
+                            required_columns,
                             all_referenced,
                             childrens,
                             outcome,

@@ -50,7 +50,10 @@ impl TableFunctionImpl for Numbers {
         args: &[ExprRef],
         arena: &(dyn MetaArena + '_),
     ) -> Result<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>, DatabaseError> {
-        let mut value = arena.expression(args[0]).eval(arena, None)?.into_owned();
+        let mut value = arena
+            .expression(args[0])
+            .eval::<[DataValue]>(arena, None)?
+            .into_owned();
 
         value = value.cast(&LogicalType::Integer)?;
         let num = value

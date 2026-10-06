@@ -183,7 +183,7 @@ impl ColumnCatalog {
             .map(|expr| {
                 arena
                     .expression(*expr)
-                    .eval(arena, None)
+                    .eval::<[DataValue]>(arena, None)
                     .map(Cow::into_owned)
             })
             .transpose()

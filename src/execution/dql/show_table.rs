@@ -29,7 +29,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowTables<'a, T> {
     fn into_executor(
         _: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: &mut (dyn MetaArena + 'a),
+        _: &mut (dyn MetaArena + '_),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
