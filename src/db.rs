@@ -25,6 +25,7 @@ use crate::expression::function::table::{
     ArcTableFunctionImpl, TableFunctionCatalog, TableFunctionImpl,
 };
 use crate::expression::function::FunctionSummary;
+use crate::function::abs::Abs;
 use crate::function::char_length::CharLength;
 #[cfg(feature = "time")]
 use crate::function::current_date::CurrentDate;
@@ -297,6 +298,9 @@ impl DataBaseBuilder {
             _p: Default::default(),
         };
 
+        for ty in Abs::types() {
+            state.load_scalar_function(Abs::new(ty));
+        }
         state.load_scalar_function(CharLength::new("char_length".to_lowercase()));
         state.load_scalar_function(CharLength::new("character_length".to_lowercase()));
         #[cfg(feature = "time")]
