@@ -29,7 +29,7 @@ select id from s where char_length(c) + 1 > 3;
 query I
 select char_length(c) from s where id = 3;
 ----
-null
+NULL
 
 statement ok
 drop table s

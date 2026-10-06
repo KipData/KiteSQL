@@ -40,9 +40,9 @@ select * from t
 3 3 3 30 300
 4 4 4 40 400
 5 5 1 10 100
-6 6 1 10 null
-7 7 10 1 null
-8 8 null null null
+6 6 1 10 NULL
+7 7 10 1 NULL
+8 8 NULL NULL NULL
 
 statement ok
 drop table t;

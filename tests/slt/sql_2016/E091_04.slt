@@ -6,7 +6,7 @@ CREATE TABLE TABLE_E091_04_01_01 ( ID INT PRIMARY KEY, A FLOAT );
 query F
 SELECT MIN ( A ) FROM TABLE_E091_04_01_01
 ----
-null
+NULL
 
 statement ok
 drop table table_e091_04_01_01

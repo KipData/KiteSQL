@@ -202,7 +202,7 @@ select * from t1 where (c1 = 7 or c1 = 10) and c2 < 9;
 query IIT
 select * from t1 where c1 is null and c2 is null;
 ----
-100000000 null null
+100000000 NULL NULL
 
 query IIT
 select * from t1 where c1 > 0 and c1 < 8;

@@ -53,9 +53,9 @@ insert into distinct_alias values (0, 1, 2, 'a', 1.5), (1, 2, null, null, null),
 query TT rowsort
 select distinct lower(c) as x, c from distinct_alias;
 ----
+NULL NULL
 a A
 a a
-null null
 
 query T rowsort
 select distinct (a = 1) as x from distinct_alias;
@@ -73,7 +73,7 @@ query T rowsort
 select distinct upper(c) as x from distinct_alias order by x;
 ----
 A
-null
+NULL
 
 statement ok
 drop table distinct_alias

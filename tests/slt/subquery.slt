@@ -398,8 +398,8 @@ insert into scalar_outer values (1), (2);
 query IT
 select id, (select v from scalar_inner where v = -1) from scalar_outer order by id;
 ----
-1 null
-2 null
+1 NULL
+2 NULL
 
 statement ok
 drop table scalar_outer;
@@ -539,9 +539,9 @@ query II
 select outer_row.id, (select v from scalar_eof where id < 0)
 from scalar_eof outer_row order by outer_row.id;
 ----
-1 null
-2 null
-3 null
+1 NULL
+2 NULL
+3 NULL
 
 # Validate before accepting the cached scalar, including a single outer-row limit.
 statement error

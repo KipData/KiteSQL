@@ -18,7 +18,7 @@ select v from set_left union select v from set_right
 3
 4
 5
-null
+NULL
 
 query I rowsort
 select v from set_left union all select v from set_right
@@ -33,9 +33,9 @@ select v from set_left union all select v from set_right
 3
 4
 5
-null
-null
-null
+NULL
+NULL
+NULL
 
 # Edge case: tuple values should be compared as whole set values across set
 # operators, rather than flattening their fields or comparing only one slot.
@@ -75,14 +75,14 @@ select v from set_left except all select v from set_right
 ----
 2
 5
-null
+NULL
 
 query I rowsort
 select v from set_left intersect select v from set_right
 ----
 1
 3
-null
+NULL
 
 # Edge case: INTERSECT ALL emits min(left_count, right_count), so value 1
 # appears twice even though the right side has three copies.
@@ -92,14 +92,14 @@ select v from set_left intersect all select v from set_right
 1
 1
 3
-null
+NULL
 
 # Edge case: set membership treats NULL as a set value for duplicate
 # elimination/matching, unlike ordinary NULL = NULL predicate evaluation.
 query I rowsort
 select v from set_left where v is null intersect select v from set_right where v is null
 ----
-null
+NULL
 
 query I rowsort
 select v from set_left where v is null except select v from set_right where v is null
@@ -110,7 +110,7 @@ select v from set_left intersect select v from set_right order by v desc
 ----
 3
 1
-null
+NULL
 
 # Regression: branch table names from a set operation must not leak to the
 # top-level ORDER BY scope.

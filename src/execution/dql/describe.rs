@@ -115,7 +115,7 @@ fn describe_default(column: &ColumnCatalog, arena: &(dyn MetaArena + '_)) -> Str
         .default
         .as_ref()
         .map(|expr| expr.output_name(arena))
-        .unwrap_or_else(|| "null".to_string())
+        .unwrap_or_else(|| "NULL".to_string())
 }
 
 fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog, default: String) {

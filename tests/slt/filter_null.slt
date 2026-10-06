@@ -35,7 +35,7 @@ select * from t where v1 > 1
 query III
 select * from t where v1 is null
 ----
-1 null 3
+1 NULL 3
 
 query III
 select * from t where v1 is not null

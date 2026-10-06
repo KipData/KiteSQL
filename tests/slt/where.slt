@@ -241,7 +241,7 @@ select id from in_ty where (b % 2) in (0, null);
 query T rowsort
 select (b % 2) in (0, null) from in_ty;
 ----
-null
+NULL
 true
 true
 
@@ -269,8 +269,8 @@ insert into between_ty values (0, 1e300), (1, 1.5), (2, null);
 query T rowsort
 select d not between 0 and 3 from between_ty;
 ----
+NULL
 false
-null
 true
 
 query I rowsort
@@ -290,7 +290,7 @@ drop table between_ty
 query TTTTT
 select 1 between 3 and null, 1 not between 3 and null, 5 between 3 and null, -1 not between 2 and null, 5 between null and 3;
 ----
-false true null true false
+false true NULL true false
 
 statement ok
 create table between_null(id int primary key, a int);
@@ -327,9 +327,9 @@ select id from tuple_in where (a, b) in ((1, 10), (4, null), (null, 50));
 query T rowsort
 select (a, b) in ((1, 10), (4, null)) from tuple_in;
 ----
-null
-null
-null
+NULL
+NULL
+NULL
 true
 
 query I rowsort

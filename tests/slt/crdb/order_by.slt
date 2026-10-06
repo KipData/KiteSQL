@@ -12,21 +12,21 @@ SELECT c FROM t ORDER BY c
 ----
 false
 true
-null
+NULL
 
 query I
 SELECT c FROM t ORDER BY c
 ----
 false
 true
-null
+NULL
 
 query I
 SELECT c FROM t ORDER BY c DESC
 ----
 true
 false
-null
+NULL
 
 query II
 SELECT a, b FROM t ORDER BY b
@@ -166,18 +166,18 @@ SELECT * FROM t ORDER BY true,a
 ----
 1 9 true
 2 8 false
-3 7 null
-4 7 null
-5 7 null
+3 7 NULL
+4 7 NULL
+5 7 NULL
 
 query III
 SELECT * FROM t ORDER BY "a"
 ----
 1 9 true
 2 8 false
-3 7 null
-4 7 null
-5 7 null
+3 7 NULL
+4 7 NULL
+5 7 NULL
 
 query error
 SELECT * FROM t ORDER BY 2.5,a
@@ -232,8 +232,8 @@ INSERT INTO bar VALUES (0, NULL), (1, NULL)
 query IT
 SELECT * FROM bar ORDER BY baz, id
 ----
-0 null
-1 null
+0 NULL
+1 NULL
 
 statement ok
 drop table if exists abcd
@@ -272,8 +272,8 @@ INSERT INTO store VALUES (0, NULL, 10), (1, NULL, 5)
 query ITI
 SELECT * FROM store ORDER BY baz, extra
 ----
-1  null  5
-0  null  10
+1  NULL  5
+0  NULL  10
 
 statement ok
 drop table if exists xy
@@ -287,42 +287,42 @@ INSERT INTO xy VALUES (0, 2, NULL), (1, NULL, 6), (2, 2, 5), (3, 4, 8)
 query IT
 SELECT x, y FROM xy ORDER BY y NULLS FIRST
 ----
-2 null
+2 NULL
 2 5
-null 6
+NULL 6
 4 8
 
 query II
 SELECT x, y FROM xy ORDER BY y NULLS LAST
 ----
 2 5
-null 6
+NULL 6
 4 8
-2 null
+2 NULL
 
 query IT
 SELECT x, y FROM xy ORDER BY y DESC NULLS FIRST
 ----
-2 null
+2 NULL
 4 8
-null 6
+NULL 6
 2 5
 
 query II
 SELECT x, y FROM xy ORDER BY y DESC NULLS LAST
 ----
 4 8
-null 6
+NULL 6
 2 5
-2 null
+2 NULL
 
 query II
 SELECT x, y FROM xy ORDER BY y NULLS LAST
 ----
 2 5
-null 6
+NULL 6
 4 8
-2 null
+2 NULL
 
 statement ok
 INSERT INTO xy VALUES (4, NULL, NULL)
@@ -330,72 +330,72 @@ INSERT INTO xy VALUES (4, NULL, NULL)
 query TI
 SELECT x, y FROM xy ORDER BY x NULLS FIRST, y NULLS LAST
 ----
-null 6
-null null
+NULL 6
+NULL NULL
 2 5
-2 null
+2 NULL
 4 8
 
 query IT
 SELECT x, y FROM xy ORDER BY x NULLS LAST, y DESC NULLS FIRST
 ----
-2 null
+2 NULL
 2 5
 4 8
-null null
-null 6
+NULL NULL
+NULL 6
 
 query II
 SELECT x, y FROM xy ORDER BY x, y
 ----
 2 5
-2 null
+2 NULL
 4 8
-null 6
-null null
+NULL 6
+NULL NULL
 
 query IT
 SELECT x, y FROM xy ORDER BY x, y DESC NULLS FIRST
 ----
-2 null
+2 NULL
 2 5
 4 8
-null null
-null 6
+NULL NULL
+NULL 6
 
 query IT
 SELECT x, y FROM xy ORDER BY x NULLS LAST, y DESC NULLS FIRST
 ----
-2 null
+2 NULL
 2 5
 4 8
-null null
-null 6
+NULL NULL
+NULL 6
 
 query TT
 SELECT x, y FROM xy ORDER BY x NULLS FIRST, y DESC NULLS LAST
 ----
-null 6
-null null
+NULL 6
+NULL NULL
 2 5
-2 null
+2 NULL
 4 8
 
 query TT
 SELECT x, y FROM xy ORDER BY x NULLS FIRST, y DESC
 ----
-null 6
-null null
+NULL 6
+NULL NULL
 2 5
-2 null
+2 NULL
 4 8
 
 query TI
 SELECT x, y FROM xy ORDER BY x NULLS FIRST, y DESC NULLS FIRST
 ----
-null null
-null 6
-2 null
+NULL NULL
+NULL 6
+2 NULL
 2 5
 4 8
 

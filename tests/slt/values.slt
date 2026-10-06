@@ -27,7 +27,7 @@ query I
 SELECT * FROM (VALUES (1), (NULL), (3));
 ----
 1
-null
+NULL
 3
 
 statement ok
