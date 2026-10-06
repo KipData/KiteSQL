@@ -86,17 +86,17 @@ insert into sn values (1, 1), (2, 2);
 query I
 select sum(null) from sn;
 ----
-null
+NULL
 
 query I
 select sum(distinct null) from sn;
 ----
-null
+NULL
 
 query I
 select (select sum(null) from sn) from sn where id = 1;
 ----
-null
+NULL
 
 statement ok
 drop table sn

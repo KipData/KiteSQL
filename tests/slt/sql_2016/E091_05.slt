@@ -6,7 +6,7 @@ CREATE TABLE TABLE_E091_05_01_01 ( ID INT PRIMARY KEY, A FLOAT );
 query F
 SELECT SUM ( A ) FROM TABLE_E091_05_01_01
 ----
-null
+NULL
 
 statement ok
 drop table table_e091_05_01_01

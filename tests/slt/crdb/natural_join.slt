@@ -81,9 +81,9 @@ query II
 SELECT k, x FROM t1 NATURAL JOIN t2
 ----
 0 0
-0 null
-null 0
-null null
+0 NULL
+NULL 0
+NULL NULL
 
 query II
 SELECT k, x FROM t1 JOIN t2 ON k = x

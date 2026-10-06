@@ -25,9 +25,9 @@ alter table alter_users alter column v2 type bigint
 query TTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-v2 Bigint 8 true EMPTY null
+id Integer 4 false PRIMARY NULL
+value1 Integer 4 true UNIQUE NULL
+v2 Bigint 8 true EMPTY NULL
 
 query I
 select v2 from alter_users order by id
@@ -41,9 +41,9 @@ alter table alter_users change column v2 value2 bigint
 query TTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Bigint 8 true EMPTY null
+id Integer 4 false PRIMARY NULL
+value1 Integer 4 true UNIQUE NULL
+value2 Bigint 8 true EMPTY NULL
 
 statement ok
 alter table alter_users alter column value2 set default 999
@@ -65,7 +65,7 @@ insert into alter_users (id, value1) values (4, 44)
 query T
 select value2 from alter_users where id = 4
 ----
-null
+NULL
 
 statement error
 alter table alter_users alter column value2 set not null
@@ -79,9 +79,9 @@ alter table alter_users alter column value2 set not null
 query TTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Bigint 8 false EMPTY null
+id Integer 4 false PRIMARY NULL
+value1 Integer 4 true UNIQUE NULL
+value2 Bigint 8 false EMPTY NULL
 
 statement error
 insert into alter_users (id, value1) values (5, 55)
@@ -95,7 +95,7 @@ insert into alter_users (id, value1) values (6, 66)
 query T
 select value2 from alter_users where id = 6
 ----
-null
+NULL
 
 statement ok
 alter table alter_users modify column value2 int
@@ -103,9 +103,9 @@ alter table alter_users modify column value2 int
 query TTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Integer 4 true EMPTY null
+id Integer 4 false PRIMARY NULL
+value1 Integer 4 true UNIQUE NULL
+value2 Integer 4 true EMPTY NULL
 
 query I
 select value2 from alter_users where value2 is not null order by id
@@ -124,9 +124,9 @@ alter table alter_users change column value2 value2 int not null
 query TTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
-value2 Integer 4 false EMPTY null
+id Integer 4 false PRIMARY NULL
+value1 Integer 4 true UNIQUE NULL
+value2 Integer 4 false EMPTY NULL
 
 statement error
 insert into alter_users (id, value1) values (7, 77)
@@ -145,8 +145,8 @@ select value2 from alter_users where id = 7
 query TTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
+id Integer 4 false PRIMARY NULL
+value1 Integer 4 true UNIQUE NULL
 value2 Integer 4 false EMPTY 707
 
 statement ok
@@ -163,8 +163,8 @@ select value2 from alter_users where id = 8
 query TTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
+id Integer 4 false PRIMARY NULL
+value1 Integer 4 true UNIQUE NULL
 value2 Integer 4 true EMPTY 707
 
 statement ok
@@ -173,8 +173,8 @@ alter table alter_users modify column value2 int not null
 query TTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
+id Integer 4 false PRIMARY NULL
+value1 Integer 4 true UNIQUE NULL
 value2 Integer 4 false EMPTY 707
 
 statement ok
@@ -191,8 +191,8 @@ select value2 from alter_users where id = 9
 query TTTTTT
 describe alter_users
 ----
-id Integer 4 false PRIMARY null
-value1 Integer 4 true UNIQUE null
+id Integer 4 false PRIMARY NULL
+value1 Integer 4 true UNIQUE NULL
 value2 Integer 4 false EMPTY 808
 
 statement ok

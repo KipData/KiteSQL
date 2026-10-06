@@ -19,10 +19,10 @@ alter table t1 add column v4 int not null
 query IIII rowsort
 select * from t1
 ----
-1 1 null 0
-2 2 null 0
-3 3 null 0
-4 4 null 0
+1 1 NULL 0
+2 2 NULL 0
+3 3 NULL 0
+4 4 NULL 0
 
 statement ok
 alter table t1 drop column if exists v1
@@ -38,10 +38,10 @@ alter table t1 drop column id
 query IIII rowsort
 select * from t1
 ----
-1 null 0
-2 null 0
-3 null 0
-4 null 0
+1 NULL 0
+2 NULL 0
+3 NULL 0
+4 NULL 0
 
 statement ok
 create table t2(id int primary key, v1 int)
@@ -72,8 +72,8 @@ insert into t3 values (1, 10), (2, 20)
 query TTTTTT
 describe t3
 ----
-id Integer 4 false PRIMARY null
-v Integer 4 true EMPTY null
+id Integer 4 false PRIMARY NULL
+v Integer 4 true EMPTY NULL
 
 statement ok
 insert into t3 values (3, 10)
@@ -107,8 +107,8 @@ select * from t3
 query TTTTTT
 describe t3
 ----
-id Integer 4 false PRIMARY null
-v Integer 4 true EMPTY null
+id Integer 4 false PRIMARY NULL
+v Integer 4 true EMPTY NULL
 
 statement error
 alter table t3 modify column v int first

@@ -25,7 +25,7 @@ SELECT * FROM abc
 query TIII
 SELECT NULL AS z, * FROM abc
 ----
-null 1 2 3
+NULL 1 2 3
 
 statement ok
 SELECT * FROM abc WHERE NULL
@@ -79,17 +79,17 @@ INSERT INTO kv (k, v) VALUES ('a', null)
 query TT
 SELECT * FROM kv
 ----
-a null
+a NULL
 
 query TT
 SELECT k,v FROM kv
 ----
-a null
+a NULL
 
 query T
 SELECT v||'foo' FROM kv
 ----
-null
+NULL
 
 # TODO: lower
 # query T
@@ -105,12 +105,12 @@ a
 query TT
 SELECT kv.K,KV.v FROM kv
 ----
-a null
+a NULL
 
 query TT
 SELECT kv.* FROM kv
 ----
-a null
+a NULL
 
 query T
 SELECT FOO.k FROM kv AS foo WHERE foo.k = 'a'
@@ -120,7 +120,7 @@ a
 query T
 SELECT foo.v FROM kv AS foo WHERE foo.k = 'a'
 ----
-null
+NULL
 
 onlyif mysql
 statement ok
@@ -232,7 +232,7 @@ INSERT INTO boolean_table (id, value) VALUES (1, NULL)
 query T
 SELECT value FROM boolean_table
 ----
-null
+NULL
 
 query I
 SELECT CASE WHEN NULL THEN 1 ELSE 2 END
@@ -267,7 +267,7 @@ true
 query T
 SELECT NULL IN (1, 2)
 ----
-null
+NULL
 
 query I
 SELECT 1 IN (1, NULL)
@@ -277,7 +277,7 @@ true
 query I
 SELECT 1 IN (NULL, 2)
 ----
-null
+NULL
 
 # statement error 1105
 # SELECT NULL IN ((1, 1))
@@ -530,7 +530,7 @@ INSERT INTO wide(id, n) VALUES(0, 10)
 query IITITTITTTTIRRI
 SELECT * FROM wide
 ----
-0 null null null null null null null null null null null null null 10
+0 NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL NULL 10
 
 statement ok
 drop table xyzw

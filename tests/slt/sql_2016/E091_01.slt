@@ -6,7 +6,7 @@ CREATE TABLE TABLE_E091_01_01_01 ( ID INT PRIMARY KEY, A FLOAT );
 query F
 SELECT AVG ( A ) FROM TABLE_E091_01_01_01
 ----
-null
+NULL
 
 statement ok
 drop table table_e091_01_01_01

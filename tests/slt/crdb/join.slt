@@ -11,14 +11,14 @@ query II
 SELECT * FROM onecolumn AS a(aid, x) CROSS JOIN onecolumn AS b(bid, y) order by x
 ----
 2 42 0 44
-2 42 1 null
+2 42 1 NULL
 2 42 2 42
 0 44 0 44
-0 44 1 null
+0 44 1 NULL
 0 44 2 42
-1 null 0 44
-1 null 1 null
-1 null 2 42
+1 NULL 0 44
+1 NULL 1 NULL
+1 NULL 2 42
 
 statement error
 SELECT x FROM onecolumn AS a, onecolumn AS b;
@@ -46,14 +46,14 @@ SELECT * FROM onecolumn AS a(aid, x) LEFT OUTER JOIN onecolumn AS b(bid, y) ON a
 ----
 2 42 2 42
 0 44 0 44
-1 null null null
+1 NULL NULL NULL
 
 query I
 SELECT * FROM onecolumn AS a LEFT OUTER JOIN onecolumn AS b USING(x) ORDER BY x
 ----
 2 42 2
 0 44 0
-1 null null
+1 NULL NULL
 
 statement error
 SELECT * FROM onecolumn AS a, onecolumn AS b ORDER BY x
@@ -63,28 +63,28 @@ SELECT * FROM onecolumn AS a NATURAL LEFT OUTER JOIN onecolumn AS b order by a.x
 ----
 2 42
 0 44
-1 null
+1 NULL
 
 query II
 SELECT * FROM onecolumn AS a(aid, x) RIGHT OUTER JOIN onecolumn AS b(bid, y) ON a.x = b.y order by x
 ----
 2 42 2 42
 0 44 0 44
-null null 1 null
+NULL NULL 1 NULL
 
 query I
 SELECT * FROM onecolumn AS a RIGHT OUTER JOIN onecolumn AS b USING(x) ORDER BY x
 ----
 2 2 42
 0 0 44
-null 1 null
+NULL 1 NULL
 
 query I
 SELECT * FROM onecolumn AS a NATURAL RIGHT OUTER JOIN onecolumn AS b order by x
 ----
 2 42
 0 44
-1 null
+1 NULL
 
 statement ok
 drop table if exists onecolumn_w
@@ -100,8 +100,8 @@ SELECT * FROM onecolumn AS a NATURAL JOIN onecolumn_w as b
 ----
 0 44 0 42
 0 44 1 43
-1 null 0 42
-1 null 1 43
+1 NULL 0 42
+1 NULL 1 43
 2 42 0 42
 2 42 1 43
 
@@ -118,38 +118,38 @@ query II
 SELECT * FROM onecolumn AS a FULL OUTER JOIN othercolumn AS b ON a.x = b.x ORDER BY a.x,b.x
 ----
 2 42 1 42
-0 44 null null
-null null 2 16
-null null 0 43
-1 null null null
+0 44 NULL NULL
+NULL NULL 2 16
+NULL NULL 0 43
+1 NULL NULL NULL
 
 query II
 SELECT * FROM onecolumn AS a full OUTER JOIN othercolumn AS b ON a.x = b.x and a.x > 16 order by a.x
 ----
 2 42 1 42
-0 44 null null
-null null 0 43
-null null 2 16
-1 null null null
+0 44 NULL NULL
+NULL NULL 0 43
+NULL NULL 2 16
+1 NULL NULL NULL
 
 query II
 SELECT * FROM onecolumn AS a full OUTER JOIN othercolumn AS b ON a.x = b.x and b.x > 16 order by b.x,a.x
 ----
-null null 2 16
+NULL NULL 2 16
 2 42 1 42
-null null 0 43
-0 44 null null
-1 null null null
+NULL NULL 0 43
+0 44 NULL NULL
+1 NULL NULL NULL
 
 query II
 SELECT a.x, b.x FROM onecolumn AS a full OUTER JOIN othercolumn AS b ON false order by a.x, b.x
 ----
-42 null
-44 null
-null 16
-null 42
-null 43
-null null
+42 NULL
+44 NULL
+NULL 16
+NULL 42
+NULL 43
+NULL NULL
 
 query II
 SELECT a.x, b.x FROM onecolumn AS a full OUTER JOIN othercolumn AS b ON true order by a.x, b.x
@@ -160,9 +160,9 @@ SELECT a.x, b.x FROM onecolumn AS a full OUTER JOIN othercolumn AS b ON true ord
 44 16
 44 42
 44 43
-null 16
-null 42
-null 43
+NULL 16
+NULL 42
+NULL 43
 
 # Tips: This case will make x take the value of both sides
 # query
@@ -212,16 +212,16 @@ SELECT * FROM empty AS a JOIN onecolumn AS b USING(x)
 query IT
 SELECT * FROM onecolumn AS a(aid, x) LEFT OUTER JOIN empty AS b(bid, y) ON a.x = b.y ORDER BY a.x
 ----
-2 42 null null
-0 44 null null
-1 null null null
+2 42 NULL NULL
+0 44 NULL NULL
+1 NULL NULL NULL
 
 query I rowsort
 SELECT * FROM onecolumn AS a LEFT OUTER JOIN empty AS b USING(x) ORDER BY x
 ----
-0 44 null
-1 null null
-2 42 null
+0 44 NULL
+1 NULL NULL
+2 42 NULL
 
 query I
 SELECT * FROM empty AS a(aid, x) LEFT OUTER JOIN onecolumn AS b(bid, y) ON a.x = b.y
@@ -242,9 +242,9 @@ SELECT * FROM onecolumn AS a RIGHT OUTER JOIN empty AS b USING(x)
 query II
 SELECT * FROM empty AS a(aid, x) FULL OUTER JOIN onecolumn AS b(bid, y) ON a.x = b.y ORDER BY b.y
 ----
-null null 2 42
-null null 0 44
-null null 1 null
+NULL NULL 2 42
+NULL NULL 0 44
+NULL NULL 1 NULL
 
 statement ok
 SELECT * FROM empty AS a FULL OUTER JOIN onecolumn AS b USING(x) ORDER BY x
@@ -252,23 +252,23 @@ SELECT * FROM empty AS a FULL OUTER JOIN onecolumn AS b USING(x) ORDER BY x
 query IIII
 SELECT * FROM onecolumn AS a(aid, x) FULL OUTER JOIN empty AS b(bid, y) ON a.x = b.y ORDER BY a.x
 ----
-2 42 null null
-0 44 null null
-1 null null null
+2 42 NULL NULL
+0 44 NULL NULL
+1 NULL NULL NULL
 
 query III rowsort
 SELECT * FROM onecolumn AS a FULL OUTER JOIN empty AS b USING(x) ORDER BY x
 ----
-0 44 null
-1 null null
-2 42 null
+0 44 NULL
+1 NULL NULL
+2 42 NULL
 
 query II
 SELECT * FROM empty AS a(aid, x) FULL OUTER JOIN onecolumn AS b(bid, y) ON a.x = b.y ORDER BY b.y
 ----
-null null 2 42
-null null 0 44
-null null 1 null
+NULL NULL 2 42
+NULL NULL 0 44
+NULL NULL 1 NULL
 
 # query
 # SELECT * FROM empty AS a FULL OUTER JOIN onecolumn AS b USING(x) ORDER BY x
@@ -292,7 +292,7 @@ query IIII
 SELECT * FROM twocolumn AS a JOIN twocolumn AS b ON a.x = a.y order by a.x
 ----
 3 45 45 0 44 51
-3 45 45 1 null 52
+3 45 45 1 NULL 52
 3 45 45 2 42 53
 3 45 45 3 45 45
 
@@ -307,22 +307,22 @@ query IT
 SELECT o.x, t.y FROM onecolumn o LEFT OUTER JOIN twocolumn t ON (o.x=t.x AND t.y=53) order by o.x
 ----
 42 53
-44 null
-null null
+44 NULL
+NULL NULL
 
 query II
 SELECT o.x, t.y FROM onecolumn o LEFT OUTER JOIN twocolumn t ON (o.x=t.x AND o.x=44) order by o.x
 ----
-42 null
+42 NULL
 44 51
-null null
+NULL NULL
 
 query II
 SELECT o.x, t.y FROM onecolumn o LEFT OUTER JOIN twocolumn t ON (o.x=t.x AND t.x=44) order by o.x
 ----
-42 null
+42 NULL
 44 51
-null null
+NULL NULL
 
 # query
 # SELECT * FROM (SELECT x, 2 two FROM onecolumn) NATURAL FULL JOIN (SELECT x, y+1 plus1 FROM twocolumn)
@@ -356,31 +356,31 @@ SELECT * FROM a LEFT OUTER JOIN b ON a.i = b.i
 ----
 1 2 0 2 true
 2 3 1 3 true
-0 1 null null null
+0 1 NULL NULL NULL
 
 query III
 SELECT * FROM a RIGHT OUTER JOIN b ON a.i = b.i order by b
 ----
-null null 2 4 false
+NULL NULL 2 4 false
 1 2 0 2 true
 2 3 1 3 true
 
 query III
 SELECT * FROM a FULL OUTER JOIN b ON a.i = b.i order by b
 ----
-null null 2 4 false
+NULL NULL 2 4 false
 1 2 0 2 true
 2 3 1 3 true
-0 1 null null null
+0 1 NULL NULL NULL
 
 query III
 SELECT * FROM a FULL OUTER JOIN b ON (a.i = b.i and a.i>2) ORDER BY a.i, b.i
 ----
-0 1 null null null
-1 2 null null null
+0 1 NULL NULL NULL
+1 2 NULL NULL NULL
 2 3 1 3 true
-null null 0 2 true
-null null 2 4 false
+NULL NULL 0 2 true
+NULL NULL 2 4 false
 
 statement ok
 INSERT INTO b VALUES (3, 3, false)
@@ -391,7 +391,7 @@ SELECT * FROM a RIGHT OUTER JOIN b ON a.i=b.i ORDER BY b.i, b.b
 1 2 0 2 true
 2 3 3 3 false
 2 3 1 3 true
-null null 2 4 false
+NULL NULL 2 4 false
 
 query III
 SELECT * FROM a FULL OUTER JOIN b ON a.i=b.i ORDER BY b.i, b.b
@@ -399,8 +399,8 @@ SELECT * FROM a FULL OUTER JOIN b ON a.i=b.i ORDER BY b.i, b.b
 1 2 0 2 true
 2 3 3 3 false
 2 3 1 3 true
-null null 2 4 false
-0 1 null null null
+NULL NULL 2 4 false
+0 1 NULL NULL NULL
 
 # TODO
 # query IIIIII
@@ -541,25 +541,25 @@ SELECT * FROM pairs, square WHERE pairs.a + pairs.b = square.sq
 query III
 SELECT a, b, n, sq FROM pairs FULL OUTER JOIN square ON pairs.a + pairs.b = square.sq order by a
 ----
-1 1 null null
-1 2 null null
+1 1 NULL NULL
+1 2 NULL NULL
 1 3 2 4
-1 4 null null
-1 5 null null
-1 6 null null
-2 3 null null
-2 4 null null
-2 5 null null
-2 6 null null
-3 4 null null
-3 5 null null
+1 4 NULL NULL
+1 5 NULL NULL
+1 6 NULL NULL
+2 3 NULL NULL
+2 4 NULL NULL
+2 5 NULL NULL
+2 6 NULL NULL
+3 4 NULL NULL
+3 5 NULL NULL
 3 6 3 9
 4 5 3 9
-4 6 null null
-null null 1 1
-null null 4 16
-null null 5 25
-null null 6 36
+4 6 NULL NULL
+NULL NULL 1 1
+NULL NULL 4 16
+NULL NULL 5 25
+NULL NULL 6 36
 
 query IIII
 SELECT pairs.a, pairs.b, square.* FROM pairs FULL OUTER JOIN square ON pairs.a + pairs.b = square.sq WHERE pairs.b%2 <> square.sq%2 order by a
@@ -570,29 +570,29 @@ SELECT pairs.a, pairs.b, square.* FROM pairs FULL OUTER JOIN square ON pairs.a +
 query IITT rowsort
 SELECT * FROM (SELECT * FROM pairs LEFT JOIN square ON b = sq AND a > 1 AND n < 6) WHERE b > 1 AND (n IS NULL OR n > 1) AND (n IS NULL OR a  < sq)
 ----
-1 1 2 null null
+1 1 2 NULL NULL
 10 3 4 2 4
-11 3 5 null null
-12 3 6 null null
-13 4 5 null null
-14 4 6 null null
-2 1 3 null null
-3 1 4 null null
-4 1 5 null null
-5 1 6 null null
-6 2 3 null null
+11 3 5 NULL NULL
+12 3 6 NULL NULL
+13 4 5 NULL NULL
+14 4 6 NULL NULL
+2 1 3 NULL NULL
+3 1 4 NULL NULL
+4 1 5 NULL NULL
+5 1 6 NULL NULL
+6 2 3 NULL NULL
 7 2 4 2 4
-8 2 5 null null
-9 2 6 null null
+8 2 5 NULL NULL
+9 2 6 NULL NULL
 
 query IIII
 SELECT * FROM (SELECT * FROM pairs RIGHT JOIN square ON b = sq AND a > 1 AND n < 6) WHERE (a IS NULL OR a > 2) AND n > 1 AND (a IS NULL OR a < sq) order by n
 ----
 10 3 4 2 4
-null null null 3 9
-null null null 4 16
-null null null 5 25
-null null null 6 36
+NULL NULL NULL 3 9
+NULL NULL NULL 4 16
+NULL NULL NULL 5 25
+NULL NULL NULL 6 36
 
 statement ok
 drop table if exists t1
@@ -697,25 +697,25 @@ query TTT
 SELECT s, str1.s, str2.s FROM str1 LEFT OUTER JOIN str2 USING(s) order by str1.s
 ----
 A A A
-D D null
-a a null
-c c null
+D D NULL
+a a NULL
+c c NULL
 
 query TTT
 SELECT s, str1.s, str2.s FROM str1 RIGHT OUTER JOIN str2 USING(s) order by str2.s
 ----
 A A A
-B null B
-C null C
-E null E
+B NULL B
+C NULL C
+E NULL E
 
 query ITIT
 SELECT * FROM str1 LEFT OUTER JOIN str2 ON str1.s = str2.s order by str1.a
 ----
-0 1 a null null null
+0 1 a NULL NULL NULL
 1 2 A 0 1 A
-2 3 c null null null
-3 4 D null null null
+2 3 c NULL NULL NULL
+3 4 D NULL NULL NULL
 
 statement ok
 INSERT INTO str1 VALUES (4, 1, 'a' ), (5, 2, 'A'), (6, 3, 'c'), (7, 4, 'D')
@@ -725,17 +725,17 @@ select * from str1 right join str2 on str1.s = str2.s order by str2.a
 ----
 1 2 A 0 1 A
 5 2 A 0 1 A
-null null null 1 2 B
-null null null 2 3 C
-null null null 3 4 E
+NULL NULL NULL 1 2 B
+NULL NULL NULL 2 3 C
+NULL NULL NULL 3 4 E
 
 query ITIT
 select * from str1 right join str2 on false order by str2.a
 ----
-null null null 0 1 A
-null null null 1 2 B
-null null null 2 3 C
-null null null 3 4 E
+NULL NULL NULL 0 1 A
+NULL NULL NULL 1 2 B
+NULL NULL NULL 2 3 C
+NULL NULL NULL 3 4 E
 
 # query
 # SELECT s, str1.s, str2.s FROM str1 FULL OUTER JOIN str2 USING(s)
@@ -767,8 +767,8 @@ query IIII
 SELECT * FROM xyu LEFT OUTER JOIN xyv USING(x, y) WHERE x > 2 order by xyu.uid
 ----
 2 3 1 31 7 31
-3 3 2 32 null null
-4 4 4 44 null null
+3 3 2 32 NULL NULL
+4 4 4 44 NULL NULL
 
 # TODO: x > 2 means x on both sides
 # query IIII
@@ -780,10 +780,10 @@ query IIIIII rowsort
 SELECT * FROM xyu FULL OUTER JOIN xyv USING(x, y) WHERE x > 2
 ----
 2 3 1 31 7 31
-3 3 2 32 null null
-4 4 4 44 null null
-null 3 3 null 8 33
-null 5 5 null 9 55
+3 3 2 32 NULL NULL
+4 4 4 44 NULL NULL
+NULL 3 3 NULL 8 33
+NULL 5 5 NULL 9 55
 
 query IIIIII
 SELECT * FROM xyu INNER JOIN xyv ON xyu.x = xyv.x AND xyu.y = xyv.y WHERE xyu.x = 1 AND xyu.y < 10
@@ -798,27 +798,27 @@ SELECT * FROM xyu INNER JOIN xyv ON xyu.x = xyv.x AND xyu.y = xyv.y AND xyu.x = 
 query IIITTT
 SELECT * FROM xyu LEFT OUTER JOIN xyv ON xyu.x = xyv.x AND xyu.y = xyv.y AND xyu.x = 1 AND xyu.y < 10 order by xyu.uid
 ----
-0 0 0 0 null null null null
+0 0 0 0 NULL NULL NULL NULL
 1 1 1 1 5 1 1 1
-2 3 1 31 null null null null
-3 3 2 32 null null null null
-4 4 4 44 null null null null
+2 3 1 31 NULL NULL NULL NULL
+3 3 2 32 NULL NULL NULL NULL
+4 4 4 44 NULL NULL NULL NULL
 
 query IIIIII
 SELECT * FROM xyu RIGHT OUTER JOIN xyv ON xyu.x = xyv.x AND xyu.y = xyv.y AND xyu.x = 1 AND xyu.y < 10 order by v
 ----
 1 1 1 1 5 1 1 1
-null null null null 6 2 2 2
-null null null null 7 3 1 31
-null null null null 8 3 3 33
-null null null null 9 5 5 55
+NULL NULL NULL NULL 6 2 2 2
+NULL NULL NULL NULL 7 3 1 31
+NULL NULL NULL NULL 8 3 3 33
+NULL NULL NULL NULL 9 5 5 55
 
 query IIII rowsort
 SELECT * FROM (SELECT * FROM xyu ORDER BY x, y) AS xyu LEFT OUTER JOIN (SELECT * FROM xyv ORDER BY x, y) AS xyv USING(x, y) WHERE x > 2
 ----
 2 3 1 31 7 31
-3 3 2 32 null null
-4 4 4 44 null null
+3 3 2 32 NULL NULL
+4 4 4 44 NULL NULL
 
 # TODO: x > 2 means x on both sides
 # query IIII
@@ -835,20 +835,20 @@ SELECT * FROM (SELECT * FROM xyu ORDER BY x, y) AS xyu LEFT OUTER JOIN (SELECT *
 query IIITTT rowsort
 SELECT * FROM (SELECT * FROM xyu ORDER BY x, y) AS xyu LEFT OUTER JOIN (SELECT * FROM xyv ORDER BY x, y) AS xyv ON xyu.x = xyv.x AND xyu.y = xyv.y AND xyu.x = 1 AND xyu.y < 10
 ----
-0 0 0 0 null null null null
+0 0 0 0 NULL NULL NULL NULL
 1 1 1 1 5 1 1 1
-2 3 1 31 null null null null
-3 3 2 32 null null null null
-4 4 4 44 null null null null
+2 3 1 31 NULL NULL NULL NULL
+3 3 2 32 NULL NULL NULL NULL
+4 4 4 44 NULL NULL NULL NULL
 
 query IIIIII
 SELECT * FROM xyu RIGHT OUTER JOIN (SELECT * FROM xyv ORDER BY x, y) AS xyv ON xyu.x = xyv.x AND xyu.y = xyv.y AND xyu.x = 1 AND xyu.y < 10 ORDER BY v
 ----
 1 1 1 1 5 1 1 1
-null null null null 6 2 2 2
-null null null null 7 3 1 31
-null null null null 8 3 3 33
-null null null null 9 5 5 55
+NULL NULL NULL NULL 6 2 2 2
+NULL NULL NULL NULL 7 3 1 31
+NULL NULL NULL NULL 8 3 3 33
+NULL NULL NULL NULL 9 5 5 55
 
 statement ok
 drop table if exists l
@@ -876,27 +876,27 @@ SELECT a, l.a, r.a FROM l INNER JOIN r USING(a) WHERE a = 2
 query III
 SELECT a, l.a, r.a FROM l LEFT OUTER JOIN r USING(a) WHERE a = 1
 ----
-1 1 null
+1 1 NULL
 
 query III
 SELECT a, l.a, r.a FROM l RIGHT OUTER JOIN r USING(a) WHERE a = 4
 ----
-4 null 4
+4 NULL 4
 
 query III
 SELECT a, l.a, r.a FROM l FULL OUTER JOIN r USING(a) WHERE a = 1
 ----
-1 1 null
+1 1 NULL
 
 query III
 SELECT a, l.a, r.a FROM l FULL OUTER JOIN r USING(a) WHERE a = 4
 ----
-4 null 4
+4 NULL 4
 
 query III
 SELECT * FROM l LEFT OUTER JOIN r USING(a) WHERE a = 1
 ----
-1 1 null
+1 1 NULL
 
 query III
 SELECT * FROM l LEFT OUTER JOIN r USING(a) WHERE a = 2
@@ -911,7 +911,7 @@ SELECT * FROM l RIGHT OUTER JOIN r USING(a) WHERE a = 3
 query III
 SELECT * FROM l RIGHT OUTER JOIN r USING(a) WHERE a = 4
 ----
-null 4 1
+NULL 4 1
 
 statement ok
 drop table if exists foo
@@ -998,10 +998,10 @@ drop table if exists bar
 query TII
 SELECT * FROM onecolumn AS a(aid, x) RIGHT JOIN twocolumn ON false order by y
 ----
-null null 3 45 45
-null null 0 44 51
-null null 1 null 52
-null null 2 42 53
+NULL NULL 3 45 45
+NULL NULL 0 44 51
+NULL NULL 1 NULL 52
+NULL NULL 2 42 53
 
 statement ok
 SELECT * FROM onecolumn AS a(aid, x) RIGHT JOIN twocolumn ON true where false order by y

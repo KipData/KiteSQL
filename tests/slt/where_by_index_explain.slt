@@ -138,7 +138,7 @@ Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter (t1.c
 query T
 explain select * from t1 where c1 is null and c2 is null;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter t1.c2 is null, Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By u_c1_index => null => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter t1.c2 is null, Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By u_c1_index => NULL => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
 
 query T
 explain select * from t1 where c1 > 0 and c1 < 8;
