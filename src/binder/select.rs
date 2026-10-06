@@ -1327,6 +1327,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.context.step(QueryBindStep::Where);
+        if predicate.has_agg_call(arena)? {
+            return Err(DatabaseError::AggMiss(
+                "aggregate functions are not allowed in WHERE".into(),
+            ));
+        }
 
         if let Some(sub_queries) = self.context.sub_queries_at_now() {
             for sub_query in sub_queries {

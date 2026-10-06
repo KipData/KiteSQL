@@ -37,7 +37,7 @@ use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveSca
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::Operator;
 use crate::planner::MetaArena;
-use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
+use crate::planner::{Childrens, ExecArenaView, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
@@ -164,18 +164,50 @@ impl<S: Storage> Database<S> {
         let sql = sql.as_ref();
         let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
 
-        for statement in statements {
-            if !matches!(command_type(&statement)?, CommandType::DDL) {
+        for statement in &statements {
+            if !matches!(command_type(statement)?, CommandType::DDL) {
                 return Err(DatabaseError::UnsupportedStmt(
                     "`Database::ddl` only accepts DDL statements".to_string(),
                 )
                 .with_sql_context(sql));
             }
+        }
+        self.run_mut_statements(sql, statements, |_| Ok(()))
+    }
 
+    /// Executes SQL with catalog mutations allowed, lending the last statement's results
+    /// to `consume`. On success, unread rows are drained before committing and publishing
+    /// catalog updates. A callback or execution error rolls the current statement back.
+    /// Earlier statements are completed and committed in order before the callback runs.
+    pub fn run_mut<C, R>(&mut self, sql: impl AsRef<str>, consume: C) -> Result<R, DatabaseError>
+    where
+        C: for<'a> FnOnce(
+            &mut TransactionIter<'a, S::TransactionType<'a>, ExecArenaView<PlanArena<'a>>>,
+        ) -> Result<R, DatabaseError>,
+    {
+        let sql = sql.as_ref();
+        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        self.run_mut_statements(sql, statements, consume)
+    }
+
+    fn run_mut_statements<C, R>(
+        &mut self,
+        sql: &str,
+        mut statements: Vec<Statement>,
+        consume: C,
+    ) -> Result<R, DatabaseError>
+    where
+        C: for<'a> FnOnce(
+            &mut TransactionIter<'a, S::TransactionType<'a>, ExecArenaView<PlanArena<'a>>>,
+        ) -> Result<R, DatabaseError>,
+    {
+        let last = statements
+            .pop()
+            .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
+        for statement in statements {
             self.execute_mut(sql, &[], |binder, arena| binder.bind(&statement, arena))?;
         }
-
-        Ok(())
+        self.execute_mut_with(sql, &[], |binder, arena| binder.bind(&last, arena), consume)
     }
 
     /// Runs one or more SQL statements and returns an iterator for the final result set.

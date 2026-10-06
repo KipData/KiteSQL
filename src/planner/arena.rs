@@ -327,7 +327,7 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
 }
 
 /// Owns the metadata and scalar-query cache for one statement execution.
-pub(crate) struct ExecArenaView<A> {
+pub struct ExecArenaView<A> {
     parent: A,
     init_values: HashMap<ScalarQueryRef, Option<DataValue>>,
 }
