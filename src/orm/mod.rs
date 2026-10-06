@@ -3709,7 +3709,7 @@ mod tests {
                 len: "4".to_string(),
                 nullable: true,
                 key: "PRI".to_string(),
-                default: "null".to_string(),
+                default: "NULL".to_string(),
             }
         );
         assert!(tuple
