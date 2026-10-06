@@ -46,6 +46,26 @@ query IIT
 select * from t1 where id = 0 and id != 0;
 ----
 
+# AND over an OR must intersect every OR branch, not union them
+query IIT
+select * from t1 where id > 10 and (id = 3 or id = 21);
+----
+21 22 23
+
+query IIT
+select * from t1 where (id = 3 or id = 21) and (id = 21 or id = 30);
+----
+21 22 23
+
+query IIT
+select * from t1 where (id = 3 or id = 21) and (id = 6 or id = 9);
+----
+
+query IIT
+select * from t1 where id > 10 and id < 30 and (id < 5 or id > 25);
+----
+27 28 29
+
 query IIT
 select * from t1 where id = 0 or id != 0 limit 10;
 ----
