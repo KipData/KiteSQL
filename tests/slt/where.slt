@@ -345,3 +345,78 @@ select id from tuple_in where (a, b) <> (1, 10);
 
 statement ok
 drop table tuple_in
+
+# A SELECT alias must not hide a same-named input column in SELECT or WHERE.
+statement ok
+create table alias_input(id int primary key, v int);
+
+statement ok
+insert into alias_input values (1, 10), (2, 20), (3, null);
+
+query II
+select id, -v as v from alias_input where v > 15 order by id;
+----
+2 -20
+
+query II
+select id, cast(null as int) as v from alias_input where v is null;
+----
+3 NULL
+
+query II
+select id, 57 as v from alias_input where v < 15 order by id;
+----
+1 57
+
+query II
+select 57 as v, v from alias_input order by id;
+----
+57 10
+57 20
+57 NULL
+
+# ORDER BY still resolves the output alias before the input column.
+query II
+select id, -v as v from alias_input where id < 3 order by v;
+----
+2 -20
+1 -10
+
+# Retain existing alias fallback when there is no input column of that name.
+query II
+select id, v + 1 as x from alias_input where x = 11;
+----
+1 11
+
+query II
+select id, -v as v from alias_input where exists(select 1 where alias_input.v > 15);
+----
+2 -20
+
+statement ok
+create table alias_other(id int primary key, v int);
+
+statement error is ambiguous
+select a.id as v from alias_input a cross join alias_other b where v > 0;
+
+statement ok
+drop table alias_other;
+
+query IIII
+select cast(-12.75 as int), cast(cast(-12.75 as float) as int), cast(0.0 as int), cast(-0.0 as int);
+----
+-12 -12 0 0
+
+query I
+select id from alias_input where cast(-v as int) = -20;
+----
+2
+
+statement error over flow
+select cast(2147483648.0 as int);
+
+statement error over flow
+select cast(-2147483649.0 as int);
+
+statement ok
+drop table alias_input;

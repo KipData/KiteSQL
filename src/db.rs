@@ -774,6 +774,26 @@ impl<S: Storage> Database<S> {
             &mut PlanArena<'a>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
+        self.execute_mut_with(context, params, build, |_| Ok(()))
+    }
+
+    pub(crate) fn execute_mut_with<A, F, C, R>(
+        &mut self,
+        context: &str,
+        params: A,
+        build: F,
+        consume: C,
+    ) -> Result<R, DatabaseError>
+    where
+        A: AsRef<[(usize, LogicalType)]>,
+        F: for<'a, 'txn, 'bind> FnOnce(
+            &mut Binder<'bind, '_, S::TransactionType<'txn>, A>,
+            &mut PlanArena<'a>,
+        ) -> Result<LogicalPlan, DatabaseError>,
+        C: for<'a> FnOnce(
+            &mut TransactionIter<'a, S::TransactionType<'a>, ExecArenaView<PlanArena<'a>>>,
+        ) -> Result<R, DatabaseError>,
+    {
         let transaction = Box::into_raw(Box::new(
             self.storage
                 .transaction_with_isolation(self.transaction_isolation)?,
@@ -787,16 +807,18 @@ impl<S: Storage> Database<S> {
                     return Err(err.with_sql_context(context));
                 }
             };
-        let (mut plan_arena, apply) =
-            match TransactionIter::new(schema, plan_arena, executor, transaction)
-                .done_with_ddl_apply()
-            {
-                Ok(apply) => apply,
-                Err(err) => {
-                    unsafe { drop(Box::from_raw(transaction)) };
-                    return Err(err.with_sql_context(context));
-                }
-            };
+        let (result, mut plan_arena, apply) = match (|| {
+            let mut iter = TransactionIter::new(schema, plan_arena, executor, transaction);
+            let result = consume(&mut iter)?;
+            let (arena, apply) = iter.done_with_ddl_apply()?;
+            Ok::<_, DatabaseError>((result, arena, apply))
+        })() {
+            Ok(result) => result,
+            Err(err) => {
+                unsafe { drop(Box::from_raw(transaction)) };
+                return Err(err.with_sql_context(context));
+            }
+        };
 
         if let Err(err) = unsafe { Box::from_raw(transaction).commit() } {
             return Err(err.with_sql_context(context));
@@ -810,7 +832,7 @@ impl<S: Storage> Database<S> {
         if catalog_changed {
             unsafe { (&mut *state).recycle_table_arena() }?;
         }
-        Ok(())
+        Ok(result)
     }
 
     pub fn analyze(&mut self, table_name: impl AsRef<str>) -> Result<(), DatabaseError> {
@@ -1172,13 +1194,42 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
     }
 }
 
-/// Raw result iterator returned by transaction execution APIs.
-pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn MetaArena + 'a>> {
+struct TransactionGuard<'a, T: Transaction + 'a> {
     executor: Option<Executor<'a, T>>,
-    plan_arena: Option<A>,
-    schema: Schema,
     transaction: *mut T,
     statement_scope_active: bool,
+}
+
+impl<T: Transaction> TransactionGuard<'_, T> {
+    #[inline]
+    fn finish_statement_scope(
+        &mut self,
+        ddl_apply: &mut Vec<DDLApply>,
+    ) -> Result<(), DatabaseError> {
+        if !self.statement_scope_active {
+            return Ok(());
+        }
+
+        if let Some(mut executor) = self.executor.take() {
+            ddl_apply.extend(executor.take_ddl_apply());
+        }
+        self.statement_scope_active = false;
+        unsafe { (*self.transaction).end_statement_scope() }
+    }
+}
+
+impl<T: Transaction> Drop for TransactionGuard<'_, T> {
+    fn drop(&mut self) {
+        let _ = self.finish_statement_scope(&mut Vec::new());
+    }
+}
+
+/// Raw result iterator returned by transaction execution APIs.
+pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn MetaArena + 'a>> {
+    // Drop execution before the metadata arena it borrows from.
+    guard: TransactionGuard<'a, T>,
+    plan_arena: A,
+    schema: Schema,
     ddl_apply: Vec<DDLApply>,
 }
 
@@ -1190,35 +1241,25 @@ impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
         transaction: *mut T,
     ) -> Self {
         Self {
-            executor: Some(executor),
-            plan_arena: Some(plan_arena),
+            guard: TransactionGuard {
+                executor: Some(executor),
+                transaction,
+                statement_scope_active: true,
+            },
+            plan_arena,
             schema,
-            transaction,
-            statement_scope_active: true,
             ddl_apply: Vec::new(),
         }
     }
 
     #[inline]
     fn finish_statement_scope(&mut self) -> Result<(), DatabaseError> {
-        if !self.statement_scope_active {
-            return Ok(());
-        }
-
-        if let Some(mut executor) = self.executor.take() {
-            self.ddl_apply.extend(executor.take_ddl_apply());
-        }
-        self.statement_scope_active = false;
-        unsafe { (*self.transaction).end_statement_scope() }
+        self.guard.finish_statement_scope(&mut self.ddl_apply)
     }
 
     #[inline]
     pub fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
-        let plan_arena = self
-            .plan_arena
-            .as_ref()
-            .expect("result iterator schema is unavailable after statement completion");
-        let schema = SchemaView::new(&self.schema, plan_arena);
+        let schema = SchemaView::new(&self.schema, &self.plan_arena);
         f(&schema)
     }
 
@@ -1227,14 +1268,11 @@ impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
         &mut self,
         f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
     ) -> Result<Option<R>, DatabaseError> {
-        let Some(executor) = self.executor.as_mut() else {
+        let Some(executor) = self.guard.executor.as_mut() else {
             return Ok(None);
         };
         let executor_ptr = std::ptr::from_mut(executor);
-        let plan_arena = self
-            .plan_arena
-            .as_mut()
-            .expect("result iterator plan arena is unavailable after statement completion");
+        let plan_arena = &mut self.plan_arena;
         match unsafe { (*executor_ptr).next_tuple(plan_arena) } {
             Ok(Some(tuple)) => {
                 let schema = SchemaView::new(&self.schema, plan_arena);
@@ -1261,19 +1299,14 @@ impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
 impl<'a, T: Transaction + 'a> TransactionIter<'a, T, ExecArenaView<PlanArena<'a>>> {
     fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
-        Ok((
-            self.plan_arena
-                .take()
-                .expect("DDL apply plan arena is unavailable after statement completion")
-                .into_parent(),
-            std::mem::take(&mut self.ddl_apply),
-        ))
-    }
-}
-
-impl<T: Transaction, A: MetaArena> Drop for TransactionIter<'_, T, A> {
-    fn drop(&mut self) {
-        let _ = self.finish_statement_scope();
+        let Self {
+            guard,
+            plan_arena,
+            ddl_apply,
+            ..
+        } = self;
+        drop(guard);
+        Ok((plan_arena.into_parent(), ddl_apply))
     }
 }
 

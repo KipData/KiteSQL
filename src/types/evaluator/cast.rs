@@ -178,10 +178,15 @@ macro_rules! float_to_int_cast {
         let float_value: $float_type = $float_value;
         if float_value.is_nan() {
             Ok(0)
-        } else if float_value <= 0.0 || float_value > <$int_type>::MAX as $float_type {
-            Err($crate::errors::DatabaseError::OverFlow)
         } else {
-            Ok(float_value as $int_type)
+            let truncated = float_value.trunc();
+            // Use an exclusive upper bound: wide integer MAX rounds up to 2^N in floats.
+            let upper = <$int_type>::MAX as $float_type + 1.0;
+            if truncated < <$int_type>::MIN as $float_type || truncated >= upper {
+                Err($crate::errors::DatabaseError::OverFlow)
+            } else {
+                Ok(truncated as $int_type)
+            }
         }
     }};
 }
@@ -1161,6 +1166,85 @@ mod test {
 
     fn create(from: LogicalType, to: LogicalType) -> Result<CastEvaluatorRef, DatabaseError> {
         cast_create(&from, &to)
+    }
+
+    #[test]
+    fn float_integer_cast_accepts_negative_and_zero_values() -> Result<(), DatabaseError> {
+        for (from, value) in [
+            (LogicalType::Float, DataValue::Float32(OrderedFloat(-12.75))),
+            (
+                LogicalType::Double,
+                DataValue::Float64(OrderedFloat(-12.75)),
+            ),
+        ] {
+            for (to, expected) in [
+                (LogicalType::Tinyint, DataValue::Int8(-12)),
+                (LogicalType::Smallint, DataValue::Int16(-12)),
+                (LogicalType::Integer, DataValue::Int32(-12)),
+                (LogicalType::Bigint, DataValue::Int64(-12)),
+            ] {
+                assert_eq!(cast_eval(from.clone(), to, &value)?, expected);
+            }
+        }
+        for (from, zero) in [
+            (LogicalType::Float, DataValue::Float32(OrderedFloat(0.0))),
+            (LogicalType::Double, DataValue::Float64(OrderedFloat(-0.0))),
+        ] {
+            assert_eq!(
+                cast_eval(from.clone(), LogicalType::Integer, &zero)?,
+                DataValue::Int32(0)
+            );
+            assert_eq!(
+                cast_eval(from, LogicalType::UInteger, &zero)?,
+                DataValue::UInt32(0)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn float_integer_cast_checks_target_bounds() {
+        macro_rules! check_bounds {
+            ($float:ty, $int:ty) => {{
+                let min = <$int>::MIN as $float;
+                let upper = <$int>::MAX as $float + 1.0;
+                assert_eq!(float_to_int_cast!(min, $int, $float).unwrap(), <$int>::MIN);
+                assert!(matches!(
+                    float_to_int_cast!(upper, $int, $float),
+                    Err(DatabaseError::OverFlow)
+                ));
+                assert!(matches!(
+                    float_to_int_cast!(min * 2.0 - 1.0, $int, $float),
+                    Err(DatabaseError::OverFlow)
+                ));
+                assert!(matches!(
+                    float_to_int_cast!(<$float>::INFINITY, $int, $float),
+                    Err(DatabaseError::OverFlow)
+                ));
+                assert!(matches!(
+                    float_to_int_cast!(<$float>::NEG_INFINITY, $int, $float),
+                    Err(DatabaseError::OverFlow)
+                ));
+            }};
+        }
+        check_bounds!(f32, i8);
+        check_bounds!(f32, i16);
+        check_bounds!(f32, i32);
+        check_bounds!(f32, i64);
+        check_bounds!(f64, i8);
+        check_bounds!(f64, i16);
+        check_bounds!(f64, i32);
+        check_bounds!(f64, i64);
+        check_bounds!(f32, u8);
+        check_bounds!(f32, u16);
+        check_bounds!(f32, u32);
+        check_bounds!(f32, u64);
+        check_bounds!(f64, u8);
+        check_bounds!(f64, u16);
+        check_bounds!(f64, u32);
+        check_bounds!(f64, u64);
+        assert_eq!(float_to_int_cast!(127.9_f64, i8, f64).unwrap(), 127);
+        assert_eq!(float_to_int_cast!(-128.9_f64, i8, f64).unwrap(), -128);
     }
 
     fn utf8(value: &str) -> DataValue {

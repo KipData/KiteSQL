@@ -180,6 +180,7 @@ impl ReferenceTables {
 mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
+    use crate::planner::TableArena;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::value::DataValue;
@@ -195,7 +196,7 @@ mod tests {
         S: ReferenceSerialization + PartialEq + Debug,
     {
         let mut reference_tables = ReferenceTables::new();
-        let mut arena = crate::planner::TableArena::default();
+        let mut arena = TableArena::default();
         let mut cursor = Cursor::new(Vec::new());
 
         source.encode(&mut cursor, false, &mut reference_tables, &arena)?;

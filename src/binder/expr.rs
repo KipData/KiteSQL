@@ -326,6 +326,21 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         if table_name.is_none() {
+            // SELECT expressions and WHERE read input columns, not a same-named output alias.
+            if bind_table_name.is_none()
+                && matches!(
+                    self.context.step_now(),
+                    QueryBindStep::Project | QueryBindStep::Where
+                )
+            {
+                let input = match self.context.using.get(column_name) {
+                    Some(column) => Some(column.visible_expr(arena)?),
+                    None => Self::find_column_in_scope(&self.context, arena, column_name)?,
+                };
+                if let Some(input) = input {
+                    return Ok(input);
+                }
+            }
             if let Some((_, expr)) = self
                 .context
                 .expr_aliases
