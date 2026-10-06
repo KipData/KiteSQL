@@ -86,12 +86,20 @@ impl ScalarExpression {
                 }
             }
             ScalarExpression::Binary {
+                op,
                 left_expr,
                 right_expr,
                 evaluator,
                 ..
             } => {
                 let left = arena.expression(*left_expr).eval(arena, tuple)?;
+                if matches!(
+                    (op, left.as_ref()),
+                    (BinaryOperator::And, DataValue::Boolean(false))
+                        | (BinaryOperator::Or, DataValue::Boolean(true))
+                ) {
+                    return Ok(left);
+                }
                 let right = arena.expression(*right_expr).eval(arena, tuple)?;
 
                 evaluator

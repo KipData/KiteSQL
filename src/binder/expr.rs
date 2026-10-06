@@ -420,10 +420,12 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
                 LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned()
             }
             expression::BinaryOperator::Divide => {
-                if let LogicalType::Decimal(precision, scale) =
-                    LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned()
+                let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
+                if ty.is_signed_numeric()
+                    || ty.is_unsigned_numeric()
+                    || matches!(ty, LogicalType::Decimal(..))
                 {
-                    LogicalType::Decimal(precision, scale)
+                    ty
                 } else {
                     LogicalType::Double
                 }
@@ -459,6 +461,18 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
         op: expression::UnaryOperator,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
+        if op == expression::UnaryOperator::Plus {
+            let ty = expr.return_type(arena);
+            if ty.is_numeric()
+                || matches!(
+                    ty.as_ref(),
+                    LogicalType::SqlNull | LogicalType::Char(..) | LogicalType::Varchar(..)
+                )
+            {
+                return Ok(arena.expression(expr).clone());
+            }
+            return Err(DatabaseError::UnsupportedUnaryOperator(ty.into_owned(), op));
+        }
         let ty = if let expression::UnaryOperator::Not = op {
             LogicalType::Boolean
         } else {

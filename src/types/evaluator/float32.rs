@@ -19,9 +19,6 @@ use crate::types::LogicalType;
 #[cfg(feature = "decimal")]
 use rust_decimal::prelude::FromPrimitive;
 use std::hint;
-pub fn float32_plus_unary_eval(value: &DataValue) -> DataValue {
-    value.clone()
-}
 pub fn float32_minus_unary_eval(value: &DataValue) -> DataValue {
     match value {
         DataValue::Float32(value) => DataValue::Float32(-value),
@@ -195,7 +192,6 @@ mod test {
         let left = DataValue::Float32(OrderedFloat(5.5));
         let right = DataValue::Float32(OrderedFloat(2.0));
 
-        assert_eq!(float32_plus_unary_eval(&left), left);
         assert_eq!(
             float32_minus_unary_eval(&left),
             DataValue::Float32(OrderedFloat(-5.5))
