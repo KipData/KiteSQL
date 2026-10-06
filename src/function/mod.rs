@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod abs;
 pub(crate) mod char_length;
 #[cfg(feature = "time")]
 pub(crate) mod current_date;
