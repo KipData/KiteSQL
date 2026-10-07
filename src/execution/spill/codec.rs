@@ -126,7 +126,11 @@ impl SpillCodec for ScalarQueryRef {
                 )))
             }
         };
-        Ok(Self { arena_id, pos, is_outer_value })
+        Ok(Self {
+            arena_id,
+            pos,
+            is_outer_value,
+        })
     }
 
     fn estimated_size(&self) -> usize {
