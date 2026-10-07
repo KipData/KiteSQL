@@ -1187,3 +1187,84 @@ drop table onecolumn_w
 
 statement ok
 drop table str1
+
+# Comma/CROSS joins must recognize conjunctive equality keys without losing residual filters.
+statement ok
+create table ij_a(id int primary key, k int, v int);
+
+statement ok
+create table ij_b(id int primary key, k bigint, v int);
+
+statement ok
+create table ij_c(id int primary key, k int);
+
+statement ok
+insert into ij_a values (1,1,10),(2,2,20),(3,null,30),(4,2,25);
+
+statement ok
+insert into ij_b values (1,2,100),(2,1,200),(3,2,300),(4,null,400);
+
+statement ok
+insert into ij_c values (1,1),(2,2);
+
+# Both side filters are pushed down, while the cross-side inequality stays above the equijoin.
+query T
+explain select a.id,b.id from ij_a a,ij_b b where b.k=a.k and a.v>15 and b.v<250 and a.v<b.v;
+----
+Projection [a.id, b.id] [Project => (Sort Option: Follow)] Filter (a.v < b.v), Is Having: false [Filter => (Sort Option: Follow)] Inner Join On cast (a.k as Bigint) = b.k [HashJoin => (Sort Option: None)] Filter ((ij_a.v) as (a.v) > 15), Is Having: false [Filter => (Sort Option: Follow)] TableScan ij_a -> [ij_a.id, ij_a.k, ij_a.v] [SeqScan => (Sort Option: None)] Filter ((ij_b.v) as (b.v) < 250), Is Having: false [Filter => (Sort Option: Follow)] TableScan ij_b -> [ij_b.id, ij_b.k, ij_b.v] [SeqScan => (Sort Option: None)]
+
+query II
+select a.id,b.id from ij_a a,ij_b b where b.k=a.k and a.v>15 and b.v<250 and a.v<b.v order by a.id,b.id;
+----
+2 1
+4 1
+
+query II
+select a.id,b.id from ij_a a cross join ij_b b where a.k=b.k and a.v+b.v>320 order by a.id,b.id;
+----
+4 3
+
+query II
+select a.id,b.id from ij_a a,ij_b b where a.k=b.k or a.id=b.id order by a.id,b.id;
+----
+1 1
+1 2
+2 1
+2 2
+2 3
+3 3
+4 1
+4 3
+4 4
+
+query II
+select a.id,b.id from ij_a a,ij_b b where a.id=2 and b.id=1;
+----
+2 1
+
+query III
+select a.id,b.id,c.id from ij_a a,ij_b b,ij_c c where c.k=b.k and b.k=a.k and a.v>15 and c.id=2 order by a.id,b.id,c.id;
+----
+2 1 2
+2 3 2
+4 1 2
+4 3 2
+
+query II
+select a.id,b.id from ij_a a,ij_b b where a.v>b.v order by a.id,b.id;
+----
+
+query II
+select a.id,b.id from ij_a a,ij_a b where b.k=a.k and a.id=2 order by b.id;
+----
+2 2
+2 4
+
+statement ok
+drop table ij_c;
+
+statement ok
+drop table ij_b;
+
+statement ok
+drop table ij_a;

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::planner::operator::join::extract_join_keys;
 use crate::planner::MetaArena;
 use crate::{
     expression::ScalarExpression,
@@ -1865,7 +1866,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 // expression that didn't match equi-join pattern
                 let mut filter = vec![];
 
-                Self::extract_join_keys(
+                extract_join_keys(
                     expr,
                     &mut on_keys,
                     &mut filter,
@@ -1993,150 +1994,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 })
             }
         }
-    }
-
-    /// for sqlrs
-    /// original idea from datafusion planner.rs
-    /// Extracts equijoin ON condition be a single Eq or multiple conjunctive Eqs
-    /// Filters matching this pattern are added to `accum`
-    /// Filters that don't match this pattern are added to `accum_filter`
-    /// Examples:
-    /// ```text
-    /// foo = bar => accum=[(foo, bar)] accum_filter=[]
-    /// foo = bar AND bar = baz => accum=[(foo, bar), (bar, baz)] accum_filter=[]
-    /// foo = bar AND baz > 1 => accum=[(foo, bar)] accum_filter=[baz > 1]
-    /// ```
-    fn extract_join_keys(
-        expr: ExprRef,
-        accum: &mut Vec<(ExprRef, ExprRef)>,
-        accum_filter: &mut Vec<ExprRef>,
-        left_schema: &Schema,
-        right_schema: &Schema,
-        arena: &mut PlanArena,
-    ) -> Result<(), DatabaseError> {
-        let fn_contains = |schema: &Schema, column: ColumnRef| {
-            let summary = arena.column(column).summary();
-            schema
-                .iter()
-                .any(|candidate| arena.column(*candidate).summary() == summary)
-        };
-        let fn_or_contains = |column: ColumnRef| {
-            fn_contains(left_schema, column) || fn_contains(right_schema, column)
-        };
-
-        let expr = expr.unpack_alias(arena);
-        match arena.expression(expr) {
-            ScalarExpression::Binary {
-                left_expr,
-                right_expr,
-                op,
-                ..
-            } => {
-                match op {
-                    BinaryOperator::Eq => {
-                        match (
-                            left_expr.unpack_alias_ref(arena),
-                            right_expr.unpack_alias_ref(arena),
-                        ) {
-                            // example: foo = bar
-                            (
-                                ScalarExpression::ColumnRef { column: l, .. },
-                                ScalarExpression::ColumnRef { column: r, .. },
-                            ) => {
-                                // reorder left and right joins keys to pattern: (left, right)
-                                let key = if fn_contains(left_schema, *l)
-                                    && fn_contains(right_schema, *r)
-                                {
-                                    Some((*left_expr, *right_expr))
-                                } else if fn_contains(left_schema, *r)
-                                    && fn_contains(right_schema, *l)
-                                {
-                                    Some((*right_expr, *left_expr))
-                                } else {
-                                    if fn_or_contains(*l) || fn_or_contains(*r) {
-                                        accum_filter.push(expr);
-                                    }
-                                    None
-                                };
-                                // Join keys are compared (and hashed) directly, so cast
-                                // both to one type like `l = r` in a filter; otherwise
-                                // e.g. `bigint = int` never matches.
-                                if let Some((left, right)) = key {
-                                    let ty = LogicalType::max_logical_type(
-                                        &left.return_type(arena),
-                                        &right.return_type(arena),
-                                    )?
-                                    .into_owned();
-                                    accum.push((
-                                        left.type_cast(Cow::Borrowed(&ty), arena)?,
-                                        right.type_cast(Cow::Borrowed(&ty), arena)?,
-                                    ));
-                                }
-                            }
-                            (ScalarExpression::ColumnRef { column, .. }, _)
-                            | (_, ScalarExpression::ColumnRef { column, .. }) => {
-                                if fn_or_contains(*column) {
-                                    accum_filter.push(expr);
-                                }
-                            }
-                            _other => {
-                                // example: baz > 1
-                                if left_expr.all_referenced_columns(arena, |_, column| {
-                                    fn_or_contains(*column)
-                                })? && right_expr
-                                    .all_referenced_columns(arena, |_, column| {
-                                        fn_or_contains(*column)
-                                    })?
-                                {
-                                    accum_filter.push(expr);
-                                }
-                            }
-                        }
-                    }
-                    BinaryOperator::And => {
-                        // example: foo = bar AND baz > 1
-                        let (left_expr, right_expr) = (*left_expr, *right_expr);
-                        Self::extract_join_keys(
-                            left_expr,
-                            accum,
-                            accum_filter,
-                            left_schema,
-                            right_schema,
-                            arena,
-                        )?;
-                        Self::extract_join_keys(
-                            right_expr,
-                            accum,
-                            accum_filter,
-                            left_schema,
-                            right_schema,
-                            arena,
-                        )?;
-                    }
-                    BinaryOperator::Or => {
-                        accum_filter.push(expr);
-                    }
-                    _ => {
-                        if left_expr
-                            .all_referenced_columns(arena, |_, column| fn_or_contains(*column))?
-                            && right_expr.all_referenced_columns(arena, |_, column| {
-                                fn_or_contains(*column)
-                            })?
-                        {
-                            accum_filter.push(expr);
-                        }
-                    }
-                }
-            }
-            _ => {
-                if expr.all_referenced_columns(arena, |_, column| fn_or_contains(*column))? {
-                    // example: baz > 1
-                    accum_filter.push(expr);
-                }
-            }
-        }
-
-        Ok(())
     }
 }
 
