@@ -641,19 +641,6 @@ where
                 }
             }
         }
-        if self.orderby.is_some()
-            && self
-                .binder
-                .context
-                .scalar_queries
-                .iter()
-                .any(|query| !query.param_bindings.is_empty())
-        {
-            return Err(DatabaseError::UnsupportedStmt(
-                "correlated scalar values across ORDER BY require a row-scoped execution context"
-                    .into(),
-            ));
-        }
         self.plan = self.binder.bind_scalar_queries(
             self.plan,
             &[QueryBindStep::Project, QueryBindStep::Sort],

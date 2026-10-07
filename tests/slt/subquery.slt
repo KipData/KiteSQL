@@ -843,12 +843,30 @@ NULL 20
 NULL 20
 NULL 30
 
-# LIMIT is streaming, unlike ORDER BY; ordinary input rows still drive recomputation.
+# LIMIT without sorting streams input; sorting preserves each row's scalar values.
 query I rowsort
 select (select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows limit 2;
 ----
 0
 1
+
+# Multiple scalar results and a statement constant must survive sorting together.
+query IIII
+select id,(select count(*) from corr_rows x where x.b<corr_rows.b),(select count(*) from corr_rows x where x.b>corr_rows.b),(select 7) from corr_rows order by id desc limit 3 offset 1;
+----
+4 0 0 7
+3 3 0 7
+2 1 1 7
+
+# Null/text scalar results are paired with the original rows after ordering.
+query IT
+select id,(select cast(x.b as varchar(12)) from corr_rows x where x.id=corr_rows.id and x.id<>2) from corr_rows order by id desc;
+----
+5 20
+4 NULL
+3 30
+2 NULL
+1 10
 
 query II rowsort
 select id,(select count(*) from corr_rows x where x.b<corr_rows.b) as n from corr_rows;
@@ -859,8 +877,12 @@ select id,(select count(*) from corr_rows x where x.b<corr_rows.b) as n from cor
 4 0
 5 1
 
-statement error correlated scalar values across ORDER BY require a row-scoped execution context
+query II
 select id,(select count(*) from corr_rows x where x.b<corr_rows.b) as n from corr_rows order by n desc,id limit 3;
+----
+3 3
+2 1
+5 1
 
 statement error correlated scalar values across DISTINCT require a row-scoped execution context
 select distinct (select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows;
@@ -931,8 +953,14 @@ select id,coalesce((select x.b from corr_rows x where x.id=corr_rows.id),-1)+(se
 4 6
 5 27
 
-statement error correlated scalar values across ORDER BY require a row-scoped execution context
+query I
 select (select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows order by b desc nulls last,id;
+----
+3
+1
+1
+0
+0
 
 query II rowsort
 select id,(select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows where exists(select 1 from corr_rows y where y.id=corr_rows.id);

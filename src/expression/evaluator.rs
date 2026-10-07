@@ -445,7 +445,7 @@ mod tests {
 
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
-        let reference = arena.alloc_scalar_query_ref();
+        let reference = arena.alloc_scalar_query_ref(false);
         let mut init = arena.alloc_expression(ScalarExpression::InitValue {
             id: reference,
             ty: LogicalType::Integer,

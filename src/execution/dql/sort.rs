@@ -18,6 +18,7 @@ use crate::execution::{
 };
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
+use crate::planner::ScalarQueryRef;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
@@ -49,11 +50,6 @@ impl<'a, T> NullableVec<'a, T> {
     }
 
     #[inline]
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &T> {
-        self.0.iter().map(|item| unsafe { item.assume_init_ref() })
-    }
-
-    #[inline]
     pub(crate) fn pop(&mut self) -> Option<T> {
         self.0.pop().map(|item| unsafe { item.assume_init() })
     }
@@ -79,24 +75,25 @@ impl<T> DerefMut for NullableVec<'_, T> {
     }
 }
 
-pub(crate) fn sort_tuples(
+pub(crate) fn sort_tuples<A: MetaArena>(
     sort_fields: &[SortField],
-    tuples: &mut NullableVec<'_, (usize, Tuple)>,
-    plan_arena: &(dyn MetaArena + '_),
+    tuples: &mut NullableVec<'_, (usize, SortTuple)>,
+    plan_arena: &mut ExecMetaArena<A>,
 ) -> Result<(), DatabaseError> {
     // Extract the results of calculating SortFields to avoid double calculation
     // of data during comparison.
-    let mut eval_values = vec![Vec::new(); sort_fields.len()];
+    let width = sort_fields.len();
+    let mut eval_values = Vec::with_capacity(tuples.len() * width);
 
-    for (x, SortField { expr, .. }) in sort_fields.iter().enumerate() {
-        for (_, tuple) in tuples.iter() {
-            eval_values[x].push(
-                plan_arena
-                    .expression(*expr)
-                    .eval(plan_arena, Some(tuple))?
-                    .into_owned(),
-            );
+    for (_, row) in tuples.iter_mut() {
+        plan_arena.restore_outer_values(std::mem::take(&mut row.outer_values));
+        for SortField { expr, .. } in sort_fields {
+            let value = plan_arena
+                .expression(*expr)
+                .eval(plan_arena, Some(&row.tuple))?;
+            eval_values.push(value.into_owned());
         }
+        row.outer_values = plan_arena.take_outer_values();
     }
 
     tuples.0.sort_by(|tuple_1, tuple_2| {
@@ -104,8 +101,8 @@ pub(crate) fn sort_tuples(
         let (i_2, _) = unsafe { tuple_2.assume_init_ref() };
         compare_sort_keys(
             sort_fields,
-            eval_values.iter().map(|values| &values[*i_1]),
-            eval_values.iter().map(|values| &values[*i_2]),
+            eval_values[*i_1 * width..(*i_1 + 1) * width].iter(),
+            eval_values[*i_2 * width..(*i_2 + 1) * width].iter(),
         )
     });
     drop(eval_values);
@@ -148,8 +145,13 @@ pub(crate) fn compare_sort_keys<'a>(
     Ordering::Equal
 }
 
+pub(crate) struct SortTuple {
+    tuple: Tuple,
+    outer_values: Vec<(ScalarQueryRef, DataValue)>,
+}
+
 pub struct Sort<'a> {
-    rows: NullableVec<'static, (usize, Tuple)>,
+    rows: NullableVec<'static, (usize, SortTuple)>,
     _arena: Box<Bump>,
     sort_fields: &'a [SortField],
     input: ExecId,
@@ -168,7 +170,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
         let input = build_read(arena, plan_arena, input, cache, transaction);
         let sort_arena = Box::<Bump>::default();
         let rows = unsafe {
-            transmute::<NullableVec<'_, (usize, Tuple)>, NullableVec<'static, (usize, Tuple)>>(
+            transmute::<NullableVec<'_, (usize, SortTuple)>, NullableVec<'static, (usize, SortTuple)>>(
                 NullableVec::new(&sort_arena),
             )
         };
@@ -188,13 +190,20 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if let Some((_, tuple)) = self.rows.pop() {
-                arena.produce_tuple(tuple);
+            if let Some((_, row)) = self.rows.pop() {
+                plan_arena.restore_outer_values(row.outer_values);
+                arena.produce_tuple(row.tuple);
                 return Ok(());
             }
             while arena.next_tuple(self.input, plan_arena)? {
                 let offset = self.rows.len();
-                self.rows.put((offset, arena.materialize_tuple()));
+                self.rows.put((
+                    offset,
+                    SortTuple {
+                        tuple: arena.materialize_tuple(),
+                        outer_values: plan_arena.take_outer_values(),
+                    },
+                ));
             }
             if self.rows.is_empty() {
                 arena.finish();
@@ -210,14 +219,110 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
-    use crate::execution::dql::sort::{sort_tuples, NullableVec};
+    use crate::execution::dql::sort::{sort_tuples, NullableVec, SortTuple};
     use crate::expression::ScalarExpression;
     use crate::planner::operator::sort::SortField;
+    use crate::planner::{ExecMetaArena, PlanArena};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use bumpalo::Bump;
     use std::cell::Cell;
+
+    #[test]
+    fn memory_sort_restores_scalar_values_for_each_output_row() -> Result<(), DatabaseError> {
+        use super::Sort;
+        use crate::execution::{empty_context, ExecArena, ReadExecutor};
+        use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
+        use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
+        use crate::planner::operator::values::ValuesOperator;
+        use crate::planner::operator::{sort::SortOperator, Operator};
+        use crate::planner::{
+            Childrens, ExecMetaArena, LogicalPlan, MetaArena, PlanArena, TableArenaCell,
+        };
+        use crate::storage::memory::MemoryStorage;
+        use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
+
+        let storage = MemoryStorage::new();
+        let transaction = storage.transaction()?;
+        let tables = TableCache::default();
+        let views = ViewCache::default();
+        let stats = StatisticsMetaCache::default();
+        let cache = empty_context(&tables, &views, &stats);
+        let catalog = TableArenaCell::default();
+        let mut metadata = PlanArena::new(&catalog);
+        let column = metadata.alloc_column(ColumnCatalog::new(
+            "id".into(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        ));
+        let input_expr = metadata.alloc_expression(ScalarExpression::column_expr(column, 0));
+        let param = metadata.alloc_scalar_query_ref(false);
+        let result = metadata.alloc_scalar_query_ref(true);
+        let marker = metadata.alloc_expression(ScalarExpression::OuterValue {
+            id: result,
+            ty: LogicalType::Integer,
+        });
+        let param_expr = metadata.alloc_expression(ScalarExpression::OuterParam {
+            id: param,
+            ty: LogicalType::Integer,
+        });
+        let values = [3, 1, 2]
+            .into_iter()
+            .map(|value| {
+                metadata.alloc_expression(ScalarExpression::Constant(DataValue::Int32(value)))
+            })
+            .collect();
+        let input = LogicalPlan::new(
+            Operator::Values(ValuesOperator::new(values, 3, vec![column])),
+            Childrens::None,
+        );
+        let query = ScalarSubqueryOperator::build(LogicalPlan::new(
+            Operator::Values(ValuesOperator::new(vec![param_expr], 1, vec![column])),
+            Childrens::None,
+        ));
+        let mut plan =
+            ScalarQueryInitOperator::build(input, query, marker, vec![(param, input_expr)]);
+        plan.populate_output_schema_recursive(&mut metadata);
+        let op = SortOperator {
+            sort_fields: vec![SortField {
+                expr: marker,
+                asc: true,
+                nulls_first: false,
+            }],
+        };
+        let mut arena = ExecArena::with_capacity(0);
+        arena.init_context(cache, &transaction);
+        // Select the memory executor explicitly even when the spill feature is enabled.
+        let root = <Sort as ReadExecutor<_>>::into_executor(
+            (&op, &plan),
+            &mut arena,
+            &mut metadata,
+            cache,
+            &transaction,
+        );
+        let mut metadata = ExecMetaArena::new(metadata);
+        for expected in [1, 2, 3] {
+            assert!(arena.next_tuple(root, &mut metadata)?);
+            assert_eq!(
+                arena.result_tuple().values,
+                vec![DataValue::Int32(expected)]
+            );
+            assert_eq!(
+                metadata.init_value(result),
+                Some(&DataValue::Int32(expected))
+            );
+            assert_eq!(
+                metadata
+                    .expression(marker)
+                    .eval(&metadata, Some(arena.result_tuple()))?
+                    .as_ref(),
+                &DataValue::Int32(expected)
+            );
+        }
+        assert!(!arena.next_tuple(root, &mut metadata)?);
+        Ok(())
+    }
 
     #[test]
     fn nullable_vec_drops_values() {
@@ -241,13 +346,13 @@ mod test {
 
     fn sorted_rows<'a>(
         sort_fields: &[SortField],
-        mut tuples: NullableVec<'a, (usize, Tuple)>,
-        plan_arena: &crate::planner::PlanArena<'_>,
+        mut tuples: NullableVec<'a, (usize, SortTuple)>,
+        plan_arena: &mut ExecMetaArena<PlanArena<'_>>,
     ) -> Result<impl Iterator<Item = Tuple> + 'a, DatabaseError> {
         sort_tuples(sort_fields, &mut tuples, plan_arena)?;
         let mut rows = Vec::with_capacity(tuples.len());
-        while let Some((_, tuple)) = tuples.pop() {
-            rows.push(tuple);
+        while let Some((_, row)) = tuples.pop() {
+            rows.push(row.tuple);
         }
         rows.reverse();
         Ok(rows.into_iter())
@@ -279,12 +384,31 @@ mod test {
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         ))];
 
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         let arena = Bump::new();
         let fn_tuples = || {
             let mut vec = NullableVec::new(&arena);
-            vec.put((0_usize, Tuple::new(None, vec![DataValue::Null])));
-            vec.put((1_usize, Tuple::new(None, vec![DataValue::Int32(0)])));
-            vec.put((2_usize, Tuple::new(None, vec![DataValue::Int32(1)])));
+            vec.put((
+                0_usize,
+                SortTuple {
+                    tuple: Tuple::new(None, vec![DataValue::Null]),
+                    outer_values: Vec::new(),
+                },
+            ));
+            vec.put((
+                1_usize,
+                SortTuple {
+                    tuple: Tuple::new(None, vec![DataValue::Int32(0)]),
+                    outer_values: Vec::new(),
+                },
+            ));
+            vec.put((
+                2_usize,
+                SortTuple {
+                    tuple: Tuple::new(None, vec![DataValue::Int32(1)]),
+                    outer_values: Vec::new(),
+                },
+            ));
             vec
         };
 
@@ -360,22 +484,22 @@ mod test {
         fn_asc_and_nulls_first_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, true),
             fn_tuples(),
-            &plan_arena,
+            &mut plan_arena,
         )?));
         fn_asc_and_nulls_last_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, false),
             fn_tuples(),
-            &plan_arena,
+            &mut plan_arena,
         )?));
         fn_desc_and_nulls_first_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, true),
             fn_tuples(),
-            &plan_arena,
+            &mut plan_arena,
         )?));
         fn_desc_and_nulls_last_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, false),
             fn_tuples(),
-            &plan_arena,
+            &mut plan_arena,
         )?));
 
         Ok(())
@@ -430,33 +554,52 @@ mod test {
                 ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
             )),
         ];
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         let arena = Bump::new();
 
         let fn_tuples = || {
             let mut vec = NullableVec::new(&arena);
             vec.put((
                 0_usize,
-                Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
+                SortTuple {
+                    tuple: Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
+                    outer_values: Vec::new(),
+                },
             ));
             vec.put((
                 1_usize,
-                Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
+                SortTuple {
+                    tuple: Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
+                    outer_values: Vec::new(),
+                },
             ));
             vec.put((
                 2_usize,
-                Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
+                SortTuple {
+                    tuple: Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
+                    outer_values: Vec::new(),
+                },
             ));
             vec.put((
                 3_usize,
-                Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
+                SortTuple {
+                    tuple: Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
+                    outer_values: Vec::new(),
+                },
             ));
             vec.put((
                 4_usize,
-                Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
+                SortTuple {
+                    tuple: Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
+                    outer_values: Vec::new(),
+                },
             ));
             vec.put((
                 5_usize,
-                Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
+                SortTuple {
+                    tuple: Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
+                    outer_values: Vec::new(),
+                },
             ));
             vec
         };
@@ -596,22 +739,22 @@ mod test {
         fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, true, true, true),
             fn_tuples(),
-            &plan_arena,
+            &mut plan_arena,
         )?));
         fn_asc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(true, false, true, true),
             fn_tuples(),
-            &plan_arena,
+            &mut plan_arena,
         )?));
         fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, true, true, true),
             fn_tuples(),
-            &plan_arena,
+            &mut plan_arena,
         )?));
         fn_desc_1_and_nulls_last_1_and_asc_2_and_nulls_first_2_eq(Box::new(sorted_rows(
             &fn_sort_fields(false, false, true, true),
             fn_tuples(),
-            &plan_arena,
+            &mut plan_arena,
         )?));
 
         Ok(())

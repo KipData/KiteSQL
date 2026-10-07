@@ -1401,7 +1401,7 @@ mod tests {
         let left = LogicalPlan::new(Operator::ShowTable, Childrens::None);
         let right = LogicalPlan::new(Operator::ShowView, Childrens::None);
 
-        let id = arena.alloc_scalar_query_ref();
+        let id = arena.alloc_scalar_query_ref(false);
         let value = arena.alloc_expression(ScalarExpression::InitValue {
             id,
             ty: LogicalType::Integer,

@@ -80,6 +80,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
                     arena.finish();
                     return Ok(());
                 };
+                plan_arena.restore_outer_values(row.outer_values);
                 arena.produce_tuple(row.tuple);
                 return Ok(());
             }
@@ -94,7 +95,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
             let mut runs = Vec::new();
             while arena.next_tuple(self.input, plan_arena)? {
                 let tuple = arena.materialize_tuple();
-                if let Some(segment) = rows.push(SortRow::new(sort_fields, tuple, plan_arena)?)? {
+                let row = SortRow::new(sort_fields, tuple, plan_arena)?;
+                if let Some(segment) = rows.push(row)? {
                     runs.push(Run::new(segment, 1));
                 }
             }
@@ -285,9 +287,10 @@ mod test {
     use crate::execution::spill::{SortRow, SpillVec};
     use crate::expression::ScalarExpression;
     use crate::planner::operator::sort::SortField;
+    use crate::planner::{ExecMetaArena, MetaArena};
     use crate::types::tuple::Tuple;
-    use crate::types::value::DataValue;
-    use crate::types::LogicalType;
+    use crate::types::value::{DataValue, Utf8Type};
+    use crate::types::{CharLengthUnits, LogicalType};
     use std::cmp::Ordering;
 
     #[test]
@@ -308,6 +311,7 @@ mod test {
             nulls_first: false,
         }];
 
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         let mut rows = SpillVec::new()
             .limit(4, usize::MAX)
             .on_flush(|rows| sort_segment(&sort_fields, rows));
@@ -315,7 +319,7 @@ mod test {
             let _ = rows.push(SortRow::new(
                 &sort_fields,
                 Tuple::new(None, vec![value]),
-                &plan_arena,
+                &mut plan_arena,
             )?)?;
         }
 
@@ -358,6 +362,7 @@ mod test {
             DataValue::Int32(0),
         ];
 
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         let mut rows = SpillVec::new()
             .limit(2, usize::MAX)
             .on_flush(|rows| sort_segment(&sort_fields, rows));
@@ -367,13 +372,34 @@ mod test {
                 Some(DataValue::Int32(sequence as i32)),
                 vec![value, DataValue::Int32(sequence as i32)],
             );
-            if let Some(segment) = rows.push(SortRow::new(&sort_fields, tuple, &plan_arena)?)? {
+            let reference = plan_arena.alloc_scalar_query_ref(true);
+            plan_arena.set_init_value(
+                reference,
+                DataValue::Utf8 {
+                    value: format!("row-{sequence}"),
+                    ty: Utf8Type::Variable(None),
+                    unit: CharLengthUnits::Characters,
+                },
+            );
+            let row = SortRow::new(&sort_fields, tuple, &mut plan_arena)?;
+            if let Some(segment) = rows.push(row)? {
                 runs.push(Run::new(segment, 1));
             }
         }
 
         let tuples = finish_sort(rows, runs, &sort_fields, 2)?
-            .map(|row| row.map(|row| row.tuple))
+            .map(|row| {
+                row.map(|row| {
+                    assert_eq!(row.outer_values.len(), 1);
+                    let sequence = row.tuple.values[1].i32().unwrap();
+                    assert_eq!(row.outer_values[0].0.pos, sequence as usize);
+                    assert_eq!(
+                        row.outer_values[0].1.utf8(),
+                        Some(format!("row-{sequence}").as_str())
+                    );
+                    row.tuple
+                })
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let positions = tuples
             .iter()
@@ -433,6 +459,7 @@ mod test {
             },
         ];
 
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         let mut rows = SpillVec::new().on_flush(|rows| sort_segment(&sort_fields, rows));
         let mut runs = Vec::new();
         for position in 0..ROW_COUNT {
@@ -444,7 +471,7 @@ mod test {
             };
             let sequence = DataValue::Int32(sequence as i32);
             let tuple = Tuple::new(Some(sequence.clone()), vec![key, sequence]);
-            if let Some(segment) = rows.push(SortRow::new(&sort_fields, tuple, &plan_arena)?)? {
+            if let Some(segment) = rows.push(SortRow::new(&sort_fields, tuple, &mut plan_arena)?)? {
                 runs.push(Run::new(segment, 1));
             }
         }
