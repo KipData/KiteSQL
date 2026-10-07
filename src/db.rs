@@ -339,7 +339,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         )
         .before_batch(
             "Predicate Pushdown".to_string(),
-            HepBatchStrategy::fix_point_topdown(10),
+            HepBatchStrategy::fix_point_topdown(30),
             vec![
                 NormalizationRuleImpl::PushPredicateThroughJoin,
                 NormalizationRuleImpl::PushJoinPredicateIntoScan,
