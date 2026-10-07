@@ -53,7 +53,9 @@ impl ScalarExpression {
                 }
                 val => Ok(Cow::Borrowed(val)),
             },
-            ScalarExpression::Init { id, .. } => {
+            ScalarExpression::InitValue { id, .. }
+            | ScalarExpression::OuterValue { id, .. }
+            | ScalarExpression::OuterParam { id, .. } => {
                 let value = arena.init_value(*id).ok_or_else(|| {
                     DatabaseError::InvalidValue(format!("scalar query {id} is not initialized"))
                 })?;
@@ -415,7 +417,7 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
 mod tests {
     use super::*;
     use crate::planner::test::PlanArenaTestExt;
-    use crate::planner::{ExecArenaView, ExprRef, TableArenaCell};
+    use crate::planner::{ExecMetaArena, ExprRef, TableArenaCell};
 
     fn const_in(
         arena: &mut PlanArena<'_>,
@@ -444,14 +446,14 @@ mod tests {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let reference = arena.alloc_scalar_query_ref();
-        let mut init = arena.alloc_expression(ScalarExpression::Init {
+        let mut init = arena.alloc_expression(ScalarExpression::InitValue {
             id: reference,
             ty: LogicalType::Integer,
         });
         PositionShift { delta: 5 }.visit(&mut init, &mut arena)?;
         assert!(matches!(
             arena.expression(init),
-            ScalarExpression::Init { id, ty: LogicalType::Integer } if *id == reference
+            ScalarExpression::InitValue { id, ty: LogicalType::Integer } if *id == reference
         ));
         assert!(!init.any_referenced_column(&arena, |_, _| true)?);
         let row = Tuple::new(None, vec![DataValue::Int32(99)]);
@@ -459,7 +461,7 @@ mod tests {
             arena.expression(init).eval(&arena, Some(&row)),
             Err(DatabaseError::InvalidValue(message)) if message.contains("is not initialized")
         ));
-        let mut view = ExecArenaView::new(arena);
+        let mut view = ExecMetaArena::new(arena);
         assert!(view.expression(init).eval(&view, Some(&row)).is_err());
         view.set_init_value(reference, DataValue::Null);
         let value = view.expression(init).eval(&view, Some(&row))?;

@@ -24,7 +24,7 @@ use crate::optimizer::core::histogram::{HistogramBuilder, ANALYZE_STATISTICS_REL
 use crate::optimizer::core::statistics_meta::StatisticsMeta;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::{table_codec::TableCodec, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::{DataValue, Utf8Type};
@@ -72,10 +72,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
             arena.finish();

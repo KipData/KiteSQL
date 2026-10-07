@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::ExprRef;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
@@ -59,10 +59,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.remaining_rows == 0 {
             arena.finish();

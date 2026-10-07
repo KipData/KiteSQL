@@ -726,8 +726,12 @@ select (select v from init_rows)
 statement error
 select id from init_rows where v = (select v from init_rows)
 
-statement error
+query I rowsort
 select (select x.v from init_rows as x where x.id = init_rows.id) from init_rows
+----
+10
+20
+30
 
 statement ok
 create view init_max as select (select max(v) from init_rows) as m
@@ -792,3 +796,216 @@ drop view init_min
 
 statement ok
 drop table init_rows
+
+# Correlated values use the execution arena; outer columns remain input dependencies.
+statement ok
+create table corr_rows(id int primary key, b int);
+
+statement ok
+insert into corr_rows values (1,10),(2,20),(3,30),(4,null),(5,20);
+
+# WHERE and SELECT registrations are attached before their own consumers.
+query T
+explain select id,(select 7) from corr_rows where b<(select 25);
+----
+Projection [corr_rows.id, InitValue(1:0)] [Project => (Sort Option: Follow)] ScalarQueryInit InitValue(1:0) Filter (corr_rows.b < InitValue(1:1)), Is Having: false [Filter => (Sort Option: Follow)] ScalarQueryInit InitValue(1:1) TableScan corr_rows -> [corr_rows.id, corr_rows.b] [SeqScan => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [25] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [7] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)]
+
+query II rowsort
+select id,(select 7) from corr_rows where b<(select 25);
+----
+1 7
+2 7
+5 7
+
+# b is needed solely as an outer parameter, not as a projected output column.
+query I rowsort
+select (select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows;
+----
+0
+0
+1
+1
+3
+
+query II rowsort
+select (select count(*) from corr_rows x where x.b<corr_rows.b),(select 7) from corr_rows where b<(select 25);
+----
+0 7
+1 7
+1 7
+
+query II rowsort
+select (select x.b from corr_rows x where x.id=corr_rows.id+100),coalesce((select x.b from corr_rows x where x.id=corr_rows.id),-1) from corr_rows;
+----
+NULL -1
+NULL 10
+NULL 20
+NULL 20
+NULL 30
+
+# LIMIT is streaming, unlike ORDER BY; ordinary input rows still drive recomputation.
+query I rowsort
+select (select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows limit 2;
+----
+0
+1
+
+query II rowsort
+select id,(select count(*) from corr_rows x where x.b<corr_rows.b) as n from corr_rows;
+----
+1 0
+2 1
+3 3
+4 0
+5 1
+
+statement error correlated scalar values across ORDER BY require a row-scoped execution context
+select id,(select count(*) from corr_rows x where x.b<corr_rows.b) as n from corr_rows order by n desc,id limit 3;
+
+statement error correlated scalar values across DISTINCT require a row-scoped execution context
+select distinct (select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows;
+
+query III rowsort
+select id,(select count(*) from corr_rows x where x.b<corr_rows.b),(select count(*) from corr_rows x where x.b>corr_rows.b) from corr_rows;
+----
+1 0 3
+2 1 1
+3 3 0
+4 0 0
+5 1 1
+
+query II rowsort
+select o.id,(select count(*) from corr_rows x where x.b>o.b and x.id<o.id) from corr_rows o;
+----
+1 0
+2 0
+3 0
+4 0
+5 1
+
+query II rowsort
+select id,(select x.b from corr_rows x where x.id=corr_rows.id) from corr_rows;
+----
+1 10
+2 20
+3 30
+4 NULL
+5 20
+
+query II rowsort
+select id,(select x.b from corr_rows x where x.id=corr_rows.id+100) from corr_rows;
+----
+1 NULL
+2 NULL
+3 NULL
+4 NULL
+5 NULL
+
+# A missing middle-row match must not retain the preceding scalar result.
+query II rowsort
+select id,(select x.b from corr_rows x where x.id=corr_rows.id and x.id<>2) from corr_rows where id<4;
+----
+1 10
+2 NULL
+3 30
+
+# Owned text values and NULL remain distinct across repeated scalar execution.
+query IT rowsort
+select id,(select cast(x.b as varchar(12)) from corr_rows x where x.id=corr_rows.id) from corr_rows;
+----
+1 10
+2 20
+3 30
+4 NULL
+5 20
+
+statement error scalar subquery returned more than one row
+select id,(select x.b from corr_rows x where x.b=corr_rows.b) from corr_rows;
+
+query II rowsort
+select id,coalesce((select x.b from corr_rows x where x.id=corr_rows.id),-1)+(select 7) from corr_rows;
+----
+1 17
+2 27
+3 37
+4 6
+5 27
+
+statement error correlated scalar values across ORDER BY require a row-scoped execution context
+select (select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows order by b desc nulls last,id;
+
+query II rowsort
+select id,(select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows where exists(select 1 from corr_rows y where y.id=corr_rows.id);
+----
+1 0
+2 1
+3 3
+4 0
+5 1
+
+statement ok
+create table corr_lookup(id int primary key, v int);
+
+statement ok
+insert into corr_lookup values (1,100),(2,200);
+
+query III rowsort
+select o.id,l.id,(select count(*) from corr_rows x where x.b<o.b and x.id>l.id) from corr_rows o cross join corr_lookup l where o.id=3;
+----
+3 1 2
+3 2 1
+
+query II rowsort
+select id,(select sum(x.b) from corr_rows x where x.b<corr_rows.b) from corr_rows;
+----
+1 NULL
+2 10
+3 50
+4 NULL
+5 10
+
+query II rowsort
+select id,(select x.b from corr_rows x where x.b<corr_rows.b order by x.b desc limit 1) from corr_rows;
+----
+1 NULL
+2 10
+3 20
+4 NULL
+5 10
+
+query II rowsort
+select id,(select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows where id<0;
+----
+
+statement error correlated scalar queries with outer windows are not supported yet
+select row_number() over(order by id),(select count(*) from corr_rows x where x.b<corr_rows.b) from corr_rows;
+
+statement error nested correlated scalar queries are not supported yet
+select (select (select count(*) from corr_rows y where y.b<x.b) from corr_rows x where x.id=corr_rows.id) from corr_rows;
+
+statement error correlated scalar subqueries currently require the SELECT list
+select id from corr_rows where b=(select max(x.b) from corr_rows x where x.id<corr_rows.id);
+
+statement error correlated scalar queries with outer aggregation are not supported yet
+select count(*),(select max(x.b) from corr_rows x where x.id<corr_rows.id) from corr_rows;
+
+statement ok
+create view corr_view as select id,(select count(*) from corr_rows x where x.b<corr_rows.b) as n from corr_rows;
+
+query II
+select a.id,a.n+b.n from corr_view a join corr_view b on a.id=b.id order by a.id;
+----
+1 0
+2 2
+3 6
+4 0
+5 2
+
+statement ok
+drop view corr_view;
+
+statement ok
+drop table corr_lookup;
+
+statement ok
+drop table corr_rows;

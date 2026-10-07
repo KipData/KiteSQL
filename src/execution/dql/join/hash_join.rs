@@ -28,7 +28,7 @@ use crate::execution::{
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
@@ -143,10 +143,10 @@ impl HashJoin {
         Ok(())
     }
 
-    fn initialize_build<'a, T: Transaction + 'a>(
+    fn initialize_build<'a, T: Transaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if !matches!(self.state, HashJoinState::Build) {
             return Ok(());
@@ -251,10 +251,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if let Some(err) = self.init_error.take() {
             return Err(err);

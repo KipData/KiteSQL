@@ -248,7 +248,6 @@ macro_rules! impl_display_explain {
 }
 
 impl_display_explain!(
-    ScalarQueryInitOperator,
     MarkApplyOperator,
     ScalarSubqueryOperator,
     FunctionScanOperator,
@@ -362,6 +361,16 @@ impl Operator {
                 op: &'operator AggregateOperator,
             ) -> Result<(), DatabaseError> {
                 for expr in op.agg_calls.iter().chain(&op.groupby_exprs) {
+                    ExprVisitor::visit(self, *expr, self.arena)?;
+                }
+                Ok(())
+            }
+
+            fn visit_scalar_query_init(
+                &mut self,
+                op: &'operator ScalarQueryInitOperator,
+            ) -> Result<(), DatabaseError> {
+                for (_, expr) in &op.param_bindings {
                     ExprVisitor::visit(self, *expr, self.arena)?;
                 }
                 Ok(())
@@ -1002,10 +1011,12 @@ mod tests {
         });
         assert_eq!(referenced_columns(&delete, &mut arena)?, vec![a]);
 
+        let scalar = Operator::ScalarQueryInit(ScalarQueryInitOperator {
+            value: arena.alloc_expression(ScalarExpression::Constant(DataValue::Null)),
+            param_bindings: Vec::new(),
+        });
+        assert!(referenced_columns(&scalar, &mut arena)?.is_empty());
         let no_reference_operators = [
-            Operator::ScalarQueryInit(ScalarQueryInitOperator {
-                id: arena.alloc_scalar_query_ref(),
-            }),
             Operator::ScalarSubquery(ScalarSubqueryOperator),
             Operator::Analyze(AnalyzeOperator {
                 table_name: "users".into(),
@@ -1390,11 +1401,15 @@ mod tests {
         let left = LogicalPlan::new(Operator::ShowTable, Childrens::None);
         let right = LogicalPlan::new(Operator::ShowView, Childrens::None);
 
-        let apply =
-            ScalarQueryInitOperator::build(left.clone(), right, arena.alloc_scalar_query_ref());
+        let id = arena.alloc_scalar_query_ref();
+        let value = arena.alloc_expression(ScalarExpression::InitValue {
+            id,
+            ty: LogicalType::Integer,
+        });
+        let apply = ScalarQueryInitOperator::build(left.clone(), right, value, Vec::new());
         assert_eq!(
             apply.operator.explain(&arena).to_string(),
-            "ScalarQueryInit #1:0"
+            "ScalarQueryInit InitValue(1:0)"
         );
         assert!(matches!(*apply.childrens, Childrens::Twins { .. }));
 

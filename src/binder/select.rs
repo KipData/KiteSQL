@@ -32,6 +32,7 @@ use super::{Binder, BinderContext, QueryBindStep, SetOperatorKind, Source, SubQu
 use crate::catalog::{ColumnRef, ColumnRelation, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::joins_nullable;
+use crate::expression::visitor::ExprVisitor;
 use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut, PositionShift};
 use crate::expression::{AliasType, BinaryOperator, TypeCast};
 use crate::iter_ext::Itertools;
@@ -41,7 +42,7 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::set_membership::{SetMembershipKind, SetMembershipOperator};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::union::UnionOperator;
-use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, ScalarQueryRef};
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
@@ -412,6 +413,17 @@ where
 
     #[cfg(feature = "orm")]
     pub fn finish(self) -> Result<LogicalPlan, DatabaseError> {
+        if self
+            .binder
+            .context
+            .scalar_queries
+            .iter()
+            .any(|query| !query.param_bindings.is_empty())
+        {
+            return Err(DatabaseError::UnsupportedStmt(
+                "correlated scalar queries in ORM projections are not supported yet".into(),
+            ));
+        }
         for expr in &self.select_list {
             if expr.has_agg_call(self.arena)? || expr.has_window_call(self.arena)? {
                 return self.aggregate_without_group()?.finish();
@@ -420,7 +432,7 @@ where
         let plan = self
             .binder
             .bind_project(self.plan, self.select_list, self.arena)?;
-        Ok(self.binder.init_scalar_queries(plan))
+        Ok(plan)
     }
 }
 
@@ -489,6 +501,30 @@ where
         self.binder
             .extract_select_aggregate(&mut self.select_list, self.arena)?;
 
+        // Statement-constant scalar values needed by grouping/aggregate arguments are initialized
+        // before the aggregate, without turning them into input columns.
+        self.plan =
+            self.binder
+                .bind_scalar_queries(self.plan, &[QueryBindStep::Agg], self.arena)?;
+        if self
+            .binder
+            .context
+            .scalar_queries
+            .iter()
+            .any(|query| !query.param_bindings.is_empty())
+        {
+            if !group_by.is_empty() || !self.binder.context.agg_calls.is_empty() {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "correlated scalar queries with outer aggregation are not supported yet".into(),
+                ));
+            }
+        } else if !group_by.is_empty() || !self.binder.context.agg_calls.is_empty() {
+            self.plan = self.binder.bind_scalar_queries(
+                self.plan,
+                &[QueryBindStep::Project],
+                self.arena,
+            )?;
+        }
         if !group_by.is_empty() {
             self.binder.extract_group_by_aggregate_exprs(
                 &mut self.select_list,
@@ -511,6 +547,17 @@ where
         if !self.binder.context.agg_calls.is_empty()
             || !self.binder.context.group_by_exprs.is_empty()
         {
+            if self
+                .binder
+                .context
+                .scalar_queries
+                .iter()
+                .any(|q| !q.param_bindings.is_empty())
+            {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "correlated scalar queries with outer aggregation are not supported yet".into(),
+                ));
+            }
             let agg_calls = std::mem::take(&mut self.binder.context.agg_calls);
             let group_by_exprs = std::mem::take(&mut self.binder.context.group_by_exprs);
             let output_exprs = self
@@ -575,6 +622,43 @@ where
     pub(crate) fn window(
         mut self,
     ) -> Result<BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
+        if self
+            .binder
+            .context
+            .scalar_queries
+            .iter()
+            .any(|query| !query.param_bindings.is_empty())
+        {
+            for expr in self.select_list.iter().chain(
+                self.orderby
+                    .iter()
+                    .flat_map(|fields| fields.iter().map(|field| &field.expr)),
+            ) {
+                if expr.has_window_call(self.arena)? {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "correlated scalar queries with outer windows are not supported yet".into(),
+                    ));
+                }
+            }
+        }
+        if self.orderby.is_some()
+            && self
+                .binder
+                .context
+                .scalar_queries
+                .iter()
+                .any(|query| !query.param_bindings.is_empty())
+        {
+            return Err(DatabaseError::UnsupportedStmt(
+                "correlated scalar values across ORDER BY require a row-scoped execution context"
+                    .into(),
+            ));
+        }
+        self.plan = self.binder.bind_scalar_queries(
+            self.plan,
+            &[QueryBindStep::Project, QueryBindStep::Sort],
+            self.arena,
+        )?;
         self.plan = self.binder.bind_window(
             self.plan,
             &mut self.select_list,
@@ -602,6 +686,25 @@ where
         distinct: bool,
     ) -> Result<BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         if distinct {
+            struct OuterResult(bool);
+            impl ExprVisitor<dyn MetaArena + '_> for OuterResult {
+                fn visit_outer_value(
+                    &mut self,
+                    _id: ScalarQueryRef,
+                    _ty: &LogicalType,
+                    _arena: &(dyn MetaArena + '_),
+                ) -> Result<(), DatabaseError> {
+                    self.0 = true;
+                    Ok(())
+                }
+            }
+            let mut outer = OuterResult(false);
+            for expr in &self.select_list {
+                ExprVisitor::visit(&mut outer, *expr, self.arena)?;
+            }
+            if outer.0 {
+                return Err(DatabaseError::UnsupportedStmt("correlated scalar values across DISTINCT require a row-scoped execution context".into()));
+            }
             let distinct_outputs = self.select_list.clone();
             self.binder.bind_distinct_output_exprs(
                 &distinct_outputs,
@@ -661,7 +764,7 @@ where
         }
 
         Ok(BindPlanProjected {
-            plan: self.binder.init_scalar_queries(self.plan),
+            plan: self.plan,
             _marker: std::marker::PhantomData,
         })
     }
@@ -698,12 +801,30 @@ impl BindPlanComplete {
 }
 
 impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b, T, A> {
+    pub(crate) fn bind_scalar_queries(
+        &mut self,
+        mut plan: LogicalPlan,
+        on_steps: &[QueryBindStep],
+        _arena: &mut PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        for query in self
+            .context
+            .scalar_queries
+            .extract_if(.., |query| on_steps.contains(&query.step))
+        {
+            plan =
+                ScalarQueryInitOperator::build(plan, query.plan, query.value, query.param_bindings);
+        }
+        Ok(plan)
+    }
+
     pub(crate) fn init_scalar_queries(&mut self, mut plan: LogicalPlan) -> LogicalPlan {
-        for (id, init) in std::mem::take(&mut self.context.scalar_queries)
+        for query in std::mem::take(&mut self.context.scalar_queries)
             .into_iter()
             .rev()
         {
-            plan = ScalarQueryInitOperator::build(plan, init, id);
+            plan =
+                ScalarQueryInitOperator::build(plan, query.plan, query.value, query.param_bindings);
         }
         plan
     }
@@ -1327,6 +1448,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         predicate: ExprRef,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
+        children = self.bind_scalar_queries(children, &[QueryBindStep::Where], arena)?;
         self.context.step(QueryBindStep::Where);
         if predicate.has_agg_call(arena)? {
             return Err(DatabaseError::AggMiss(
@@ -1745,10 +1867,11 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 
     fn bind_having(
         &mut self,
-        children: LogicalPlan,
+        mut children: LogicalPlan,
         mut having: ExprRef,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
+        children = self.bind_scalar_queries(children, &[QueryBindStep::Having], arena)?;
         self.context.step(QueryBindStep::Having);
 
         self.validate_having_orderby(having, arena)?;
@@ -1770,10 +1893,10 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         &mut self,
         children: LogicalPlan,
         select_list: Vec<ExprRef>,
-        _arena: &mut PlanArena,
+        arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
+        let children = self.bind_scalar_queries(children, &[QueryBindStep::Project], arena)?;
         self.context.step(QueryBindStep::Project);
-
         Ok(Self::build_project_plan(children, select_list))
     }
 
@@ -1781,10 +1904,10 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         &mut self,
         children: LogicalPlan,
         sort_fields: Vec<SortField>,
-        _arena: &mut PlanArena,
+        arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
+        let children = self.bind_scalar_queries(children, &[QueryBindStep::Sort], arena)?;
         self.context.step(QueryBindStep::Sort);
-
         Ok(LogicalPlan::new(
             Operator::Sort(SortOperator { sort_fields }),
             Childrens::Only(Box::new(children)),
@@ -2182,9 +2305,16 @@ mod tests {
             "select * from t1 where c1 = (select max(c3) from t2)",
             &mut arena,
         )?;
-        assert!(matches!(plan.operator, Operator::ScalarQueryInit(_)));
+        assert!(matches!(plan.operator, Operator::Project(_)));
         assert!(find_join(&plan).is_none());
-        let Childrens::Twins { left, right } = plan.childrens.as_mut() else {
+        let Childrens::Only(filter) = plan.childrens.as_mut() else {
+            panic!("expected project input")
+        };
+        let Childrens::Only(init) = filter.childrens.as_mut() else {
+            panic!("expected filter input")
+        };
+        assert!(matches!(init.operator, Operator::ScalarQueryInit(_)));
+        let Childrens::Twins { left, right } = init.childrens.as_mut() else {
             panic!("expected init children")
         };
         assert_eq!(left.output_schema(&mut arena).len(), 2);
@@ -2267,16 +2397,17 @@ mod tests {
             "select * from t1 where c1 <= (select 4) and c1 > (select 1)",
             &mut arena,
         )?;
-        let Operator::ScalarQueryInit(first) = &plan.operator else {
+        let init = plan.childrens.only().childrens.only();
+        let Operator::ScalarQueryInit(first) = &init.operator else {
             panic!("expected scalar init")
         };
-        let Childrens::Twins { left, .. } = plan.childrens.as_ref() else {
+        let Childrens::Twins { left, .. } = init.childrens.as_ref() else {
             panic!("expected init children")
         };
         let Operator::ScalarQueryInit(second) = &left.operator else {
             panic!("expected second scalar init")
         };
-        assert_ne!(first.id, second.id);
+        assert_ne!(first.reference(&arena), second.reference(&arena));
         assert!(find_join(&plan).is_none());
         Ok(())
     }

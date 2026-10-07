@@ -13,30 +13,46 @@
 // limitations under the License.
 
 use super::Operator;
-use crate::planner::{Childrens, LogicalPlan, ScalarQueryRef};
+use crate::expression::ScalarExpression;
+use crate::planner::{Childrens, Explain, ExprRef, LogicalPlan, MetaArena, ScalarQueryRef};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct ScalarQueryInitOperator {
-    pub id: ScalarQueryRef,
+    pub value: ExprRef,
+    pub param_bindings: Vec<(ScalarQueryRef, ExprRef)>,
 }
 
 impl ScalarQueryInitOperator {
-    pub fn build(left: LogicalPlan, right: LogicalPlan, id: ScalarQueryRef) -> LogicalPlan {
+    pub fn build(
+        left: LogicalPlan,
+        right: LogicalPlan,
+        value: ExprRef,
+        param_bindings: Vec<(ScalarQueryRef, ExprRef)>,
+    ) -> LogicalPlan {
         LogicalPlan::new(
-            Operator::ScalarQueryInit(ScalarQueryInitOperator { id }),
+            Operator::ScalarQueryInit(Self {
+                value,
+                param_bindings,
+            }),
             Childrens::Twins {
                 left: Box::new(left),
                 right: Box::new(right),
             },
         )
     }
+
+    pub(crate) fn reference(&self, arena: &dyn MetaArena) -> ScalarQueryRef {
+        match arena.expression(self.value) {
+            ScalarExpression::InitValue { id, .. } | ScalarExpression::OuterValue { id, .. } => *id,
+            _ => unreachable!("scalar initializer requires a value marker"),
+        }
+    }
 }
 
-impl fmt::Display for ScalarQueryInitOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "ScalarQueryInit #{}", self.id)
+impl Explain for ScalarQueryInitOperator {
+    fn fmt(&self, arena: &dyn MetaArena, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ScalarQueryInit {}", self.value.explain(arena))
     }
 }

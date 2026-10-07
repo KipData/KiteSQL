@@ -20,7 +20,7 @@ use crate::execution::{
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::table_codec::BumpBytes;
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
@@ -143,10 +143,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.output.is_none() {
             let keep_count = self.offset.unwrap_or(0) + self.limit;

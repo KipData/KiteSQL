@@ -19,7 +19,7 @@ use crate::execution::{
 };
 use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::tuple_builder::TupleBuilder;
@@ -45,10 +45,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let op = self.op;
         let column_types = op

@@ -37,7 +37,7 @@ use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveSca
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::Operator;
 use crate::planner::MetaArena;
-use crate::planner::{Childrens, ExecArenaView, ExprRef, LogicalPlan, PlanArena};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
@@ -182,7 +182,7 @@ impl<S: Storage> Database<S> {
     pub fn run_mut<C, R>(&mut self, sql: impl AsRef<str>, consume: C) -> Result<R, DatabaseError>
     where
         C: for<'a> FnOnce(
-            &mut TransactionIter<'a, S::TransactionType<'a>, ExecArenaView<PlanArena<'a>>>,
+            &mut TransactionIter<'a, S::TransactionType<'a>, PlanArena<'a>>,
         ) -> Result<R, DatabaseError>,
     {
         let sql = sql.as_ref();
@@ -198,7 +198,7 @@ impl<S: Storage> Database<S> {
     ) -> Result<R, DatabaseError>
     where
         C: for<'a> FnOnce(
-            &mut TransactionIter<'a, S::TransactionType<'a>, ExecArenaView<PlanArena<'a>>>,
+            &mut TransactionIter<'a, S::TransactionType<'a>, PlanArena<'a>>,
         ) -> Result<R, DatabaseError>,
     {
         let last = statements
@@ -277,7 +277,7 @@ impl<S: Storage> Database<S> {
             } else {
                 let inner = Box::into_raw(Box::new(TransactionIter::new(
                     schema,
-                    Box::new(plan_arena) as Box<dyn crate::planner::MetaArena>,
+                    plan_arena.boxed(),
                     executor,
                     transaction,
                 )));
@@ -1256,6 +1256,12 @@ where
                     Childrens::Only(Box::new(plan)),
                 );
             }
+            let steps = [
+                QueryBindStep::From,
+                QueryBindStep::Where,
+                QueryBindStep::Project,
+            ];
+            plan = self.binder.bind_scalar_queries(plan, &steps, self.arena)?;
             self.binder.bind_update(table_name, value_exprs, plan)
         } else {
             Err(DatabaseError::UnsupportedStmt(format!(
@@ -2720,8 +2726,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         let left_plan = {
             let mut left_binder = Binder::new(self.context.fork(), self.args, self.parent);
             let plan = left_binder.bind_set_expr(left, arena)?;
-            if left_binder.context.has_outer_refs() {
-                self.context.mark_outer_ref();
+            if left_binder.context.has_join_outer_ref() {
+                self.context.mark_join_outer_ref();
             }
             plan
         };
@@ -2729,8 +2735,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         let right_plan = {
             let mut right_binder = Binder::new(self.context.fork(), self.args, self.parent);
             let plan = right_binder.bind_set_expr(right, arena)?;
-            if right_binder.context.has_outer_refs() {
-                self.context.mark_outer_ref();
+            if right_binder.context.has_join_outer_ref() {
+                self.context.mark_join_outer_ref();
             }
             plan
         };
@@ -2902,8 +2908,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             arena.alloc_expression(predicate)
         })?;
 
-        let plan = self.bind_where_expr(children, predicate, arena)?;
-        Ok(self.init_scalar_queries(plan))
+        self.bind_where_expr(children, predicate, arena)
     }
 
     pub(crate) fn normalize_select_item(
@@ -3207,7 +3212,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
 
         self.context.restore_ctes(cte_checkpoint);
         self.context.step(origin_step);
-        Ok(self.init_scalar_queries(plan))
+        Ok(plan)
     }
 
     fn bind_non_negative_limit_value(

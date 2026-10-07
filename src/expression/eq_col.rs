@@ -83,14 +83,34 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         walk_expr(self, lhs, arena)
     }
 
-    fn visit_init(
+    fn visit_outer_param(
+        &mut self,
+        id: ScalarQueryRef,
+        ty: &LogicalType,
+        _arena: &(dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        self.equal = matches!(self.rhs(), ScalarExpression::OuterParam { id: rhs, ty: rhs_ty } if id == *rhs && ty == rhs_ty);
+        Ok(())
+    }
+
+    fn visit_outer_value(
+        &mut self,
+        id: ScalarQueryRef,
+        ty: &LogicalType,
+        _arena: &(dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        self.equal = matches!(self.rhs(), ScalarExpression::OuterValue { id: rhs, ty: rhs_ty } if id == *rhs && ty == rhs_ty);
+        Ok(())
+    }
+
+    fn visit_init_value(
         &mut self,
         id: ScalarQueryRef,
         ty: &LogicalType,
         _arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
-            ScalarExpression::Init {
+            ScalarExpression::InitValue {
                 id: rhs_id,
                 ty: rhs_ty,
             } => id == *rhs_id && ty == rhs_ty,

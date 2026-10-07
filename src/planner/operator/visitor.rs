@@ -222,6 +222,17 @@ impl<'a, V: ExprVisitor<A>, A: MetaArena + ?Sized> OperatorVisitor<'a>
         Ok(())
     }
 
+    fn visit_scalar_query_init(
+        &mut self,
+        op: &'a ScalarQueryInitOperator,
+    ) -> Result<(), DatabaseError> {
+        ExprVisitor::visit(self.visitor, op.value, self.arena)?;
+        for (_, expr) in &op.param_bindings {
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
+        }
+        Ok(())
+    }
+
     fn visit_mark_apply(&mut self, op: &'a MarkApplyOperator) -> Result<(), DatabaseError> {
         for expr in &op.predicates {
             ExprVisitor::visit(self.visitor, *expr, self.arena)?;
@@ -452,7 +463,8 @@ pub(crate) mod tests {
                 force_spill: false,
             }),
             Operator::ScalarQueryInit(ScalarQueryInitOperator {
-                id: arena.alloc_scalar_query_ref(),
+                param_bindings: Vec::new(),
+                value: expr(0),
             }),
             Operator::MarkApply(mark_apply),
             Operator::Filter(FilterOperator {
@@ -660,7 +672,7 @@ pub(crate) mod tests {
         for operator in &operators {
             visitor.visit_operator(operator)?;
         }
-        assert_eq!(counter.0, 21); // Includes the Values row expression.
+        assert_eq!(counter.0, 22); // Includes the Values row expression.
 
         Ok(())
     }
