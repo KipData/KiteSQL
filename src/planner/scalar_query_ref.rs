@@ -23,6 +23,7 @@ use std::io::{Read, Write};
 pub struct ScalarQueryRef {
     pub(crate) arena_id: usize,
     pub(crate) pos: usize,
+    pub(crate) is_outer_value: bool,
 }
 
 impl std::fmt::Display for ScalarQueryRef {
@@ -40,7 +41,8 @@ impl ReferenceSerialization for ScalarQueryRef {
         arena: &A,
     ) -> Result<(), DatabaseError> {
         self.arena_id.encode(writer, direct, tables, arena)?;
-        self.pos.encode(writer, direct, tables, arena)
+        self.pos.encode(writer, direct, tables, arena)?;
+        self.is_outer_value.encode(writer, direct, tables, arena)
     }
 
     fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
@@ -52,6 +54,7 @@ impl ReferenceSerialization for ScalarQueryRef {
         let reference = Self {
             arena_id: usize::decode(reader, context, tables, arena)?,
             pos: usize::decode(reader, context, tables, arena)?,
+            is_outer_value: bool::decode(reader, context, tables, arena)?,
         };
         arena.reserve_scalar_query_ref(reference);
         Ok(reference)
@@ -67,7 +70,7 @@ mod tests {
     #[test]
     fn decoding_preserves_source_reference() -> Result<(), DatabaseError> {
         let mut source = TableArena::default();
-        let reference = source.alloc_scalar_query_ref();
+        let reference = source.alloc_scalar_query_ref(true);
         let mut bytes = Vec::new();
         let mut tables = ReferenceTables::new();
         reference.encode(&mut bytes, false, &mut tables, &source)?;
@@ -95,7 +98,7 @@ mod tests {
             &mut target,
         )?;
         assert_eq!(second, reference);
-        assert_ne!(target.alloc_scalar_query_ref(), reference);
+        assert_ne!(target.alloc_scalar_query_ref(false), reference);
         Ok(())
     }
 }

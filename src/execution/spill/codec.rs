@@ -15,7 +15,7 @@
 use super::SpillCodec;
 use crate::errors::DatabaseError;
 use crate::planner::operator::sort::SortField;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena, ScalarQueryRef};
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use std::io::{Read, Write};
@@ -24,13 +24,14 @@ use std::mem::size_of;
 pub(crate) struct SortRow {
     pub(crate) sort_values: Vec<DataValue>,
     pub(crate) tuple: Tuple,
+    pub(crate) outer_values: Vec<(ScalarQueryRef, DataValue)>,
 }
 
 impl SortRow {
     pub(crate) fn new(
         sort_fields: &[SortField],
         tuple: Tuple,
-        arena: &(dyn MetaArena + '_),
+        arena: &mut ExecMetaArena<impl MetaArena>,
     ) -> Result<Self, DatabaseError> {
         let sort_values = sort_fields
             .iter()
@@ -41,25 +42,36 @@ impl SortRow {
                     .map(|v| v.into_owned())
             })
             .collect::<Result<_, _>>()?;
-        Ok(Self { sort_values, tuple })
+        Ok(Self {
+            sort_values,
+            tuple,
+            outer_values: arena.take_outer_values(),
+        })
     }
 }
 
 impl SpillCodec for SortRow {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<(), DatabaseError> {
         self.sort_values.encode(writer)?;
-        self.tuple.encode(writer)
+        self.tuple.encode(writer)?;
+        self.outer_values.encode(writer)
     }
 
     fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError> {
         Ok(Self {
             sort_values: Vec::<DataValue>::decode(reader)?,
             tuple: Tuple::decode(reader)?,
+            outer_values: Vec::decode(reader)?,
         })
     }
 
     fn estimated_size(&self) -> usize {
         size_of::<Self>()
+            .saturating_add(
+                self.outer_values
+                    .estimated_size()
+                    .saturating_sub(size_of::<Vec<(ScalarQueryRef, DataValue)>>()),
+            )
             .saturating_add(
                 self.sort_values
                     .estimated_size()
@@ -70,6 +82,55 @@ impl SpillCodec for SortRow {
                     .estimated_size()
                     .saturating_sub(size_of::<Tuple>()),
             )
+    }
+}
+
+impl<A: SpillCodec, B: SpillCodec> SpillCodec for (A, B) {
+    fn encode<W: Write>(&self, writer: &mut W) -> Result<(), DatabaseError> {
+        self.0.encode(writer)?;
+        self.1.encode(writer)
+    }
+
+    fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError> {
+        Ok((A::decode(reader)?, B::decode(reader)?))
+    }
+
+    fn estimated_size(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(self.0.estimated_size().saturating_sub(size_of::<A>()))
+            .saturating_add(self.1.estimated_size().saturating_sub(size_of::<B>()))
+    }
+}
+
+impl SpillCodec for ScalarQueryRef {
+    fn encode<W: Write>(&self, writer: &mut W) -> Result<(), DatabaseError> {
+        writer.write_all(&(self.arena_id as u64).to_le_bytes())?;
+        writer.write_all(&(self.pos as u64).to_le_bytes())?;
+        writer.write_all(&[u8::from(self.is_outer_value)])?;
+        Ok(())
+    }
+    fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError> {
+        let mut bytes = [0; 8];
+        reader.read_exact(&mut bytes)?;
+        let arena_id = usize::try_from(u64::from_le_bytes(bytes))?;
+        reader.read_exact(&mut bytes)?;
+        let pos = usize::try_from(u64::from_le_bytes(bytes))?;
+        let mut marker = [0];
+        reader.read_exact(&mut marker)?;
+        let is_outer_value = match marker[0] {
+            0 => false,
+            1 => true,
+            tag => {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "invalid scalar reference marker: {tag}"
+                )))
+            }
+        };
+        Ok(Self { arena_id, pos, is_outer_value })
+    }
+
+    fn estimated_size(&self) -> usize {
+        size_of::<Self>()
     }
 }
 

@@ -204,7 +204,7 @@ mod tests {
         ] {
             let table_arena = TableArenaCell::default();
             let mut metadata = PlanArena::new(&table_arena);
-            let reference = metadata.alloc_scalar_query_ref();
+            let reference = metadata.alloc_scalar_query_ref(false);
             let column = metadata.alloc_column(ColumnCatalog::new(
                 "v".into(),
                 true,

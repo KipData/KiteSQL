@@ -88,20 +88,18 @@ impl<T> TreeNode<T> {
     fn add_child(&mut self, child: TreeNode<T>) {
         self.children.push(child);
     }
-}
 
-impl<T: Clone> TreeNode<T> {
-    fn enumeration(self, path: &mut Vec<T>, combinations: &mut Vec<Vec<T>>) {
+    fn enumeration(self, path: &mut Vec<T>, consume: &mut impl FnMut(&[T])) {
         if self.value.is_none() && self.children.is_empty() {
-            combinations.push(path.clone());
+            consume(path);
         }
         for mut child in self.children {
             if let Some(val) = child.value.take() {
                 path.push(val);
-                Self::enumeration(child, path, combinations);
+                Self::enumeration(child, path, consume);
                 let _ = path.pop();
             } else {
-                Self::enumeration(child, path, combinations);
+                Self::enumeration(child, path, consume);
             }
         }
     }
@@ -290,15 +288,11 @@ impl Range {
         }
 
         let node = build_tree(eqs, 0)?;
-        let mut combinations = Vec::new();
-
-        node.enumeration(&mut Vec::new(), &mut combinations);
-
+        let mut path = Vec::with_capacity(eqs.len());
         let mut ranges = Vec::new();
-
-        for tuple in combinations {
-            collect_tuple_range(&mut ranges, &tuple, self.clone())
-        }
+        node.enumeration(&mut path, &mut |tuple| {
+            collect_tuple_range(&mut ranges, tuple, self.clone());
+        });
         Some(RangeDetacher::<IndexRangeColumn>::ranges2range(ranges))
     }
 }
@@ -2837,6 +2831,35 @@ mod test {
             ]),
         ];
         let combined = suffix.combining_eqs(&prefixes).unwrap();
+        let eq = |value| Range::Eq(DataValue::Int32(value));
+        assert_eq!(
+            eq(9).combining_eqs(&[
+                Range::SortedRanges(vec![eq(1), eq(2)]),
+                Range::SortedRanges(vec![eq(3), eq(4)]),
+            ]),
+            Some(Range::SortedRanges(vec![
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(3),
+                    DataValue::Int32(9)
+                ])),
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(4),
+                    DataValue::Int32(9)
+                ])),
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(2),
+                    DataValue::Int32(3),
+                    DataValue::Int32(9)
+                ])),
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(2),
+                    DataValue::Int32(4),
+                    DataValue::Int32(9)
+                ])),
+            ]))
+        );
         let first = DataValue::Int32(1);
         let second = DataValue::Int32(2);
         let borrowed = [Range::Eq(&first), Range::Eq(&second)];

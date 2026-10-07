@@ -229,7 +229,7 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             ));
         }
         let ty = arena.column(schema[0]).datatype().clone();
-        let id = arena.alloc_scalar_query_ref();
+        let id = arena.alloc_scalar_query_ref(!param_bindings.is_empty());
         let value = arena.alloc_expression(if param_bindings.is_empty() {
             ScalarExpression::InitValue { id, ty: ty.clone() }
         } else {
@@ -440,7 +440,7 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         let ty = expr.return_type(arena).into_owned();
-        let id = arena.alloc_scalar_query_ref();
+        let id = arena.alloc_scalar_query_ref(false);
         let source = arena.alloc_expression(expr);
         self.context.scalar_outer_bindings.push((id, source));
         Ok(ScalarExpression::OuterParam { id, ty })
