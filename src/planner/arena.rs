@@ -46,7 +46,27 @@ impl ScalarQueryRelocator {
 }
 
 impl ExprVisitorMut for ScalarQueryRelocator {
-    fn visit_init(
+    fn visit_outer_param(
+        &mut self,
+        reference: &mut ScalarQueryRef,
+        _ty: &mut LogicalType,
+        _arena: &mut dyn MetaArena,
+    ) -> Result<(), DatabaseError> {
+        self.relocate(reference);
+        Ok(())
+    }
+
+    fn visit_outer_value(
+        &mut self,
+        reference: &mut ScalarQueryRef,
+        _ty: &mut LogicalType,
+        _arena: &mut dyn MetaArena,
+    ) -> Result<(), DatabaseError> {
+        self.relocate(reference);
+        Ok(())
+    }
+
+    fn visit_init_value(
         &mut self,
         reference: &mut ScalarQueryRef,
         _ty: &mut LogicalType,
@@ -77,7 +97,9 @@ impl<'a> OperatorVisitorMut<'a> for ScalarQueryPlanRelocator<'_> {
         &mut self,
         op: &'a mut ScalarQueryInitOperator,
     ) -> Result<(), DatabaseError> {
-        self.references.relocate(&mut op.id);
+        for (reference, _) in &mut op.param_bindings {
+            self.references.relocate(reference);
+        }
         Ok(())
     }
 }
@@ -225,10 +247,6 @@ pub trait MetaArena {
         None
     }
 
-    fn set_init_value(&mut self, _reference: ScalarQueryRef, _value: DataValue) {
-        panic!("scalar query initialization requires an execution arena view")
-    }
-
     fn alloc_dummy(&mut self, name: &str) -> ColumnRef {
         self.table_arena_cell().borrow().alloc_dummy(name)
     }
@@ -294,9 +312,6 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
     fn init_value(&self, reference: ScalarQueryRef) -> Option<&DataValue> {
         (**self).init_value(reference)
     }
-    fn set_init_value(&mut self, reference: ScalarQueryRef, value: DataValue) {
-        (**self).set_init_value(reference, value)
-    }
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
         (**self).alloc_column(column)
     }
@@ -327,12 +342,12 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
 }
 
 /// Owns the metadata and scalar-query cache for one statement execution.
-pub struct ExecArenaView<A> {
+pub struct ExecMetaArena<A> {
     parent: A,
     init_values: HashMap<ScalarQueryRef, Option<DataValue>>,
 }
 
-impl<A: MetaArena> ExecArenaView<A> {
+impl<A: MetaArena> ExecMetaArena<A> {
     pub(crate) fn new(parent: A) -> Self {
         Self {
             parent,
@@ -340,12 +355,26 @@ impl<A: MetaArena> ExecArenaView<A> {
         }
     }
 
+    pub(crate) fn boxed<'a>(self) -> ExecMetaArena<Box<dyn MetaArena + 'a>>
+    where
+        A: 'a,
+    {
+        ExecMetaArena {
+            parent: Box::new(self.parent),
+            init_values: self.init_values,
+        }
+    }
+
     pub(crate) fn into_parent(self) -> A {
         self.parent
     }
+
+    pub(crate) fn set_init_value(&mut self, reference: ScalarQueryRef, value: DataValue) {
+        self.init_values.insert(reference, Some(value));
+    }
 }
 
-impl<A: MetaArena> MetaArena for ExecArenaView<A> {
+impl<A: MetaArena> MetaArena for ExecMetaArena<A> {
     fn arena_id(&self) -> usize {
         self.parent.arena_id()
     }
@@ -369,9 +398,6 @@ impl<A: MetaArena> MetaArena for ExecArenaView<A> {
     }
     fn bound_param(&self, id: usize) -> Option<&DataValue> {
         self.parent.bound_param(id)
-    }
-    fn set_init_value(&mut self, reference: ScalarQueryRef, value: DataValue) {
-        self.init_values.insert(reference, Some(value));
     }
     fn expression_mut(&mut self, expr: ExprRef) -> ArenaExprMut<'_> {
         self.parent.expression_mut(expr)
@@ -1204,7 +1230,7 @@ mod tests {
                 pos: 0
             }
         );
-        let mut view = ExecArenaView::new(params);
+        let mut view = ExecMetaArena::new(params);
         view.set_init_value(catalog, DataValue::Int32(11));
         assert_eq!(view.arena_id(), 2);
         assert_eq!(view.init_value(catalog), Some(&DataValue::Int32(11)));

@@ -20,7 +20,7 @@ use crate::expression::window::WindowFunctionKind;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::window::WindowOperator;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
@@ -219,10 +219,10 @@ impl<'a> Window<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut output_ready = true;
         loop {

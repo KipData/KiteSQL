@@ -214,7 +214,7 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
         unmatched_group_exprs.retain(|expr| {
             !matches!(
                 arena.expression(expr.unpack_alias(arena)),
-                ScalarExpression::Init { .. }
+                ScalarExpression::InitValue { .. }
             )
         });
         if !unmatched_group_exprs.is_empty() {

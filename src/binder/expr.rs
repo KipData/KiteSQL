@@ -18,7 +18,7 @@ use crate::expression;
 use crate::expression::agg::AggKind;
 use crate::iter_ext::Itertools;
 
-use super::{Binder, BinderContext, QueryBindStep, SubQueryType};
+use super::{Binder, BinderContext, BoundScalarQuery, QueryBindStep, SubQueryType};
 use crate::expression::function::scala::{ArcScalarFunctionImpl, ScalarFunction};
 use crate::expression::function::table::TableFunction;
 use crate::expression::function::FunctionSummary;
@@ -147,7 +147,7 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
     {
         let mut binder = Binder::new(self.context.fork_empty(), self.args, Some(&self.context));
         let sub_query = build(&mut binder, arena)?;
-        let correlated = binder.context.has_outer_refs();
+        let correlated = binder.context.has_join_outer_ref();
         Ok((sub_query, correlated))
     }
 
@@ -206,19 +206,42 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             &mut PlanArena<'arena>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        let (sub_query, column, correlated) =
-            self.bind_subquery_plan_with_output(None, arena, build)?;
-        if correlated {
+        let mut child_context = self.context.fork_empty();
+        child_context.capture_scalar_outer = true;
+        let mut binder = Binder::new(child_context, self.args, Some(&self.context));
+        let mut sub_query = build(&mut binder, arena)?;
+        let param_bindings = binder.context.scalar_outer_bindings;
+        if !param_bindings.is_empty() && self.context.capture_scalar_outer {
             return Err(DatabaseError::UnsupportedStmt(
-                "correlated scalar subqueries are not supported".to_string(),
+                "nested correlated scalar queries are not supported yet".into(),
             ));
         }
+        if !param_bindings.is_empty() && self.context.step_now() != QueryBindStep::Project {
+            return Err(DatabaseError::UnsupportedStmt(
+                "correlated scalar subqueries currently require the SELECT list".into(),
+            ));
+        }
+        let schema = sub_query.output_schema(arena);
+        if schema.len() != 1 {
+            return Err(DatabaseError::MisMatch(
+                "expects only one expression to be returned",
+                "the expression returned by the subquery",
+            ));
+        }
+        let ty = arena.column(schema[0]).datatype().clone();
         let id = arena.alloc_scalar_query_ref();
-        let ty = column.return_type(arena).into_owned();
-        self.context
-            .scalar_queries
-            .push((id, ScalarSubqueryOperator::build(sub_query)));
-        Ok(ScalarExpression::Init { id, ty })
+        let value = arena.alloc_expression(if param_bindings.is_empty() {
+            ScalarExpression::InitValue { id, ty: ty.clone() }
+        } else {
+            ScalarExpression::OuterValue { id, ty: ty.clone() }
+        });
+        self.context.scalar_queries.push(BoundScalarQuery {
+            value,
+            step: self.context.step_now(),
+            plan: ScalarSubqueryOperator::build(sub_query),
+            param_bindings,
+        });
+        Ok(arena.expression(value).clone())
     }
 
     pub(crate) fn bind_exists_subquery_plan<'arena, F>(
@@ -360,12 +383,14 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             try_default!(&table_name, column_name);
         }
         if let Some(table) = table_name.or(bind_table_name) {
+            let mut is_outer = false;
             let (source, position_offset) =
                 match Self::resolve_source_columns_in_scope(&self.context, table) {
                     Ok(source) => source,
                     Err(err) => {
                         if let Some(parent) = self.parent {
-                            self.context.mark_outer_ref();
+                            self.context.mark_join_outer_ref();
+                            is_outer = true;
                             Self::resolve_source_columns_in_scope(parent, table).map_err(|_| err)?
                         } else {
                             return Err(err);
@@ -376,10 +401,11 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
                 Self::find_column_in_schema(source.schema().iter(), arena, column_name)
                     .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
 
-            Ok(ScalarExpression::column_expr(
-                column,
-                position_offset + position,
-            ))
+            let expr = ScalarExpression::column_expr(column, position_offset + position);
+            if is_outer && self.context.capture_scalar_outer {
+                return self.capture_scalar_outer(expr, arena);
+            }
+            Ok(expr)
         } else {
             // handle col syntax
             let mut find_visible_column =
@@ -392,8 +418,13 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             let mut got_column = find_visible_column(&self.context)?;
             if got_column.is_none() {
                 if let Some(parent) = self.parent {
-                    self.context.mark_outer_ref();
+                    self.context.mark_join_outer_ref();
                     got_column = find_visible_column(parent)?;
+                    if self.context.capture_scalar_outer {
+                        if let Some(expr) = got_column {
+                            return self.capture_scalar_outer(expr, arena);
+                        }
+                    }
                 }
             }
             match got_column {
@@ -401,6 +432,18 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
                 None => Err(DatabaseError::column_not_found(column_name.to_string())),
             }
         }
+    }
+
+    fn capture_scalar_outer(
+        &mut self,
+        expr: ScalarExpression,
+        arena: &mut PlanArena,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        let ty = expr.return_type(arena).into_owned();
+        let id = arena.alloc_scalar_query_ref();
+        let source = arena.alloc_expression(expr);
+        self.context.scalar_outer_bindings.push((id, source));
+        Ok(ScalarExpression::OuterParam { id, ty })
     }
 
     pub(crate) fn bind_binary_op_expr(

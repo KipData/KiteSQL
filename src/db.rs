@@ -44,7 +44,7 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::orm::FromQueryRow;
 use crate::planner::operator::Operator;
 use crate::planner::{
-    ExecArenaView, LogicalPlan, MetaArena, PlanArena, PlanInput, PlanKeeper, TableArenaCell,
+    ExecMetaArena, LogicalPlan, MetaArena, PlanArena, PlanInput, PlanKeeper, TableArenaCell,
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
@@ -591,7 +591,7 @@ impl<S: Storage> State<S> {
     ) -> Result<
         (
             Schema,
-            ExecArenaView<A>,
+            ExecMetaArena<A>,
             Executor<'a, S::TransactionType<'txn>>,
         ),
         DatabaseError,
@@ -612,7 +612,7 @@ impl<S: Storage> State<S> {
             &self.table_functions,
         );
         let root = build_write(&mut arena, &mut plan_arena, plan, read_context, transaction);
-        let plan_arena = ExecArenaView::new(plan_arena);
+        let plan_arena = ExecMetaArena::new(plan_arena);
         let executor = Executor::new(arena, root, keeper);
 
         Ok((schema, plan_arena, executor))
@@ -626,7 +626,7 @@ impl<S: Storage> State<S> {
     ) -> Result<
         (
             Schema,
-            ExecArenaView<PlanArena<'a>>,
+            ExecMetaArena<PlanArena<'a>>,
             Executor<'a, S::TransactionType<'txn>>,
         ),
         DatabaseError,
@@ -689,7 +689,7 @@ impl<S: Storage> State<S> {
             table_functions,
         );
         let root = build_write(&mut arena, &mut plan_arena, plan, cache, transaction);
-        let plan_arena = ExecArenaView::new(plan_arena);
+        let plan_arena = ExecMetaArena::new(plan_arena);
         let executor = Executor::new(arena, root, keeper);
 
         Ok((schema, plan_arena, executor))
@@ -791,7 +791,7 @@ impl<S: Storage> Database<S> {
             &mut PlanArena<'a>,
         ) -> Result<LogicalPlan, DatabaseError>,
         C: for<'a> FnOnce(
-            &mut TransactionIter<'a, S::TransactionType<'a>, ExecArenaView<PlanArena<'a>>>,
+            &mut TransactionIter<'a, S::TransactionType<'a>, PlanArena<'a>>,
         ) -> Result<R, DatabaseError>,
     {
         let transaction = Box::into_raw(Box::new(
@@ -963,7 +963,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
         };
         let inner = Box::into_raw(Box::new(TransactionIter::new(
             schema,
-            Box::new(arena) as Box<dyn MetaArena + 'a>,
+            arena.boxed(),
             executor,
             transaction,
         )));
@@ -1173,7 +1173,7 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
                 .execute(unsafe { &mut *transaction }, plan.into(), arena)?;
         Ok(TransactionIter::new(
             schema,
-            Box::new(arena) as Box<dyn MetaArena + 'a>,
+            arena.boxed(),
             executor,
             transaction,
         ))
@@ -1228,7 +1228,7 @@ impl<T: Transaction> Drop for TransactionGuard<'_, T> {
 pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn MetaArena + 'a>> {
     // Drop execution before the metadata arena it borrows from.
     guard: TransactionGuard<'a, T>,
-    plan_arena: A,
+    plan_arena: ExecMetaArena<A>,
     schema: Schema,
     ddl_apply: Vec<DDLApply>,
 }
@@ -1236,7 +1236,7 @@ pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn 
 impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     pub(crate) fn new(
         schema: Schema,
-        plan_arena: A,
+        plan_arena: ExecMetaArena<A>,
         executor: Executor<'a, T>,
         transaction: *mut T,
     ) -> Self {
@@ -1296,7 +1296,7 @@ impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     }
 }
 
-impl<'a, T: Transaction + 'a> TransactionIter<'a, T, ExecArenaView<PlanArena<'a>>> {
+impl<'a, T: Transaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
     fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         let Self {

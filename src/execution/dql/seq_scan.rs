@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::{Iter, Transaction, TupleIter};
 
 pub(crate) struct SeqScan<'a, T: Transaction + 'a> {
@@ -38,10 +38,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let state = arena.local_state(plan_arena);
         let iter = match &mut self.iter {

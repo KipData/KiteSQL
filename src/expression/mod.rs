@@ -66,7 +66,15 @@ pub enum AliasType {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum ScalarExpression {
     Constant(DataValue),
-    Init {
+    OuterParam {
+        id: ScalarQueryRef,
+        ty: LogicalType,
+    },
+    OuterValue {
+        id: ScalarQueryRef,
+        ty: LogicalType,
+    },
+    InitValue {
         id: ScalarQueryRef,
         ty: LogicalType,
     },
@@ -485,7 +493,9 @@ impl TypeCast for ScalarExpression {
             }
             ScalarExpression::Position { .. } => Cow::Owned(LogicalType::Integer),
             ScalarExpression::Alias { expr, .. } => expr.return_type(arena),
-            ScalarExpression::Init { ty, .. } => Cow::Borrowed(ty),
+            ScalarExpression::InitValue { ty, .. }
+            | ScalarExpression::OuterValue { ty, .. }
+            | ScalarExpression::OuterParam { ty, .. } => Cow::Borrowed(ty),
             ScalarExpression::Empty | ScalarExpression::TableFunction(_) => unreachable!(),
             ScalarExpression::Tuple(exprs) => Cow::Owned(LogicalType::Tuple(
                 exprs
@@ -556,7 +566,9 @@ impl Explain for ExprRef {
 
         match arena.expression(*self) {
             ScalarExpression::Constant(value) => write!(f, "{value}"),
-            ScalarExpression::Init { id, .. } => write!(f, "Init({id})"),
+            ScalarExpression::InitValue { id, .. } => write!(f, "InitValue({id})"),
+            ScalarExpression::OuterValue { id, .. } => write!(f, "OuterValue({id})"),
+            ScalarExpression::OuterParam { id, .. } => write!(f, "OuterParam({id})"),
             ScalarExpression::ColumnRef { column, .. } => Explain::fmt(column, arena, f),
             ScalarExpression::Alias { alias, expr } => match alias {
                 AliasType::Name(alias) => f.write_str(alias),

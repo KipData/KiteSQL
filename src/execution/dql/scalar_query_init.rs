@@ -16,28 +16,85 @@ use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
+use crate::expression::ScalarExpression;
 use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
-use crate::planner::{LogicalPlan, MetaArena, ScalarQueryRef};
+use crate::planner::ExecMetaArena;
+use crate::planner::{ExprRef, LogicalPlan, MetaArena, ScalarQueryRef};
 use crate::storage::Transaction;
+use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 
-pub struct ScalarQueryInit {
-    input: ExecId,
-    init: ExecId,
-    reference: ScalarQueryRef,
+enum ScalarQueryInitState {
+    Initialize,
+    ReadInput,
+    ReadOuter,
+    EvaluateOuter,
+    Finished,
 }
 
-impl ScalarQueryInit {
-    pub(crate) fn new(input: ExecId, init: ExecId, reference: ScalarQueryRef) -> Self {
-        Self {
+pub struct ScalarQueryInit<'a> {
+    input: ExecId,
+    reference: ScalarQueryRef,
+    state: ScalarQueryInitState,
+    param_bindings: &'a [(ScalarQueryRef, ExprRef)],
+    scratch_tuple: Tuple,
+
+    init_plan: &'a LogicalPlan,
+    init_pos: ExecId,
+    init: ExecId,
+}
+
+impl<'a> ScalarQueryInit<'a> {
+    fn evaluate_init<T: Transaction + 'a, A: MetaArena + 'a>(
+        &self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        let mut value = DataValue::Null;
+        if arena.next_tuple(self.init, plan_arena)? {
+            std::mem::swap(&mut value, &mut arena.result_tuple_mut().values[0]);
+        }
+        if arena.next_tuple(self.init, plan_arena)? {
+            return Err(DatabaseError::InvalidValue(
+                "scalar subquery returned more than one row".into(),
+            ));
+        }
+        plan_arena.set_init_value(self.reference, value);
+        Ok(())
+    }
+
+    pub(crate) fn build<T: Transaction + 'a>(
+        op: &'a ScalarQueryInitOperator,
+        input: ExecId,
+        init_plan: &'a LogicalPlan,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut (dyn MetaArena + 'a),
+        cache: ExecutionContext<'_>,
+        transaction: &T,
+    ) -> ExecId {
+        let init_pos = arena.nodes.position();
+        let init = build_read(arena, plan_arena, init_plan, cache, transaction);
+        arena.push(ExecNode::ScalarQueryInit(Self {
             input,
             init,
-            reference,
-        }
+            reference: op.reference(plan_arena),
+            state: if matches!(
+                plan_arena.expression(op.value),
+                ScalarExpression::OuterValue { .. }
+            ) {
+                ScalarQueryInitState::ReadOuter
+            } else {
+                ScalarQueryInitState::Initialize
+            },
+            param_bindings: &op.param_bindings,
+            scratch_tuple: Tuple::default(),
+            init_plan,
+            init_pos,
+        }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit<'a> {
     type Input = (
         &'a ScalarQueryInitOperator,
         &'a LogicalPlan,
@@ -52,33 +109,69 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit {
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        let init = build_read(arena, plan_arena, init, cache, transaction);
-        arena.push(ExecNode::ScalarQueryInit(Self::new(input, init, op.id)))
+        Self::build(op, input, init, arena, plan_arena, cache, transaction)
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit {
-    fn next_tuple(
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        if plan_arena.init_value(self.reference).is_none() {
-            let value = if arena.next_tuple(self.init, plan_arena)? {
-                arena.result_tuple().values[0].clone()
-            } else {
-                DataValue::Null
-            };
-            // Drain the scalar wrapper to validate cardinality before publishing its value.
-            if arena.next_tuple(self.init, plan_arena)? {
-                return Err(DatabaseError::InvalidValue(
-                    "scalar subquery returned more than one row".into(),
-                ));
+        loop {
+            match self.state {
+                ScalarQueryInitState::Initialize => {
+                    if plan_arena.init_value(self.reference).is_none() {
+                        self.evaluate_init(arena, plan_arena)?;
+                    }
+                    self.state = ScalarQueryInitState::ReadInput;
+                }
+                ScalarQueryInitState::ReadInput => {
+                    if !arena.next_tuple(self.input, plan_arena)? {
+                        self.state = ScalarQueryInitState::Finished;
+                    }
+                    return Ok(());
+                }
+                ScalarQueryInitState::ReadOuter => {
+                    if !arena.next_tuple(self.input, plan_arena)? {
+                        self.state = ScalarQueryInitState::Finished;
+                        return Ok(());
+                    }
+                    // Preserve the outer row and lend the previous subquery buffer to the arena.
+                    std::mem::swap(arena.result_tuple_mut(), &mut self.scratch_tuple);
+                    for (reference, expr) in self.param_bindings {
+                        let value = plan_arena
+                            .expression(*expr)
+                            .eval(plan_arena, Some(&self.scratch_tuple))?
+                            .into_owned();
+                        plan_arena.set_init_value(*reference, value);
+                    }
+                    self.state = ScalarQueryInitState::EvaluateOuter;
+                }
+                ScalarQueryInitState::EvaluateOuter => {
+                    let previous = arena.nodes.position();
+                    arena.nodes.seek(self.init_pos);
+                    self.init = build_read(
+                        arena,
+                        plan_arena,
+                        self.init_plan,
+                        arena.context(),
+                        arena.transaction(),
+                    );
+                    arena.nodes.seek(previous);
+                    self.evaluate_init(arena, plan_arena)?;
+                    std::mem::swap(arena.result_tuple_mut(), &mut self.scratch_tuple);
+                    self.state = ScalarQueryInitState::ReadOuter;
+                    arena.resume();
+                    return Ok(());
+                }
+                ScalarQueryInitState::Finished => {
+                    arena.finish();
+                    return Ok(());
+                }
             }
-            plan_arena.set_init_value(self.reference, value);
         }
-        arena.next_tuple(self.input, plan_arena)?;
-        Ok(())
     }
 }
 
@@ -91,7 +184,7 @@ mod tests {
     use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::{Childrens, ExecArenaView, PlanArena, TableArenaCell};
+    use crate::planner::{Childrens, ExecMetaArena, PlanArena, TableArenaCell};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
     use crate::types::LogicalType;
@@ -118,6 +211,10 @@ mod tests {
                 ColumnDesc::new(LogicalType::Integer, None, false, None)?,
             ));
             let expr = metadata.alloc_expression(ScalarExpression::Constant(value.clone()));
+            let marker = metadata.alloc_expression(ScalarExpression::InitValue {
+                id: reference,
+                ty: LogicalType::Integer,
+            });
             let make_init = |rows| {
                 ScalarSubqueryOperator::build(LogicalPlan::new(
                     Operator::Values(ValuesOperator::new(vec![expr; rows], rows, vec![column])),
@@ -127,13 +224,15 @@ mod tests {
             let mut first = ScalarQueryInitOperator::build(
                 LogicalPlan::new(Operator::Dummy, Childrens::None),
                 make_init(row_count),
-                reference,
+                marker,
+                Vec::new(),
             );
             // This duplicate would error if executed, making cache reuse observable even for NULL.
             let mut duplicate = ScalarQueryInitOperator::build(
                 LogicalPlan::new(Operator::Dummy, Childrens::None),
                 make_init(2),
-                reference,
+                marker,
+                Vec::new(),
             );
             first.populate_output_schema_recursive(&mut metadata);
             duplicate.populate_output_schema_recursive(&mut metadata);
@@ -142,7 +241,7 @@ mod tests {
             let first_root = build_read(&mut arena, &mut metadata, &first, cache, &transaction);
             let duplicate_root =
                 build_read(&mut arena, &mut metadata, &duplicate, cache, &transaction);
-            let mut view = ExecArenaView::new(metadata);
+            let mut view = ExecMetaArena::new(metadata);
             if row_count == 2 {
                 assert!(arena.next_tuple(first_root, &mut view).is_err());
                 assert_eq!(view.init_value(reference), None);

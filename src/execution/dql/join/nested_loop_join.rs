@@ -16,7 +16,7 @@
 //! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::RowBitmap;
@@ -154,10 +154,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
 
@@ -579,6 +579,7 @@ mod test {
         let address = arena.nodes.items.as_ptr();
         assert_eq!(count, 5);
         let mut rows = 0;
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         while arena.next_tuple(root, &mut plan_arena)? {
             rows += 1;
             assert_eq!(arena.result_tuple().values.len(), 9);

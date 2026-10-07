@@ -1198,8 +1198,8 @@ where
             };
             build(&mut context)?
         };
-        if child_binder.context.has_outer_refs() {
-            self.binder.context.mark_outer_ref();
+        if child_binder.context.has_join_outer_ref() {
+            self.binder.context.mark_join_outer_ref();
         }
         Ok(plan)
     }

@@ -76,7 +76,7 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
-use crate::planner::{ExprRef, LogicalPlan, PlanKeeper};
+use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
@@ -179,9 +179,9 @@ impl<'a, T: Transaction + 'a> Executor<'a, T> {
         }
     }
 
-    pub(crate) fn next_tuple(
+    pub(crate) fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<Option<&mut Tuple>, DatabaseError> {
         if !self.arena.next_tuple(self.root, plan_arena)? {
             return Ok(None);
@@ -228,7 +228,7 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Projection(Projection<'a>),
     RecursiveCte(RecursiveCte<'a, T>),
     RecursiveScan(RecursiveScan),
-    ScalarQueryInit(ScalarQueryInit),
+    ScalarQueryInit(ScalarQueryInit<'a>),
     ScalarSubquery(ScalarSubquery),
     SetMembership(SetMembership),
     SeqScan(SeqScan<'a, T>),
@@ -247,18 +247,18 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
 }
 
 pub(crate) trait ExecutorNode<'a, T: Transaction + 'a>: Sized {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError>;
 }
 
 impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         match self {
             ExecNode::AddColumn(exec) => {
@@ -352,7 +352,7 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
                 <RecursiveScan as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::ScalarQueryInit(exec) => {
-                <ScalarQueryInit as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <ScalarQueryInit<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::ScalarSubquery(exec) => {
                 <ScalarSubquery as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -688,10 +688,10 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         self.resume();
     }
 
-    pub(crate) fn next_tuple(
+    pub(crate) fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         id: ExecId,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<bool, DatabaseError> {
         self.result.status = None;
         let slot = &self.nodes.items[id] as *const std::cell::RefCell<ExecNode<'a, T>>;
@@ -793,7 +793,7 @@ where
         Operator::Filter(op) => read!(Filter, (op, plan.childrens.only())),
         Operator::ScalarQueryInit(op) => {
             let (left, right) = plan.childrens.twins();
-            read!(ScalarQueryInit, (op, left, right))
+            read!(ScalarQueryInit<'a>, (op, left, right))
         }
         Operator::MarkApply(op) => {
             let (left, right) = plan.childrens.twins();
@@ -893,11 +893,8 @@ where
     match &plan.operator {
         Operator::ScalarQueryInit(op) => {
             let (input, init) = plan.childrens.twins();
-            let init = build_read(arena, plan_arena, init, cache, transaction);
             let input = build_write(arena, plan_arena, input, cache, transaction);
-            arena.push(ExecNode::ScalarQueryInit(ScalarQueryInit::new(
-                input, init, op.id,
-            )))
+            ScalarQueryInit::build(op, input, init, arena, plan_arena, cache, transaction)
         }
         Operator::Insert(op) => write!(Insert<'a>, (op, plan.childrens.only())),
         Operator::Update(op) => write!(Update<'a>, (op, plan.childrens.only())),
@@ -930,7 +927,6 @@ where
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test_utils {
     use super::*;
-    use crate::planner::ExecArenaView;
 
     static EMPTY_SCALA_FUNCTIONS: std::sync::LazyLock<ScalaFunctions> =
         std::sync::LazyLock::new(ScalaFunctions::default);
@@ -953,7 +949,7 @@ mod test_utils {
 
     pub(crate) struct TestExecutor<'a, T: Transaction + 'a> {
         executor: Executor<'a, T>,
-        plan_arena: ExecArenaView<PlanArena<'a>>,
+        plan_arena: ExecMetaArena<PlanArena<'a>>,
     }
 
     impl<T: Transaction> TestExecutor<'_, T> {
@@ -982,7 +978,7 @@ mod test_utils {
             transaction,
         );
         TestExecutor {
-            plan_arena: ExecArenaView::new(plan_arena),
+            plan_arena: ExecMetaArena::new(plan_arena),
             executor: Executor::new(arena, root, PlanKeeper::empty()),
         }
     }
@@ -1008,7 +1004,7 @@ mod test_utils {
             transaction,
         );
         TestExecutor {
-            plan_arena: ExecArenaView::new(plan_arena),
+            plan_arena: ExecMetaArena::new(plan_arena),
             executor: Executor::new(arena, root, PlanKeeper::empty()),
         }
     }
@@ -1040,7 +1036,7 @@ mod test {
     #[test]
     fn active_nodes_cannot_be_overwritten_or_relocated() {
         let table_arena = TableArenaCell::default();
-        let mut plan_arena = PlanArena::new(&table_arena);
+        let mut plan_arena = ExecMetaArena::new(PlanArena::new(&table_arena));
         let mut arena = ExecArena::<'_, MemoryTransaction>::with_capacity(0);
         arena.push(ExecNode::Dummy(Dummy::default()));
         let slot =

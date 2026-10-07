@@ -530,7 +530,9 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
 
                     None
                 }
-                ScalarExpression::Init { .. }
+                ScalarExpression::OuterParam { .. }
+                | ScalarExpression::OuterValue { .. }
+                | ScalarExpression::InitValue { .. }
                 | ScalarExpression::Constant(_)
                 | ScalarExpression::Alias { .. }
                 | ScalarExpression::TypeCast { .. }
@@ -554,7 +556,9 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 | ScalarExpression::TableFunction(_)
                 | ScalarExpression::Empty => unreachable!(),
             },
-            ScalarExpression::Init { .. }
+            ScalarExpression::OuterParam { .. }
+            | ScalarExpression::OuterValue { .. }
+            | ScalarExpression::InitValue { .. }
             | ScalarExpression::Constant(_)
             | ScalarExpression::ColumnRef { .. } => None,
             // FIXME: support [RangeDetacher::_detach]

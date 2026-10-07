@@ -61,7 +61,25 @@ impl ExprVisitorMut for PositionShift {
 }
 
 pub trait ExprVisitorMut: Sized {
-    fn visit_init(
+    fn visit_outer_param(
+        &mut self,
+        _id: &mut ScalarQueryRef,
+        _ty: &mut LogicalType,
+        _arena: &mut dyn MetaArena,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    fn visit_outer_value(
+        &mut self,
+        _id: &mut ScalarQueryRef,
+        _ty: &mut LogicalType,
+        _arena: &mut dyn MetaArena,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
+    fn visit_init_value(
         &mut self,
         _id: &mut ScalarQueryRef,
         _ty: &mut LogicalType,
@@ -404,7 +422,9 @@ pub fn walk_mut_expr<V: ExprVisitorMut>(
         std::mem::replace(&mut *arena.expression_mut(*expr), ScalarExpression::Empty);
     let result = match &mut expression {
         ScalarExpression::Constant(value) => visitor.visit_constant(value, arena),
-        ScalarExpression::Init { id, ty } => visitor.visit_init(id, ty, arena),
+        ScalarExpression::OuterParam { id, ty } => visitor.visit_outer_param(id, ty, arena),
+        ScalarExpression::OuterValue { id, ty } => visitor.visit_outer_value(id, ty, arena),
+        ScalarExpression::InitValue { id, ty } => visitor.visit_init_value(id, ty, arena),
         ScalarExpression::ColumnRef { column, position } => {
             visitor.visit_column_ref(column, position, arena)
         }

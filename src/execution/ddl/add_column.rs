@@ -19,7 +19,7 @@ use crate::execution::{
 };
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::index::{Index, IndexType};
 use crate::types::value::DataValue;
@@ -43,10 +43,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
         let AddColumnOperator {

@@ -18,7 +18,7 @@ use crate::execution::{
 };
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{SplitTupleRef, Tuple};
@@ -65,10 +65,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if matches!(self.op.kind, MarkApplyKind::InnerJoin) {
             return self.next_join_tuple(arena, plan_arena);
@@ -88,10 +88,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
 }
 
 impl<'a> MarkApply<'a> {
-    fn next_join_tuple<T: Transaction + 'a>(
+    fn next_join_tuple<T: Transaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
             if let Some((root, left)) = &mut self.join_input {
@@ -174,10 +174,10 @@ impl<'a> MarkApply<'a> {
             .transpose()
     }
 
-    fn mark_value<T: Transaction + 'a>(
+    fn mark_value<T: Transaction + 'a, A: MetaArena + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
         left_tuple: &Tuple,
     ) -> Result<DataValue, DatabaseError> {
         let probe = self.parameterized_probe_value(left_tuple, plan_arena)?;
@@ -255,10 +255,10 @@ impl<'a> MarkApply<'a> {
         }
     }
 
-    fn scan_quantified_right_input<T: Transaction + 'a>(
+    fn scan_quantified_right_input<T: Transaction + 'a, A: MetaArena + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
         right_input: ExecId,
         quantifier: MarkApplyQuantifier,
         left_tuple: &Tuple,
@@ -521,6 +521,7 @@ mod tests {
         let address = arena.nodes.items.as_ptr();
         let count = arena.nodes.items.len();
         assert_eq!(count, 3);
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         for _ in 0..4 {
             assert!(arena.next_tuple(root, &mut plan_arena)?);
             assert_eq!(
@@ -611,6 +612,7 @@ mod tests {
         let address = arena.nodes.items.as_ptr();
         assert_eq!(count, 3);
         let mut tuples = Vec::new();
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         while arena.next_tuple(root, &mut plan_arena)? {
             tuples.push(arena.materialize_tuple());
             assert_eq!(arena.nodes.items.len(), count);
@@ -739,6 +741,7 @@ mod tests {
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]);
 
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         assert_eq!(
             exec.mark_value(&mut arena, &mut plan_arena, &left_tuple)?,
             DataValue::Boolean(true)
@@ -792,6 +795,7 @@ mod tests {
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Int32(2)]);
 
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         assert_eq!(
             exec.mark_value(&mut arena, &mut plan_arena, &left_tuple)?,
             DataValue::Boolean(true)
@@ -845,6 +849,7 @@ mod tests {
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Null]);
 
+        let mut plan_arena = ExecMetaArena::new(plan_arena);
         assert_eq!(
             exec.mark_value(&mut arena, &mut plan_arena, &left_tuple)?,
             DataValue::Null

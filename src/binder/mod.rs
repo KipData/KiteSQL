@@ -235,6 +235,13 @@ impl UsingColumn {
     }
 }
 
+pub(crate) struct BoundScalarQuery {
+    value: ExprRef,
+    step: QueryBindStep,
+    plan: LogicalPlan,
+    param_bindings: Vec<(ScalarQueryRef, ExprRef)>,
+}
+
 pub struct BinderContext<'a, T: Transaction> {
     pub(crate) scala_functions: &'a ScalaFunctions,
     pub(crate) table_functions: &'a TableFunctions,
@@ -254,12 +261,14 @@ pub struct BinderContext<'a, T: Transaction> {
     pub(crate) agg_calls: Vec<ExprRef>,
     // join
     using: HashMap<String, UsingColumn>,
+    has_join_outer_ref: bool,
+    // subquery
+    sub_queries: HashMap<QueryBindStep, Vec<SubQueryType>>,
+    scalar_queries: Vec<BoundScalarQuery>,
+    capture_scalar_outer: bool,
+    scalar_outer_bindings: Vec<(ScalarQueryRef, ExprRef)>,
 
     bind_step: QueryBindStep,
-    sub_queries: HashMap<QueryBindStep, Vec<SubQueryType>>,
-    scalar_queries: Vec<(ScalarQueryRef, LogicalPlan)>,
-    has_outer_refs: bool,
-
     pub(crate) allow_default: bool,
 }
 
@@ -321,7 +330,9 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             bind_step: QueryBindStep::From,
             sub_queries: Default::default(),
             scalar_queries: Vec::new(),
-            has_outer_refs: false,
+            capture_scalar_outer: false,
+            scalar_outer_bindings: Vec::new(),
+            has_join_outer_ref: false,
             allow_default: false,
         }
     }
@@ -348,7 +359,9 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             bind_step: self.bind_step,
             sub_queries: Default::default(),
             scalar_queries: Vec::new(),
-            has_outer_refs: false,
+            capture_scalar_outer: false,
+            scalar_outer_bindings: Vec::new(),
+            has_join_outer_ref: false,
             allow_default: self.allow_default,
         }
     }
@@ -429,12 +442,12 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         self.sub_queries.remove(&self.bind_step)
     }
 
-    pub fn mark_outer_ref(&mut self) {
-        self.has_outer_refs = true;
+    pub fn mark_join_outer_ref(&mut self) {
+        self.has_join_outer_ref = true;
     }
 
-    pub fn has_outer_refs(&self) -> bool {
-        self.has_outer_refs
+    pub fn has_join_outer_ref(&self) -> bool {
+        self.has_join_outer_ref
     }
 
     pub fn table(&self, table_name: TableName) -> Result<Option<&TableCatalog>, DatabaseError> {

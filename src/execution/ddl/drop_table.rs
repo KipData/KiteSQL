@@ -17,7 +17,7 @@ use crate::execution::{
     DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::drop_table::DropTableOperator;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 
 pub struct DropTable<'a> {
@@ -39,10 +39,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropTable<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropTable<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let DropTableOperator {
             table_name,

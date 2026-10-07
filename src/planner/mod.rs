@@ -30,7 +30,7 @@ use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-pub(crate) use arena::{ExecArenaView, ParamArena, PlanRef};
+pub(crate) use arena::{ExecMetaArena, ParamArena, PlanRef};
 pub use arena::{ExprRef, MetaArena, PlanArena, TableArena, TableArenaCell};
 pub(crate) use plan_keeper::{PlanInput, PlanKeeper};
 pub use scalar_query_ref::ScalarQueryRef;

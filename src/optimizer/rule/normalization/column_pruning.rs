@@ -531,7 +531,21 @@ impl ColumnPruning {
                     let Childrens::Twins { left, right } = childrens else {
                         unreachable!("scalar initialization requires two children");
                     };
+                    Self::extend_operator_referenced_columns(
+                        operator,
+                        &mut required_columns,
+                        arena,
+                    )?;
+                    let left_start = outcome.removed_positions.len();
                     Self::_apply_appending(required_columns, all_referenced, left, outcome, arena)?;
+                    if outcome.changed {
+                        Self::remap_operator_after_child_change(
+                            operator,
+                            &outcome.removed_positions[left_start..],
+                            &mut outcome.remapped_exprs,
+                            arena,
+                        )?;
+                    }
                     changed |= outcome.changed;
                     let main_removed_end = outcome.removed_positions.len();
                     Self::_apply_appending(

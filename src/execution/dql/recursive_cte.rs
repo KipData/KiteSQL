@@ -22,7 +22,7 @@ use crate::execution::{
 };
 use crate::planner::operator::recursive_cte::RecursiveScanOperator;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 use std::mem;
@@ -201,9 +201,9 @@ impl<'a, T: Transaction + 'a> RecursiveCte<'a, T> {
         }
     }
 
-    fn start_recursive(
+    fn start_recursive<A: MetaArena + 'a>(
         &mut self,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<bool, DatabaseError> {
         let Some(input) = mem::take(&mut self.working).into_input()? else {
             return Ok(false);
@@ -246,10 +246,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
             match self.phase {
@@ -307,10 +307,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
+        _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         match self.input.next().transpose()? {
             Some(tuple) => arena.produce_tuple(tuple),

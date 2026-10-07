@@ -17,7 +17,7 @@ use crate::execution::{
     DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::drop_view::DropViewOperator;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 
 pub struct DropView<'a> {
@@ -39,10 +39,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropView<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropView<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _: &mut (dyn MetaArena + '_),
+        _: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let DropViewOperator {
             view_name,

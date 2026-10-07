@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::expression::function::table::TableFunction;
 use crate::planner::operator::function_scan::FunctionScanOperator;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 
@@ -50,10 +50,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {
             let TableFunction { args, catalog } = self.table_function;

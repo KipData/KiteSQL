@@ -1240,6 +1240,7 @@ pub(crate) fn reuse_bound_as_excluded(bound: &mut Bound<Bytes>, key: &[u8]) {
     *bound = Bound::Excluded(bytes);
 }
 
+#[cfg(any(test, all(not(target_arch = "wasm32"), feature = "lmdb")))]
 pub(crate) fn bounds_contain(min: Bound<&[u8]>, max: Bound<&[u8]>, key: &[u8]) -> bool {
     std::ops::RangeBounds::<[u8]>::contains(&(min, max), key)
 }
