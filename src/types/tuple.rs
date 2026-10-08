@@ -84,12 +84,6 @@ pub trait TupleLike {
 
     fn value_at(&self, index: usize) -> &DataValue;
 
-    /// The boundary between the outermost split's left and right inputs.
-    #[inline]
-    fn split_point(&self) -> Option<usize> {
-        None
-    }
-
     #[inline]
     fn as_slice(&self) -> Option<&[DataValue]> {
         None
@@ -171,11 +165,6 @@ impl<T: TupleLike + ?Sized> TupleLike for &T {
     }
 
     #[inline]
-    fn split_point(&self) -> Option<usize> {
-        (**self).split_point()
-    }
-
-    #[inline]
     fn as_slice(&self) -> Option<&[DataValue]> {
         (**self).as_slice()
     }
@@ -185,11 +174,6 @@ impl<L: TupleLike + ?Sized, R: TupleLike + ?Sized> TupleLike for SplitTupleRef<'
     #[inline]
     fn len(&self) -> usize {
         self.left_len + self.right.len()
-    }
-
-    #[inline]
-    fn split_point(&self) -> Option<usize> {
-        Some(self.left_len)
     }
 
     #[inline]
@@ -731,33 +715,6 @@ mod tests {
             super::TupleLike::as_slice(&tuple.values.as_slice()).unwrap(),
             tuple.values.as_slice()
         );
-    }
-
-    #[test]
-    fn test_tuple_split_point() {
-        use super::{SplitTupleRef, TupleLike};
-
-        let left = Tuple::new(None, vec![DataValue::Int32(1)]);
-        let right = Tuple::new(None, vec![DataValue::Int32(2)]);
-        let tail = [DataValue::Int32(3)];
-        assert_eq!(left.split_point(), None);
-        assert_eq!(tail.as_slice().split_point(), None);
-        assert_eq!(OneValueTupleLike(DataValue::Null).split_point(), None);
-
-        let split = SplitTupleRef::new(&left, &right);
-        assert_eq!(split.split_point(), Some(1));
-        let nested = SplitTupleRef::new(&split, tail.as_slice());
-        assert_eq!(nested.split_point(), Some(2));
-        assert_eq!(nested.value_at(nested.split_point().unwrap()), &tail[0]);
-        let dynamic: &dyn TupleLike = &nested;
-        assert_eq!(dynamic.split_point(), Some(2));
-        assert_eq!(TupleLike::split_point(&dynamic), Some(2));
-        assert_eq!(TupleLike::split_point(&&&nested), Some(2));
-
-        let empty: &[DataValue] = &[];
-        assert_eq!(SplitTupleRef::new(empty, &left).split_point(), Some(0));
-        assert_eq!(SplitTupleRef::new(&left, empty).split_point(), Some(1));
-        assert_eq!(SplitTupleRef::new(empty, empty).split_point(), Some(0));
     }
 
     #[test]
