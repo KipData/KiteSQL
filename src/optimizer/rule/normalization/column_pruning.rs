@@ -30,7 +30,7 @@ use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Clone)]
 pub struct ColumnPruning;
@@ -38,7 +38,7 @@ pub struct ColumnPruning;
 struct ApplyOutcome {
     changed: bool,
     removed_positions: Vec<usize>,
-    remapped_exprs: HashMap<ExprRef, ExprRef>,
+    remapped_exprs: HashSet<ExprRef>,
 }
 
 #[derive(Clone, Default)]
@@ -115,7 +115,7 @@ impl ApplyOutcome {
         Self {
             changed: false,
             removed_positions: Vec::with_capacity(arena.allocated_columns_len()),
-            remapped_exprs: HashMap::new(),
+            remapped_exprs: HashSet::new(),
         }
     }
 }
@@ -263,7 +263,7 @@ impl ColumnPruning {
     fn remap_operator_after_child_change(
         operator: &mut Operator,
         removed_positions: &[usize],
-        remapped_exprs: &mut HashMap<ExprRef, ExprRef>,
+        remapped_exprs: &mut HashSet<ExprRef>,
         arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         OperatorExprVisitorMut::new(
@@ -276,7 +276,7 @@ impl ColumnPruning {
     fn remap_exprs_after_child_change<'a>(
         exprs: impl IntoIterator<Item = &'a mut ExprRef>,
         removed_positions: &[usize],
-        remapped_exprs: &mut HashMap<ExprRef, ExprRef>,
+        remapped_exprs: &mut HashSet<ExprRef>,
         arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         if removed_positions.is_empty() {
@@ -647,7 +647,7 @@ impl ColumnPruning {
                                             [left_removed_start..right_removed_end];
                                         if !removed_positions.is_empty() {
                                             remap_expr_positions(
-                                                filter,
+                                                *filter,
                                                 removed_positions,
                                                 &mut outcome.remapped_exprs,
                                                 arena,

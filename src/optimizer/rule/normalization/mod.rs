@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
+use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
@@ -35,7 +35,7 @@ use crate::optimizer::rule::normalization::simplification::ConstantCalculation;
 use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
 use crate::optimizer::rule::normalization::top_k::TopK;
 use crate::planner::{ExprRef, LogicalPlan};
-use std::collections::HashMap;
+use std::collections::HashSet;
 mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
@@ -261,49 +261,29 @@ pub(crate) fn remap_position(position: &mut usize, removed_positions: &[usize]) 
 
 struct PositionRemapper<'positions, 'visited> {
     removed_positions: &'positions [usize],
-    remapped: &'visited mut HashMap<ExprRef, ExprRef>,
-    changes: usize,
+    visited: &'visited mut HashSet<ExprRef>,
 }
 
 impl<'positions, 'visited> PositionRemapper<'positions, 'visited> {
     pub(super) fn new(
         removed_positions: &'positions [usize],
-        remapped: &'visited mut HashMap<ExprRef, ExprRef>,
+        visited: &'visited mut HashSet<ExprRef>,
     ) -> Self {
-        remapped.clear();
+        visited.clear();
         Self {
             removed_positions,
-            remapped,
-            changes: 0,
+            visited,
         }
     }
 }
 
 impl ExprVisitorMut for PositionRemapper<'_, '_> {
-    fn visit(
+    fn visit_expression_ref(
         &mut self,
         expr: &mut ExprRef,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
-        if let Some(remapped) = self.remapped.get(expr) {
-            if *expr != *remapped {
-                self.changes += 1;
-                *expr = *remapped;
-            }
-            return Ok(());
-        }
-        let changes = self.changes;
-        let original = *expr;
-        let expression = arena.expression(original).clone();
-        // Preserve shared definitions and rewrite only the current consumer's reference.
-        let mut rewritten = arena.alloc_expression(expression);
-        walk_mut_expr(self, &mut rewritten, arena)?;
-        if self.changes != changes {
-            *expr = rewritten;
-        }
-        self.remapped.insert(original, *expr);
-        self.remapped.insert(*expr, *expr);
-        Ok(())
+        _arena: &mut (dyn MetaArena + '_),
+    ) -> Result<bool, DatabaseError> {
+        Ok(self.visited.insert(*expr))
     }
 
     fn visit_column_ref(
@@ -312,11 +292,7 @@ impl ExprVisitorMut for PositionRemapper<'_, '_> {
         position: &mut usize,
         _arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
-        let original = *position;
         remap_position(position, self.removed_positions);
-        if *position != original {
-            self.changes += 1;
-        }
         Ok(())
     }
 
@@ -334,21 +310,21 @@ impl ExprVisitorMut for PositionRemapper<'_, '_> {
 }
 
 pub(crate) fn remap_expr_positions(
-    expr: &mut ExprRef,
+    mut expr: ExprRef,
     removed_positions: &[usize],
-    remapped: &mut HashMap<ExprRef, ExprRef>,
+    visited: &mut HashSet<ExprRef>,
     arena: &mut crate::planner::PlanArena<'_>,
 ) -> Result<(), DatabaseError> {
-    PositionRemapper::new(removed_positions, remapped).visit(expr, arena)
+    PositionRemapper::new(removed_positions, visited).visit(&mut expr, arena)
 }
 
 pub(crate) fn remap_exprs_positions<'a>(
     exprs: impl IntoIterator<Item = &'a mut ExprRef>,
     removed_positions: &[usize],
-    remapped: &mut HashMap<ExprRef, ExprRef>,
+    visited: &mut HashSet<ExprRef>,
     arena: &mut crate::planner::PlanArena<'_>,
 ) -> Result<(), DatabaseError> {
-    let mut remapper = PositionRemapper::new(removed_positions, remapped);
+    let mut remapper = PositionRemapper::new(removed_positions, visited);
     for expr in exprs {
         remapper.visit(expr, arena)?;
     }
