@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
 
@@ -46,10 +46,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Dummy {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Dummy {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        _: &mut (dyn MetaArena + 'a),
+        _: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let Some(row) = self.row.take() else {
             arena.finish();

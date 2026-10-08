@@ -164,18 +164,50 @@ impl<S: Storage> Database<S> {
         let sql = sql.as_ref();
         let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
 
-        for statement in statements {
-            if !matches!(command_type(&statement)?, CommandType::DDL) {
+        for statement in &statements {
+            if !matches!(command_type(statement)?, CommandType::DDL) {
                 return Err(DatabaseError::UnsupportedStmt(
                     "`Database::ddl` only accepts DDL statements".to_string(),
                 )
                 .with_sql_context(sql));
             }
+        }
+        self.run_mut_statements(sql, statements, |_| Ok(()))
+    }
 
+    /// Executes SQL with catalog mutations allowed, lending the last statement's results
+    /// to `consume`. On success, unread rows are drained before committing and publishing
+    /// catalog updates. A callback or execution error rolls the current statement back.
+    /// Earlier statements are completed and committed in order before the callback runs.
+    pub fn run_mut<C, R>(&mut self, sql: impl AsRef<str>, consume: C) -> Result<R, DatabaseError>
+    where
+        C: for<'a> FnOnce(
+            &mut TransactionIter<'a, S::TransactionType<'a>, PlanArena<'a>>,
+        ) -> Result<R, DatabaseError>,
+    {
+        let sql = sql.as_ref();
+        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        self.run_mut_statements(sql, statements, consume)
+    }
+
+    fn run_mut_statements<C, R>(
+        &mut self,
+        sql: &str,
+        mut statements: Vec<Statement>,
+        consume: C,
+    ) -> Result<R, DatabaseError>
+    where
+        C: for<'a> FnOnce(
+            &mut TransactionIter<'a, S::TransactionType<'a>, PlanArena<'a>>,
+        ) -> Result<R, DatabaseError>,
+    {
+        let last = statements
+            .pop()
+            .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
+        for statement in statements {
             self.execute_mut(sql, &[], |binder, arena| binder.bind(&statement, arena))?;
         }
-
-        Ok(())
+        self.execute_mut_with(sql, &[], |binder, arena| binder.bind(&last, arena), consume)
     }
 
     /// Runs one or more SQL statements and returns an iterator for the final result set.
@@ -245,7 +277,7 @@ impl<S: Storage> Database<S> {
             } else {
                 let inner = Box::into_raw(Box::new(TransactionIter::new(
                     schema,
-                    Box::new(plan_arena) as Box<dyn crate::planner::MetaArena>,
+                    plan_arena.boxed(),
                     executor,
                     transaction,
                 )));
@@ -1224,6 +1256,12 @@ where
                     Childrens::Only(Box::new(plan)),
                 );
             }
+            let steps = [
+                QueryBindStep::From,
+                QueryBindStep::Where,
+                QueryBindStep::Project,
+            ];
+            plan = self.binder.bind_scalar_queries(plan, &steps, self.arena)?;
             self.binder.bind_update(table_name, value_exprs, plan)
         } else {
             Err(DatabaseError::UnsupportedStmt(format!(
@@ -2688,8 +2726,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         let left_plan = {
             let mut left_binder = Binder::new(self.context.fork(), self.args, self.parent);
             let plan = left_binder.bind_set_expr(left, arena)?;
-            if left_binder.context.has_outer_refs() {
-                self.context.mark_outer_ref();
+            if left_binder.context.has_join_outer_ref() {
+                self.context.mark_join_outer_ref();
             }
             plan
         };
@@ -2697,8 +2735,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         let right_plan = {
             let mut right_binder = Binder::new(self.context.fork(), self.args, self.parent);
             let plan = right_binder.bind_set_expr(right, arena)?;
-            if right_binder.context.has_outer_refs() {
-                self.context.mark_outer_ref();
+            if right_binder.context.has_join_outer_ref() {
+                self.context.mark_join_outer_ref();
             }
             plan
         };
@@ -3253,7 +3291,8 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         stmt: &Statement,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        Ok(self.build_statement(arena).statement(stmt)?.finish())
+        let plan = self.build_statement(arena).statement(stmt)?.finish();
+        Ok(self.init_scalar_queries(plan))
     }
 }
 

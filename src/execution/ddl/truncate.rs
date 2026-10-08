@@ -17,7 +17,7 @@ use crate::execution::{
     ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::truncate::TruncateOperator;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 
 pub struct Truncate<'a> {
@@ -39,10 +39,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Truncate<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let TruncateOperator { table_name } = self.op;
         let mut state = arena.local_state(plan_arena);

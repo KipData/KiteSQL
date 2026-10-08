@@ -3,4 +3,4 @@
 query I
 SELECT NULLIF ( 1 , 1 )
 ----
-null
+NULL

@@ -22,8 +22,8 @@ use crate::expression::function::table::TableFunction;
 use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::window::WindowCall;
 use crate::expression::{BinaryOperator, ScalarExpression, TrimWhereField, UnaryOperator};
-use crate::planner::ExprRef;
 use crate::planner::MetaArena;
+use crate::planner::{ExprRef, ScalarQueryRef};
 use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -81,6 +81,42 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
             return Ok(());
         }
         walk_expr(self, lhs, arena)
+    }
+
+    fn visit_outer_param(
+        &mut self,
+        id: ScalarQueryRef,
+        ty: &LogicalType,
+        _arena: &(dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        self.equal = matches!(self.rhs(), ScalarExpression::OuterParam { id: rhs, ty: rhs_ty } if id == *rhs && ty == rhs_ty);
+        Ok(())
+    }
+
+    fn visit_outer_value(
+        &mut self,
+        id: ScalarQueryRef,
+        ty: &LogicalType,
+        _arena: &(dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        self.equal = matches!(self.rhs(), ScalarExpression::OuterValue { id: rhs, ty: rhs_ty } if id == *rhs && ty == rhs_ty);
+        Ok(())
+    }
+
+    fn visit_init_value(
+        &mut self,
+        id: ScalarQueryRef,
+        ty: &LogicalType,
+        _arena: &(dyn MetaArena + '_),
+    ) -> Result<(), DatabaseError> {
+        self.equal = match self.rhs() {
+            ScalarExpression::InitValue {
+                id: rhs_id,
+                ty: rhs_ty,
+            } => id == *rhs_id && ty == rhs_ty,
+            _ => false,
+        };
+        Ok(())
     }
 
     fn visit_constant(&mut self, lhs: &DataValue) -> Result<(), DatabaseError> {

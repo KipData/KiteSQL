@@ -20,10 +20,11 @@ use crate::execution::{
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::Schema;
+use crate::types::value::DataValue;
 use crate::types::ColumnId;
 
 pub struct CreateIndex<'a> {
@@ -53,10 +54,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateIndex<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let CreateIndexOperator {
             table_name,
@@ -119,7 +120,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             if arena.result_tuple().pk.is_none() {
                 continue;
             }
-            arena.rewrite(&column_exprs, plan_arena, None)?;
+            arena.rewrite(&column_exprs, plan_arena, None::<&[DataValue]>)?;
             {
                 let mut state = arena.local_state(plan_arena);
                 let (tuple, transaction, table_codec) = state.tuple_transaction_codec_mut();

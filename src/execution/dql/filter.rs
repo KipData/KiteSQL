@@ -19,7 +19,7 @@ use crate::execution::{
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 pub struct Filter {
     predicate: ExprRef,
@@ -45,10 +45,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Filter {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Filter {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
             if !arena.next_tuple(self.input, plan_arena)? {

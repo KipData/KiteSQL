@@ -18,7 +18,7 @@ use crate::execution::{
 };
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::value::DataValue;
 
@@ -49,10 +49,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let has_next = arena.next_tuple(self.input, plan_arena)?;
         if self.returned {

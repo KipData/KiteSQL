@@ -19,9 +19,10 @@ use crate::execution::{
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::tuple::Tuple;
+use crate::types::value::DataValue;
 
 pub struct StreamDistinctExecutor<'a> {
     groupby_exprs: &'a [ExprRef],
@@ -49,10 +50,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a>
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
             if !arena.next_tuple(self.input, plan_arena)? {
@@ -64,7 +65,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a>
                 }
                 return Ok(());
             }
-            arena.rewrite(self.groupby_exprs, plan_arena, None)?;
+            arena.rewrite(self.groupby_exprs, plan_arena, None::<&[DataValue]>)?;
 
             if let Some(last_keys) = &mut self.last_keys {
                 if last_keys.values == arena.result_tuple().values {

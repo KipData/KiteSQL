@@ -86,17 +86,40 @@ insert into sn values (1, 1), (2, 2);
 query I
 select sum(null) from sn;
 ----
-null
+NULL
 
 query I
 select sum(distinct null) from sn;
 ----
-null
+NULL
 
 query I
 select (select sum(null) from sn) from sn where id = 1;
 ----
-null
+NULL
+
+# Aggregates, including SELECT aliases containing aggregates, cannot run in WHERE.
+statement error agg miss: aggregate functions are not allowed in WHERE
+select count(*) as n from sn where n is not null;
+
+statement error agg miss: aggregate functions are not allowed in WHERE
+select + + 23 * + count(*) * - + 69 as n from sn where not n is null;
+
+statement error agg miss: aggregate functions are not allowed in WHERE
+select count(*) as n from sn where coalesce(n, 0) > 0;
+
+statement error agg miss: aggregate functions are not allowed in WHERE
+select id from sn where count(*) > 0;
+
+query I
+select count(*) as n from sn having n > 0;
+----
+2
+
+query I
+select count(*) from sn where a > 0;
+----
+2
 
 statement ok
 drop table sn

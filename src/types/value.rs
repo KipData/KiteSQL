@@ -1801,7 +1801,7 @@ impl fmt::Display for DataValue {
             DataValue::UInt32(e) => write!(f, "{e}")?,
             DataValue::UInt64(e) => write!(f, "{e}")?,
             DataValue::Utf8 { value: e, .. } => write!(f, "{e}")?,
-            DataValue::Null => write!(f, "null")?,
+            DataValue::Null => write!(f, "NULL")?,
             DataValue::Date32(e) => {
                 #[cfg(feature = "time")]
                 write!(f, "{}", DataValue::date_format(*e).unwrap())?;
@@ -2361,7 +2361,7 @@ mod test {
             (DataValue::UInt32(3), "3", "UInt32(3)"),
             (DataValue::UInt64(4), "4", "UInt64(4)"),
             (utf8("kite"), "kite", "Utf8(\"kite\")"),
-            (DataValue::Null, "null", "null"),
+            (DataValue::Null, "NULL", "null"),
             #[cfg(feature = "decimal")]
             (
                 DataValue::Decimal(Decimal::new(123, 2)),

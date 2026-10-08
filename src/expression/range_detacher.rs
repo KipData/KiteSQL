@@ -88,20 +88,18 @@ impl<T> TreeNode<T> {
     fn add_child(&mut self, child: TreeNode<T>) {
         self.children.push(child);
     }
-}
 
-impl<T: Clone> TreeNode<T> {
-    fn enumeration(self, path: &mut Vec<T>, combinations: &mut Vec<Vec<T>>) {
+    fn enumeration(self, path: &mut Vec<T>, consume: &mut impl FnMut(&[T])) {
         if self.value.is_none() && self.children.is_empty() {
-            combinations.push(path.clone());
+            consume(path);
         }
         for mut child in self.children {
             if let Some(val) = child.value.take() {
                 path.push(val);
-                Self::enumeration(child, path, combinations);
+                Self::enumeration(child, path, consume);
                 let _ = path.pop();
             } else {
-                Self::enumeration(child, path, combinations);
+                Self::enumeration(child, path, consume);
             }
         }
     }
@@ -290,15 +288,11 @@ impl Range {
         }
 
         let node = build_tree(eqs, 0)?;
-        let mut combinations = Vec::new();
-
-        node.enumeration(&mut Vec::new(), &mut combinations);
-
+        let mut path = Vec::with_capacity(eqs.len());
         let mut ranges = Vec::new();
-
-        for tuple in combinations {
-            collect_tuple_range(&mut ranges, &tuple, self.clone())
-        }
+        node.enumeration(&mut path, &mut |tuple| {
+            collect_tuple_range(&mut ranges, tuple, self.clone());
+        });
         Some(RangeDetacher::<IndexRangeColumn>::ranges2range(ranges))
     }
 }
@@ -328,6 +322,12 @@ impl RangeColumnMatcher for IndexRangeColumn {
         table_name == index.table_name.as_ref()
             && index.column_ids.get(self.position) == Some(&column_id)
     }
+}
+
+enum Placement {
+    Before,
+    After,
+    Overlap,
 }
 
 pub struct RangeDetacher<
@@ -524,7 +524,10 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
 
                     None
                 }
-                ScalarExpression::Constant(_)
+                ScalarExpression::OuterParam { .. }
+                | ScalarExpression::OuterValue { .. }
+                | ScalarExpression::InitValue { .. }
+                | ScalarExpression::Constant(_)
                 | ScalarExpression::Alias { .. }
                 | ScalarExpression::TypeCast { .. }
                 | ScalarExpression::IsNull { .. }
@@ -547,7 +550,11 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 | ScalarExpression::TableFunction(_)
                 | ScalarExpression::Empty => unreachable!(),
             },
-            ScalarExpression::Constant(_) | ScalarExpression::ColumnRef { .. } => None,
+            ScalarExpression::OuterParam { .. }
+            | ScalarExpression::OuterValue { .. }
+            | ScalarExpression::InitValue { .. }
+            | ScalarExpression::Constant(_)
+            | ScalarExpression::ColumnRef { .. } => None,
             // FIXME: support [RangeDetacher::_detach]
             ScalarExpression::Unary { .. }
             | ScalarExpression::In { .. }
@@ -687,11 +694,12 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                         Ok(Range::Eq(unpack_bound(bound_eq)))
                     }
                     BinaryOperator::Or => {
+                        // NULL sorts after every value, so only an unbounded `max` already covers it.
                         if eq.is_null() {
-                            return Ok(if matches!(min, Bound::Excluded(_)) {
-                                Range::SortedRanges(vec![Range::Eq(eq), Range::Scope { min, max }])
-                            } else {
+                            return Ok(if matches!(max, Bound::Unbounded) {
                                 Range::Scope { min, max }
+                            } else {
+                                Range::SortedRanges(vec![Range::Scope { min, max }, Range::Eq(eq)])
                             });
                         }
                         let bound_eq = Bound::Excluded(eq);
@@ -739,9 +747,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 if bounds_have_parameter(&[&min, &max]) || ranges.iter().any(Range::has_parameter) {
                     return Err((Range::Scope { min, max }, Range::SortedRanges(ranges)));
                 }
-                let merged_ranges =
-                    Self::extract_merge_ranges(op, Some(Range::Scope { min, max }), ranges, &mut 0);
-                Ok(Self::ranges2range(merged_ranges))
+                Self::merge_ranges(op, Range::Scope { min, max }, ranges)
             }
             // e.g. (c1 = 1 or c1 = 2) ? c1 > 1
             (Range::SortedRanges(ranges), Range::Scope { min, max }) => {
@@ -779,9 +785,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 if eq.has_parameter() || ranges.iter().any(Range::has_parameter) {
                     return Err((Range::Eq(eq), Range::SortedRanges(ranges)));
                 }
-                let merged_ranges =
-                    Self::extract_merge_ranges(op, Some(Range::Eq(eq)), ranges, &mut 0);
-                Ok(Self::ranges2range(merged_ranges))
+                Self::merge_ranges(op, Range::Eq(eq), ranges)
             }
             // e.g. (c1 = 1 or c1 = 2) ? c1 = 1
             (Range::SortedRanges(ranges), Range::Eq(eq)) => {
@@ -789,7 +793,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                     .map_err(|(right, left)| (left, right))
             }
             // e.g. (c1 = 1 or c1 = 2) ? (c1 = 1 or c1 = 2)
-            (Range::SortedRanges(left_ranges), Range::SortedRanges(mut right_ranges)) => {
+            (Range::SortedRanges(left_ranges), Range::SortedRanges(right_ranges)) => {
                 if left_ranges.iter().any(Range::has_parameter)
                     || right_ranges.iter().any(Range::has_parameter)
                 {
@@ -798,12 +802,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                         Range::SortedRanges(right_ranges),
                     ));
                 }
-                let mut idx = 0;
-                for left_range in left_ranges {
-                    right_ranges =
-                        Self::extract_merge_ranges(op, Some(left_range), right_ranges, &mut idx)
-                }
-                Ok(Self::ranges2range(right_ranges))
+                Self::merge_ranges(op, Range::SortedRanges(left_ranges), right_ranges)
             }
         }
     }
@@ -818,132 +817,176 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
         }
     }
 
-    #[allow(unreachable_code)]
-    fn extract_merge_ranges(
+    #[allow(clippy::result_large_err)]
+    fn merge_ranges(
         op: BinaryOperator,
-        mut binary: Option<Range>,
+        left: Range,
         mut ranges: Vec<Range>,
-        idx: &mut usize,
-    ) -> Vec<Range> {
-        // FIXME: Lots of duplicate code
-        while *idx < ranges.len() {
-            match (&binary, &ranges[*idx]) {
-                (
-                    Some(Range::Scope {
-                        min: l_min,
-                        max: l_max,
-                    }),
-                    Range::Scope {
-                        min: r_min,
-                        max: r_max,
-                    },
-                ) => {
-                    if let Some(true) =
-                        Self::bound_compared(l_max, r_min, true, false).map(Ordering::is_lt)
-                    {
-                        ranges.insert(*idx, binary.unwrap());
-                        return ranges;
-                    } else if let Some(true) =
-                        Self::bound_compared(l_min, r_max, false, true).map(Ordering::is_gt)
-                    {
-                        *idx += 1;
-                        continue;
-                    } else {
-                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx)).ok();
-                    }
-                }
-                (
-                    Some(Range::Scope {
-                        min: l_min,
-                        max: l_max,
-                    }),
-                    Range::Eq(r_val),
-                ) => {
-                    let r_bound = Bound::Included(r_val);
+    ) -> Result<Range, (Range, Range)> {
+        match op {
+            BinaryOperator::And => Self::intersect_ranges(left, ranges),
+            BinaryOperator::Or => {
+                Self::union_ranges(left, &mut ranges);
+                Ok(Self::ranges2range(ranges))
+            }
+            _ => Err((left, Range::SortedRanges(ranges))),
+        }
+    }
 
-                    if let Some(true) =
-                        Self::bound_compared(l_max, &r_bound, true, false).map(Ordering::is_lt)
-                    {
-                        ranges.insert(*idx, binary.unwrap());
-                        return ranges;
-                    } else if Self::bound_compared(l_min, &r_bound, false, true)
-                        .map(Ordering::is_gt)
-                        .unwrap_or_else(|| op == BinaryOperator::Or)
-                    {
-                        *idx += 1;
-                        continue;
-                    } else if r_val.is_null() {
-                        let _ = ranges.remove(*idx);
-                    } else {
-                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx)).ok();
-                    }
-                }
-                (Some(Range::Eq(l_val)), Range::Eq(r_val)) => {
-                    if let Some(true) = l_val.partial_cmp(r_val).map(Ordering::is_lt) {
-                        ranges.insert(*idx, binary.unwrap());
-                        return ranges;
-                    } else if let Some(true) = l_val.partial_cmp(r_val).map(Ordering::is_gt) {
-                        *idx += 1;
-                        continue;
-                    } else {
-                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx)).ok();
-                    }
-                }
-                (
-                    Some(Range::Eq(l_val)),
-                    Range::Scope {
-                        min: r_min,
-                        max: r_max,
-                    },
-                ) => {
-                    let l_bound = Bound::Included(l_val);
+    fn placement(op: BinaryOperator, left: &Range, right: &Range) -> Option<Placement> {
+        let placement = match (left, right) {
+            (
+                Range::Scope {
+                    min: l_min,
+                    max: l_max,
+                },
+                Range::Scope {
+                    min: r_min,
+                    max: r_max,
+                },
+            ) => Self::bound_compared(l_max, r_min, true, false)
+                .is_some_and(Ordering::is_lt)
+                .then_some(Placement::Before)
+                .or_else(|| {
+                    Self::bound_compared(l_min, r_max, false, true)
+                        .is_some_and(Ordering::is_gt)
+                        .then_some(Placement::After)
+                }),
+            (
+                Range::Scope {
+                    min: l_min,
+                    max: l_max,
+                },
+                Range::Eq(r_val),
+            ) => {
+                let r_bound = Bound::Included(r_val);
+                Self::bound_compared(l_max, &r_bound, true, false)
+                    .is_some_and(Ordering::is_lt)
+                    .then_some(Placement::Before)
+                    .or_else(|| {
+                        Self::bound_compared(l_min, &r_bound, false, true)
+                            .map(Ordering::is_gt)
+                            .unwrap_or_else(|| op == BinaryOperator::Or)
+                            .then_some(Placement::After)
+                    })
+            }
+            (Range::Eq(l_val), Range::Eq(r_val)) => match Self::bound_compared(
+                &Bound::Included(l_val),
+                &Bound::Included(r_val),
+                false,
+                false,
+            ) {
+                Some(Ordering::Less) => Some(Placement::Before),
+                Some(Ordering::Greater) => Some(Placement::After),
+                _ => None,
+            },
+            (
+                Range::Eq(l_val),
+                Range::Scope {
+                    min: r_min,
+                    max: r_max,
+                },
+            ) => {
+                let l_bound = Bound::Included(l_val);
+                Self::bound_compared(&l_bound, r_min, true, false)
+                    .map(Ordering::is_lt)
+                    .unwrap_or_else(|| op == BinaryOperator::Or)
+                    .then_some(Placement::Before)
+                    .or_else(|| {
+                        Self::bound_compared(&l_bound, r_max, false, true)
+                            .is_some_and(Ordering::is_gt)
+                            .then_some(Placement::After)
+                    })
+            }
+            _ => return None,
+        };
+        Some(placement.unwrap_or(Placement::Overlap))
+    }
 
-                    if Self::bound_compared(&l_bound, r_min, true, false)
-                        .map(Ordering::is_lt)
-                        .unwrap_or_else(|| op == BinaryOperator::Or)
-                    {
-                        ranges.insert(*idx, binary.unwrap());
-                        return ranges;
-                    } else if let Some(true) =
-                        Self::bound_compared(&l_bound, r_max, false, true).map(Ordering::is_gt)
-                    {
-                        *idx += 1;
-                        continue;
-                    } else if l_val.is_null() {
-                        binary = Some(ranges.remove(*idx));
-                    } else {
-                        binary = Self::merge_binary(op, binary.unwrap(), ranges.remove(*idx)).ok();
+    #[allow(clippy::result_large_err)]
+    fn intersect_ranges(left: Range, mut ranges: Vec<Range>) -> Result<Range, (Range, Range)> {
+        let len = ranges.len();
+        let l_ranges = match &left {
+            Range::SortedRanges(l_ranges) => l_ranges.as_slice(),
+            single => std::slice::from_ref(single),
+        };
+        let mut start = 0;
+        for l_range in l_ranges {
+            let mut idx = start;
+            while idx < len {
+                let Some(placement) = Self::placement(BinaryOperator::And, l_range, &ranges[idx])
+                else {
+                    ranges.truncate(len);
+                    return Err((left, Range::SortedRanges(ranges)));
+                };
+                match placement {
+                    Placement::After => {
+                        idx += 1;
+                        start = idx;
                     }
-                }
-                (Some(Range::Dummy), _) => {
-                    binary = match op {
-                        BinaryOperator::And => return vec![],
-                        BinaryOperator::Or => Some(ranges.remove(*idx)),
-                        _ => None,
-                    };
-                }
-                (Some(Range::SortedRanges(l_ranges)), r_range) => {
-                    return Self::extract_merge_ranges(
-                        op,
-                        Some(r_range.clone()),
-                        l_ranges.clone(),
-                        &mut 0,
-                    );
-                }
-                (None, _) => break,
-                _ => {
-                    #[cfg(debug_assertions)]
-                    {
-                        unreachable!();
+                    Placement::Before => break,
+                    Placement::Overlap => {
+                        match Self::merge_binary(
+                            BinaryOperator::And,
+                            l_range.clone(),
+                            ranges[idx].clone(),
+                        ) {
+                            Ok(Range::Dummy) => (),
+                            Ok(range) => ranges.push(range),
+                            Err(_) => {
+                                ranges.truncate(len);
+                                return Err((left, Range::SortedRanges(ranges)));
+                            }
+                        }
+                        idx += 1;
                     }
-                    return vec![];
                 }
             }
         }
-        if let Some(range) = binary {
-            ranges.push(range);
+        drop(ranges.drain(..len));
+        Ok(Self::ranges2range(ranges))
+    }
+
+    fn union_ranges(binary: Range, ranges: &mut Vec<Range>) {
+        match binary {
+            Range::Dummy => (),
+            Range::SortedRanges(l_ranges) => {
+                for l_range in l_ranges {
+                    Self::union_ranges(l_range, ranges);
+                }
+            }
+            piece => Self::union_piece(piece, ranges),
         }
-        ranges
+    }
+
+    #[allow(unreachable_code)]
+    fn union_piece(mut binary: Range, ranges: &mut Vec<Range>) {
+        let mut idx = 0;
+        while idx < ranges.len() {
+            let Some(placement) = Self::placement(BinaryOperator::Or, &binary, &ranges[idx]) else {
+                #[cfg(debug_assertions)]
+                {
+                    unreachable!();
+                }
+                ranges.clear();
+                return;
+            };
+            match placement {
+                Placement::Before => {
+                    ranges.insert(idx, binary);
+                    return;
+                }
+                Placement::After => idx += 1,
+                Placement::Overlap => {
+                    match Self::merge_binary(BinaryOperator::Or, binary, ranges.remove(idx)) {
+                        Ok(range @ (Range::Scope { .. } | Range::Eq(_))) => binary = range,
+                        Ok(range) => return Self::union_ranges(range, ranges),
+                        Err(_) => return,
+                    }
+                }
+            }
+        }
+        ranges.push(binary);
     }
 
     fn or_scope_merge(
@@ -2788,6 +2831,35 @@ mod test {
             ]),
         ];
         let combined = suffix.combining_eqs(&prefixes).unwrap();
+        let eq = |value| Range::Eq(DataValue::Int32(value));
+        assert_eq!(
+            eq(9).combining_eqs(&[
+                Range::SortedRanges(vec![eq(1), eq(2)]),
+                Range::SortedRanges(vec![eq(3), eq(4)]),
+            ]),
+            Some(Range::SortedRanges(vec![
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(3),
+                    DataValue::Int32(9)
+                ])),
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(4),
+                    DataValue::Int32(9)
+                ])),
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(2),
+                    DataValue::Int32(3),
+                    DataValue::Int32(9)
+                ])),
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(2),
+                    DataValue::Int32(4),
+                    DataValue::Int32(9)
+                ])),
+            ]))
+        );
         let first = DataValue::Int32(1);
         let second = DataValue::Int32(2);
         let borrowed = [Range::Eq(&first), Range::Eq(&second)];
@@ -2864,5 +2936,57 @@ mod test {
             }])
             .is_none());
         assert!(!suffix.only_eq());
+    }
+
+    /// AND over a union must intersect every piece instead of keeping the disjoint ones.
+    #[test]
+    fn test_detach_and_over_or() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
+        let eq = |v| Range::Eq(DataValue::Int32(v));
+        let cases = [
+            ("c1 > 10 and (c1 = 1 or c1 = 20)", eq(20)),
+            // `c1 > 3` must still be applied after it has been intersected with `c1 = 5`.
+            (
+                "c1 > 3 and (c1 = 5 or c1 = 7)",
+                Range::SortedRanges(vec![eq(5), eq(7)]),
+            ),
+            ("(c1 = 1 or c1 = 20) and (c1 = 5 or c1 = 20)", eq(20)),
+            // One `rj` overlapping several `li` must be intersected with each of them.
+            (
+                "(c1 = 5 or c1 = 7) and (c1 < 10 or c1 > 20)",
+                Range::SortedRanges(vec![eq(5), eq(7)]),
+            ),
+            (
+                "(c1 < 10 or c1 > 20) and (c1 = 5 or c1 = 7 or c1 = 15 or c1 = 25)",
+                Range::SortedRanges(vec![eq(5), eq(7), eq(25)]),
+            ),
+            (
+                "c1 > 3 and (c1 < 2 or c1 > 30)",
+                Range::Scope {
+                    min: Bound::Excluded(DataValue::Int32(30)),
+                    max: Bound::Unbounded,
+                },
+            ),
+            ("c1 = 1 and (c1 > 10 or c1 < 3)", eq(1)),
+            (
+                "(c1 > 5 or c1 < 0) and (c1 = -1 or c1 = 3 or c1 = 7)",
+                Range::SortedRanges(vec![eq(-1), eq(7)]),
+            ),
+            ("(c1 = 1 or c1 = 2) and (c1 = 3 or c1 = 4)", Range::Dummy),
+            ("c1 = 3 and (c1 between 5 and 2 or c1 > 9)", Range::Dummy),
+        ];
+        for (predicate, expected) in cases {
+            let sql = format!("select * from t1 where {predicate}");
+            let plan = table_state.plan_with_arena(&sql, &mut plan_arena)?;
+            let op = plan_filter(plan, &mut plan_arena)?.unwrap();
+            let detached =
+                RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &mut plan_arena)
+                    .detach(op.predicate)?
+                    .expect("c1 predicate should be consumed");
+            assert_eq!(detached.range, expected, "{predicate}");
+            assert_eq!(detached.residual, None, "{predicate}");
+        }
+        Ok(())
     }
 }

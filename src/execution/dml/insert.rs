@@ -20,7 +20,7 @@ use crate::execution::{
 use crate::iter_ext::Itertools;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::index::Index;
 use crate::types::tuple::{Schema, Tuple};
@@ -92,10 +92,10 @@ impl Insert<'_> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {
             arena.finish();

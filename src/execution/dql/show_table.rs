@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::{TableIter, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
@@ -29,7 +29,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowTables<'a, T> {
     fn into_executor(
         _: Self::Input,
         arena: &mut ExecArena<'a, T>,
-        _: &mut (dyn MetaArena + 'a),
+        _: &mut (dyn MetaArena + '_),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
@@ -38,10 +38,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowTables<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
             let mut state = arena.local_state(plan_arena);

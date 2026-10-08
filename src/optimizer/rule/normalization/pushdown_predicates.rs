@@ -19,6 +19,7 @@ use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::plan_utils::{replace_with_only_child, wrap_child_with};
 use crate::planner::operator::filter::FilterOperator;
+use crate::planner::operator::join::extract_join_keys;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
@@ -159,17 +160,57 @@ impl NormalizationRule for PushPredicateThroughJoin {
 
             if !matches!(
                 join_type,
-                JoinType::Inner | JoinType::LeftOuter | JoinType::RightOuter
+                JoinType::Inner | JoinType::Cross | JoinType::LeftOuter | JoinType::RightOuter
             ) {
                 return Ok(false);
             }
 
-            let (left_filter, mut right_filter, common_filter, left_len) =
+            let (left_filter, mut right_filter, mut common_filter, left_len) =
                 classify_join_filters(filter_op.predicate, join_plan.childrens.as_mut(), arena)?;
+
+            if join_type == JoinType::Cross {
+                if let Some(predicate) = common_filter {
+                    let Childrens::Twins { left, right } = join_plan.childrens.as_mut() else {
+                        return Ok(false);
+                    };
+                    let left_schema = left.output_schema(arena).clone();
+                    let right_schema = right.output_schema(arena).clone();
+                    let mut keys = Vec::new();
+                    let mut residual = Vec::new();
+                    extract_join_keys(
+                        predicate,
+                        &mut keys,
+                        &mut residual,
+                        &left_schema,
+                        &right_schema,
+                        arena,
+                    )?;
+                    if !keys.is_empty() {
+                        for (_, right) in &mut keys {
+                            // WHERE uses joined positions; join keys use each input's local positions.
+                            *right = right.clone_expression(arena)?;
+                            PositionShift {
+                                delta: -(left_len as isize),
+                            }
+                            .visit(right, arena)?;
+                        }
+                        if let Operator::Join(op) = &mut join_plan.operator {
+                            op.join_type = JoinType::Inner;
+                            op.on = JoinCondition::On {
+                                on: keys,
+                                filter: None,
+                            };
+                        }
+                        common_filter = reduce_filters(residual, filter_op.having, arena)
+                            .map(|op| op.predicate);
+                        applied = true;
+                    }
+                }
+            }
 
             let mut new_ops = (None, None, None);
             match join_type {
-                JoinType::Inner => {
+                JoinType::Inner | JoinType::Cross => {
                     if let Some(left_filter_op) =
                         reduce_filters(left_filter, filter_op.having, arena)
                     {
@@ -1033,6 +1074,39 @@ mod tests {
             unreachable!("Should be a filter operator")
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn cross_join_without_conjunctive_keys_stays_cross() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+        for predicate in ["c1 = c3 or c2 = c4", "c1 < c3", "c1 > 0 and c3 < 9"] {
+            let mut arena = PlanArena::new(&tables.table_arena);
+            let plan = tables.plan_with_arena(
+                &format!("select * from t1, t2 where {predicate}"),
+                &mut arena,
+            )?;
+            let plan = apply_pipeline(
+                plan,
+                HepOptimizerPipeline::builder().before_batch(
+                    "cross join pushdown".into(),
+                    HepBatchStrategy::once_topdown(),
+                    vec![NormalizationRuleImpl::PushPredicateThroughJoin],
+                ),
+                &mut arena,
+            )?;
+            let child = plan.childrens.only();
+            let join = if matches!(child.operator, Operator::Filter(_)) {
+                child.childrens.only()
+            } else {
+                child
+            };
+            let Operator::Join(op) = &join.operator else {
+                panic!("expected join")
+            };
+            assert_eq!(op.join_type, JoinType::Cross, "{predicate}");
+            assert!(matches!(op.on, JoinCondition::None));
+        }
         Ok(())
     }
 

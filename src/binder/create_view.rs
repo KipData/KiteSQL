@@ -91,6 +91,7 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
         };
         plan = self.bind_project(plan, exprs, arena)?;
         let schema = plan.output_schema(arena).clone();
+        arena.materialize_scalar_queries(&mut plan)?;
 
         Ok(LogicalPlan::new(
             Operator::CreateView(CreateViewOperator {

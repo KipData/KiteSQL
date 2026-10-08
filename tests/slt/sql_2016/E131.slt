@@ -3,4 +3,4 @@
 query T
 SELECT NULL
 ----
-null
+NULL

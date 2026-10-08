@@ -67,9 +67,9 @@ pub trait OperatorVisitorMut<'a>: Sized {
         Ok(())
     }
 
-    fn visit_scalar_apply(
+    fn visit_scalar_query_init(
         &mut self,
-        _op: &'a mut ScalarApplyOperator,
+        _op: &'a mut ScalarQueryInitOperator,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -274,6 +274,17 @@ impl<'a, V: ExprVisitorMut> OperatorVisitorMut<'a> for OperatorExprVisitorMut<'_
         Ok(())
     }
 
+    fn visit_scalar_query_init(
+        &mut self,
+        op: &'a mut ScalarQueryInitOperator,
+    ) -> Result<(), DatabaseError> {
+        ExprVisitorMut::visit(self.visitor, &mut op.value, self.arena)?;
+        for (_, expr) in &mut op.param_bindings {
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
+        }
+        Ok(())
+    }
+
     fn visit_mark_apply(&mut self, op: &'a mut MarkApplyOperator) -> Result<(), DatabaseError> {
         for expr in &mut op.predicates {
             ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
@@ -403,7 +414,7 @@ pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
     match operator {
         Operator::Dummy => visitor.visit_dummy(),
         Operator::Aggregate(op) => visitor.visit_aggregate(op),
-        Operator::ScalarApply(op) => visitor.visit_scalar_apply(op),
+        Operator::ScalarQueryInit(op) => visitor.visit_scalar_query_init(op),
         Operator::MarkApply(op) => visitor.visit_mark_apply(op),
         Operator::Filter(op) => visitor.visit_filter(op),
         Operator::Join(op) => visitor.visit_join(op),
@@ -523,7 +534,7 @@ mod tests {
                 visitor.visit_operator(operator, None)?;
             }
         }
-        assert_eq!(counter.0, 21); // Includes the Values row expression.
+        assert_eq!(counter.0, 22); // Includes the Values row expression.
 
         Ok(())
     }

@@ -190,6 +190,15 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
             if expr.has_agg_call(arena)? {
                 continue;
             }
+            if !expr.any_referenced_column(arena, |_, _| true)? {
+                if let Some(position) = unmatched_group_exprs
+                    .iter()
+                    .position(|group_expr| expr.eq_ignore_colref_pos(*group_expr, arena))
+                {
+                    unmatched_group_exprs.remove(position);
+                }
+                continue;
+            }
             let Some(position) = unmatched_group_exprs
                 .iter()
                 .position(|group_expr| expr.eq_ignore_colref_pos(*group_expr, arena))
@@ -202,6 +211,12 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
             unmatched_group_exprs.remove(position);
         }
 
+        unmatched_group_exprs.retain(|expr| {
+            !matches!(
+                arena.expression(expr.unpack_alias(arena)),
+                ScalarExpression::InitValue { .. }
+            )
+        });
         if !unmatched_group_exprs.is_empty() {
             return Err(DatabaseError::AggMiss(
                 "in the GROUP BY clause the field must be in the select clause".to_string(),

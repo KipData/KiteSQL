@@ -6,7 +6,7 @@ CREATE TABLE TABLE_E091_03_01_01 ( ID INT PRIMARY KEY, A FLOAT );
 query F
 SELECT MAX ( A ) FROM TABLE_E091_03_01_01
 ----
-null
+NULL
 
 statement ok
 drop table table_e091_03_01_01

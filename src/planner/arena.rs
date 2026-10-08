@@ -14,20 +14,102 @@
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
+use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::ScalarExpression;
-use crate::planner::LogicalPlan;
+use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
+use crate::planner::operator::visitor_mut::{
+    walk_mut_operator, OperatorExprVisitorMut, OperatorVisitorMut,
+};
+use crate::planner::operator::{Operator, PhysicalOption};
+use crate::planner::{LogicalPlan, ScalarQueryRef};
 use crate::types::index::{IndexMeta, IndexMetaRef};
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
+use crate::types::LogicalType;
 use std::cell::UnsafeCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+
+struct ScalarQueryRelocator {
+    source_arena: usize,
+    target_arena: usize,
+    base: usize,
+}
+
+impl ScalarQueryRelocator {
+    fn relocate(&self, reference: &mut ScalarQueryRef) {
+        if reference.arena_id == self.source_arena {
+            reference.arena_id = self.target_arena;
+            reference.pos += self.base;
+        }
+    }
+}
+
+impl ExprVisitorMut for ScalarQueryRelocator {
+    fn visit_outer_param(
+        &mut self,
+        reference: &mut ScalarQueryRef,
+        _ty: &mut LogicalType,
+        _arena: &mut dyn MetaArena,
+    ) -> Result<(), DatabaseError> {
+        self.relocate(reference);
+        Ok(())
+    }
+
+    fn visit_outer_value(
+        &mut self,
+        reference: &mut ScalarQueryRef,
+        _ty: &mut LogicalType,
+        _arena: &mut dyn MetaArena,
+    ) -> Result<(), DatabaseError> {
+        self.relocate(reference);
+        Ok(())
+    }
+
+    fn visit_init_value(
+        &mut self,
+        reference: &mut ScalarQueryRef,
+        _ty: &mut LogicalType,
+        _arena: &mut dyn MetaArena,
+    ) -> Result<(), DatabaseError> {
+        self.relocate(reference);
+        Ok(())
+    }
+}
+
+struct ScalarQueryPlanRelocator<'a> {
+    references: ScalarQueryRelocator,
+    arena: &'a mut dyn MetaArena,
+}
+
+impl<'a> OperatorVisitorMut<'a> for ScalarQueryPlanRelocator<'_> {
+    fn visit_operator(
+        &mut self,
+        operator: &'a mut Operator,
+        physical_option: Option<&'a mut PhysicalOption>,
+    ) -> Result<(), DatabaseError> {
+        OperatorExprVisitorMut::new(&mut self.references, self.arena)
+            .visit_operator(operator, physical_option)?;
+        walk_mut_operator(self, operator)
+    }
+
+    fn visit_scalar_query_init(
+        &mut self,
+        op: &'a mut ScalarQueryInitOperator,
+    ) -> Result<(), DatabaseError> {
+        for (reference, _) in &mut op.param_bindings {
+            self.references.relocate(reference);
+        }
+        Ok(())
+    }
+}
 
 pub struct TableArena {
     dummy_columns: [ColumnCatalog; DUMMY_COLUMN_COUNT],
     columns: Vec<TableArenaColumn>,
     indexes: Vec<TableArenaIndex>,
     expressions: Vec<TableArenaExpression>,
+    scalar_query_count: usize,
     version: usize,
 }
 
@@ -62,6 +144,8 @@ pub struct PlanArena<'a> {
     table_arena_version: usize,
     allocated_columns_len: usize,
     temp_table_id: usize,
+    arena_id: usize,
+    scalar_query_count: usize,
     columns: Vec<ColumnCatalog>,
     indexes: Vec<IndexMeta>,
     expressions: Vec<ArenaExpr>,
@@ -153,6 +237,16 @@ pub trait MetaArena {
         None
     }
 
+    fn arena_id(&self) -> usize;
+
+    fn alloc_scalar_query_ref(&mut self, is_outer_value: bool) -> ScalarQueryRef;
+
+    fn reserve_scalar_query_ref(&mut self, reference: ScalarQueryRef);
+
+    fn init_value(&self, _reference: ScalarQueryRef) -> Option<&DataValue> {
+        None
+    }
+
     fn alloc_dummy(&mut self, name: &str) -> ColumnRef {
         self.table_arena_cell().borrow().alloc_dummy(name)
     }
@@ -206,6 +300,18 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
     fn bound_param(&self, id: usize) -> Option<&DataValue> {
         (**self).bound_param(id)
     }
+    fn arena_id(&self) -> usize {
+        (**self).arena_id()
+    }
+    fn alloc_scalar_query_ref(&mut self, is_outer_value: bool) -> ScalarQueryRef {
+        (**self).alloc_scalar_query_ref(is_outer_value)
+    }
+    fn reserve_scalar_query_ref(&mut self, reference: ScalarQueryRef) {
+        (**self).reserve_scalar_query_ref(reference)
+    }
+    fn init_value(&self, reference: ScalarQueryRef) -> Option<&DataValue> {
+        (**self).init_value(reference)
+    }
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
         (**self).alloc_column(column)
     }
@@ -232,6 +338,106 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
     }
     fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
         (**self).find_index(index)
+    }
+}
+
+/// Owns the metadata and scalar-query cache for one statement execution.
+pub struct ExecMetaArena<A> {
+    parent: A,
+    init_values: HashMap<ScalarQueryRef, Option<DataValue>>,
+}
+
+impl<A: MetaArena> ExecMetaArena<A> {
+    pub(crate) fn new(parent: A) -> Self {
+        Self {
+            parent,
+            init_values: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn boxed<'a>(self) -> ExecMetaArena<Box<dyn MetaArena + 'a>>
+    where
+        A: 'a,
+    {
+        ExecMetaArena {
+            parent: Box::new(self.parent),
+            init_values: self.init_values,
+        }
+    }
+
+    pub(crate) fn into_parent(self) -> A {
+        self.parent
+    }
+
+    pub(crate) fn set_init_value(&mut self, reference: ScalarQueryRef, value: DataValue) {
+        self.init_values.insert(reference, Some(value));
+    }
+
+    pub(crate) fn take_outer_values(&mut self) -> Vec<(ScalarQueryRef, DataValue)> {
+        self.init_values
+            .extract_if(|reference, _| reference.is_outer_value)
+            .filter_map(|(reference, value)| value.map(|value| (reference, value)))
+            .collect()
+    }
+
+    pub(crate) fn restore_outer_values(&mut self, values: Vec<(ScalarQueryRef, DataValue)>) {
+        for (reference, value) in values {
+            self.set_init_value(reference, value);
+        }
+    }
+}
+
+impl<A: MetaArena> MetaArena for ExecMetaArena<A> {
+    fn arena_id(&self) -> usize {
+        self.parent.arena_id()
+    }
+    fn alloc_scalar_query_ref(&mut self, is_outer_value: bool) -> ScalarQueryRef {
+        self.parent.alloc_scalar_query_ref(is_outer_value)
+    }
+    fn reserve_scalar_query_ref(&mut self, reference: ScalarQueryRef) {
+        self.parent.reserve_scalar_query_ref(reference)
+    }
+    fn init_value(&self, reference: ScalarQueryRef) -> Option<&DataValue> {
+        self.init_values.get(&reference).and_then(Option::as_ref)
+    }
+    fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
+    where
+        Self: 'a,
+    {
+        self.parent.table_arena_cell()
+    }
+    fn has_bound_params(&self) -> bool {
+        self.parent.has_bound_params()
+    }
+    fn bound_param(&self, id: usize) -> Option<&DataValue> {
+        self.parent.bound_param(id)
+    }
+    fn expression_mut(&mut self, expr: ExprRef) -> ArenaExprMut<'_> {
+        self.parent.expression_mut(expr)
+    }
+    fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
+        self.parent.alloc_column(column)
+    }
+    fn alloc_index(&mut self, index: IndexMeta) -> IndexMetaRef {
+        self.parent.alloc_index(index)
+    }
+    fn alloc_expression(&mut self, expression: ScalarExpression) -> ExprRef {
+        self.parent.alloc_expression(expression)
+    }
+    fn column(&self, column: ColumnRef) -> &ColumnCatalog {
+        self.parent.column(column)
+    }
+    fn index(&self, index: IndexMetaRef) -> &IndexMeta {
+        self.parent.index(index)
+    }
+    fn expression(&self, expr: ExprRef) -> &ScalarExpression {
+        self.parent.expression(expr)
+    }
+    fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef> {
+        self.parent.find_column(column)
+    }
+    fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
+        self.parent.find_index(index)
     }
 }
 
@@ -297,6 +503,7 @@ impl Default for TableArena {
             columns: Vec::new(),
             indexes: Vec::new(),
             expressions: Vec::new(),
+            scalar_query_count: 0,
             version: 0,
         }
     }
@@ -396,6 +603,22 @@ impl fmt::Debug for TableArena {
 }
 
 impl MetaArena for TableArena {
+    fn arena_id(&self) -> usize {
+        0
+    }
+    fn alloc_scalar_query_ref(&mut self, is_outer_value: bool) -> ScalarQueryRef {
+        let reference = ScalarQueryRef {
+            is_outer_value,
+            arena_id: 0,
+            pos: self.scalar_query_count,
+        };
+        self.scalar_query_count += 1;
+        reference
+    }
+    fn reserve_scalar_query_ref(&mut self, reference: ScalarQueryRef) {
+        assert_eq!(reference.arena_id, 0);
+        self.scalar_query_count = self.scalar_query_count.max(reference.pos + 1);
+    }
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
         if let Some(column_ref) = self.find_column(&column) {
             return column_ref;
@@ -526,6 +749,8 @@ impl<'a> PlanArena<'a> {
             table_arena_version,
             allocated_columns_len: 0,
             temp_table_id: 0,
+            arena_id: table_arena.borrow().arena_id() + 1,
+            scalar_query_count: 0,
             columns: Vec::new(),
             indexes: Vec::new(),
             expressions: Vec::new(),
@@ -587,6 +812,26 @@ impl<'a> PlanArena<'a> {
         let table_arena = self.table_arena.borrow_mut();
         self.append_expressions_to_table_arena(table_arena);
         table_arena.increment_version();
+    }
+
+    /// Moves scalar definitions with a cached plan into the persistent namespace.
+    pub(crate) fn materialize_scalar_queries(
+        &mut self,
+        plan: &mut LogicalPlan,
+    ) -> Result<(), DatabaseError> {
+        self.assert_table_arena_unchanged();
+        let target = self.table_arena.borrow_mut();
+        let references = ScalarQueryRelocator {
+            source_arena: self.arena_id,
+            target_arena: target.arena_id(),
+            base: target.scalar_query_count,
+        };
+        target.scalar_query_count += self.scalar_query_count;
+        ScalarQueryPlanRelocator {
+            references,
+            arena: self,
+        }
+        .visit_plan(plan)
     }
 
     pub(crate) fn materialize_into_table_arena(&self) {
@@ -715,6 +960,26 @@ impl<'a> PlanArena<'a> {
 }
 
 impl MetaArena for PlanArena<'_> {
+    fn arena_id(&self) -> usize {
+        self.arena_id
+    }
+    fn alloc_scalar_query_ref(&mut self, is_outer_value: bool) -> ScalarQueryRef {
+        let reference = ScalarQueryRef {
+            is_outer_value,
+            arena_id: self.arena_id,
+            pos: self.scalar_query_count,
+        };
+        self.scalar_query_count += 1;
+        reference
+    }
+    fn reserve_scalar_query_ref(&mut self, reference: ScalarQueryRef) {
+        if reference.arena_id == self.arena_id {
+            self.scalar_query_count = self.scalar_query_count.max(reference.pos + 1);
+        } else {
+            assert_eq!(reference.arena_id, 0);
+            assert!(reference.pos < self.table_arena.borrow().scalar_query_count);
+        }
+    }
     fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
     where
         Self: 'a,
@@ -820,6 +1085,7 @@ pub(crate) struct ParamArena<'a> {
     expressions: Vec<(Option<usize>, ArenaExpr)>,
     parameter_count: usize,
     parent_end: usize,
+    scalar_query_count: usize,
 }
 
 impl<'a> ParamArena<'a> {
@@ -850,11 +1116,29 @@ impl<'a> ParamArena<'a> {
             expressions,
             parameter_count: parameter_expressions.len(),
             parent_end: parent.expression_end(),
+            scalar_query_count: 0,
         })
     }
 }
 
 impl MetaArena for ParamArena<'_> {
+    fn arena_id(&self) -> usize {
+        self.parent.arena_id() + 1
+    }
+    fn alloc_scalar_query_ref(&mut self, is_outer_value: bool) -> ScalarQueryRef {
+        let reference = ScalarQueryRef {
+            is_outer_value,
+            arena_id: self.arena_id(),
+            pos: self.scalar_query_count,
+        };
+        self.scalar_query_count += 1;
+        reference
+    }
+    fn reserve_scalar_query_ref(&mut self, reference: ScalarQueryRef) {
+        if reference.arena_id == self.arena_id() {
+            self.scalar_query_count = self.scalar_query_count.max(reference.pos + 1);
+        }
+    }
     fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
     where
         Self: 'a,
@@ -930,6 +1214,74 @@ mod tests {
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::LogicalType;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn sorting_moves_only_outer_results() {
+        let catalog = TableArenaCell::default();
+        let mut plan = PlanArena::new(&catalog);
+        let init = plan.alloc_scalar_query_ref(false);
+        let param = plan.alloc_scalar_query_ref(false);
+        let result = plan.alloc_scalar_query_ref(true);
+        let mut arena = ExecMetaArena::new(plan);
+        arena.set_init_value(init, DataValue::Int32(7));
+        arena.set_init_value(param, DataValue::Int32(3));
+        arena.set_init_value(result, DataValue::Null);
+        let values = arena.take_outer_values();
+        assert_eq!(values, vec![(result, DataValue::Null)]);
+        assert_eq!(arena.init_value(init), Some(&DataValue::Int32(7)));
+        assert_eq!(arena.init_value(param), Some(&DataValue::Int32(3)));
+        assert_eq!(arena.init_value(result), None);
+        arena.restore_outer_values(values);
+        assert_eq!(arena.init_value(result), Some(&DataValue::Null));
+    }
+
+    #[test]
+    fn scalar_query_namespaces_follow_arena_parent() -> Result<(), DatabaseError> {
+        let root = TableArenaCell::default();
+        let catalog = root.borrow_mut().alloc_scalar_query_ref(false);
+        assert_eq!(
+            catalog,
+            ScalarQueryRef {
+                is_outer_value: false,
+                arena_id: 0,
+                pos: 0
+            }
+        );
+        let mut plan = PlanArena::new(&root);
+        let local = plan.alloc_scalar_query_ref(false);
+        assert_eq!(
+            local,
+            ScalarQueryRef {
+                is_outer_value: false,
+                arena_id: 1,
+                pos: 0
+            }
+        );
+        assert_ne!(catalog, local);
+        let mut params = ParamArena::new(&plan, &[], &[])?;
+        assert_eq!(params.arena_id(), 2);
+        let param_local = params.alloc_scalar_query_ref(false);
+        assert_eq!(
+            param_local,
+            ScalarQueryRef {
+                is_outer_value: false,
+                arena_id: 2,
+                pos: 0
+            }
+        );
+        let mut view = ExecMetaArena::new(params);
+        view.set_init_value(catalog, DataValue::Int32(11));
+        assert_eq!(view.arena_id(), 2);
+        assert_eq!(view.init_value(catalog), Some(&DataValue::Int32(11)));
+        assert_eq!(view.init_value(local), None);
+        assert_eq!(view.init_value(param_local), None);
+        view.set_init_value(local, DataValue::Null);
+        assert_eq!(view.init_value(local), Some(&DataValue::Null));
+        view.set_init_value(local, DataValue::Int32(33));
+        assert_eq!(view.init_value(catalog), Some(&DataValue::Int32(11)));
+        assert_eq!(view.init_value(local), Some(&DataValue::Int32(33)));
+        Ok(())
+    }
 
     fn column(name: &str) -> ColumnCatalog {
         ColumnCatalog::new(

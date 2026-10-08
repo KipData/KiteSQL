@@ -37,7 +37,7 @@ pub mod limit;
 pub mod mark_apply;
 pub mod project;
 pub mod recursive_cte;
-pub mod scalar_apply;
+pub mod scalar_query_init;
 pub mod scalar_subquery;
 pub mod set_membership;
 pub mod sort;
@@ -56,8 +56,8 @@ use self::{
     aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
     alter_table::change_column::ChangeColumnOperator, filter::FilterOperator, join::JoinOperator,
     limit::LimitOperator, mark_apply::MarkApplyOperator, project::ProjectOperator,
-    scalar_apply::ScalarApplyOperator, scalar_subquery::ScalarSubqueryOperator, sort::SortOperator,
-    table_scan::TableScanOperator,
+    scalar_query_init::ScalarQueryInitOperator, scalar_subquery::ScalarSubqueryOperator,
+    sort::SortOperator, table_scan::TableScanOperator,
 };
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
@@ -97,7 +97,7 @@ pub enum Operator {
     // DQL
     Dummy,
     Aggregate(AggregateOperator),
-    ScalarApply(ScalarApplyOperator),
+    ScalarQueryInit(ScalarQueryInitOperator),
     MarkApply(MarkApplyOperator),
     Filter(FilterOperator),
     Join(JoinOperator),
@@ -177,7 +177,7 @@ pub enum PlanImpl {
     HashAggregate,
     StreamAggregate,
     StreamDistinct,
-    ScalarApply,
+    ScalarQueryInit,
     MarkApply,
     Filter,
     HashJoin,
@@ -248,7 +248,6 @@ macro_rules! impl_display_explain {
 }
 
 impl_display_explain!(
-    ScalarApplyOperator,
     MarkApplyOperator,
     ScalarSubqueryOperator,
     FunctionScanOperator,
@@ -277,7 +276,7 @@ impl Explain for Operator {
         match self {
             Operator::Dummy => f.write_str("Dummy"),
             Operator::Aggregate(op) => Explain::fmt(op, arena, f),
-            Operator::ScalarApply(op) => Explain::fmt(op, arena, f),
+            Operator::ScalarQueryInit(op) => Explain::fmt(op, arena, f),
             Operator::MarkApply(op) => Explain::fmt(op, arena, f),
             Operator::Filter(op) => Explain::fmt(op, arena, f),
             Operator::Join(op) => Explain::fmt(op, arena, f),
@@ -362,6 +361,16 @@ impl Operator {
                 op: &'operator AggregateOperator,
             ) -> Result<(), DatabaseError> {
                 for expr in op.agg_calls.iter().chain(&op.groupby_exprs) {
+                    ExprVisitor::visit(self, *expr, self.arena)?;
+                }
+                Ok(())
+            }
+
+            fn visit_scalar_query_init(
+                &mut self,
+                op: &'operator ScalarQueryInitOperator,
+            ) -> Result<(), DatabaseError> {
+                for (_, expr) in &op.param_bindings {
                     ExprVisitor::visit(self, *expr, self.arena)?;
                 }
                 Ok(())
@@ -595,7 +604,7 @@ impl Explain for PlanImpl {
             PlanImpl::HashAggregate => f.write_str("HashAggregate"),
             PlanImpl::StreamAggregate => f.write_str("StreamAggregate"),
             PlanImpl::StreamDistinct => f.write_str("StreamDistinct"),
-            PlanImpl::ScalarApply => f.write_str("ScalarApply"),
+            PlanImpl::ScalarQueryInit => f.write_str("ScalarQueryInit"),
             PlanImpl::MarkApply => f.write_str("MarkApply"),
             PlanImpl::Filter => f.write_str("Filter"),
             PlanImpl::HashJoin => f.write_str("HashJoin"),
@@ -767,7 +776,7 @@ mod tests {
             (PlanImpl::HashAggregate, "HashAggregate"),
             (PlanImpl::StreamAggregate, "StreamAggregate"),
             (PlanImpl::StreamDistinct, "StreamDistinct"),
-            (PlanImpl::ScalarApply, "ScalarApply"),
+            (PlanImpl::ScalarQueryInit, "ScalarQueryInit"),
             (PlanImpl::MarkApply, "MarkApply"),
             (PlanImpl::Filter, "Filter"),
             (PlanImpl::HashJoin, "HashJoin"),
@@ -1002,8 +1011,12 @@ mod tests {
         });
         assert_eq!(referenced_columns(&delete, &mut arena)?, vec![a]);
 
+        let scalar = Operator::ScalarQueryInit(ScalarQueryInitOperator {
+            value: arena.alloc_expression(ScalarExpression::Constant(DataValue::Null)),
+            param_bindings: Vec::new(),
+        });
+        assert!(referenced_columns(&scalar, &mut arena)?.is_empty());
         let no_reference_operators = [
-            Operator::ScalarApply(ScalarApplyOperator),
             Operator::ScalarSubquery(ScalarSubqueryOperator),
             Operator::Analyze(AnalyzeOperator {
                 table_name: "users".into(),
@@ -1382,14 +1395,22 @@ mod tests {
     }
 
     #[test]
-    fn scalar_apply_and_subquery_build_expected_child_shapes() {
+    fn scalar_query_init_and_subquery_build_expected_child_shapes() {
         let table_arena = TableArenaCell::default();
-        let arena = PlanArena::new(&table_arena);
+        let mut arena = PlanArena::new(&table_arena);
         let left = LogicalPlan::new(Operator::ShowTable, Childrens::None);
         let right = LogicalPlan::new(Operator::ShowView, Childrens::None);
 
-        let apply = ScalarApplyOperator::build(left.clone(), right);
-        assert_eq!(apply.operator.explain(&arena).to_string(), "ScalarApply");
+        let id = arena.alloc_scalar_query_ref(false);
+        let value = arena.alloc_expression(ScalarExpression::InitValue {
+            id,
+            ty: LogicalType::Integer,
+        });
+        let apply = ScalarQueryInitOperator::build(left.clone(), right, value, Vec::new());
+        assert_eq!(
+            apply.operator.explain(&arena).to_string(),
+            "ScalarQueryInit InitValue(1:0)"
+        );
         assert!(matches!(*apply.childrens, Childrens::Twins { .. }));
 
         let subquery = ScalarSubqueryOperator::build(left);

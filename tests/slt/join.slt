@@ -59,9 +59,9 @@ insert into a values (0, 1, 1), (1, 2, 2), (2, 3, 3);
 query IIII rowsort
 select v1, v2, v3, v4 from a left join b on v1 = v3;
 ----
-1 1 null null
-2 2 null null
-3 3 null null
+1 1 NULL NULL
+2 2 NULL NULL
+3 3 NULL NULL
 
 statement ok
 insert into b values (0, 1, 100), (1, 3, 300), (2, 4, 400);
@@ -71,22 +71,22 @@ select v1, v2, v3, v4 from a left join b on v1 = v3;
 ----
 1 1 1 100
 3 3 3 300
-2 2 null null
+2 2 NULL NULL
 
 query IIII rowsort
 select v1, v2, v3, v4 from a right join b on v1 = v3;
 ----
 1 1 1 100
 3 3 3 300
-null null 4 400
+NULL NULL 4 400
 
 query IIII rowsort
 select v1, v2, v3, v4 from a full join b on v1 = v3;
 ----
 1 1 1 100
-2 2 null null
+2 2 NULL NULL
 3 3 3 300
-null null 4 400
+NULL NULL 4 400
 
 statement ok
 drop table a;
@@ -164,7 +164,7 @@ select a.*, b.* from a left join b on v1 < v3 or v2 < v4
 0 1 1 1 2 2 2
 0 1 1 2 3 3 4
 1 2 2 2 3 3 4
-2 3 3 null null null null
+2 3 3 NULL NULL NULL NULL
 
 query IIIIIII rowsort
 select a.*, b.* from a right join b on v1 <> v3 and v2 < v4
@@ -172,8 +172,8 @@ select a.*, b.* from a right join b on v1 <> v3 and v2 < v4
 0 1 1 1 2 2 2
 0 1 1 2 3 3 4
 1 2 2 2 3 3 4
-null null null 0 1 1 1
-null null null 3 1 1 5
+NULL NULL NULL 0 1 1 1
+NULL NULL NULL 3 1 1 5
 
 query IIIIIII rowsort
 select a.*, b.* from a cross join b
@@ -312,8 +312,8 @@ left join lookup_inner i on o.k=i.k order by o.id,i.id;
 1 1
 1 2
 2 3
-3 null
-4 null
+3 NULL
+4 NULL
 5 1
 5 2
 
@@ -564,16 +564,16 @@ insert into full_using_r values (5, 2, 200), (6, 3, 300)
 query IIIII rowsort
 select * from full_using_l as l (lid, x, lv) full join full_using_r using(x)
 ----
-0 1 10 null null
+0 1 10 NULL NULL
 1 2 20 5 200
-null 3 null 6 300
+NULL 3 NULL 6 300
 
 query IIIII rowsort
 select * from full_using_l full join full_using_r using(x)
 ----
-0 1 10 null null
+0 1 10 NULL NULL
 1 2 20 5 200
-null 3 null 6 300
+NULL 3 NULL 6 300
 
 statement ok
 drop table full_using_l

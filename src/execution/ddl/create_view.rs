@@ -17,7 +17,7 @@ use crate::execution::{
     DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::create_view::CreateViewOperator;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 
 pub struct CreateView<'a> {
@@ -39,10 +39,10 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateView<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateView<'a> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let CreateViewOperator { view, or_replace } = self.op;
         let (transaction, table_codec) = arena.transaction_codec_mut();

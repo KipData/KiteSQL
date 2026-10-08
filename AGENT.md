@@ -151,7 +151,11 @@ KiteSQL aims to stay easy to build, easy to audit, and easy to understand.
 
 A valid PR should:
 
-- Follow the repository pull request template
+- Follow `.github/pull_request_template.md` exactly: preserve its headings, checklist labels,
+  ordering, and comments. In `Code changes` and `Check List`, only change checkbox states;
+  do not add, remove, or reword items, or insert explanatory paragraphs.
+- Put test results, manual verification steps, compatibility notes, and side-effect explanations
+  in `Note for reviewer`, not inside the checklist. Keep the PR description concise.
 - Describe test coverage and verified behavior instead of listing commands that were run
 - Compile cleanly
 - Pass all tests via make

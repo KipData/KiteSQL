@@ -87,10 +87,10 @@ pub(crate) fn create_accumulators(
         .try_collect()
 }
 
-pub(crate) fn update_accumulators(
+pub(crate) fn update_accumulators<T: TupleLike + ?Sized>(
     accs: &mut [Box<dyn Accumulator>],
     agg_calls: &[ExprRef],
-    tuple: &dyn TupleLike,
+    tuple: &T,
     arena: &(dyn MetaArena + '_),
 ) -> Result<(), DatabaseError> {
     for (acc, expr) in accs.iter_mut().zip(agg_calls.iter()) {

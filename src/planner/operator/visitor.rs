@@ -31,7 +31,10 @@ pub trait OperatorVisitor<'a>: Sized {
         Ok(())
     }
 
-    fn visit_scalar_apply(&mut self, _op: &'a ScalarApplyOperator) -> Result<(), DatabaseError> {
+    fn visit_scalar_query_init(
+        &mut self,
+        _op: &'a ScalarQueryInitOperator,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
@@ -219,6 +222,17 @@ impl<'a, V: ExprVisitor<A>, A: MetaArena + ?Sized> OperatorVisitor<'a>
         Ok(())
     }
 
+    fn visit_scalar_query_init(
+        &mut self,
+        op: &'a ScalarQueryInitOperator,
+    ) -> Result<(), DatabaseError> {
+        ExprVisitor::visit(self.visitor, op.value, self.arena)?;
+        for (_, expr) in &op.param_bindings {
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
+        }
+        Ok(())
+    }
+
     fn visit_mark_apply(&mut self, op: &'a MarkApplyOperator) -> Result<(), DatabaseError> {
         for expr in &op.predicates {
             ExprVisitor::visit(self.visitor, *expr, self.arena)?;
@@ -338,7 +352,7 @@ pub fn walk_operator<'a, V: OperatorVisitor<'a>>(
     match operator {
         Operator::Dummy => visitor.visit_dummy(),
         Operator::Aggregate(op) => visitor.visit_aggregate(op),
-        Operator::ScalarApply(op) => visitor.visit_scalar_apply(op),
+        Operator::ScalarQueryInit(op) => visitor.visit_scalar_query_init(op),
         Operator::MarkApply(op) => visitor.visit_mark_apply(op),
         Operator::Filter(op) => visitor.visit_filter(op),
         Operator::Join(op) => visitor.visit_join(op),
@@ -448,7 +462,10 @@ pub(crate) mod tests {
                 is_distinct: false,
                 force_spill: false,
             }),
-            Operator::ScalarApply(ScalarApplyOperator),
+            Operator::ScalarQueryInit(ScalarQueryInitOperator {
+                param_bindings: Vec::new(),
+                value: expr(0),
+            }),
             Operator::MarkApply(mark_apply),
             Operator::Filter(FilterOperator {
                 predicate: expr(5),
@@ -655,7 +672,7 @@ pub(crate) mod tests {
         for operator in &operators {
             visitor.visit_operator(operator)?;
         }
-        assert_eq!(counter.0, 21); // Includes the Values row expression.
+        assert_eq!(counter.0, 22); // Includes the Values row expression.
 
         Ok(())
     }

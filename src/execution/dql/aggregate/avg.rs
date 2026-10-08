@@ -18,6 +18,7 @@ use crate::execution::dql::aggregate::Accumulator;
 use crate::expression::BinaryOperator;
 use crate::types::evaluator::binary_create;
 use crate::types::value::DataValue;
+use crate::types::LogicalType;
 use std::borrow::Cow;
 
 pub struct AvgAccumulator {
@@ -60,24 +61,14 @@ impl Accumulator for AvgAccumulator {
         let Some(acc) = &self.inner else {
             return Ok(());
         };
-        let mut value = Cow::Borrowed(acc.result());
-        let value_ty = value.logical_type();
-
         if self.count == 0 {
             return Ok(());
         }
-        let quantity = if value_ty.is_signed_numeric() {
-            DataValue::Int64(self.count as i64)
-        } else {
-            DataValue::UInt32(self.count as u32)
-        };
-        let quantity_ty = quantity.logical_type();
-
-        if value_ty != quantity_ty {
-            value = Cow::Owned(value.into_owned().cast(&quantity_ty)?)
-        }
-        let evaluator = binary_create(Cow::Owned(quantity_ty), BinaryOperator::Divide)?;
-        self.result = evaluator.binary_eval(value.as_ref(), &quantity)?;
+        // AVG returns Double even when ordinary integer division truncates.
+        let value = acc.result().clone().cast(&LogicalType::Double)?;
+        let quantity = DataValue::Float64((self.count as f64).into());
+        let evaluator = binary_create(Cow::Owned(LogicalType::Double), BinaryOperator::Divide)?;
+        self.result = evaluator.binary_eval(&value, &quantity)?;
         Ok(())
     }
 

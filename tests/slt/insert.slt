@@ -42,17 +42,17 @@ select * from t
 ----
 0 1 10 100
 1 9 9 9
-10 null 1 null
-11 null 9 null
+10 NULL 1 NULL
+11 NULL 9 NULL
 2 2 20 200
 20 1 10 100
 21 9 9 9
 3 3 30 300
 4 4 40 400
 5 1 10 100
-6 1 10 null
-7 10 1 null
-8 null null null
+6 1 10 NULL
+7 10 1 NULL
+8 NULL NULL NULL
 
 statement ok
 drop table t;

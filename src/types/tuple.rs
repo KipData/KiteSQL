@@ -76,6 +76,12 @@ impl<'a, 'p> SchemaView<'a, 'p> {
 }
 
 pub trait TupleLike {
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     fn value_at(&self, index: usize) -> &DataValue;
 
     #[inline]
@@ -85,23 +91,25 @@ pub trait TupleLike {
 }
 
 #[derive(Clone, Copy)]
-pub struct SplitTupleRef<'a> {
-    left: &'a [DataValue],
-    right: &'a [DataValue],
+pub struct SplitTupleRef<'a, L: ?Sized, R: ?Sized> {
+    left: &'a L,
+    right: &'a R,
     left_len: usize,
 }
 
-impl<'a> SplitTupleRef<'a> {
-    pub fn new(left: &'a Tuple, right: &'a Tuple) -> Self {
-        Self::from_slices(left.values.as_slice(), right.values.as_slice())
-    }
-
-    pub fn from_slices(left: &'a [DataValue], right: &'a [DataValue]) -> Self {
-        SplitTupleRef {
+impl<'a, L: TupleLike + ?Sized, R: TupleLike + ?Sized> SplitTupleRef<'a, L, R> {
+    pub fn new(left: &'a L, right: &'a R) -> Self {
+        Self {
             left,
             right,
             left_len: left.len(),
         }
+    }
+}
+
+impl<'a> SplitTupleRef<'a, [DataValue], [DataValue]> {
+    pub fn from_slices(left: &'a [DataValue], right: &'a [DataValue]) -> Self {
+        Self::new(left, right)
     }
 }
 
@@ -112,6 +120,11 @@ pub struct Tuple {
 }
 
 impl TupleLike for Tuple {
+    #[inline]
+    fn len(&self) -> usize {
+        self.values.len()
+    }
+
     #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
         &self.values[index]
@@ -125,29 +138,10 @@ impl TupleLike for Tuple {
 
 impl TupleLike for [DataValue] {
     #[inline]
-    fn value_at(&self, index: usize) -> &DataValue {
-        &self[index]
+    fn len(&self) -> usize {
+        <[DataValue]>::len(self)
     }
 
-    #[inline]
-    fn as_slice(&self) -> Option<&[DataValue]> {
-        Some(self)
-    }
-}
-
-impl TupleLike for &Tuple {
-    #[inline]
-    fn value_at(&self, index: usize) -> &DataValue {
-        &self.values[index]
-    }
-
-    #[inline]
-    fn as_slice(&self) -> Option<&[DataValue]> {
-        Some(self.values.as_slice())
-    }
-}
-
-impl TupleLike for &[DataValue] {
     #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
         &self[index]
@@ -159,25 +153,35 @@ impl TupleLike for &[DataValue] {
     }
 }
 
-impl TupleLike for &dyn TupleLike {
+impl<T: TupleLike + ?Sized> TupleLike for &T {
+    #[inline]
+    fn len(&self) -> usize {
+        (**self).len()
+    }
+
     #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
-        (*self).value_at(index)
+        (**self).value_at(index)
     }
 
     #[inline]
     fn as_slice(&self) -> Option<&[DataValue]> {
-        (*self).as_slice()
+        (**self).as_slice()
     }
 }
 
-impl TupleLike for SplitTupleRef<'_> {
+impl<L: TupleLike + ?Sized, R: TupleLike + ?Sized> TupleLike for SplitTupleRef<'_, L, R> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.left_len + self.right.len()
+    }
+
     #[inline]
     fn value_at(&self, index: usize) -> &DataValue {
         if index < self.left_len {
-            &self.left[index]
+            self.left.value_at(index)
         } else {
-            &self.right[index - self.left_len]
+            self.right.value_at(index - self.left_len)
         }
     }
 }
@@ -299,6 +303,10 @@ mod tests {
     struct OneValueTupleLike(DataValue);
 
     impl super::TupleLike for OneValueTupleLike {
+        fn len(&self) -> usize {
+            1
+        }
+
         fn value_at(&self, index: usize) -> &DataValue {
             assert_eq!(index, 0);
             &self.0
@@ -676,6 +684,27 @@ mod tests {
         assert_eq!(split.value_at(1), &DataValue::Int32(2));
         let split = super::SplitTupleRef::from_slices(&left.values, &right.values);
         assert_eq!(split.value_at(1), &DataValue::Int32(2));
+        assert_eq!(split.len(), 2);
+        assert!(!split.is_empty());
+        assert_eq!(tuple_like.len(), 2);
+        assert_eq!(one.len(), 1);
+        let empty: &[DataValue] = &[];
+        assert!(empty.is_empty());
+        let tail = OneValueTupleLike(DataValue::Int32(9));
+        let nested = super::SplitTupleRef::new(&split, &tail);
+        assert_eq!(nested.len(), 3);
+        assert_eq!(nested.value_at(0), &DataValue::Int32(1));
+        assert_eq!(nested.value_at(1), &DataValue::Int32(2));
+        assert_eq!(nested.value_at(2), &DataValue::Int32(9));
+        assert_eq!(nested.as_slice(), None);
+        let empty_left = super::SplitTupleRef::new(empty, &tail);
+        assert_eq!(empty_left.len(), 1);
+        assert_eq!(empty_left.value_at(0), &DataValue::Int32(9));
+        let empty_right = super::SplitTupleRef::new(&tail, empty);
+        assert_eq!(empty_right.len(), 1);
+        assert_eq!(empty_right.value_at(0), &DataValue::Int32(9));
+        let empty_split = super::SplitTupleRef::new(empty, empty);
+        assert!(super::TupleLike::is_empty(&empty_split));
         let tuple_slice: &[DataValue] = (&tuple).into();
         assert_eq!(tuple_slice, tuple.values.as_slice());
         assert_eq!(

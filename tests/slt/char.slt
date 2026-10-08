@@ -17,7 +17,7 @@ query ITT
 select * from t1;
 ----
 0 🪁 🪁🪁🪁🪁🪁 🪁
-1 null null null
+1 NULL NULL NULL
 
 statement ok
 create table t2(id int primary key, v1 varchar, v2 varchar(5 characters), v3 varchar(5 octets))
@@ -38,7 +38,32 @@ query ITT
 select * from t2;
 ----
 0 🪁 🪁🪁🪁🪁🪁 🪁
-1 null null null
+1 NULL NULL NULL
+
+query TTT
+select +v1, ++v2, +v3 from t1 order by id;
+----
+🪁 🪁🪁🪁🪁🪁 🪁
+NULL NULL NULL
+
+query TTT
+select +v1, ++v2, +v3 from t2 order by id;
+----
+🪁 🪁🪁🪁🪁🪁 🪁
+NULL NULL NULL
+
+query TTT
+select +'abc', +'12', +cast('abc' as char(3));
+----
+abc 12 abc
+
+query I
+select id from t2 where +v1 is null;
+----
+1
+
+statement error
+select -v1 from t2;
 
 statement ok
 drop table t1;

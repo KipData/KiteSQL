@@ -17,7 +17,7 @@ use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNo
 use crate::expression::range_detacher::{IndexRangeColumn, Range, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::SortOption;
-use crate::planner::MetaArena;
+use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::{IndexIter, IndexRanges, Iter, Transaction};
 use crate::types::index::{IndexInfo, IndexLookup, RuntimeIndexProbe};
 use std::borrow::Cow;
@@ -99,10 +99,10 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
-    fn next_tuple(
+    fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let iter = match &mut self.iter {
             Some(iter) => iter,

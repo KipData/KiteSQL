@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use kite_sql::binder::{command_type, CommandType};
-use kite_sql::db::{prepare_all, Database, DatabaseIter, Statement};
+use kite_sql::db::Database;
 use kite_sql::errors::DatabaseError;
 use kite_sql::storage::lmdb::LmdbStorage;
+use kite_sql::types::value::DataValue;
 use sqllogictest::{DBOutput, DefaultColumnType, DB};
 use std::time::Instant;
 
@@ -30,73 +30,37 @@ impl DB for SQLBase {
     fn run(&mut self, sql: &str) -> Result<DBOutput<Self::ColumnType>, Self::Error> {
         let start = Instant::now();
         println!("|— Input SQL: {}", sql);
-        let mut statements = prepare_all(sql)?.into_iter().peekable();
-
-        let output = loop {
-            let Some(statement) = statements.next() else {
-                break DBOutput::StatementComplete(0);
-            };
-            let is_last = statements.peek().is_none();
-            match command_type(&statement)? {
-                CommandType::DDL => {
-                    self.db.ddl(statement.to_string())?;
-                    if is_last {
-                        break DBOutput::StatementComplete(0);
-                    }
-                }
-                CommandType::Analyze => {
-                    execute_analyze_statement(&mut self.db, &statement)?;
-                    if is_last {
-                        break DBOutput::StatementComplete(0);
-                    }
-                }
-                _ => {
-                    let iter = self.db.run(statement.to_string())?;
-                    if is_last {
-                        break collect_output(iter)?;
-                    }
-                    iter.done()?;
-                }
-            }
-        };
-
+        let output = run_sql(&mut self.db, sql, |_, value| value.to_string())?;
         println!(" |— time spent: {:?}", start.elapsed());
         Ok(output)
     }
 }
 
-fn collect_output(
-    mut iter: DatabaseIter<'_, LmdbStorage>,
-) -> Result<DBOutput<DefaultColumnType>, DatabaseError> {
-    let types = vec![DefaultColumnType::Any; iter.schema(|schema| schema.len())];
-    let mut rows = Vec::new();
-
-    while let Some(row) = iter.next_tuple(|_, tuple| {
-        tuple
-            .values
-            .iter()
-            .map(|value| format!("{}", value))
-            .collect()
-    })? {
-        rows.push(row);
-    }
-    iter.done()?;
-    if rows.is_empty() {
-        return Ok(DBOutput::StatementComplete(0));
-    }
-    Ok(DBOutput::Rows { types, rows })
-}
-
-fn execute_analyze_statement(
+/// Runs every statement in `sql` and returns the output of the last one, rendering each value of
+/// column `i` with `format(i, value)`.
+pub fn run_sql(
     db: &mut Database<LmdbStorage>,
-    statement: &Statement,
-) -> Result<(), DatabaseError> {
-    let Statement::Analyze(analyze) = statement else {
-        unreachable!("execute_analyze_statement only accepts ANALYZE")
-    };
-    let table_name = analyze
-        .table_name
-        .as_ref()
-        .ok_or_else(|| DatabaseError::UnsupportedStmt("ANALYZE requires table name".to_string()))?;
-    db.analyze(table_name.to_string())
+    sql: &str,
+    mut format: impl FnMut(usize, &DataValue) -> String,
+) -> Result<DBOutput<DefaultColumnType>, DatabaseError> {
+    db.run_mut(sql, |iter| {
+        let width = iter.schema(|schema| schema.len());
+        let types = vec![DefaultColumnType::Any; width];
+        let mut rows = Vec::new();
+        while let Some(row) = iter.next_tuple(|_, tuple| {
+            tuple
+                .values
+                .iter()
+                .enumerate()
+                .map(|(i, value)| format(i, value))
+                .collect()
+        })? {
+            rows.push(row);
+        }
+        if rows.is_empty() {
+            Ok(DBOutput::StatementComplete(0))
+        } else {
+            Ok(DBOutput::Rows { types, rows })
+        }
+    })
 }

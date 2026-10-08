@@ -26,17 +26,17 @@ apple
 query T
 select substring('pineapple' from 1 for null )
 ----
-null
+NULL
 
 query T
 select substring('pineapple' from null for 4 )
 ----
-null
+NULL
 
 query T
 select substring(null from 1 for 4 )
 ----
-null
+NULL
 
 # issue: https://github.com/KipData/KiteSQL/issues/160
 query T

@@ -72,18 +72,18 @@ select v1, v2 from t order by v1 asc, v2 asc
 ----
 1 0
 2 2
-2 null
-null 5
-null null
+2 NULL
+NULL 5
+NULL NULL
 
 query II
 select v1, v2 from t order by v1 asc nulls last, v2 asc
 ----
 1 0
 2 2
-2 null
-null 5
-null null
+2 NULL
+NULL 5
+NULL NULL
 
 statement ok
 drop table t

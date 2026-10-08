@@ -1,0 +1,29 @@
+statement ok
+create table t_abs(id int primary key, i int, b bigint, s smallint, d double, f float);
+
+statement ok
+insert into t_abs values (0, -3, -9000000000, -7, -1.5, -2.5), (1, 4, 5, 6, 0.25, 1.5), (2, null, null, null, null, null);
+
+query IIIRR rowsort
+select abs(i), abs(b), abs(s), abs(d), abs(f) from t_abs;
+----
+3 9000000000 7 1.5 2.5
+4 5 6 0.25 1.5
+NULL NULL NULL NULL NULL
+
+query I rowsort
+select abs(i - b) from t_abs where id < 2;
+----
+1
+8999999997
+
+query I
+select id from t_abs where abs(i) > 3;
+----
+1
+
+statement error
+select abs(-2147483648);
+
+statement ok
+drop table t_abs;

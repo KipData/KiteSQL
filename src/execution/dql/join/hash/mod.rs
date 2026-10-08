@@ -121,14 +121,14 @@ impl JoinProbeState for JoinProbeStateImpl {
     }
 }
 
-pub(crate) fn filter<T: TupleLike>(
+pub(crate) fn filter<T: TupleLike + ?Sized>(
     values: &T,
     filter_expr: &ExprRef,
     plan_arena: &(dyn MetaArena + '_),
 ) -> Result<bool, DatabaseError> {
     match &*plan_arena
         .expression(*filter_expr)
-        .eval(plan_arena, Some(values as &dyn TupleLike))?
+        .eval(plan_arena, Some(values))?
     {
         DataValue::Boolean(false) | DataValue::Null => Ok(false),
         DataValue::Boolean(true) => Ok(true),

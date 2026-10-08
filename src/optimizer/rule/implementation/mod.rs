@@ -45,7 +45,7 @@ use crate::optimizer::rule::implementation::dql::join::JoinImplementation;
 use crate::optimizer::rule::implementation::dql::limit::LimitImplementation;
 use crate::optimizer::rule::implementation::dql::mark_apply::MarkApplyImplementation;
 use crate::optimizer::rule::implementation::dql::projection::ProjectionImplementation;
-use crate::optimizer::rule::implementation::dql::scalar_apply::ScalarApplyImplementation;
+use crate::optimizer::rule::implementation::dql::scalar_query_init::ScalarQueryInitImplementation;
 use crate::optimizer::rule::implementation::dql::scalar_subquery::ScalarSubqueryImplementation;
 use crate::optimizer::rule::implementation::dql::sort::SortImplementation;
 use crate::optimizer::rule::implementation::dql::table_scan::{
@@ -66,7 +66,7 @@ pub enum ImplementationRuleRootTag {
     Limit,
     MarkApply,
     Project,
-    ScalarApply,
+    ScalarQueryInit,
     ScalarSubquery,
     TableScan,
     FunctionScan,
@@ -102,7 +102,7 @@ impl ImplementationRuleRootTag {
             Operator::Limit(_) => Some(Self::Limit),
             Operator::MarkApply(_) => Some(Self::MarkApply),
             Operator::Project(_) => Some(Self::Project),
-            Operator::ScalarApply(_) => Some(Self::ScalarApply),
+            Operator::ScalarQueryInit(_) => Some(Self::ScalarQueryInit),
             Operator::ScalarSubquery(_) => Some(Self::ScalarSubquery),
             Operator::TableScan(_) => Some(Self::TableScan),
             Operator::FunctionScan(_) => Some(Self::FunctionScan),
@@ -150,7 +150,7 @@ pub enum ImplementationRuleImpl {
     Limit,
     MarkApply,
     Projection,
-    ScalarApply,
+    ScalarQueryInit,
     ScalarSubquery,
     SeqScan,
     FunctionScan,
@@ -188,7 +188,7 @@ impl MatchPattern for ImplementationRuleImpl {
             ImplementationRuleImpl::Limit => LimitImplementation.pattern(),
             ImplementationRuleImpl::MarkApply => MarkApplyImplementation.pattern(),
             ImplementationRuleImpl::Projection => ProjectionImplementation.pattern(),
-            ImplementationRuleImpl::ScalarApply => ScalarApplyImplementation.pattern(),
+            ImplementationRuleImpl::ScalarQueryInit => ScalarQueryInitImplementation.pattern(),
             ImplementationRuleImpl::ScalarSubquery => ScalarSubqueryImplementation.pattern(),
             ImplementationRuleImpl::SeqScan => SeqScanImplementation.pattern(),
             ImplementationRuleImpl::IndexScan => IndexScanImplementation.pattern(),
@@ -227,7 +227,7 @@ impl ImplementationRuleImpl {
             ImplementationRuleImpl::Limit => ImplementationRuleRootTag::Limit,
             ImplementationRuleImpl::MarkApply => ImplementationRuleRootTag::MarkApply,
             ImplementationRuleImpl::Projection => ImplementationRuleRootTag::Project,
-            ImplementationRuleImpl::ScalarApply => ImplementationRuleRootTag::ScalarApply,
+            ImplementationRuleImpl::ScalarQueryInit => ImplementationRuleRootTag::ScalarQueryInit,
             ImplementationRuleImpl::ScalarSubquery => ImplementationRuleRootTag::ScalarSubquery,
             ImplementationRuleImpl::SeqScan | ImplementationRuleImpl::IndexScan => {
                 ImplementationRuleRootTag::TableScan
@@ -278,7 +278,7 @@ impl ImplementationRule for ImplementationRuleImpl {
             ImplementationRuleImpl::Limit => update!(LimitImplementation),
             ImplementationRuleImpl::MarkApply => update!(MarkApplyImplementation),
             ImplementationRuleImpl::Projection => update!(ProjectionImplementation),
-            ImplementationRuleImpl::ScalarApply => update!(ScalarApplyImplementation),
+            ImplementationRuleImpl::ScalarQueryInit => update!(ScalarQueryInitImplementation),
             ImplementationRuleImpl::ScalarSubquery => update!(ScalarSubqueryImplementation),
             ImplementationRuleImpl::SeqScan => update!(SeqScanImplementation),
             ImplementationRuleImpl::IndexScan => update!(IndexScanImplementation),
@@ -443,9 +443,9 @@ mod tests {
         )?;
         assert_sql_rule(
             "select (select c3 from t2 limit 1) from t1",
-            ImplementationRuleImpl::ScalarApply,
-            |op| matches!(op, Operator::ScalarApply(_)),
-            PlanImpl::ScalarApply,
+            ImplementationRuleImpl::ScalarQueryInit,
+            |op| matches!(op, Operator::ScalarQueryInit(_)),
+            PlanImpl::ScalarQueryInit,
         )?;
         assert_sql_rule(
             "select (select c3 from t2 limit 1) from t1",
