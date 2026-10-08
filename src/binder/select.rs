@@ -1188,7 +1188,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         let table_alias = alias.as_ref().map(|alias| alias.name.clone());
 
         if let Some(plan_ref) = self.context.cte(&table_name).map(|cte| cte.plan_ref) {
-            let mut plan = arena.plan(plan_ref).clone().clone_plan(arena)?;
+            let mut plan = arena.plan(plan_ref).clone();
             if let Some(alias) = alias {
                 plan = self.bind_alias(
                     plan,
