@@ -749,6 +749,25 @@ with q as (select (select max(v) from init_rows) as m) select a.m, b.m from q as
 ----
 30 30
 
+# Repeated CTE inputs can prune different columns without changing shared definitions.
+query II
+with q as (select max(v) as m from init_rows)
+select a.m,b.m from q a cross join q b;
+----
+30 30
+
+query II
+with q as (select id,v,(select max(v) from init_rows) as m from init_rows)
+select a.v,b.m from q a join q b on a.id=b.id where a.id=2;
+----
+20 30
+
+query II
+with q as (select id,v,(select max(v) from init_rows) as m from init_rows)
+select a.m,b.v from q a join q b on a.id=b.id where b.id=1;
+----
+30 10
+
 query II
 select id, sum((select 2)) over (order by id) from init_rows order by id
 ----

@@ -33,7 +33,7 @@ use crate::catalog::{ColumnRef, ColumnRelation, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::joins_nullable;
 use crate::expression::visitor::ExprVisitor;
-use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut, PositionShift};
+use crate::expression::visitor_mut::{walk_mut_expr, ExprCloner, ExprVisitorMut, PositionShift};
 use crate::expression::{AliasType, BinaryOperator, TypeCast};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::function_scan::FunctionScanOperator;
@@ -42,6 +42,7 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::set_membership::{SetMembershipKind, SetMembershipOperator};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::union::UnionOperator;
+use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, ScalarQueryRef};
 use crate::storage::Transaction;
 use crate::types::tuple::Schema;
@@ -1188,7 +1189,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         let table_alias = alias.as_ref().map(|alias| alias.name.clone());
 
         if let Some(plan_ref) = self.context.cte(&table_name).map(|cte| cte.plan_ref) {
-            let mut plan = arena.plan(plan_ref).clone().clone_plan(arena)?;
+            let mut plan = arena.plan(plan_ref).clone();
+            OperatorExprVisitorMut::new(&mut ExprCloner, arena).visit_plan(&mut plan)?;
             if let Some(alias) = alias {
                 plan = self.bind_alias(
                     plan,
