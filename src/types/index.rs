@@ -21,6 +21,7 @@ use crate::planner::Explain;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::serialize::TupleValueSerializableImpl;
+use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -130,15 +131,23 @@ impl IndexMeta {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Index<'a> {
+#[derive(Debug)]
+pub struct Index<'a, V: TupleLike + ?Sized = [DataValue]> {
     pub id: IndexId,
-    pub values: &'a [DataValue],
+    pub values: &'a V,
     pub ty: IndexType,
 }
 
-impl<'a> Index<'a> {
-    pub fn new(id: IndexId, values: &'a [DataValue], ty: IndexType) -> Self {
+impl<V: TupleLike + ?Sized> Clone for Index<'_, V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<V: TupleLike + ?Sized> Copy for Index<'_, V> {}
+
+impl<'a, V: TupleLike + ?Sized> Index<'a, V> {
+    pub fn new(id: IndexId, values: &'a V, ty: IndexType) -> Self {
         Index { id, values, ty }
     }
 }

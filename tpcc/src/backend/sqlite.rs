@@ -17,7 +17,7 @@ use super::{
 };
 use crate::TpccError;
 use chrono::{NaiveDateTime, TimeZone, Utc};
-use kite_sql::types::tuple::Tuple;
+use kite_sql::types::tuple::{Tuple, TupleImpl};
 use kite_sql::types::value::{DataValue, Utf8Type};
 use kite_sql::types::{CharLengthUnits, LogicalType};
 use rust_decimal::Decimal;
@@ -156,22 +156,22 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         let tuple = iter.next().transpose()?.ok_or(TpccError::EmptyTuples)?;
-        visitor(&tuple)
+        visitor(&tuple.into())
     }
 
     fn with_query_all(
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let iter = self.execute_raw(statement, params)?;
         for row in iter {
-            visitor(&row?)?;
+            visitor(&row?.into())?;
         }
         Ok(())
     }
@@ -181,7 +181,7 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         for _ in 0..n {
@@ -190,7 +190,7 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
             }
         }
         let tuple = iter.next().transpose()?.ok_or(TpccError::EmptyTuples)?;
-        visitor(&tuple)
+        visitor(&tuple.into())
     }
 
     fn commit(mut self) -> Result<(), TpccError> {

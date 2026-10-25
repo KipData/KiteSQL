@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::join::hash::full_join::FullJoinState;
-use crate::execution::dql::join::hash::{filter, JoinProbeState, ProbeState};
+use crate::execution::dql::join::hash::{
+    filter, join_rows, null_left_row, JoinProbeState, ProbeState,
+};
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::tuple::{SplitTupleRef, Tuple};
+use crate::types::tuple::{SplitTupleRef, TupleImpl};
 
 pub(crate) struct RightJoinState {
     pub(crate) left_schema_len: usize,
@@ -31,7 +32,7 @@ impl JoinProbeState for RightJoinState {
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
         if probe_state.is_keys_has_null {
             if probe_state.emitted_unmatched {
                 probe_state.finished = true;
@@ -39,7 +40,7 @@ impl JoinProbeState for RightJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(FullJoinState::take_full_right_row(
+            return Ok(Some(null_left_row(
                 self.left_schema_len,
                 &mut probe_state.probe_tuple,
             )));
@@ -52,40 +53,34 @@ impl JoinProbeState for RightJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(FullJoinState::take_full_right_row(
+            return Ok(Some(null_left_row(
                 self.left_schema_len,
                 &mut probe_state.probe_tuple,
             )));
         };
 
         while probe_state.index < build_state.tuples.len() {
-            let (_, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
+            let (_, build_tuple) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
 
             if let Some(filter_expr) = filter_expr {
-                let full_values =
-                    SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
+                let full_values = SplitTupleRef::new(build_tuple, &probe_state.probe_tuple);
                 if !filter(&full_values, filter_expr, plan_arena)? {
                     continue;
                 }
             }
-            let full_values = Vec::from_iter(
-                values
-                    .iter()
-                    .chain(probe_state.probe_tuple.values.iter())
-                    .cloned(),
-            );
             probe_state.produced = true;
-            return Ok(Some(Tuple::new(
-                pk.as_ref().or(probe_state.probe_tuple.pk.as_ref()).cloned(),
-                full_values,
+            return Ok(Some(join_rows(
+                build_tuple,
+                &mut probe_state.probe_tuple,
+                false,
             )));
         }
 
         if !probe_state.produced && !probe_state.emitted_unmatched {
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(FullJoinState::take_full_right_row(
+            return Ok(Some(null_left_row(
                 self.left_schema_len,
                 &mut probe_state.probe_tuple,
             )));

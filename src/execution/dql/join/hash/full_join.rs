@@ -14,13 +14,13 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::{
-    filter, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
+    filter, join_rows, null_left_row, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
 };
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::bitset::BitSet;
-use crate::types::tuple::{SplitTupleRef, Tuple};
+use crate::types::tuple::{SplitTupleRef, TupleImpl};
 use crate::types::value::DataValue;
 
 pub(crate) struct FullJoinState {
@@ -36,7 +36,7 @@ impl JoinProbeState for FullJoinState {
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
         if probe_state.is_keys_has_null {
             if probe_state.emitted_unmatched {
                 probe_state.finished = true;
@@ -44,7 +44,7 @@ impl JoinProbeState for FullJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(Self::take_full_right_row(
+            return Ok(Some(null_left_row(
                 self.left_schema_len,
                 &mut probe_state.probe_tuple,
             )));
@@ -57,41 +57,35 @@ impl JoinProbeState for FullJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(Self::take_full_right_row(
+            return Ok(Some(null_left_row(
                 self.left_schema_len,
                 &mut probe_state.probe_tuple,
             )));
         };
 
         while probe_state.index < build_state.tuples.len() {
-            let (i, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
+            let (i, build_tuple) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
 
             if let Some(filter_expr) = filter_expr {
-                let full_values =
-                    SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
+                let full_values = SplitTupleRef::new(build_tuple, &probe_state.probe_tuple);
                 if !filter(&full_values, filter_expr, plan_arena)? {
                     continue;
                 }
             }
-            let full_values = Vec::from_iter(
-                values
-                    .iter()
-                    .chain(probe_state.probe_tuple.values.iter())
-                    .cloned(),
-            );
             self.bits.insert(*i);
             probe_state.produced = true;
-            return Ok(Some(Tuple::new(
-                pk.as_ref().or(probe_state.probe_tuple.pk.as_ref()).cloned(),
-                full_values,
+            return Ok(Some(join_rows(
+                build_tuple,
+                &mut probe_state.probe_tuple,
+                false,
             )));
         }
 
         probe_state.finished = true;
         if !probe_state.produced && !probe_state.emitted_unmatched {
             probe_state.emitted_unmatched = true;
-            return Ok(Some(Self::take_full_right_row(
+            return Ok(Some(null_left_row(
                 self.left_schema_len,
                 &mut probe_state.probe_tuple,
             )));
@@ -104,7 +98,7 @@ impl JoinProbeState for FullJoinState {
         left_drop_state: &mut LeftDropState,
         _filter_expr: Option<&ExprRef>,
         _plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
         let full_schema_len = self.right_schema_len + self.left_schema_len;
 
         loop {
@@ -113,7 +107,7 @@ impl JoinProbeState for FullJoinState {
                     if self.bits.contains(i) {
                         continue;
                     }
-                    left_tuple.values.resize(full_schema_len, DataValue::Null);
+                    left_tuple.resize(full_schema_len, DataValue::Null);
                     return Ok(Some(left_tuple));
                 }
                 left_drop_state.current = None;
@@ -127,16 +121,5 @@ impl JoinProbeState for FullJoinState {
                 tuples: state.tuples.into_iter(),
             });
         }
-    }
-}
-
-impl FullJoinState {
-    pub(crate) fn take_full_right_row(left_schema_len: usize, probe_tuple: &mut Tuple) -> Tuple {
-        let mut tuple = std::mem::take(probe_tuple);
-        tuple
-            .values
-            .resize(tuple.values.len() + left_schema_len, DataValue::Null);
-        tuple.values.rotate_right(left_schema_len);
-        tuple
     }
 }

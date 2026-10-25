@@ -18,7 +18,7 @@ use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::sort::SortField;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, Transaction};
-use crate::types::tuple::{SchemaView, Tuple};
+use crate::types::tuple::{SchemaView, TupleImpl};
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
@@ -83,7 +83,10 @@ pub struct DescribeColumn {
 }
 
 impl FromQueryRow for DescribeColumn {
-    fn from_query_row(_: &SchemaView<'_, '_>, tuple: &mut Tuple) -> Result<Self, DatabaseError> {
+    fn from_query_row(
+        _: &SchemaView<'_, '_>,
+        tuple: &mut TupleImpl,
+    ) -> Result<Self, DatabaseError> {
         let field = describe_text_value(take_projected_value(tuple, 0));
         let data_type = describe_text_value(take_projected_value(tuple, 1));
         let len = describe_text_value(take_projected_value(tuple, 2));
@@ -2810,7 +2813,7 @@ pub trait FromDataValue: Sized {
 /// ```
 pub trait FromQueryTuple: Sized {
     /// Decodes one projected tuple into `Self`.
-    fn from_query_tuple(tuple: &mut Tuple) -> Result<Self, DatabaseError>;
+    fn from_query_tuple(tuple: &mut TupleImpl) -> Result<Self, DatabaseError>;
 }
 
 /// Conversion trait from a query result row into a Rust value.
@@ -2820,7 +2823,7 @@ pub trait FromQueryRow: Sized {
     /// Decodes one result row into `Self`.
     fn from_query_row(
         schema: &SchemaView<'_, '_>,
-        tuple: &mut Tuple,
+        tuple: &mut TupleImpl,
     ) -> Result<Self, DatabaseError>;
 }
 
@@ -2994,7 +2997,7 @@ pub trait DecimalType {}
 
 #[doc(hidden)]
 pub fn take_value_at<T: FromDataValue>(
-    tuple: &mut Tuple,
+    tuple: &mut TupleImpl,
     index: Option<usize>,
     field_name: &str,
 ) -> Result<T, DatabaseError> {
@@ -3002,7 +3005,7 @@ pub fn take_value_at<T: FromDataValue>(
         name: field_name.to_string(),
         span: None,
     })?;
-    let value = tuple.values.get_mut(idx).ok_or(DatabaseError::MisMatch(
+    let value = tuple.get_mut(idx).ok_or(DatabaseError::MisMatch(
         "the query result schema",
         "the query result tuple",
     ))?;
@@ -3246,9 +3249,9 @@ macro_rules! impl_from_query_tuple {
                 $($name: FromDataValue,)+
             {
                 #[allow(non_snake_case)]
-                fn from_query_tuple(tuple: &mut Tuple) -> Result<Self, DatabaseError> {
+                fn from_query_tuple(tuple: &mut TupleImpl) -> Result<Self, DatabaseError> {
                     let expected_len = [$(stringify!($name)),+].len();
-                    if tuple.values.len() != expected_len {
+                    if tuple.len() != expected_len {
                         return Err(DatabaseError::MisMatch(
                             "the expected tuple projection width",
                             "the query result",
@@ -3360,9 +3363,8 @@ fn invalid_from_data_value<T>(value: &DataValue) -> DatabaseError {
     ))
 }
 
-fn take_projected_value(tuple: &mut Tuple, index: usize) -> Option<DataValue> {
+fn take_projected_value(tuple: &mut TupleImpl, index: usize) -> Option<DataValue> {
     tuple
-        .values
         .get_mut(index)
         .map(|value| std::mem::replace(value, DataValue::Null))
 }
@@ -3378,8 +3380,8 @@ fn extract_projected_data_value<T: FromDataValue>(
     convert_projected_value::<T>(value)
 }
 
-fn extract_value_from_tuple<T: FromDataValue>(tuple: &mut Tuple) -> Result<T, DatabaseError> {
-    let value = if tuple.values.len() == 1 {
+fn extract_value_from_tuple<T: FromDataValue>(tuple: &mut TupleImpl) -> Result<T, DatabaseError> {
+    let value = if tuple.len() == 1 {
         take_projected_value(tuple, 0).expect("checked one projected expression")
     } else {
         return Err(DatabaseError::MisMatch(
@@ -3391,7 +3393,7 @@ fn extract_value_from_tuple<T: FromDataValue>(tuple: &mut Tuple) -> Result<T, Da
     convert_projected_value::<T>(value)
 }
 
-fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut Tuple) -> Result<T, DatabaseError> {
+fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut TupleImpl) -> Result<T, DatabaseError> {
     T::from_query_tuple(tuple)
 }
 
@@ -3455,7 +3457,7 @@ fn orm_list<'a, E: BindSource<'a>, M: Model>(
 mod tests {
     use super::*;
     use crate::expression::BinaryOperator;
-    use crate::types::tuple::{Schema, SchemaView};
+    use crate::types::tuple::{Schema, SchemaView, Tuple};
     use std::sync::Arc;
 
     #[derive(Debug, PartialEq, Eq)]
@@ -3515,7 +3517,7 @@ mod tests {
     impl FromQueryRow for OrmUnitUser {
         fn from_query_row(
             schema: &SchemaView<'_, '_>,
-            tuple: &mut Tuple,
+            tuple: &mut TupleImpl,
         ) -> Result<Self, DatabaseError> {
             Ok(Self {
                 id: take_value_at(tuple, schema.position("id"), "id")?,
@@ -3603,7 +3605,7 @@ mod tests {
     impl FromQueryRow for OrmUnitOrder {
         fn from_query_row(
             schema: &SchemaView<'_, '_>,
-            tuple: &mut Tuple,
+            tuple: &mut TupleImpl,
         ) -> Result<Self, DatabaseError> {
             Ok(Self {
                 id: take_value_at(tuple, schema.position("id"), "id")?,
@@ -3718,7 +3720,7 @@ mod tests {
         let arena = PlanArena::new(&table_arena);
         let schema: Schema = Vec::new();
         let schema_view = SchemaView::new(&schema, &arena);
-        let mut tuple = Tuple::new(
+        let mut tuple: TupleImpl = Tuple::new(
             None,
             vec![
                 DataValue::from("id".to_string()),
@@ -3728,7 +3730,8 @@ mod tests {
                 DataValue::from("PRI".to_string()),
                 DataValue::Null,
             ],
-        );
+        )
+        .into();
 
         let column = DescribeColumn::from_query_row(&schema_view, &mut tuple)?;
         assert_eq!(
@@ -3742,10 +3745,7 @@ mod tests {
                 default: "NULL".to_string(),
             }
         );
-        assert!(tuple
-            .values
-            .iter()
-            .all(|value| matches!(value, DataValue::Null)));
+        assert!(tuple.iter().all(|value| matches!(value, DataValue::Null)));
         assert_eq!(describe_text_value(None), "");
 
         Ok(())
@@ -3810,29 +3810,29 @@ mod tests {
     #[test]
     fn tuple_projection_helpers_cast_extract_and_report_width_mismatch() -> Result<(), DatabaseError>
     {
-        let mut tuple = Tuple::new(
+        let mut tuple: TupleImpl = Tuple::new(
             None,
             vec![DataValue::Int8(7), DataValue::from("seven".to_string())],
-        );
+        )
+        .into();
         assert_eq!(take_value_at::<i32>(&mut tuple, Some(0), "id")?, 7);
-        assert!(matches!(tuple.values[0], DataValue::Null));
+        assert!(matches!(tuple[0], DataValue::Null));
         assert!(matches!(
             take_value_at::<i32>(&mut tuple, None, "missing"),
             Err(DatabaseError::ColumnNotFound { .. })
         ));
 
-        let mut tuple = Tuple::new(
+        let mut tuple: TupleImpl = Tuple::new(
             None,
             vec![DataValue::Int32(1), DataValue::from("one".to_string())],
-        );
+        )
+        .into();
         let projected = <(i32, String) as FromQueryTuple>::from_query_tuple(&mut tuple)?;
         assert_eq!(projected, (1, "one".to_string()));
-        assert!(tuple
-            .values
-            .iter()
-            .all(|value| matches!(value, DataValue::Null)));
+        assert!(tuple.iter().all(|value| matches!(value, DataValue::Null)));
 
-        let mut too_wide = Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(2)]);
+        let mut too_wide: TupleImpl =
+            Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(2)]).into();
         assert!(matches!(
             extract_value_from_tuple::<i32>(&mut too_wide),
             Err(DatabaseError::MisMatch(
@@ -3841,7 +3841,7 @@ mod tests {
             ))
         ));
 
-        let mut too_narrow = Tuple::new(None, vec![DataValue::Int32(1)]);
+        let mut too_narrow: TupleImpl = Tuple::new(None, vec![DataValue::Int32(1)]).into();
         assert!(matches!(
             <(i32, i32) as FromQueryTuple>::from_query_tuple(&mut too_narrow),
             Err(DatabaseError::MisMatch(
@@ -4204,10 +4204,7 @@ mod tests {
         let mut iter =
             database.run("select id,name,age from orm_unit_users where id>3 order by id")?;
         let mut rows = Vec::new();
-        while iter
-            .next_tuple(|_, row| rows.push(row.values.clone()))?
-            .is_some()
-        {}
+        while iter.next_tuple(|_, row| rows.push(row.clone()))?.is_some() {}
         iter.done()?;
         assert_eq!(
             rows,

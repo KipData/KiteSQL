@@ -27,7 +27,7 @@ use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTab
 use crate::storage::{TableCache, Transaction};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
 use crate::types::serialize::TupleValueSerializableImpl;
-use crate::types::tuple::{Tuple, TupleId};
+use crate::types::tuple::{Tuple, TupleId, TupleLike};
 use crate::types::value::{DataValue, IndexKeyMapping};
 use crate::types::{ColumnId, LogicalType};
 use std::borrow::Borrow;
@@ -54,7 +54,7 @@ static EMPTY_REFERENCE_TABLES: LazyLock<ReferenceTables> = LazyLock::new(Referen
 
 pub type Bytes = Vec<u8>;
 pub type BumpBytes<'bump> = bumpalo::collections::Vec<'bump, u8>;
-type TupleValueWriter<'a> = &'a mut dyn FnMut(&Tuple, &mut Bytes) -> Result<(), DatabaseError>;
+type TupleValueWriter<'a> = &'a mut dyn FnMut(&mut Bytes) -> Result<(), DatabaseError>;
 
 #[derive(Default)]
 pub struct TableCodec {
@@ -294,7 +294,7 @@ impl TableCodec {
         &mut self,
         table_name: &str,
         tuple_id: &TupleId,
-        tuple_value: Option<(&Tuple, TupleValueWriter<'_>)>,
+        tuple_value: Option<TupleValueWriter<'_>>,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         Self::check_primary_key(tuple_id, 0)?;
@@ -306,7 +306,7 @@ impl TableCodec {
         &mut self,
         table_name: &str,
         tuple_id: &TupleId,
-        tuple_value: Option<(&Tuple, TupleValueWriter<'_>)>,
+        tuple_value: Option<TupleValueWriter<'_>>,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
@@ -316,8 +316,8 @@ impl TableCodec {
             lower.push(BOUND_MIN_TAG);
             tuple_id.memcomparable_encode(lower)?;
 
-            if let Some((tuple, serializers)) = tuple_value {
-                serializers(tuple, value)?;
+            if let Some(write_value) = tuple_value {
+                write_value(value)?;
                 value.extend_from_slice(&stamp.to_le_bytes());
             }
 
@@ -430,10 +430,10 @@ impl TableCodec {
     ///
     /// Unique index key:
     /// `{TableName}{INDEX_TAG}{BOUND_MIN_TAG}{IndexID}{BOUND_MIN_TAG}{DataValue}`
-    pub fn with_index<R>(
+    pub fn with_index<R, V: TupleLike + ?Sized>(
         &mut self,
         table_name: &str,
-        index: &Index,
+        index: &Index<'_, V>,
         tuple_id: Option<&TupleId>,
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
@@ -444,8 +444,8 @@ impl TableCodec {
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index.id.to_le_bytes());
             lower.push(BOUND_MIN_TAG);
-            for value in index.values {
-                value.memcomparable_encode(lower)?;
+            for i in 0..index.values.len() {
+                index.values.value_at(i).memcomparable_encode(lower)?;
             }
 
             if let Some(tuple_id) = tuple_id {
@@ -1182,7 +1182,7 @@ mod tests {
             },
             DataValue::Int32(99),
         ];
-        let index = Index::new(7, &values, IndexType::Normal);
+        let index = Index::new(7, values.as_slice(), IndexType::Normal);
         let mut codec = TableCodec::default();
         let key = codec.with_index("cover", &index, Some(&DataValue::Int32(1)), |key, _| {
             Ok(key.to_vec())
@@ -1221,20 +1221,19 @@ mod tests {
         let table_catalog = build_table_codec(&table_arena);
         let plan_arena = PlanArena::new(&table_arena);
 
-        let expected = Tuple::new(
+        let expected = crate::types::tuple::TupleImpl::from(Tuple::new(
             Some(DataValue::Int32(0)),
             vec![DataValue::Int32(0), DataValue::Decimal(Decimal::new(1, 0))],
-        );
+        ));
         let serializers = [
             LogicalType::Integer.serializable(),
             LogicalType::Decimal(None, None).serializable(),
         ];
-        let mut write_value =
-            |tuple: &Tuple, value: &mut Bytes| tuple.serialize_to(&serializers, value);
+        let mut write_value = |value: &mut Bytes| expected.serialize_to(&serializers, value);
         let bytes = TableCodec::default().with_tuple(
             "t1",
             &DataValue::Int32(0),
-            Some((&expected, &mut write_value)),
+            Some(&mut write_value),
             |_, value| Ok(value.to_vec()),
         )?;
         let deserializers = table_catalog
@@ -1479,7 +1478,7 @@ mod tests {
     #[test]
     fn test_table_codec_index() -> Result<(), DatabaseError> {
         let tuple_id = DataValue::Int32(0);
-        let index = Index::new(0, &[], IndexType::Unique);
+        let index = Index::new(0, &[][..], IndexType::Unique);
         let bytes =
             TableCodec::default()
                 .with_index("t1", &index, Some(&tuple_id), |_, value| Ok(value.to_vec()))?;
@@ -1805,7 +1804,7 @@ mod tests {
             let value = Arc::new(value);
             let index = Index::new(
                 index_id as u32,
-                std::slice::from_ref(&value),
+                std::slice::from_ref(value.as_ref()),
                 IndexType::PrimaryKey { is_multiple: false },
             );
 
@@ -1858,7 +1857,7 @@ mod tests {
             let value = Arc::new(value);
             let index = Index::new(
                 index_id as u32,
-                std::slice::from_ref(&value),
+                std::slice::from_ref(value.as_ref()),
                 IndexType::PrimaryKey { is_multiple: false },
             );
 

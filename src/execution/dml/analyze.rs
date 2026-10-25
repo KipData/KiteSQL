@@ -30,6 +30,7 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::{table_codec::TableCodec, Transaction};
 use crate::types::index::IndexId;
+use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId};
 use ordered_float::OrderedFloat;
@@ -135,16 +136,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
         };
 
         while arena.next_tuple(input, plan_arena)? {
-            let tuple = arena.materialize_tuple();
+            let tuple = arena.take_tuple();
             for (_, position, builder) in &mut columns {
-                builder.append(&tuple.values[*position]);
+                builder.append(tuple.value_at(*position));
             }
             for State { exprs, builder, .. } in builders.iter_mut() {
                 let value = match exprs.as_slice() {
                     [expr] => expr.eval(plan_arena, Some(&tuple))?.into_owned(),
                     _ => {
-                        arena.rewrite(exprs, plan_arena, Some(&tuple), None)?;
-                        DataValue::Tuple(arena.materialize_tuple().values)
+                        arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                        DataValue::Tuple(arena.result_mut().take_values())
                     }
                 };
                 builder.append(value)?;
@@ -162,7 +163,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
             plan_arena,
         )?;
 
-        arena.produce_tuple(crate::types::tuple::Tuple::new(None, values));
+        arena.produce(crate::types::tuple::Tuple::new(None, values).into());
         Ok(())
     }
 }
@@ -493,7 +494,7 @@ mod test {
         let mut iter = reopened.run("select a from t1 where b=7 order by a")?;
         let mut rows = Vec::new();
         while iter
-            .next_tuple(|_, row| rows.push(row.values[0].clone()))?
+            .next_tuple(|_, row| rows.push(row[0].clone()))?
             .is_some()
         {}
         iter.done()?;

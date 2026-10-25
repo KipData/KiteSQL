@@ -30,7 +30,7 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
 use crate::types::bitset::BitSet;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
 use std::collections::HashMap;
@@ -127,7 +127,7 @@ impl HashJoin {
 
     fn eval_keys(
         on_keys: &[ExprRef],
-        tuple: &Tuple,
+        tuple: &TupleImpl,
         build_buf: &mut BumpVec<'_, DataValue>,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
@@ -163,7 +163,7 @@ impl HashJoin {
         let mut build_count = 0usize;
 
         while arena.next_tuple(self.left_input, plan_arena)? {
-            let tuple = arena.materialize_tuple();
+            let tuple = arena.take_tuple();
             Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf, plan_arena)?;
 
             match build_map.get_mut(&build_buf) {
@@ -226,7 +226,7 @@ impl HashJoin {
 // LMDB PK-sized hash join plus allocator consolidation; allocate build rows in `bump` instead.
 #[derive(Default, Debug)]
 pub(crate) struct BuildState {
-    pub(crate) tuples: Vec<(usize, Tuple)>,
+    pub(crate) tuples: Vec<(usize, TupleImpl)>,
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
@@ -292,7 +292,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                             if !arena.next_tuple(self.right_input, plan_arena)? {
                                 break true;
                             }
-                            let tuple = arena.materialize_tuple();
+                            let tuple = arena.take_tuple();
                             Self::eval_keys(
                                 &self.on_right_keys,
                                 &tuple,
@@ -333,7 +333,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                                 probe_buf,
                                 probe_state,
                             };
-                            arena.produce_tuple(tuple);
+                            arena.produce(tuple);
                             return Ok(());
                         }
 
@@ -364,7 +364,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                             join_impl,
                             left_drop,
                         };
-                        arena.produce_tuple(tuple);
+                        arena.produce(tuple);
                         return Ok(());
                     }
                     state = HashJoinState::End;
@@ -542,15 +542,15 @@ mod test {
         assert_eq!(tuples.len(), 3);
 
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             build_integers(vec![Some(0), Some(2), Some(4), Some(0), Some(2), Some(4)])
         );
         assert_eq!(
-            tuples[1].values,
+            tuples[1],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(3), Some(5)])
         );
         assert_eq!(
-            tuples[2].values,
+            tuples[2],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(1), Some(1)])
         );
 
@@ -603,19 +603,19 @@ mod test {
             assert_eq!(tuples.len(), 4);
 
             assert_eq!(
-                tuples[0].values,
+                tuples[0],
                 build_integers(vec![Some(0), Some(2), Some(4), Some(0), Some(2), Some(4)])
             );
             assert_eq!(
-                tuples[1].values,
+                tuples[1],
                 build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(3), Some(5)])
             );
             assert_eq!(
-                tuples[2].values,
+                tuples[2],
                 build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(1), Some(1)])
             );
             assert_eq!(
-                tuples[3].values,
+                tuples[3],
                 build_integers(vec![Some(3), Some(5), Some(7), None, None, None])
             );
         }
@@ -669,19 +669,19 @@ mod test {
         assert_eq!(tuples.len(), 4);
 
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             build_integers(vec![Some(0), Some(2), Some(4), Some(0), Some(2), Some(4)])
         );
         assert_eq!(
-            tuples[1].values,
+            tuples[1],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(3), Some(5)])
         );
         assert_eq!(
-            tuples[2].values,
+            tuples[2],
             build_integers(vec![None, None, None, Some(4), Some(6), Some(8)])
         );
         assert_eq!(
-            tuples[3].values,
+            tuples[3],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(1), Some(1)])
         );
 
@@ -778,7 +778,7 @@ mod test {
 
         assert_eq!(tuples.len(), 1);
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             vec![
                 DataValue::Int32(2),
                 DataValue::Int32(5),
@@ -835,23 +835,23 @@ mod test {
         assert_eq!(tuples.len(), 5);
 
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             build_integers(vec![Some(0), Some(2), Some(4), Some(0), Some(2), Some(4)])
         );
         assert_eq!(
-            tuples[1].values,
+            tuples[1],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(3), Some(5)])
         );
         assert_eq!(
-            tuples[2].values,
+            tuples[2],
             build_integers(vec![None, None, None, Some(4), Some(6), Some(8)])
         );
         assert_eq!(
-            tuples[3].values,
+            tuples[3],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(1), Some(1)])
         );
         assert_eq!(
-            tuples[4].values,
+            tuples[4],
             build_integers(vec![Some(3), Some(5), Some(7), None, None, None])
         );
 

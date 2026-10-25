@@ -113,7 +113,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
             return Ok(());
         };
 
-        write_aggregate_output(arena.result_tuple_mut(), accs, group_keys)?;
+        write_aggregate_output(arena.output_tuple_mut(), accs, group_keys)?;
         arena.resume();
         Ok(())
     }
@@ -234,7 +234,10 @@ mod test {
 
         assert_eq!(tuples.len(), 2);
 
-        let vec_values = tuples.into_iter().map(|tuple| tuple.values).collect_vec();
+        let vec_values = tuples
+            .into_iter()
+            .map(|mut tuple| tuple.take_values())
+            .collect_vec();
 
         assert!(vec_values.contains(&build_integers(vec![Some(3), Some(0)])));
         assert!(vec_values.contains(&build_integers(vec![Some(5), Some(1)])));

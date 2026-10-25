@@ -159,7 +159,6 @@ fn lift_cross_project(
     if from_right {
         op.exprs.rotate_right(offset);
     }
-    op.moveable = None;
 
     let mut project = input.take();
     **input = std::mem::replace(&mut *project.childrens, Childrens::None).pop_only();
@@ -249,7 +248,6 @@ impl NormalizationRule for EliminateProject {
                         }
                     }
                 }
-                op.moveable = None;
             }
             Operator::Filter(op) => op.is_optimized = false,
             _ => (),
@@ -263,7 +261,7 @@ impl NormalizationRule for EliminateProject {
             // Lift the Project: its expressions keep the parent's output layout.
             let mut project = child.take();
             let mut parent = plan.take();
-            
+
             std::mem::swap(&mut parent.childrens, &mut project.childrens);
 
             parent.reset_output_schema_cache();

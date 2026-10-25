@@ -74,7 +74,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
             arena.finish();
             return Ok(());
         };
-        arena.produce_tuple(tuple);
+        arena.produce(tuple.into());
         Ok(())
     }
 }

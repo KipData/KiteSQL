@@ -21,12 +21,10 @@ use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
-use crate::types::bitset::BitSet;
 use crate::types::value::DataValue;
 
 pub struct Projection<'a> {
     exprs: &'a [ExprRef],
-    moveable: Option<&'a BitSet>,
     input: ExecId,
 }
 
@@ -34,18 +32,14 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
     type Input = (&'a ProjectOperator, &'a LogicalPlan);
 
     fn into_executor(
-        (ProjectOperator { exprs, moveable }, input): Self::Input,
+        (ProjectOperator { exprs }, input): Self::Input,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::Projection(Projection {
-            exprs,
-            moveable: moveable.as_ref(),
-            input,
-        }))
+        arena.push(ExecNode::Projection(Projection { exprs, input }))
     }
 }
 
@@ -68,7 +62,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
             return Ok(());
         }
 
-        arena.rewrite(self.exprs, plan_arena, None::<&[DataValue]>, self.moveable)?;
+        arena.rewrite(self.exprs, plan_arena, None::<&[DataValue]>)?;
         arena.resume();
         Ok(())
     }

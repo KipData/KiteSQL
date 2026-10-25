@@ -128,9 +128,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
                     })
                 },
                 |tuple| {
-                    let value = std::mem::replace(&mut tuple.values[column_index], DataValue::Null);
-                    tuple.values[column_index] = value.cast(&target_data_type)?;
-                    if needs_not_null_validation && tuple.values[column_index].is_null() {
+                    let value = std::mem::replace(&mut tuple[column_index], DataValue::Null);
+                    tuple[column_index] = value.cast(&target_data_type)?;
+                    if needs_not_null_validation && tuple[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));
                     }
                     Ok(())
@@ -154,7 +154,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
                         .map(|column| plan_arena.column(*column).datatype().serializable())
                 },
                 |tuple| {
-                    if tuple.values[column_index].is_null() {
+                    if tuple[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));
                     }
                     Ok(())

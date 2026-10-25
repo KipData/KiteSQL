@@ -117,15 +117,15 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
         };
 
         while arena.next_tuple(self.input, plan_arena)? {
-            if arena.result_tuple().pk.is_none() {
+            if arena.result_tuple().pk().is_none() {
                 continue;
             }
-            arena.rewrite(&column_exprs, plan_arena, None::<&[DataValue]>, None)?;
+            arena.rewrite(&column_exprs, plan_arena, None::<&[DataValue]>)?;
             {
                 let mut state = arena.local_state(plan_arena);
                 let (tuple, transaction, table_codec) = state.tuple_transaction_codec_mut();
-                let tuple_pk = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-                let index = Index::new(index_id, &tuple.values, *ty);
+                let tuple_pk = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+                let index = Index::new(index_id, tuple, *ty);
                 transaction.add_index(table_codec, table_name.as_ref(), index, tuple_pk)?;
             }
         }

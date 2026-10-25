@@ -49,8 +49,6 @@ mod min_max_top_k;
 use guard_mark_apply::GuardMarkApply;
 use join_reorder::GreedyJoinReorder;
 use materialize_mark_apply::MaterializeMarkApply;
-mod project_move;
-use project_move::ProjectMove;
 mod parameterized_index;
 mod pushdown_limit;
 mod pushdown_predicates;
@@ -95,7 +93,6 @@ pub enum NormalizationRuleImpl {
     GreedyJoinReorder,
     MaterializeMarkApply,
     GuardMarkApply,
-    ProjectMove,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -187,9 +184,7 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::ColumnPruning => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EliminateProject => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::CollapseGroupByAgg => NormalizationRuleRootTag::Aggregate,
-            NormalizationRuleImpl::GuardMarkApply | NormalizationRuleImpl::ProjectMove => {
-                NormalizationRuleRootTag::Project
-            }
+            NormalizationRuleImpl::GuardMarkApply => NormalizationRuleRootTag::Project,
             NormalizationRuleImpl::CombineFilter => NormalizationRuleRootTag::Filter,
             NormalizationRuleImpl::LimitProjectTranspose
             | NormalizationRuleImpl::PushLimitThroughJoin
@@ -227,7 +222,6 @@ impl NormalizationRule for NormalizationRuleImpl {
             }
             NormalizationRuleImpl::GuardMarkApply => GuardMarkApply.apply(plan, arena, loader),
             NormalizationRuleImpl::EliminateProject => EliminateProject.apply(plan, arena, loader),
-            NormalizationRuleImpl::ProjectMove => ProjectMove.apply(plan, arena, loader),
             NormalizationRuleImpl::CollapseGroupByAgg => {
                 CollapseGroupByAgg.apply(plan, arena, loader)
             }

@@ -74,7 +74,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values<'a> {
         self.remaining_rows -= 1;
         let width = self.op.schema_ref.len();
 
-        let output = arena.result_tuple_mut();
+        let output = arena.output_tuple_mut();
         output.pk = None;
         output.values.clear();
         for (i, expr) in self.rows.by_ref().take(width).enumerate() {

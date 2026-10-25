@@ -19,7 +19,7 @@ pub mod sqlite;
 
 use crate::TpccError;
 use kite_sql::db::PreparedPlan;
-use kite_sql::types::tuple::Tuple;
+use kite_sql::types::tuple::TupleImpl;
 use kite_sql::types::value::DataValue;
 use kite_sql::types::LogicalType;
 
@@ -62,14 +62,14 @@ pub trait BackendTransaction {
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError>;
 
     fn with_query_all(
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError>;
 
     fn with_query_nth(
@@ -77,7 +77,7 @@ pub trait BackendTransaction {
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError>;
 
     fn commit(self) -> Result<(), TpccError>;

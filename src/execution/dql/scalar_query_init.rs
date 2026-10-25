@@ -21,7 +21,7 @@ use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
 use crate::planner::ExecMetaArena;
 use crate::planner::{ExprRef, LogicalPlan, MetaArena, ScalarQueryRef};
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 
 enum ScalarQueryInitState {
@@ -37,7 +37,7 @@ pub struct ScalarQueryInit<'a> {
     reference: ScalarQueryRef,
     state: ScalarQueryInitState,
     param_bindings: &'a [(ScalarQueryRef, ExprRef)],
-    scratch_tuple: Tuple,
+    scratch_tuple: TupleImpl,
 
     init: ExecId,
 }
@@ -50,7 +50,7 @@ impl<'a> ScalarQueryInit<'a> {
     ) -> Result<(), DatabaseError> {
         let mut value = DataValue::Null;
         if arena.next_tuple(self.init, plan_arena)? {
-            std::mem::swap(&mut value, &mut arena.result_tuple_mut().values[0]);
+            std::mem::swap(&mut value, &mut arena.result_mut()[0]);
         }
         if arena.next_tuple(self.init, plan_arena)? {
             return Err(DatabaseError::InvalidValue(
@@ -84,7 +84,7 @@ impl<'a> ScalarQueryInit<'a> {
                 ScalarQueryInitState::Initialize
             },
             param_bindings: &op.param_bindings,
-            scratch_tuple: Tuple::default(),
+            scratch_tuple: TupleImpl::default(),
         }))
     }
 }
@@ -119,7 +119,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
         } else {
             ScalarQueryInitState::Initialize
         };
-        self.scratch_tuple.clear();
+        self.scratch_tuple.output_mut().clear();
         arena.reset(self.input, plan_arena)
     }
 
@@ -149,7 +149,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
                         return Ok(());
                     }
                     // Preserve the outer row and lend the previous subquery buffer to the arena.
-                    std::mem::swap(arena.result_tuple_mut(), &mut self.scratch_tuple);
+                    std::mem::swap(arena.result_mut(), &mut self.scratch_tuple);
                     for (reference, expr) in self.param_bindings {
                         let value = plan_arena
                             .expression(*expr)
@@ -162,7 +162,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
                 ScalarQueryInitState::EvaluateOuter => {
                     arena.reset(self.init, plan_arena)?;
                     self.evaluate_init(arena, plan_arena)?;
-                    std::mem::swap(arena.result_tuple_mut(), &mut self.scratch_tuple);
+                    std::mem::swap(arena.result_mut(), &mut self.scratch_tuple);
                     self.state = ScalarQueryInitState::ReadOuter;
                     arena.resume();
                     return Ok(());

@@ -76,7 +76,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
         self.returned = true;
 
         if !has_next {
-            let output = arena.result_tuple_mut();
+            let output = arena.output_tuple_mut();
             output.pk = None;
             output.values.clear();
             output

@@ -64,7 +64,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Dummy {
             arena.finish();
             return Ok(());
         };
-        arena.produce_tuple(row);
+        arena.produce(row.into());
         Ok(())
     }
 }

@@ -75,7 +75,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
             return Ok(());
         };
 
-        let output = arena.result_tuple_mut();
+        let output = arena.output_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {

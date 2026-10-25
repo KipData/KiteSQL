@@ -16,21 +16,21 @@ use super::SpillCodec;
 use crate::errors::DatabaseError;
 use crate::planner::operator::sort::SortField;
 use crate::planner::{ExecMetaArena, MetaArena, ScalarQueryRef};
-use crate::types::tuple::Tuple;
+use crate::types::tuple::{Tuple, TupleImpl};
 use crate::types::value::DataValue;
 use std::io::{Read, Write};
 use std::mem::size_of;
 
 pub(crate) struct SortRow {
     pub(crate) sort_values: Vec<DataValue>,
-    pub(crate) tuple: Tuple,
+    pub(crate) tuple: TupleImpl,
     pub(crate) outer_values: Vec<(ScalarQueryRef, DataValue)>,
 }
 
 impl SortRow {
     pub(crate) fn new(
         sort_fields: &[SortField],
-        tuple: Tuple,
+        tuple: TupleImpl,
         arena: &mut ExecMetaArena<impl MetaArena>,
     ) -> Result<Self, DatabaseError> {
         let sort_values = sort_fields
@@ -60,7 +60,7 @@ impl SpillCodec for SortRow {
     fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError> {
         Ok(Self {
             sort_values: Vec::<DataValue>::decode(reader)?,
-            tuple: Tuple::decode(reader)?,
+            tuple: TupleImpl::decode(reader)?,
             outer_values: Vec::decode(reader)?,
         })
     }
@@ -86,7 +86,7 @@ impl SpillCodec for SortRow {
             .saturating_add(
                 self.tuple
                     .estimated_size()
-                    .saturating_sub(size_of::<Tuple>()),
+                    .saturating_sub(size_of::<TupleImpl>()),
             )
     }
 }
@@ -329,6 +329,60 @@ impl SpillCodec for Tuple {
     }
 }
 
+impl SpillCodec for TupleImpl {
+    fn encode<W: Write>(&self, writer: &mut W) -> Result<(), DatabaseError> {
+        if let TupleImpl::Tuple(tuple) = self {
+            return tuple.encode(writer);
+        }
+        match self.pk() {
+            Some(pk) => {
+                writer.write_all(&[1])?;
+                pk.encode(writer)?;
+            }
+            None => writer.write_all(&[0])?,
+        }
+        let len: u32 = self.len().try_into()?;
+        writer.write_all(&len.to_le_bytes())?;
+        for value in self.iter() {
+            value.encode(writer)?;
+        }
+        Ok(())
+    }
+
+    fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError> {
+        Tuple::decode(reader).map(TupleImpl::Tuple)
+    }
+
+    fn encoded_len(&self) -> Result<usize, DatabaseError> {
+        if let TupleImpl::Tuple(tuple) = self {
+            return tuple.encoded_len();
+        }
+        let _: u32 = self.len().try_into()?;
+        let pk_len = match self.pk() {
+            Some(pk) => 1 + pk.encoded_len()?,
+            None => 1,
+        };
+        self.iter()
+            .try_fold(pk_len + size_of::<u32>(), |len, value| {
+                Ok(len + value.encoded_len()?)
+            })
+    }
+
+    fn estimated_size(&self) -> usize {
+        match self {
+            TupleImpl::Tuple(tuple) => tuple.estimated_size(),
+            TupleImpl::Concat(_) => size_of::<Tuple>()
+                .saturating_add(self.len().saturating_mul(size_of::<DataValue>()))
+                .saturating_add(
+                    self.iter()
+                        .chain(self.pk())
+                        .map(estimated_dynamic_value_size)
+                        .fold(0usize, usize::saturating_add),
+                ),
+        }
+    }
+}
+
 fn estimated_dynamic_value_size(value: &DataValue) -> usize {
     match value {
         DataValue::Utf8 { value, .. } => value.capacity(),
@@ -463,11 +517,23 @@ mod tests {
             round_trip(&(reference, DataValue::Null))?;
         }
         for pk in [None, Some(DataValue::new_utf8("primary".into()))] {
-            let tuple = Tuple::new(pk, values.clone());
+            let tuple = Tuple::new(pk.clone(), values.clone());
             round_trip(&tuple)?;
+            let (left, right) = values.split_at(values.len() / 2);
+            let joined = TupleImpl::concat(
+                Tuple::new(None, left.to_vec()).into(),
+                Tuple::new(None, right.to_vec()).into(),
+                pk,
+            );
+            round_trip(&joined)?;
+            let mut flat_bytes = Vec::new();
+            tuple.encode(&mut flat_bytes)?;
+            let mut joined_bytes = Vec::new();
+            joined.encode(&mut joined_bytes)?;
+            assert_eq!(joined_bytes, flat_bytes);
             let row = SortRow {
                 sort_values: vec![DataValue::Int32(2), DataValue::Null],
-                tuple,
+                tuple: joined,
                 outer_values: vec![(
                     ScalarQueryRef {
                         arena_id: 0,

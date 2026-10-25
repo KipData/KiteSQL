@@ -37,7 +37,7 @@ use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
 use crate::types::serialize::TupleValueSerializableImpl;
-use crate::types::tuple::{Tuple, TupleId};
+use crate::types::tuple::{Tuple, TupleId, TupleImpl, TupleLike};
 use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
 use std::borrow::{Borrow, Cow};
@@ -380,11 +380,11 @@ pub trait Transaction: Sized {
         Ok((table, index_id))
     }
 
-    fn add_index(
+    fn add_index<V: TupleLike + ?Sized>(
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &str,
-        index: Index,
+        index: Index<'_, V>,
         tuple_id: &TupleId,
     ) -> Result<(), DatabaseError> {
         if matches!(index.ty, IndexType::PrimaryKey { .. }) {
@@ -406,11 +406,11 @@ pub trait Transaction: Sized {
         })
     }
 
-    fn del_index(
+    fn del_index<V: TupleLike + ?Sized>(
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &str,
-        index: &Index,
+        index: &Index<'_, V>,
         tuple_id: &TupleId,
     ) -> Result<(), DatabaseError> {
         if matches!(index.ty, IndexType::PrimaryKey { .. }) {
@@ -425,7 +425,7 @@ pub trait Transaction: Sized {
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &str,
-        tuple: &Tuple,
+        tuple: &TupleImpl,
         serializers: I,
         is_overwrite: bool,
     ) -> Result<(), DatabaseError>
@@ -433,14 +433,13 @@ pub trait Transaction: Sized {
         I: IntoIterator<Item = S>,
         S: Borrow<TupleValueSerializableImpl>,
     {
-        let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+        let tuple_id = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
         let mut serializers = serializers.into_iter();
-        let mut write_value =
-            |tuple: &Tuple, value: &mut Bytes| tuple.serialize_to(&mut serializers, value);
+        let mut write_value = |value: &mut Bytes| tuple.serialize_to(&mut serializers, value);
         table_codec.with_tuple(
             table_name,
             tuple_id,
-            Some((tuple, &mut write_value)),
+            Some(&mut write_value),
             |key, value| {
                 if !is_overwrite && self.exists(key)? {
                     return Err(DatabaseError::DuplicatePrimaryKey);
@@ -2429,7 +2428,7 @@ pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
         .done()?;
     let mut iter = tx.run("select id from t order by id")?;
     let mut ids = Vec::new();
-    while let Some(id) = iter.next_tuple(|_, tuple| tuple.values[0].clone())? {
+    while let Some(id) = iter.next_tuple(|_, tuple| tuple[0].clone())? {
         ids.push(id);
     }
     iter.done()?;
@@ -2666,11 +2665,11 @@ mod test {
         let plan_arena = PlanArena::new(&table_arena);
 
         let tuples = build_tuples();
-        for tuple in tuples.iter() {
+        for tuple in build_tuples() {
             transaction.append_tuple(
                 &mut table_codec,
                 "t1",
-                tuple,
+                &tuple.into(),
                 &[
                     LogicalType::Integer.serializable(),
                     LogicalType::Boolean.serializable(),
@@ -2981,11 +2980,11 @@ mod test {
         for (tuple_id, index) in indexes.iter().cloned() {
             transaction.add_index(&mut table_codec, "t1", index, &tuple_id)?;
         }
-        for tuple in tuples.iter() {
+        for tuple in build_tuples() {
             transaction.append_tuple(
                 &mut table_codec,
                 "t1",
-                tuple,
+                &tuple.into(),
                 &[
                     LogicalType::Integer.serializable(),
                     LogicalType::Boolean.serializable(),
@@ -3060,22 +3059,24 @@ mod test {
             LogicalType::Integer.serializable(),
         ];
 
-        let initial_tuple = Tuple::new(
+        let initial_tuple: crate::types::tuple::TupleImpl = Tuple::new(
             Some(DataValue::Int32(0)),
             vec![
                 DataValue::Int32(0),
                 DataValue::Boolean(true),
                 DataValue::Int32(0),
             ],
-        );
-        let updated_tuple = Tuple::new(
+        )
+        .into();
+        let updated_tuple: crate::types::tuple::TupleImpl = Tuple::new(
             Some(DataValue::Int32(0)),
             vec![
                 DataValue::Int32(0),
                 DataValue::Boolean(true),
                 DataValue::Int32(1),
             ],
-        );
+        )
+        .into();
         let table_arena = TableArenaCell::default();
         let mut plan_arena = PlanArena::new(&table_arena);
 
@@ -3103,10 +3104,10 @@ mod test {
                 "t1",
                 Index::new(
                     index_id,
-                    std::slice::from_ref(&initial_tuple.values[2]),
+                    std::slice::from_ref(&initial_tuple[2]),
                     IndexType::Normal,
                 ),
-                initial_tuple.pk.as_ref().unwrap(),
+                initial_tuple.pk().unwrap(),
             )?;
             setup_tx.append_tuple(&mut table_codec, "t1", &initial_tuple, &serializers, false)?;
             setup_tx.commit()?;
@@ -3145,20 +3146,20 @@ mod test {
             "t1",
             &Index::new(
                 index_id,
-                std::slice::from_ref(&initial_tuple.values[2]),
+                std::slice::from_ref(&initial_tuple[2]),
                 IndexType::Normal,
             ),
-            initial_tuple.pk.as_ref().unwrap(),
+            initial_tuple.pk().unwrap(),
         )?;
         writer_tx.add_index(
             &mut table_codec,
             "t1",
             Index::new(
                 index_id,
-                std::slice::from_ref(&updated_tuple.values[2]),
+                std::slice::from_ref(&updated_tuple[2]),
                 IndexType::Normal,
             ),
-            updated_tuple.pk.as_ref().unwrap(),
+            updated_tuple.pk().unwrap(),
         )?;
         writer_tx.append_tuple(&mut table_codec, "t1", &updated_tuple, &serializers, true)?;
         writer_tx.commit()?;

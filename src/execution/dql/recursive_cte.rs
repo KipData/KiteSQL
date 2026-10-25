@@ -26,25 +26,25 @@ use crate::planner::operator::recursive_cte::RecursiveScanOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::TupleImpl;
 use std::mem;
 
 pub(crate) enum RecursiveInput {
     One {
-        tuple: Tuple,
+        tuple: TupleImpl,
         emitted: bool,
     },
     #[cfg(feature = "spill")]
-    Many(SpillReader<Tuple>),
+    Many(SpillReader<TupleImpl>),
     #[cfg(not(feature = "spill"))]
     Many {
-        rows: Vec<Tuple>,
+        rows: Vec<TupleImpl>,
         position: usize,
     },
 }
 
 impl Iterator for RecursiveInput {
-    type Item = Result<Tuple, DatabaseError>;
+    type Item = Result<TupleImpl, DatabaseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
@@ -86,24 +86,24 @@ enum RecursiveRows {
     #[default]
     Empty,
     One {
-        tuple: Tuple,
+        tuple: TupleImpl,
         output_done: bool,
     },
     #[cfg(feature = "spill")]
-    Writing(SpillVec<'static, Tuple>),
+    Writing(SpillVec<'static, TupleImpl>),
     #[cfg(feature = "spill")]
-    Reading(SpillReader<Tuple>),
+    Reading(SpillReader<TupleImpl>),
     #[cfg(not(feature = "spill"))]
-    Writing(Vec<Tuple>),
+    Writing(Vec<TupleImpl>),
     #[cfg(not(feature = "spill"))]
     Reading {
-        rows: Vec<Tuple>,
+        rows: Vec<TupleImpl>,
         output_index: usize,
     },
 }
 
 impl RecursiveRows {
-    fn push(&mut self, tuple: Tuple) -> Result<(), DatabaseError> {
+    fn push(&mut self, tuple: TupleImpl) -> Result<(), DatabaseError> {
         match self {
             Self::Empty => {
                 *self = Self::One {
@@ -162,7 +162,7 @@ impl RecursiveRows {
         }
     }
 
-    fn next_output(&mut self) -> Result<Option<Tuple>, DatabaseError> {
+    fn next_output(&mut self) -> Result<Option<TupleImpl>, DatabaseError> {
         match self {
             Self::Empty => Ok(None),
             Self::One { tuple, output_done } => {
@@ -302,14 +302,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
             match self.phase {
                 RecursivePhase::Anchor => {
                     while arena.next_tuple(self.anchor_input, plan_arena)? {
-                        self.next.push(arena.materialize_tuple())?;
+                        self.next.push(arena.take_tuple())?;
                     }
                     self.working = mem::take(&mut self.next).finish()?;
                     self.phase = RecursivePhase::Output;
                 }
                 RecursivePhase::Output => {
                     if let Some(tuple) = self.working.next_output()? {
-                        arena.produce_tuple(tuple);
+                        arena.produce(tuple);
                         return Ok(());
                     }
                     if !self.start_recursive(plan_arena)? {
@@ -323,7 +323,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
                         .recursive_arena
                         .next_tuple(self.recursive_root, plan_arena)?
                     {
-                        self.next.push(self.recursive_arena.materialize_tuple())?;
+                        self.next.push(self.recursive_arena.take_tuple())?;
                     }
                     self.recursive_arena.reset_for_rebuild();
                     self.working = mem::take(&mut self.next).finish()?;
@@ -368,7 +368,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         match self.input.next().transpose()? {
-            Some(tuple) => arena.produce_tuple(tuple),
+            Some(tuple) => arena.produce(tuple),
             None => arena.finish(),
         }
         Ok(())
@@ -402,7 +402,12 @@ mod tests {
     #[test]
     fn spilled_generation_is_written_once_and_replayed_for_scan() -> Result<(), DatabaseError> {
         let expected = (0..1100)
-            .map(|value| Tuple::new(None, vec![DataValue::Int32(value)]))
+            .map(|value| {
+                TupleImpl::from(crate::types::tuple::Tuple::new(
+                    None,
+                    vec![DataValue::Int32(value)],
+                ))
+            })
             .collect::<Vec<_>>();
         let mut rows = RecursiveRows::default();
         for tuple in expected.iter().cloned() {
@@ -426,7 +431,12 @@ mod tests {
     #[test]
     fn memory_generation_is_replayed_for_scan() -> Result<(), DatabaseError> {
         let expected = (0..3)
-            .map(|value| Tuple::new(None, vec![DataValue::Int32(value)]))
+            .map(|value| {
+                TupleImpl::from(crate::types::tuple::Tuple::new(
+                    None,
+                    vec![DataValue::Int32(value)],
+                ))
+            })
             .collect::<Vec<_>>();
         let mut rows = RecursiveRows::default();
         for tuple in expected.iter().cloned() {
@@ -522,7 +532,7 @@ mod tests {
         assert_eq!(
             tuples
                 .into_iter()
-                .flat_map(|tuple| tuple.values)
+                .flat_map(|mut tuple| tuple.take_values())
                 .collect::<Vec<_>>(),
             vec![
                 DataValue::Int32(1),

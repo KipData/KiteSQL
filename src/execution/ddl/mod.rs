@@ -28,7 +28,7 @@ use crate::errors::DatabaseError;
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{InnerIter, Transaction};
 use crate::types::serialize::TupleValueSerializableImpl;
-use crate::types::tuple::{Tuple, TupleId};
+use crate::types::tuple::{Tuple, TupleId, TupleImpl};
 use crate::types::LogicalType;
 use std::collections::Bound;
 
@@ -43,7 +43,7 @@ fn read_tuple_batch<T, D, I>(
     old_values_len: usize,
     old_deserializers: &mut D,
     start_after: Option<&TupleId>,
-    batch: &mut Vec<Tuple>,
+    batch: &mut Vec<TupleImpl>,
     batch_size: usize,
 ) -> Result<usize, DatabaseError>
 where
@@ -76,16 +76,16 @@ where
             let tuple = if len < batch.len() {
                 &mut batch[len]
             } else {
-                batch.push(Tuple {
-                    pk: None,
-                    values: Vec::with_capacity(old_values_len),
-                });
+                batch.push(TupleImpl::from(Tuple::new(
+                    None,
+                    Vec::with_capacity(old_values_len),
+                )));
                 batch
                     .last_mut()
                     .expect("batch contains the tuple that was just pushed")
             };
             TableCodec::decode_tuple_into(
-                tuple,
+                tuple.output_mut(),
                 old_deserializers(),
                 Some(tuple_id),
                 value,
@@ -111,7 +111,7 @@ where
     T: Transaction,
     D: FnMut() -> I,
     I: IntoIterator<Item = TupleValueSerializableImpl>,
-    F: FnMut(&Tuple) -> Result<(), DatabaseError>,
+    F: FnMut(&TupleImpl) -> Result<(), DatabaseError>,
 {
     let mut last_pk = None;
     let mut batch = Vec::with_capacity(REWRITE_BATCH_SIZE);
@@ -131,7 +131,9 @@ where
         if batch_len == 0 {
             break;
         }
-        last_pk = batch.get(batch_len - 1).and_then(|tuple| tuple.pk.clone());
+        last_pk = batch
+            .get(batch_len - 1)
+            .and_then(|tuple| tuple.pk().cloned());
 
         for tuple in batch.iter().take(batch_len) {
             visit(tuple)?;
@@ -163,8 +165,8 @@ where
     I: IntoIterator<Item = TupleValueSerializableImpl>,
     S: FnMut() -> J,
     J: IntoIterator<Item = TupleValueSerializableImpl>,
-    F: FnMut(&mut Tuple) -> Result<(), DatabaseError>,
-    G: FnMut(&mut T, &mut TableCodec, &Tuple) -> Result<(), DatabaseError>,
+    F: FnMut(&mut TupleImpl) -> Result<(), DatabaseError>,
+    G: FnMut(&mut T, &mut TableCodec, &TupleImpl) -> Result<(), DatabaseError>,
 {
     let mut last_pk = None;
     let mut batch = Vec::with_capacity(REWRITE_BATCH_SIZE);
@@ -184,7 +186,9 @@ where
         if batch_len == 0 {
             break;
         }
-        last_pk = batch.get(batch_len - 1).and_then(|tuple| tuple.pk.clone());
+        last_pk = batch
+            .get(batch_len - 1)
+            .and_then(|tuple| tuple.pk().cloned());
 
         for tuple in batch.iter_mut().take(batch_len) {
             rewrite(tuple)?;

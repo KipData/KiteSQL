@@ -171,8 +171,8 @@ mod tests {
                 );
             });
             assert_eq!(
-                iter.next_tuple(|_, row| row.values.clone())?,
-                Some(vec![DataValue::Int64(expected)])
+                iter.next_tuple(|_, row| row.clone())?.unwrap(),
+                vec![DataValue::Int64(expected)]
             );
             assert!(iter.next_tuple(|_, _| ())?.is_none());
             iter.done()?;
@@ -180,8 +180,8 @@ mod tests {
         let mut tx = db.new_transaction()?;
         let mut iter = tx.execute(&plan, [(1, DataValue::Int64(7))])?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int64(31)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int64(31)]
         );
         iter.done()?;
         tx.commit()?;

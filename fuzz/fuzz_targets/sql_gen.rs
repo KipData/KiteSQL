@@ -34,6 +34,7 @@
 use kite_sql::db::{DataBaseBuilder, Database};
 use kite_sql::errors::DatabaseError;
 use kite_sql::storage::lmdb::LmdbStorage;
+use kite_sql::types::tuple::TupleImpl;
 use kite_sql::types::value::DataValue;
 use libfuzzer_sys::arbitrary::{self, Unstructured};
 use libfuzzer_sys::fuzz_target;
@@ -735,7 +736,11 @@ fn open_db() -> Database<LmdbStorage> {
 fn check_tlp(db: &Database<LmdbStorage>, select: &Select, predicate: &str) {
     let base_sql = select.render(false, false);
     let mut base = Vec::new();
-    if for_each_row(db, &base_sql, |row| base.push(row.to_vec())).is_err() {
+    if for_each_row(db, &base_sql, |row| {
+        base.push(row.iter().cloned().collect())
+    })
+    .is_err()
+    {
         return;
     }
     let order_by = select.order_by.map(|(column, _)| column);
@@ -778,8 +783,11 @@ fn rows_match(
     }
     let mut matched = true;
     let mut i = offset;
+    let mut key = Vec::new();
     let rows = for_each_row(db, sql, |row| {
-        let in_base = match remaining.get_mut(row) {
+        key.clear();
+        key.extend(row.iter().cloned());
+        let in_base = match remaining.get_mut(key.as_slice()) {
             Some(count) if *count > 0 => {
                 *count -= 1;
                 true
@@ -807,7 +815,7 @@ fn run(db: &Database<LmdbStorage>, sql: &str) -> Result<usize, DatabaseError> {
 fn for_each_row(
     db: &Database<LmdbStorage>,
     sql: &str,
-    mut f: impl FnMut(&[DataValue]),
+    mut f: impl FnMut(&TupleImpl),
 ) -> Result<usize, DatabaseError> {
     // Printed before running so a crashing statement is still visible.
     if debug() {
@@ -815,7 +823,7 @@ fn for_each_row(
     }
     let mut iter = db.run(sql)?;
     let mut rows = 0;
-    while iter.next_tuple(|_, tuple| f(&tuple.values))?.is_some() {
+    while iter.next_tuple(|_, tuple| f(tuple))?.is_some() {
         rows += 1;
     }
     iter.done()?;

@@ -63,7 +63,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain<'a> {
         }
 
         let plan = self.plan.explain(plan_arena, 0);
-        let output = arena.result_tuple_mut();
+        let output = arena.output_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {

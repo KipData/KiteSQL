@@ -83,7 +83,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
             }
         };
 
-        if iter.next_tuple_into(state.table_codec, &mut state.result.tuple)? {
+        if iter.next_tuple_into(state.table_codec, state.result.tuple.output_mut())? {
             arena.resume();
         } else {
             arena.finish();
@@ -132,7 +132,8 @@ mod tests {
                         DataValue::Boolean(true),
                         DataValue::Int32(id * 10),
                     ],
-                ),
+                )
+                .into(),
                 &serializers,
                 false,
             )?;
@@ -154,14 +155,14 @@ mod tests {
             iter: None,
         };
         scan.next_tuple(&mut arena, &mut meta)?;
-        assert_eq!(arena.result_tuple().values[0], DataValue::Int32(2));
+        assert_eq!(arena.result_tuple()[0], DataValue::Int32(2));
         let iterator = scan.iter.as_ref().unwrap() as *const _;
         for _ in 0..3 {
             scan.reset(&mut arena, &mut meta)?;
             scan.reset(&mut arena, &mut meta)?;
             for id in [2, 3] {
                 scan.next_tuple(&mut arena, &mut meta)?;
-                assert_eq!(arena.result_tuple().values[0], DataValue::Int32(id));
+                assert_eq!(arena.result_tuple()[0], DataValue::Int32(id));
                 assert_eq!(scan.iter.as_ref().unwrap() as *const _, iterator);
             }
             scan.next_tuple(&mut arena, &mut meta)?;

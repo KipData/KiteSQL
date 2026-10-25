@@ -57,7 +57,7 @@ use crate::storage::{
     CheckpointableStorage, StatisticsMetaCache, Storage, TableCache, Transaction,
     TransactionIsolationLevel, ViewCache,
 };
-use crate::types::tuple::{Schema, SchemaView, Tuple};
+use crate::types::tuple::{Schema, SchemaView, TupleImpl};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ordered_float::OrderedFloat;
@@ -545,11 +545,6 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             "Limit Into Scan",
             HepBatchStrategy::fix_point_topdown(10),
             &[NormalizationRuleImpl::PushLimitIntoTableScan],
-        )
-        .after_batch(
-            "Move Project Inputs",
-            HepBatchStrategy::fix_point_bottomup(1),
-            &[NormalizationRuleImpl::ProjectMove],
         )
         .implementations(&[
             // DQL
@@ -1223,7 +1218,7 @@ pub trait ResultIter {
     /// Advances to the next row and runs `f` while the executor row slot is borrowed.
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError>;
 
     /// Finishes consuming the iterator and flushes any remaining work.
@@ -1317,7 +1312,7 @@ impl<S: Storage> DatabaseIter<'_, S> {
     #[inline]
     pub fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         unsafe { (*self.inner).next_tuple(f) }
     }
@@ -1341,7 +1336,7 @@ impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
 
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         DatabaseIter::next_tuple(self, f)
     }
@@ -1480,7 +1475,7 @@ impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     #[inline]
     pub fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         let Some(executor) = self.guard.executor.as_mut() else {
             return Ok(None);
@@ -1531,7 +1526,7 @@ impl<T: Transaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
 
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         TransactionIter::next_tuple(self, f)
     }
@@ -1561,7 +1556,7 @@ pub(crate) mod test {
         table_codec::TableCodec, StatisticsMetaCache, Storage, TableCache, Transaction,
         TransactionIsolationLevel, ViewCache,
     };
-    use crate::types::tuple::Tuple;
+    use crate::types::tuple::{Tuple, TupleImpl};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use chrono::{Datelike, Local};
@@ -1668,12 +1663,12 @@ pub(crate) mod test {
                 execute_input::<_, Projection>((project, input), context, arena, &transaction);
             for value in [1, 2, 3, 4] {
                 assert_eq!(
-                    executor.next_tuple()?.map(|row| row.values.clone()),
-                    Some(vec![
+                    executor.next_tuple()?.cloned().unwrap(),
+                    vec![
                         DataValue::Int32(value),
                         DataValue::Int32(value),
                         DataValue::Int32(99)
-                    ])
+                    ]
                 );
             }
             assert!(executor.next_tuple()?.is_none());
@@ -1730,8 +1725,8 @@ pub(crate) mod test {
             execute_input::<_, Projection>((project, input), context, arena, &transaction);
         for value in [11, 12, 13, 14] {
             assert_eq!(
-                executor.next_tuple()?.map(|row| row.values.clone()),
-                Some(vec![DataValue::Int32(value), DataValue::Int32(99)])
+                executor.next_tuple()?.cloned().unwrap(),
+                vec![DataValue::Int32(value), DataValue::Int32(99)]
             );
         }
         assert!(executor.next_tuple()?.is_none());
@@ -1767,13 +1762,13 @@ pub(crate) mod test {
                    cross join scalar_b b cross join scalar_nested c";
         let mut iter = db.run(sql)?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![
                 DataValue::Int32(11),
                 DataValue::Int32(22),
                 DataValue::Int32(33),
                 DataValue::Int32(44),
-            ])
+            ]
         );
         assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
@@ -1782,8 +1777,8 @@ pub(crate) mod test {
         db.ddl("create view scalar_new as select (select 55) as v")?;
         let mut iter = db.run("select a.v, b.v from scalar_a a cross join scalar_new b")?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(11), DataValue::Int32(55)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(11), DataValue::Int32(55)]
         );
         iter.done()?;
         Ok(())
@@ -1826,28 +1821,21 @@ pub(crate) mod test {
         Ok(())
     }
 
-    fn tuple_owned(tuple: &Tuple) -> Tuple {
-        Tuple {
-            pk: tuple.pk.clone(),
-            values: tuple.values.clone(),
-        }
+    fn next_tuple_owned<I: ResultIter>(iter: &mut I) -> Result<Option<TupleImpl>, DatabaseError> {
+        iter.next_tuple(|_, tuple| tuple.clone())
     }
 
-    fn next_tuple_owned<I: ResultIter>(iter: &mut I) -> Result<Option<Tuple>, DatabaseError> {
-        iter.next_tuple(|_, tuple| tuple_owned(tuple))
-    }
-
-    fn next_values<I: ResultIter>(iter: &mut I) -> Result<Option<Vec<DataValue>>, DatabaseError> {
-        iter.next_tuple(|_, tuple| tuple.values.clone())
+    fn next_values<I: ResultIter>(iter: &mut I) -> Result<Option<TupleImpl>, DatabaseError> {
+        iter.next_tuple(|_, tuple| tuple.clone())
     }
 
     fn read_single_i32<I>(mut iter: I) -> Result<i32, DatabaseError>
     where
         I: ResultIter,
     {
-        let value = match iter.next_tuple(|_, tuple| match tuple.values.as_slice() {
-            [DataValue::Int32(value)] => *value,
-            other => panic!("expected a single Int32 column, got {other:?}"),
+        let value = match iter.next_tuple(|_, tuple| match (tuple.len(), tuple.get(0)) {
+            (1, Some(DataValue::Int32(value))) => *value,
+            _ => panic!("expected a single Int32 column, got {tuple:?}"),
         })? {
             Some(value) => value,
             None => panic!("expected one result row"),
@@ -1862,9 +1850,9 @@ pub(crate) mod test {
         sql: &str,
     ) -> Result<i32, DatabaseError> {
         let mut iter = database.run(sql)?;
-        let value = match iter.next_tuple(|_, tuple| match tuple.values.as_slice() {
-            [DataValue::Int32(value)] => *value,
-            other => panic!("expected a single Int32 column, got {other:?}"),
+        let value = match iter.next_tuple(|_, tuple| match (tuple.len(), tuple.get(0)) {
+            (1, Some(DataValue::Int32(value))) => *value,
+            _ => panic!("expected a single Int32 column, got {tuple:?}"),
         })? {
             Some(value) => value,
             None => panic!("expected one result row for query: {sql}"),
@@ -2233,7 +2221,7 @@ pub(crate) mod test {
             let mut iter = kite_sql.execute(&statement, &[(1, DataValue::Int32(0))])?;
 
             let row = next_tuple_owned(&mut iter)?.unwrap();
-            let plan = row.values[0].utf8().unwrap();
+            let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
                 "Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
@@ -2260,7 +2248,7 @@ pub(crate) mod test {
                 ],
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();
-            let plan = row.values[0].utf8().unwrap();
+            let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
                 "Projection [(t1.a + $1), Max((t1.b + $2))] [Project => (Sort Option: Follow)] Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate => (Sort Option: None)] Filter (t1.b > 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
@@ -2279,7 +2267,7 @@ pub(crate) mod test {
                 ],
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();
-            let plan = row.values[0].utf8().unwrap();
+            let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
                 "Projection [l.a, l.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (l.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [(t1.a) as (l.a), (t1.b) as (l.b)] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => ($3, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
@@ -2698,30 +2686,30 @@ pub(crate) mod test {
         assert_eq!(read_single_i32(db.run("select * from deep_view")?)?, 7);
         db.run_mut(&sql, |iter| {
             assert_eq!(
-                iter.next_tuple(|_, row| row.values.clone())?,
-                Some(vec![DataValue::Int32(7)])
+                iter.next_tuple(|_, row| row.clone())?.unwrap(),
+                vec![DataValue::Int32(7)]
             );
             Ok(())
         })?;
         let prepared = db.prepare_sql(&sql, &[])?;
         let mut iter = db.execute(&prepared, [])?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(7)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(7)]
         );
         iter.done()?;
         let mut tx = db.new_transaction()?;
         let mut iter = tx.run(&sql)?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(7)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(7)]
         );
         iter.done()?;
         let prepared = tx.prepare_sql(&sql, &[])?;
         let mut iter = tx.execute(&prepared, [])?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(7)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(7)]
         );
         iter.done()?;
         tx.commit()?;
@@ -2824,12 +2812,12 @@ pub(crate) mod test {
         snapshot.load(CatalogKind::View("checkpoint_view".into()))?;
         let mut rows = snapshot.run("select id,v from checkpoint_rows order by id")?;
         assert_eq!(
-            rows.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(1), DataValue::Int32(10)])
+            rows.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(1), DataValue::Int32(10)]
         );
         assert_eq!(
-            rows.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(2), DataValue::Int32(20)])
+            rows.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(2), DataValue::Int32(20)]
         );
         assert!(rows.next_tuple(|_, _| ())?.is_none());
         rows.done()?;

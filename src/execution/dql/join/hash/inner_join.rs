@@ -13,11 +13,11 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::join::hash::{filter, JoinProbeState, ProbeState};
+use crate::execution::dql::join::hash::{filter, join_rows, JoinProbeState, ProbeState};
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::tuple::{SplitTupleRef, Tuple};
+use crate::types::tuple::{SplitTupleRef, TupleImpl};
 
 pub(crate) struct InnerJoinState;
 
@@ -28,7 +28,7 @@ impl JoinProbeState for InnerJoinState {
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
         if probe_state.is_keys_has_null {
             probe_state.finished = true;
             return Ok(None);
@@ -48,20 +48,15 @@ impl JoinProbeState for InnerJoinState {
                     continue;
                 }
             }
-            let probe = &mut probe_state.probe_tuple;
-            let mut values = Vec::with_capacity(build_tuple.values.len() + probe.values.len());
-            values.extend_from_slice(&build_tuple.values);
-            let mut pk = build_tuple.pk.clone();
-            if probe_state.index == build_state.tuples.len() {
-                // No future match can read this probe row, so move its values and pk.
+            let is_last = probe_state.index == build_state.tuples.len();
+            if is_last {
                 probe_state.finished = true;
-                values.append(&mut probe.values);
-                pk = pk.or(probe.pk.take());
-            } else {
-                values.extend_from_slice(&probe.values);
-                pk = pk.or_else(|| probe.pk.clone());
             }
-            return Ok(Some(Tuple::new(pk, values)));
+            return Ok(Some(join_rows(
+                build_tuple,
+                &mut probe_state.probe_tuple,
+                is_last,
+            )));
         }
 
         probe_state.finished = true;

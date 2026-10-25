@@ -211,7 +211,6 @@ Transaction commands:
         let mut row_count = 0usize;
         while let Some(row) = iter.next_tuple(|_, tuple| {
             tuple
-                .values
                 .iter()
                 .map(|value| Cell::new(format!("{value}")))
                 .collect::<Vec<_>>()

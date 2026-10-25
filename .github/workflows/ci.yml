@@ -165,3 +165,22 @@ jobs:
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts
+  # 10
+  miri:
+    name: Miri (unsafe code UB check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-10-04
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri
+
+      - name: Set up Miri sysroot
+        run: cargo +nightly-2026-10-04 miri setup
+
+      - name: Run Miri tests
+        run: make miri

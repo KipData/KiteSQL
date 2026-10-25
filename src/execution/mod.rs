@@ -82,10 +82,8 @@ use crate::planner::MetaArena;
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
-use crate::types::bitset::BitSet;
 use crate::types::index::RuntimeIndexProbe;
-use crate::types::tuple::{Input, MoveableTuple, Tuple};
-use crate::types::value::DataValue;
+use crate::types::tuple::{Input, Tuple, TupleImpl};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecutionContext<'a> {
@@ -144,7 +142,7 @@ pub(crate) enum ExecStatus {
 
 #[derive(Debug, Default)]
 pub(crate) struct ExecResult {
-    pub(crate) tuple: Tuple,
+    pub(crate) tuple: TupleImpl,
     pub(crate) status: Option<ExecStatus>,
 }
 
@@ -186,11 +184,11 @@ impl<'a, T: Transaction + 'a> Executor<'a, T> {
     pub(crate) fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         plan_arena: &mut ExecMetaArena<A>,
-    ) -> Result<Option<&mut Tuple>, DatabaseError> {
+    ) -> Result<Option<&mut TupleImpl>, DatabaseError> {
         if !self.arena.next_tuple(self.root, plan_arena)? {
             return Ok(None);
         }
-        Ok(Some(self.arena.result_tuple_mut()))
+        Ok(Some(self.arena.result_mut()))
     }
 
     pub(crate) fn take_ddl_apply(&mut self) -> Vec<DDLApply> {
@@ -622,22 +620,10 @@ impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
         unsafe { (&mut *self.transaction, &mut *self.table_codec) }
     }
 
-    pub(crate) fn tuple_transaction_codec_mut(&mut self) -> (&Tuple, &mut T, &mut TableCodec) {
+    pub(crate) fn tuple_transaction_codec_mut(&mut self) -> (&TupleImpl, &mut T, &mut TableCodec) {
         unsafe {
             (
                 &self.result.tuple,
-                &mut *self.transaction,
-                &mut *self.table_codec,
-            )
-        }
-    }
-
-    pub(crate) fn index_values_transaction_codec_mut(
-        &mut self,
-    ) -> (&[DataValue], &mut T, &mut TableCodec) {
-        unsafe {
-            (
-                &self.result.tuple.values,
                 &mut *self.transaction,
                 &mut *self.table_codec,
             )
@@ -772,22 +758,27 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         debug_assert!(self.runtime_probe_stack.is_empty());
         debug_assert!(self.ddl_apply.is_empty());
         self.nodes.clear();
-        self.result.tuple = Tuple::default();
+        self.result.tuple = TupleImpl::default();
         self.result.status = None;
         self.recursive_input = None;
     }
 
     #[inline]
-    pub(crate) fn result_tuple(&self) -> &Tuple {
+    pub(crate) fn result_tuple(&self) -> &TupleImpl {
         &self.result.tuple
     }
 
     #[inline]
-    pub(crate) fn result_tuple_mut(&mut self) -> &mut Tuple {
+    pub(crate) fn result_mut(&mut self) -> &mut TupleImpl {
         &mut self.result.tuple
     }
 
-    pub(crate) fn materialize_tuple(&mut self) -> Tuple {
+    #[inline]
+    pub(crate) fn output_tuple_mut(&mut self) -> &mut Tuple {
+        self.result.tuple.output_mut()
+    }
+
+    pub(crate) fn take_tuple(&mut self) -> TupleImpl {
         std::mem::take(&mut self.result.tuple)
     }
 
@@ -796,35 +787,35 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         exprs: &[E],
         arena: &dyn MetaArena,
         input: Option<&TInput>,
-        moveable: Option<&BitSet>,
     ) -> Result<(), DatabaseError> {
-        let values = &mut self.result.tuple.values;
-        let base = values.len();
-        values.reserve(exprs.len());
-        // SAFETY: only the fixed input prefix is exposed. All output capacity
-        // is reserved before creating the view, and each Cow is owned before
-        // push. No source slice is subsequently materialized or resized.
-        let local = unsafe { MoveableTuple::from_raw_parts(values.as_mut_ptr(), base, moveable) };
+        let base = {
+            let values = &mut self.result.tuple.rightmost_mut().values;
+            values.reserve(exprs.len());
+            values.len()
+        };
         for expr in exprs {
             let value = {
                 let expression = expr.expression(arena);
                 match input {
                     Some(input) => expression.eval(arena, Some(input)),
-                    None => expression.eval(arena, Some(&local)),
+                    None => expression.eval(arena, Some(&self.result.tuple)),
                 }
                 .map(|value| value.into_owned())
             };
             match value {
-                Ok(value) => values.push(value),
+                Ok(value) => self.result.tuple.push(value),
                 Err(error) => {
-                    values.truncate(base);
+                    self.result.tuple.rightmost_mut().values.truncate(base);
                     return Err(error);
                 }
             }
         }
 
-        values.rotate_left(base);
-        values.truncate(exprs.len());
+        let pk = self.result.tuple.take_pk();
+        let tuple = self.result.tuple.retain_rightmost();
+        tuple.values.rotate_left(base);
+        tuple.values.truncate(exprs.len());
+        tuple.pk = pk;
         Ok(())
     }
 
@@ -839,7 +830,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     }
 
     #[inline]
-    pub(crate) fn produce_tuple(&mut self, tuple: Tuple) {
+    pub(crate) fn produce(&mut self, tuple: TupleImpl) {
         self.result.tuple = tuple;
         self.resume();
     }
@@ -1124,7 +1115,7 @@ mod test_utils {
     }
 
     impl<T: Transaction> TestExecutor<'_, T> {
-        pub(crate) fn next_tuple(&mut self) -> Result<Option<&mut Tuple>, DatabaseError> {
+        pub(crate) fn next_tuple(&mut self) -> Result<Option<&mut TupleImpl>, DatabaseError> {
             self.executor.next_tuple(&mut self.plan_arena)
         }
     }
@@ -1182,12 +1173,12 @@ mod test_utils {
 
     pub fn try_collect<T: Transaction>(
         executor: TestExecutor<'_, T>,
-    ) -> Result<Vec<Tuple>, DatabaseError> {
+    ) -> Result<Vec<TupleImpl>, DatabaseError> {
         let mut executor = executor;
         let mut tuples = Vec::new();
 
         while let Some(tuple) = executor.next_tuple()? {
-            tuples.push(tuple.clone());
+            tuples.push(std::mem::take(tuple));
         }
         Ok(tuples)
     }
@@ -1232,6 +1223,42 @@ mod test {
         drop(active);
         assert_eq!(arena.nodes.items.len(), 1);
         assert_eq!(arena.nodes.items.as_ptr(), slot);
+    }
+
+    #[test]
+    fn rewrite_projects_joined_row() -> Result<(), DatabaseError> {
+        use crate::catalog::{ColumnCatalog, ColumnDesc};
+        use crate::types::value::DataValue;
+        use crate::types::LogicalType;
+
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let column = plan_arena.alloc_column(ColumnCatalog::new(
+            "c".to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        ));
+        let exprs = [3, 0, 1].map(|position| {
+            plan_arena.alloc_expression(ScalarExpression::column_expr(column, position))
+        });
+        let ints = |values: [i32; 2]| Tuple::new(None, values.map(DataValue::Int32).to_vec());
+
+        let mut arena = ExecArena::<'_, MemoryTransaction>::with_capacity(0);
+        for base in [0, 10] {
+            arena.result.tuple = TupleImpl::concat(
+                ints([base, base + 1]).into(),
+                ints([base + 2, base + 3]).into(),
+                Some(DataValue::Int32(base)),
+            );
+            arena.rewrite(&exprs, &plan_arena, None::<&[DataValue]>)?;
+            assert!(matches!(arena.result_tuple(), TupleImpl::Tuple(_)));
+            assert_eq!(arena.result_tuple().pk(), Some(&DataValue::Int32(base)));
+            assert_eq!(
+                *arena.result_tuple(),
+                [base + 3, base, base + 1].map(DataValue::Int32)
+            );
+        }
+        Ok(())
     }
 }
 // GRCOV_EXCL_STOP

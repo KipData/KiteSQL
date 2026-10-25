@@ -118,18 +118,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
             },
             |tuple| {
                 if let Some(value) = &default_value {
-                    tuple.values.push(value.clone());
+                    tuple.push(value.clone());
                 } else {
-                    tuple.values.push(DataValue::Null);
+                    tuple.push(DataValue::Null);
                 }
                 Ok(())
             },
             |transaction, table_codec, tuple| {
-                if let (Some(unique_index_id), Some(value), Some(tuple_id)) = (
-                    unique_index_id.as_ref(),
-                    default_value.as_ref(),
-                    tuple.pk.as_ref(),
-                ) {
+                if let (Some(unique_index_id), Some(value), Some(tuple_id)) =
+                    (unique_index_id.as_ref(), default_value.as_ref(), tuple.pk())
+                {
                     let index = Index::new(
                         *unique_index_id,
                         std::slice::from_ref(value),

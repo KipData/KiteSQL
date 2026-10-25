@@ -96,7 +96,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
 
         let mut writer = self.create_writer()?;
         while arena.next_tuple(input, plan_arena)? {
-            writer.write_record(arena.result_tuple().values.iter().map(|v| v.to_string()))?;
+            writer.write_record(arena.result_tuple().iter().map(|v| v.to_string()))?;
         }
         writer.flush().map_err(DatabaseError::from)?;
 
@@ -105,7 +105,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
         } else {
             format!("{} [{}]", self.op, self.column_names.iter().join(", "))
         };
-        arena.produce_tuple(TupleBuilder::build_result(message));
+        arena.produce(TupleBuilder::build_result(message).into());
         arena.resume();
         Ok(())
     }

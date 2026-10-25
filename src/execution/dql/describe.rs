@@ -109,7 +109,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
         let column = plan_arena.column(column_ref);
         let default = describe_default(column, plan_arena);
 
-        let output = arena.result_tuple_mut();
+        let output = arena.output_tuple_mut();
         output.pk = None;
         output.values.clear();
         fill_describe_row(&mut output.values, column, default);

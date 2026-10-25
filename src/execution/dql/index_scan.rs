@@ -144,7 +144,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
         };
 
         let state = arena.local_state(plan_arena);
-        if iter.next_tuple_into(state.table_codec, &mut state.result.tuple)? {
+        if iter.next_tuple_into(state.table_codec, state.result.tuple.output_mut())? {
             arena.resume();
         } else {
             arena.finish();
@@ -194,7 +194,8 @@ mod tests {
                         DataValue::Boolean(true),
                         DataValue::Int32(id * 10),
                     ],
-                ),
+                )
+                .into(),
                 &serializers,
                 false,
             )?;
@@ -228,7 +229,7 @@ mod tests {
             max: Bound::Included(DataValue::Int32(4)),
         });
         scan.next_tuple(&mut arena, &mut meta)?;
-        assert_eq!(arena.result_tuple().values[0], DataValue::Int32(1));
+        assert_eq!(arena.result_tuple()[0], DataValue::Int32(1));
         let iterator = scan.iter.as_ref().unwrap() as *const _;
         for (probe, expected) in [
             (RuntimeIndexProbe::Eq(DataValue::Int32(3)), vec![3]),
@@ -255,7 +256,7 @@ mod tests {
             assert!(arena.runtime_probe_stack.is_empty());
             for id in expected {
                 scan.next_tuple(&mut arena, &mut meta)?;
-                assert_eq!(arena.result_tuple().values[0], DataValue::Int32(id));
+                assert_eq!(arena.result_tuple()[0], DataValue::Int32(id));
                 assert_eq!(scan.iter.as_ref().unwrap() as *const _, iterator);
             }
             scan.next_tuple(&mut arena, &mut meta)?;

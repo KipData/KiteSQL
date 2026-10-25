@@ -23,7 +23,7 @@ use crate::planner::{ExecMetaArena, MetaArena};
 use crate::planner::{LogicalPlan, ScalarQueryRef};
 use crate::storage::table_codec::BumpBytes;
 use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
 use std::cmp::Ordering;
@@ -34,7 +34,7 @@ use std::mem::transmute;
 struct CmpItem<'a> {
     key: BumpVec<'a, u8>,
     sequence: usize,
-    tuple: Tuple,
+    tuple: TupleImpl,
     outer_values: Vec<(ScalarQueryRef, DataValue)>,
 }
 
@@ -65,7 +65,7 @@ fn top_sort<'a>(
     full_key: &mut BumpBytes<'a>,
     sort_fields: &[SortField],
     heap: &mut BTreeSet<CmpItem<'a>>,
-    tuple: &mut Tuple,
+    tuple: &mut TupleImpl,
     keep_count: usize,
     sequence: usize,
     plan_arena: &mut ExecMetaArena<impl MetaArena>,
@@ -174,7 +174,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
                     &mut key_scratch,
                     self.sort_fields,
                     &mut set,
-                    arena.result_tuple_mut(),
+                    arena.result_mut(),
                     keep_count,
                     sequence,
                     plan_arena,
@@ -196,7 +196,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
 
         if let Some(item) = self.output.as_mut().and_then(std::iter::Iterator::next) {
             plan_arena.restore_outer_values(item.outer_values);
-            arena.produce_tuple(item.tuple);
+            arena.produce(item.tuple);
         } else {
             arena.finish();
         }
@@ -214,7 +214,7 @@ mod test {
     use crate::expression::ScalarExpression;
     use crate::planner::operator::sort::SortField;
     use crate::planner::ExecMetaArena;
-    use crate::types::tuple::Tuple;
+    use crate::types::tuple::{Tuple, TupleLike};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use bumpalo::Bump;
@@ -229,7 +229,7 @@ mod test {
             CmpItem {
                 key,
                 sequence,
-                tuple: Tuple::new(None, vec![DataValue::Int32(value)]),
+                tuple: Tuple::new(None, vec![DataValue::Int32(value)]).into(),
                 outer_values: Vec::new(),
             }
         };
@@ -276,48 +276,48 @@ mod test {
 
         let fn_asc_and_nulls_last_eq = |mut heap: BTreeSet<CmpItem<'_>>| {
             if let Some(reverse) = heap.pop_first() {
-                assert_eq!(reverse.tuple.values, vec![DataValue::Int32(0)])
+                assert_eq!(reverse.tuple.as_slice().unwrap(), vec![DataValue::Int32(0)])
             } else {
                 unreachable!()
             }
             if let Some(reverse) = heap.pop_first() {
-                assert_eq!(reverse.tuple.values, vec![DataValue::Int32(1)])
+                assert_eq!(reverse.tuple.as_slice().unwrap(), vec![DataValue::Int32(1)])
             } else {
                 unreachable!()
             }
         };
         let fn_desc_and_nulls_last_eq = |mut heap: BTreeSet<CmpItem<'_>>| {
             if let Some(reverse) = heap.pop_first() {
-                assert_eq!(reverse.tuple.values, vec![DataValue::Int32(1)])
+                assert_eq!(reverse.tuple.as_slice().unwrap(), vec![DataValue::Int32(1)])
             } else {
                 unreachable!()
             }
             if let Some(reverse) = heap.pop_first() {
-                assert_eq!(reverse.tuple.values, vec![DataValue::Int32(0)])
+                assert_eq!(reverse.tuple.as_slice().unwrap(), vec![DataValue::Int32(0)])
             } else {
                 unreachable!()
             }
         };
         let fn_asc_and_nulls_first_eq = |mut heap: BTreeSet<CmpItem<'_>>| {
             if let Some(reverse) = heap.pop_first() {
-                assert_eq!(reverse.tuple.values, vec![DataValue::Null])
+                assert_eq!(reverse.tuple.as_slice().unwrap(), vec![DataValue::Null])
             } else {
                 unreachable!()
             }
             if let Some(reverse) = heap.pop_first() {
-                assert_eq!(reverse.tuple.values, vec![DataValue::Int32(0)])
+                assert_eq!(reverse.tuple.as_slice().unwrap(), vec![DataValue::Int32(0)])
             } else {
                 unreachable!()
             }
         };
         let fn_desc_and_nulls_first_eq = |mut heap: BTreeSet<CmpItem<'_>>| {
             if let Some(reverse) = heap.pop_first() {
-                assert_eq!(reverse.tuple.values, vec![DataValue::Null])
+                assert_eq!(reverse.tuple.as_slice().unwrap(), vec![DataValue::Null])
             } else {
                 unreachable!()
             }
             if let Some(reverse) = heap.pop_first() {
-                assert_eq!(reverse.tuple.values, vec![DataValue::Int32(1)])
+                assert_eq!(reverse.tuple.as_slice().unwrap(), vec![DataValue::Int32(1)])
             } else {
                 unreachable!()
             }
@@ -329,7 +329,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Null]).into(),
             2,
             0,
             &mut plan_arena,
@@ -338,7 +338,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0)]).into(),
             2,
             1,
             &mut plan_arena,
@@ -347,7 +347,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1)]).into(),
             2,
             2,
             &mut plan_arena,
@@ -360,7 +360,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, false),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Null]).into(),
             2,
             3,
             &mut plan_arena,
@@ -369,7 +369,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, false),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0)]).into(),
             2,
             4,
             &mut plan_arena,
@@ -378,7 +378,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, false),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1)]).into(),
             2,
             5,
             &mut plan_arena,
@@ -391,7 +391,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Null]).into(),
             2,
             6,
             &mut plan_arena,
@@ -400,7 +400,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0)]).into(),
             2,
             7,
             &mut plan_arena,
@@ -409,7 +409,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1)]).into(),
             2,
             8,
             &mut plan_arena,
@@ -422,7 +422,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, false),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Null]).into(),
             2,
             9,
             &mut plan_arena,
@@ -431,7 +431,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, false),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0)]).into(),
             2,
             10,
             &mut plan_arena,
@@ -440,7 +440,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, false),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1)]).into(),
             2,
             11,
             &mut plan_arena,
@@ -494,13 +494,16 @@ mod test {
         let fn_asc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq =
             |mut heap: BTreeSet<CmpItem<'_>>| {
                 if let Some(reverse) = heap.pop_first() {
-                    assert_eq!(reverse.tuple.values, vec![DataValue::Null, DataValue::Null])
+                    assert_eq!(
+                        reverse.tuple.as_slice().unwrap(),
+                        vec![DataValue::Null, DataValue::Null]
+                    )
                 } else {
                     unreachable!()
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Null, DataValue::Int32(0)]
                     )
                 } else {
@@ -508,7 +511,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(0), DataValue::Null]
                     )
                 } else {
@@ -516,7 +519,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(0), DataValue::Int32(0)]
                     )
                 } else {
@@ -527,7 +530,7 @@ mod test {
             |mut heap: BTreeSet<CmpItem<'_>>| {
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(0), DataValue::Null]
                     )
                 } else {
@@ -535,7 +538,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(0), DataValue::Int32(0)]
                     )
                 } else {
@@ -543,7 +546,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(1), DataValue::Null]
                     )
                 } else {
@@ -551,7 +554,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(1), DataValue::Int32(0)]
                     )
                 } else {
@@ -561,13 +564,16 @@ mod test {
         let fn_desc_1_and_nulls_first_1_and_asc_2_and_nulls_first_2_eq =
             |mut heap: BTreeSet<CmpItem<'_>>| {
                 if let Some(reverse) = heap.pop_first() {
-                    assert_eq!(reverse.tuple.values, vec![DataValue::Null, DataValue::Null])
+                    assert_eq!(
+                        reverse.tuple.as_slice().unwrap(),
+                        vec![DataValue::Null, DataValue::Null]
+                    )
                 } else {
                     unreachable!()
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Null, DataValue::Int32(0)]
                     )
                 } else {
@@ -575,7 +581,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(1), DataValue::Null]
                     )
                 } else {
@@ -583,7 +589,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(1), DataValue::Int32(0)]
                     )
                 } else {
@@ -594,7 +600,7 @@ mod test {
             |mut heap: BTreeSet<CmpItem<'_>>| {
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(1), DataValue::Null]
                     )
                 } else {
@@ -602,7 +608,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(1), DataValue::Int32(0)]
                     )
                 } else {
@@ -610,7 +616,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(0), DataValue::Null]
                     )
                 } else {
@@ -618,7 +624,7 @@ mod test {
                 }
                 if let Some(reverse) = heap.pop_first() {
                     assert_eq!(
-                        reverse.tuple.values,
+                        reverse.tuple.as_slice().unwrap(),
                         vec![DataValue::Int32(0), DataValue::Int32(0)]
                     )
                 } else {
@@ -632,7 +638,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Null]).into(),
             4,
             12,
             &mut plan_arena,
@@ -641,7 +647,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]).into(),
             4,
             13,
             &mut plan_arena,
@@ -650,7 +656,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]).into(),
             4,
             14,
             &mut plan_arena,
@@ -659,7 +665,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]).into(),
             4,
             15,
             &mut plan_arena,
@@ -668,7 +674,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]).into(),
             4,
             16,
             &mut plan_arena,
@@ -677,7 +683,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]).into(),
             4,
             17,
             &mut plan_arena,
@@ -690,7 +696,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Null]).into(),
             4,
             18,
             &mut plan_arena,
@@ -699,7 +705,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]).into(),
             4,
             19,
             &mut plan_arena,
@@ -708,7 +714,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]).into(),
             4,
             20,
             &mut plan_arena,
@@ -717,7 +723,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]).into(),
             4,
             21,
             &mut plan_arena,
@@ -726,7 +732,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]).into(),
             4,
             22,
             &mut plan_arena,
@@ -735,7 +741,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(true, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]).into(),
             4,
             23,
             &mut plan_arena,
@@ -748,7 +754,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Null]).into(),
             4,
             24,
             &mut plan_arena,
@@ -757,7 +763,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]).into(),
             4,
             25,
             &mut plan_arena,
@@ -766,7 +772,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]).into(),
             4,
             26,
             &mut plan_arena,
@@ -775,7 +781,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]).into(),
             4,
             27,
             &mut plan_arena,
@@ -784,7 +790,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]).into(),
             4,
             28,
             &mut plan_arena,
@@ -793,7 +799,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, true, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]).into(),
             4,
             29,
             &mut plan_arena,
@@ -806,7 +812,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Null]).into(),
             4,
             30,
             &mut plan_arena,
@@ -815,7 +821,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Null]).into(),
             4,
             31,
             &mut plan_arena,
@@ -824,7 +830,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Null]).into(),
             4,
             32,
             &mut plan_arena,
@@ -833,7 +839,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Null, DataValue::Int32(0)]).into(),
             4,
             33,
             &mut plan_arena,
@@ -842,7 +848,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)]).into(),
             4,
             34,
             &mut plan_arena,
@@ -851,7 +857,7 @@ mod test {
             &mut key_scratch,
             &fn_sort_fields(false, false, true, true),
             &mut indices,
-            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]),
+            &mut Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(0)]).into(),
             4,
             35,
             &mut plan_arena,

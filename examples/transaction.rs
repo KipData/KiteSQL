@@ -16,7 +16,6 @@
 mod app {
     use kite_sql::db::DataBaseBuilder;
     use kite_sql::errors::DatabaseError;
-    use kite_sql::types::tuple::Tuple;
     use kite_sql::types::value::DataValue;
     use std::fs;
     use std::io::ErrorKind;
@@ -57,17 +56,11 @@ mod app {
 
         let mut iter = database.run("select * from t1")?;
         iter.next_tuple(|_, tuple| {
-            assert_eq!(
-                tuple,
-                &Tuple::new(None, vec![DataValue::Int32(0), DataValue::Int32(0)])
-            );
+            assert_eq!(*tuple, vec![DataValue::Int32(0), DataValue::Int32(0)]);
         })?
         .unwrap();
         iter.next_tuple(|_, tuple| {
-            assert_eq!(
-                tuple,
-                &Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(1)])
-            );
+            assert_eq!(*tuple, vec![DataValue::Int32(1), DataValue::Int32(1)]);
         })?
         .unwrap();
         assert!(iter.next_tuple(|_, _| ())?.is_none());
@@ -77,9 +70,7 @@ mod app {
         tx2.run("update t1 set c2 = 99 where c1 = 0")?.done()?;
         let mut c2_iter = database.run("select c2 from t1 where c1 = 0")?;
         assert_eq!(
-            c2_iter
-                .next_tuple(|_, tuple| tuple.values[0].i32())?
-                .unwrap(),
+            c2_iter.next_tuple(|_, tuple| tuple[0].i32())?.unwrap(),
             Some(0)
         );
         c2_iter.done()?;

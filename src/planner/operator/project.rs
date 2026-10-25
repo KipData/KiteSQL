@@ -14,21 +14,16 @@
 
 use crate::planner::MetaArena;
 use crate::planner::{fmt_explain_list, Explain, ExprRef};
-use crate::types::bitset::BitSet;
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct ProjectOperator {
     pub exprs: Vec<ExprRef>,
-    pub moveable: Option<BitSet>,
 }
 
 impl ProjectOperator {
     pub fn new(exprs: Vec<ExprRef>) -> Self {
-        Self {
-            exprs,
-            moveable: None,
-        }
+        Self { exprs }
     }
 }
 

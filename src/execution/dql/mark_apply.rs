@@ -25,7 +25,7 @@ use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, MetaArena};
 use crate::storage::Transaction;
 use crate::types::evaluator::BinaryEvaluatorRef;
 use crate::types::index::RuntimeIndexProbe;
-use crate::types::tuple::{SplitTupleRef, Tuple};
+use crate::types::tuple::{SplitTupleRef, TupleImpl};
 use crate::types::value::DataValue;
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -88,7 +88,10 @@ impl RightInput {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
         probe: Option<RuntimeIndexProbe>,
-        mut evaluate: impl FnMut(&Tuple, &ExecMetaArena<A>) -> Result<Option<DataValue>, DatabaseError>,
+        mut evaluate: impl FnMut(
+            &TupleImpl,
+            &ExecMetaArena<A>,
+        ) -> Result<Option<DataValue>, DatabaseError>,
     ) -> Result<Option<DataValue>, DatabaseError> {
         let root = self.reset(arena, plan_arena, probe)?;
         while arena.next_tuple(root, plan_arena)? {
@@ -178,7 +181,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
             arena.finish();
             return Ok(());
         }
-        let mut left = arena.materialize_tuple();
+        let mut left = arena.take_tuple();
         let (input, marker) = match self.op.guard {
             Some(guard)
                 if *plan_arena.expression(guard).eval(plan_arena, Some(&left))?
@@ -189,8 +192,8 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
             _ => self.mark_value(input, arena, plan_arena, &left)?,
         };
         self.right_input = Some(input);
-        left.values.push(marker);
-        arena.produce_tuple(left);
+        left.push(marker);
+        arena.produce(left);
         Ok(())
     }
 }
@@ -203,7 +206,7 @@ impl<'a> MarkApply<'a> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         while arena.next_tuple(self.left_input, plan_arena)? {
-            let mut left = arena.materialize_tuple();
+            let mut left = arena.take_tuple();
             let value = self.parameterized_probe_value(&left, plan_arena)?;
             let root = input.reset(arena, plan_arena, self.runtime_probe_for(value))?;
             // A full unique-key probe cannot have another match, so consume the left row.
@@ -215,10 +218,9 @@ impl<'a> MarkApply<'a> {
                     plan_arena,
                 )?
             {
-                let right = arena.result_tuple_mut();
-                left.values.append(&mut right.values);
-                left.pk = left.pk.or(right.pk.take());
-                arena.produce_tuple(left);
+                let mut right = arena.take_tuple();
+                let pk = left.take_pk().or_else(|| right.take_pk());
+                arena.produce(TupleImpl::concat(left, right, pk));
                 return Ok(());
             }
         }
@@ -246,7 +248,7 @@ impl<'a> MarkApply<'a> {
 
     fn parameterized_probe_value(
         &self,
-        left_tuple: &Tuple,
+        left_tuple: &TupleImpl,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<DataValue>, DatabaseError> {
         self.op
@@ -265,7 +267,7 @@ impl<'a> MarkApply<'a> {
         mut input: RightInput,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
-        left_tuple: &Tuple,
+        left_tuple: &TupleImpl,
     ) -> Result<(RightInput, DataValue), DatabaseError> {
         let probe = self.parameterized_probe_value(left_tuple, plan_arena)?;
         let value = match self.op.kind {
@@ -359,7 +361,7 @@ impl<'a> MarkApply<'a> {
         root: ExecId,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
-        left_tuple: &Tuple,
+        left_tuple: &TupleImpl,
     ) -> Result<MaterializedKeys, DatabaseError> {
         let (_, _, right_expr, _) = Self::quantified_comparison(self.op.predicates(), plan_arena)?;
         arena.reset(root, plan_arena)?;
@@ -395,7 +397,7 @@ impl<'a> MarkApply<'a> {
         keys: &MaterializedKeys,
         quantifier: MarkApplyQuantifier,
         plan_arena: &(dyn MetaArena + '_),
-        left_tuple: &Tuple,
+        left_tuple: &TupleImpl,
     ) -> Result<DataValue, DatabaseError> {
         let any = matches!(quantifier, MarkApplyQuantifier::Any);
         if keys.is_empty {
@@ -450,7 +452,7 @@ impl<'a> MarkApply<'a> {
         plan_arena: &mut ExecMetaArena<A>,
         probe: Option<DataValue>,
         quantifier: MarkApplyQuantifier,
-        left_tuple: &Tuple,
+        left_tuple: &TupleImpl,
     ) -> Result<DataValue, DatabaseError> {
         let mut saw_null = false;
         let predicates = self.op.predicates();
@@ -481,8 +483,8 @@ impl<'a> MarkApply<'a> {
 
     fn predicates_matched(
         predicates: &[ExprRef],
-        left_tuple: &Tuple,
-        right_tuple: &Tuple,
+        left_tuple: &TupleImpl,
+        right_tuple: &TupleImpl,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
@@ -501,8 +503,8 @@ impl<'a> MarkApply<'a> {
 
     fn quantified_predicate_outcome(
         predicates: &[ExprRef],
-        left_tuple: &Tuple,
-        right_tuple: &Tuple,
+        left_tuple: &TupleImpl,
+        right_tuple: &TupleImpl,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<QuantifiedPredicateOutcome, DatabaseError> {
         match Self::eval_predicates(predicates, left_tuple, right_tuple, plan_arena)? {
@@ -516,8 +518,8 @@ impl<'a> MarkApply<'a> {
 
     fn eval_predicates(
         predicates: &[ExprRef],
-        left_tuple: &Tuple,
-        right_tuple: &Tuple,
+        left_tuple: &TupleImpl,
+        right_tuple: &TupleImpl,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<DataValue>, DatabaseError> {
         let values = SplitTupleRef::new(left_tuple, right_tuple);
@@ -705,7 +707,7 @@ mod tests {
         for payload in ["first", "again"] {
             assert!(arena.next_tuple(root, &mut plan_arena)?);
             assert_eq!(
-                arena.materialize_tuple().values,
+                arena.take_tuple(),
                 vec![
                     DataValue::Int32(2),
                     DataValue::from(payload.to_string()),
@@ -787,15 +789,16 @@ mod tests {
         let mut tuples = Vec::new();
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         while arena.next_tuple(root, &mut plan_arena)? {
-            tuples.push(arena.materialize_tuple());
+            tuples.push(arena.take_tuple());
             assert_eq!(arena.nodes.items.len(), count);
             assert_eq!(arena.nodes.items.as_ptr(), address);
         }
 
         assert_eq!(
             tuples
-                .into_iter()
-                .flat_map(|tuple| tuple.values)
+                .iter()
+                .flat_map(TupleImpl::iter)
+                .cloned()
                 .collect::<Vec<_>>(),
             vec![
                 DataValue::Int32(1),
@@ -841,7 +844,7 @@ mod tests {
         assert_eq!(
             tuples
                 .into_iter()
-                .flat_map(|tuple| tuple.values)
+                .flat_map(|mut tuple| tuple.take_values())
                 .collect::<Vec<_>>(),
             vec![
                 DataValue::Int32(1),
@@ -913,7 +916,8 @@ mod tests {
             right_input: Some(RightInput::Streaming { root: right_root }),
             left_input: 0,
         };
-        let left_tuple = Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]);
+        let left_tuple: TupleImpl =
+            Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]).into();
 
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let input = exec.right_input.take().unwrap();
@@ -970,7 +974,7 @@ mod tests {
             right_input: Some(RightInput::Streaming { root: right_root }),
             left_input: 0,
         };
-        let left_tuple = Tuple::new(None, vec![DataValue::Int32(2)]);
+        let left_tuple: TupleImpl = Tuple::new(None, vec![DataValue::Int32(2)]).into();
 
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let input = exec.right_input.take().unwrap();
@@ -1027,7 +1031,7 @@ mod tests {
             right_input: Some(RightInput::Streaming { root: right_root }),
             left_input: 0,
         };
-        let left_tuple = Tuple::new(None, vec![DataValue::Null]);
+        let left_tuple: TupleImpl = Tuple::new(None, vec![DataValue::Null]).into();
 
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let input = exec.right_input.take().unwrap();
@@ -1082,7 +1086,7 @@ mod tests {
         assert_eq!(
             tuples
                 .into_iter()
-                .flat_map(|tuple| tuple.values)
+                .flat_map(|mut tuple| tuple.take_values())
                 .collect::<Vec<_>>(),
             vec![
                 DataValue::Int32(1),
@@ -1171,7 +1175,7 @@ mod tests {
                     if use_guard && flag == DataValue::Boolean(false) {
                         result?;
                         assert_eq!(
-                            arena.result_tuple().values,
+                            *arena.result_tuple(),
                             vec![DataValue::Int32(1), flag, DataValue::Null]
                         );
                         assert!(matches!(
@@ -1253,7 +1257,7 @@ mod tests {
             for (index, (key, flag, marker)) in cases.iter().enumerate() {
                 exec.next_tuple(&mut arena, &mut meta)?;
                 assert_eq!(
-                    arena.result_tuple().values,
+                    *arena.result_tuple(),
                     vec![DataValue::Int32(*key), flag.clone(), marker.clone()]
                 );
                 if materialize {
@@ -1333,7 +1337,7 @@ mod tests {
                     (MarkApplyQuantifier::All, DataValue::Int32(1)) => DataValue::Boolean(false),
                     _ => DataValue::Null,
                 };
-                let tuple = Tuple::new(None, vec![value]);
+                let tuple: TupleImpl = Tuple::new(None, vec![value]).into();
                 let input = exec.right_input.take().unwrap();
                 let (input, value) = exec.mark_value(input, &mut arena, &mut meta, &tuple)?;
                 exec.right_input = Some(input);
@@ -1359,7 +1363,7 @@ mod tests {
             exec.reset(&mut arena, &mut meta)?;
             exec.next_tuple(&mut arena, &mut meta)?;
             assert_eq!(
-                arena.result_tuple().values,
+                *arena.result_tuple(),
                 vec![
                     DataValue::Int32(2),
                     if matches!(quantifier, MarkApplyQuantifier::Any) {
@@ -1385,7 +1389,7 @@ mod tests {
                 input,
                 &mut arena,
                 &mut meta,
-                &Tuple::new(None, vec![DataValue::Null]),
+                &TupleImpl::from(Tuple::new(None, vec![DataValue::Null])),
             )?;
             exec.right_input = Some(input);
             assert_eq!(
@@ -1403,7 +1407,7 @@ mod tests {
             ));
             exec.next_tuple(&mut arena, &mut meta)?;
             assert_eq!(
-                arena.result_tuple().values.last(),
+                arena.result_tuple().iter().last(),
                 Some(&DataValue::Boolean(matches!(
                     quantifier,
                     MarkApplyQuantifier::All
@@ -1461,7 +1465,10 @@ mod tests {
             &transaction,
         ))?;
         assert_eq!(
-            tuples.into_iter().map(|row| row.values).collect::<Vec<_>>(),
+            tuples
+                .into_iter()
+                .map(|mut row| row.take_values())
+                .collect::<Vec<_>>(),
             vec![
                 vec![
                     DataValue::Int32(1),
@@ -1523,7 +1530,7 @@ mod tests {
         assert_eq!(
             tuples
                 .into_iter()
-                .flat_map(|tuple| tuple.values)
+                .flat_map(|mut tuple| tuple.take_values())
                 .collect::<Vec<_>>(),
             vec![
                 DataValue::Int32(1),
@@ -1594,7 +1601,7 @@ mod tests {
         assert_eq!(
             tuples
                 .into_iter()
-                .flat_map(|tuple| tuple.values)
+                .flat_map(|mut tuple| tuple.take_values())
                 .collect::<Vec<_>>(),
             vec![
                 DataValue::Int32(1),

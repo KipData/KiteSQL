@@ -100,7 +100,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                             .map(|(_, column)| plan_arena.column(*column).datatype().serializable())
                     },
                     |tuple| {
-                        let _ = tuple.values.remove(column_index);
+                        let _ = tuple.remove(column_index);
                         Ok(())
                     },
                     |_, _, _| Ok(()),

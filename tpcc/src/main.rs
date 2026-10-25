@@ -864,7 +864,7 @@ impl_from_tpcc_error!(std::io::Error, Io);
 fn explain_tpcc() -> Result<(), DatabaseError> {
     use kite_sql::db::CatalogKind;
     use kite_sql::db::{DataBaseBuilder, ResultIter};
-    use kite_sql::types::tuple::Tuple;
+    use kite_sql::types::tuple::TupleImpl;
 
     fn create_table<I: ResultIter>(mut iter: I) -> Result<String, DatabaseError> {
         let mut output = iter.schema(|schema| {
@@ -880,7 +880,6 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
         while let Some(()) = iter.next_tuple(|_, tuple| {
             output.push_str(
                 &tuple
-                    .values
                     .iter()
                     .map(|value| value.to_string())
                     .collect::<Vec<_>>()
@@ -894,7 +893,7 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
 
     fn with_next_tuple<I: ResultIter, R>(
         mut iter: I,
-        f: impl FnOnce(&Tuple) -> R,
+        f: impl FnOnce(&TupleImpl) -> R,
     ) -> Result<R, DatabaseError> {
         let value = iter
             .next_tuple(|_, tuple| f(tuple))?
@@ -923,47 +922,35 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
         tx.run("SELECT c_w_id, c_d_id, c_id, c_last, c_balance, c_data FROM customer limit 1")?,
         |tuple| {
             (
-                tuple.values[0].clone(),
-                tuple.values[1].clone(),
-                tuple.values[2].clone(),
-                tuple.values[3].clone(),
-                tuple.values[4].clone(),
-                tuple.values[5].clone(),
+                tuple[0].clone(),
+                tuple[1].clone(),
+                tuple[2].clone(),
+                tuple[3].clone(),
+                tuple[4].clone(),
+                tuple[5].clone(),
             )
         },
     )?;
     let (d_id, d_w_id, d_next_o_id) = with_next_tuple(
         tx.run("SELECT d_id, d_w_id, d_next_o_id FROM district limit 1")?,
-        |tuple| {
-            (
-                tuple.values[0].clone(),
-                tuple.values[1].clone(),
-                tuple.values[2].clone(),
-            )
-        },
+        |tuple| (tuple[0].clone(), tuple[1].clone(), tuple[2].clone()),
     )?;
     let i_id = with_next_tuple(tx.run("SELECT i_id FROM item limit 1")?, |tuple| {
-        tuple.values[0].clone()
+        tuple[0].clone()
     })?;
     let (s_i_id, s_w_id, s_quantity) = with_next_tuple(
         tx.run("SELECT s_i_id, s_w_id, s_quantity FROM stock limit 1")?,
-        |tuple| {
-            (
-                tuple.values[0].clone(),
-                tuple.values[1].clone(),
-                tuple.values[2].clone(),
-            )
-        },
+        |tuple| (tuple[0].clone(), tuple[1].clone(), tuple[2].clone()),
     )?;
     let (o_w_id, o_d_id, o_c_id, o_id, o_carrier_id) = with_next_tuple(
         tx.run("SELECT o_w_id, o_d_id, o_c_id, o_id, o_carrier_id FROM orders limit 1")?,
         |tuple| {
             (
-                tuple.values[0].clone(),
-                tuple.values[1].clone(),
-                tuple.values[2].clone(),
-                tuple.values[3].clone(),
-                tuple.values[4].clone(),
+                tuple[0].clone(),
+                tuple[1].clone(),
+                tuple[2].clone(),
+                tuple[3].clone(),
+                tuple[4].clone(),
             )
         },
     )?;
@@ -971,22 +958,16 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
         tx.run("SELECT ol_w_id, ol_d_id, ol_o_id, ol_delivery_d FROM order_line limit 1")?,
         |tuple| {
             (
-                tuple.values[0].clone(),
-                tuple.values[1].clone(),
-                tuple.values[2].clone(),
-                tuple.values[3].clone(),
+                tuple[0].clone(),
+                tuple[1].clone(),
+                tuple[2].clone(),
+                tuple[3].clone(),
             )
         },
     )?;
     let (no_d_id, no_w_id, no_o_id) = with_next_tuple(
         tx.run("SELECT no_d_id, no_w_id, no_o_id FROM new_orders limit 1")?,
-        |tuple| {
-            (
-                tuple.values[0].clone(),
-                tuple.values[1].clone(),
-                tuple.values[2].clone(),
-            )
-        },
+        |tuple| (tuple[0].clone(), tuple[1].clone(), tuple[2].clone()),
     )?;
     // ORDER
     {
