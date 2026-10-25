@@ -71,6 +71,7 @@ use self::{
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::visitor::{walk_expr, ExprVisitor};
+use crate::expression::AliasType;
 use crate::planner::operator::alter_table::change_column::DefaultChange as ColumnDefaultChange;
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::operator::analyze::AnalyzeOperator;
@@ -570,6 +571,19 @@ impl Operator {
                     self.keep_going = (self.f)(self.arena, column);
                 }
                 Ok(())
+            }
+
+            // The alias target column is still owned by the plan.
+            fn visit_alias(
+                &mut self,
+                expr: ExprRef,
+                alias: &AliasType,
+                arena: &A,
+            ) -> Result<(), DatabaseError> {
+                if let AliasType::Expr(alias_expr) = alias {
+                    self.visit(*alias_expr, arena)?;
+                }
+                self.visit(expr, arena)
             }
         }
 

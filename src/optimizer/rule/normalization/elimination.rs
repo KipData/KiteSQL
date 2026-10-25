@@ -72,22 +72,6 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for Substitute {
         }
         Ok((self.exprs.is_none() && self.offset == 0) || self.visited.insert(*expr))
     }
-
-    fn visit_alias(
-        &mut self,
-        expr: &mut ExprRef,
-        alias: &mut AliasType,
-        arena: &mut A,
-    ) -> Result<(), DatabaseError> {
-        ExprVisitorMut::visit(
-            self,
-            match alias {
-                AliasType::Expr(expr) => expr,
-                _ => expr,
-            },
-            arena,
-        )
-    }
 }
 
 struct EliminateVisitor<'a, 'b> {

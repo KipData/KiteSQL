@@ -16,7 +16,7 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::visitor::ExprVisitor;
-use crate::expression::{AliasType, HasCountStar, ScalarExpression};
+use crate::expression::{HasCountStar, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::normalization::{
@@ -99,15 +99,6 @@ impl ExprVisitor<dyn MetaArena + '_> for ReferencedColumnCollector<'_, '_> {
     ) -> Result<(), DatabaseError> {
         self.referenced_columns.insert(*column, self.arena);
         Ok(())
-    }
-
-    fn visit_alias(
-        &mut self,
-        expr: ExprRef,
-        _ty: &AliasType,
-        arena: &(dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
-        self.visit(expr, arena)
     }
 }
 

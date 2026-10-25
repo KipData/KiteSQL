@@ -85,12 +85,10 @@ pub trait ExprVisitor<A: MetaArena + ?Sized>: Sized {
     fn visit_alias(
         &mut self,
         expr: ExprRef,
-        alias: &AliasType,
+        _alias: &AliasType,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        if let AliasType::Expr(alias_expr) = alias {
-            self.visit(*alias_expr, arena)?;
-        }
+        // The alias target only carries the output identity.
         self.visit(expr, arena)
     }
     fn visit_type_cast(

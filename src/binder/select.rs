@@ -1530,15 +1530,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                         plan,
                         correlated,
                         output_column,
-                        predicate: mut quantified_predicate,
+                        predicate: quantified_predicate,
                         ..
                     } => {
-                        if correlated {
-                            quantified_predicate = Self::rewrite_correlated_quantified_predicate(
-                                quantified_predicate,
-                                arena,
-                            );
-                        }
                         if self.context.is_step(&QueryBindStep::Where) {
                             if let ScalarExpression::Binary { left_expr, .. } =
                                 &quantified_predicate
@@ -1705,36 +1699,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         }
 
         Ok((plan, apply_predicates))
-    }
-
-    fn rewrite_correlated_quantified_predicate(
-        predicate: ScalarExpression,
-        arena: &PlanArena<'_>,
-    ) -> ScalarExpression {
-        let strip_projection_alias = |expr| match arena.expression(expr) {
-            ScalarExpression::Alias {
-                expr,
-                alias: AliasType::Expr(_),
-            } => *expr,
-            _ => expr,
-        };
-
-        match predicate {
-            ScalarExpression::Binary {
-                op,
-                left_expr,
-                right_expr,
-                ty,
-                ..
-            } => ScalarExpression::Binary {
-                op,
-                left_expr: strip_projection_alias(left_expr),
-                right_expr: strip_projection_alias(right_expr),
-                evaluator: None,
-                ty,
-            },
-            predicate => predicate,
-        }
     }
 
     fn plan_has_correlated_refs(

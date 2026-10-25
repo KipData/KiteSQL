@@ -20,7 +20,7 @@ use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::visitor::OperatorVisitor;
 use crate::planner::operator::{Operator, RowCountOption};
-use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
+use crate::planner::{Childrens, LogicalPlan, MetaArena, PlanArena};
 use crate::types::ColumnId;
 use std::mem;
 
@@ -224,16 +224,6 @@ impl<A: MetaArena> ExprVisitor<A> for ScanColumnVisitor<'_, '_, A> {
             expr,
             ScalarExpression::Alias { .. } | ScalarExpression::ColumnRef { .. }
         ))
-    }
-
-    fn visit_alias(
-        &mut self,
-        expr: ExprRef,
-        _alias: &AliasType,
-        arena: &A,
-    ) -> Result<(), DatabaseError> {
-        // The alias target describes the output, not the source column.
-        self.visit(expr, arena)
     }
 
     fn visit_column_ref(&mut self, column: &ColumnRef) -> Result<(), DatabaseError> {

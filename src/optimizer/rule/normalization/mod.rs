@@ -14,7 +14,6 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
-use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
@@ -275,20 +274,6 @@ impl NormalizationRule for NormalizationRuleImpl {
     }
 }
 
-pub(crate) fn strip_alias<A: MetaArena + ?Sized>(expr: ExprRef, arena: &A) -> ExprRef {
-    match arena.expression(expr) {
-        ScalarExpression::Alias {
-            expr,
-            alias: AliasType::Name(_),
-        } => strip_alias(*expr, arena),
-        ScalarExpression::Alias {
-            alias: AliasType::Expr(alias_expr),
-            ..
-        } => strip_alias(*alias_expr, arena),
-        _ => expr,
-    }
-}
-
 pub(crate) fn remap_position(position: &mut usize, removed_positions: &[usize]) {
     match removed_positions.binary_search(position) {
         Ok(_) => {
@@ -338,18 +323,6 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for PositionRemapper<'_, '_> {
     ) -> Result<(), DatabaseError> {
         remap_position(position, self.removed_positions);
         Ok(())
-    }
-
-    fn visit_alias(
-        &mut self,
-        expr: &mut ExprRef,
-        alias: &mut AliasType,
-        arena: &mut A,
-    ) -> Result<(), DatabaseError> {
-        match alias {
-            AliasType::Expr(alias_expr) => self.visit(alias_expr, arena),
-            AliasType::Name(_) => self.visit(expr, arena),
-        }
     }
 }
 

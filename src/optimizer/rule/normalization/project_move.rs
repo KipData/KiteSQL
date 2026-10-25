@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
 use crate::expression::visitor::ExprVisitor;
-use crate::expression::{AliasType, ScalarExpression};
+use crate::expression::ScalarExpression;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::Operator;
@@ -40,19 +40,6 @@ impl<A: MetaArena + ?Sized> ExprVisitor<A> for InputUses {
             return Ok(false);
         }
         Ok(true)
-    }
-
-    fn visit_alias(
-        &mut self,
-        expr: ExprRef,
-        alias: &AliasType,
-        arena: &A,
-    ) -> Result<(), DatabaseError> {
-        let expr = match alias {
-            AliasType::Expr(expr) => *expr,
-            AliasType::Name(_) => expr,
-        };
-        self.visit(expr, arena)
     }
 
     fn visit_scala_function(
@@ -114,6 +101,7 @@ mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::expression::function::scala::ArcScalarFunctionImpl;
+    use crate::expression::AliasType;
     use crate::expression::BinaryOperator;
     use crate::function::upper::Upper;
     use crate::planner::operator::project::ProjectOperator;
@@ -194,8 +182,8 @@ mod tests {
             alias: AliasType::Name("named".into()),
         });
         let mapped = arena.alloc_expression(ScalarExpression::Alias {
-            expr: a,
-            alias: AliasType::Expr(c),
+            expr: c,
+            alias: AliasType::Expr(a),
         });
         let mut plan = LogicalPlan::new(
             Operator::Project(ProjectOperator::new(vec![named, mapped])),

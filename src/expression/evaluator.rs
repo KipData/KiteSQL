@@ -18,7 +18,7 @@ use crate::planner::PlanArena;
 
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
-use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TrimWhereField};
+use crate::expression::{BinaryOperator, ScalarExpression, TrimWhereField};
 use crate::planner::MetaArena;
 use crate::types::evaluator::binary_create;
 use crate::types::tuple::{Input, InputRef};
@@ -69,15 +69,12 @@ impl ScalarExpression {
                 };
                 Ok(tuple.column(*position))
             }
-            ScalarExpression::Alias { expr, alias } => {
+            // `AliasType::Expr` only carries the output identity.
+            ScalarExpression::Alias { expr, .. } => {
                 let Some(tuple) = tuple else {
                     return Ok(Cow::Owned(DataValue::Null));
                 };
-                if let AliasType::Expr(inner_expr) = alias {
-                    arena.expression(*inner_expr).eval(arena, Some(tuple))
-                } else {
-                    arena.expression(*expr).eval(arena, Some(tuple))
-                }
+                arena.expression(*expr).eval(arena, Some(tuple))
             }
             ScalarExpression::TypeCast {
                 expr, evaluator, ..
@@ -419,6 +416,7 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expression::AliasType;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{ExecMetaArena, ExprRef, TableArenaCell};
 

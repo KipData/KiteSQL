@@ -262,7 +262,7 @@ insert into lookup_inner values (1,10,7),(2,10,9),(3,20,3),(4,null,8);
 query T
 explain select lookup_outer.id,lookup_inner.id from lookup_outer join lookup_inner on lookup_outer.k=lookup_inner.k;
 ----
-Projection [lookup_outer.id, lookup_inner.id] [Project => (Sort Option: Follow)] InnerJoinApply TableScan lookup_outer -> [lookup_outer.id, lookup_outer.k] [SeqScan => (Sort Option: None)] TableScan lookup_inner -> [lookup_inner.id, lookup_inner.k] [IndexScan By lookup_inner_k => Probe ? => (Sort Option: OrderBy: (lookup_inner.k Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [lookup_outer.id, lookup_inner.id] [Project => (Sort Option: Follow)] InnerJoinApply [MarkApply => (Sort Option: Follow)] TableScan lookup_outer -> [lookup_outer.id, lookup_outer.k] [SeqScan => (Sort Option: None)] TableScan lookup_inner -> [lookup_inner.id, lookup_inner.k] [IndexScan By lookup_inner_k => Probe ? => (Sort Option: OrderBy: (lookup_inner.k Asc Nulls Last) ignore_prefix_len: 0)]
 
 # Resume the same non-unique probe across calls, then rebuild after NULL and
 # missing keys. In particular, NULL = NULL must not produce the inner NULL row.

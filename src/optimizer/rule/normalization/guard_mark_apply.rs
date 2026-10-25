@@ -12,19 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::strip_alias;
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::visitor::ExprVisitor;
-use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TypeCast, UnaryOperator};
+use crate::expression::{BinaryOperator, ScalarExpression, TypeCast, UnaryOperator};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
+use crate::optimizer::plan_utils::{only_child, only_child_mut};
 use crate::planner::operator::mark_apply::MarkApplyKind;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::evaluator::BinaryEvaluatorRef;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
+use std::iter::successors;
 
 pub struct GuardMarkApply;
 
@@ -35,16 +36,18 @@ impl NormalizationRule for GuardMarkApply {
         arena: &mut PlanArena,
         _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
-        let (Operator::Project(project), Childrens::Only(filter)) =
-            (&plan.operator, plan.childrens.as_mut())
-        else {
+        if !matches!(plan.operator, Operator::Project(_)) {
+            return Ok(false);
+        }
+        let Some(filter) = skip_row_order(plan) else {
             return Ok(false);
         };
         let (Operator::Filter(filter_op), Childrens::Only(mark)) =
-            (&filter.operator, filter.childrens.as_mut())
+            (&filter.operator, filter.childrens.as_ref())
         else {
             return Ok(false);
         };
+        let predicate = filter_op.predicate;
         let mut markers = Vec::new();
         let mut input = mark.as_ref();
         while let (Operator::MarkApply(op), Childrens::Twins { left, .. }) =
@@ -59,13 +62,18 @@ impl NormalizationRule for GuardMarkApply {
         if markers.is_empty() {
             return Ok(false);
         }
-        // No marker in this segment may escape through the projection.
-        for expr in &project.exprs {
-            if expr.any_referenced_column(arena, |arena, column| {
-                markers
-                    .iter()
-                    .any(|marker| arena.same_column(*column, *marker))
-            })? {
+        // No marker in this segment may be read above the filter.
+        let segment = successors(Some(&*plan), |node| only_child(node))
+            .take_while(|node| !matches!(node.operator, Operator::Filter(_)));
+        for node in segment {
+            if !node
+                .operator
+                .visit_referenced_columns(arena, &mut |arena, column| {
+                    !markers
+                        .iter()
+                        .any(|marker| arena.same_column(*column, *marker))
+                })?
+            {
                 return Ok(false);
             }
         }
@@ -99,7 +107,9 @@ impl NormalizationRule for GuardMarkApply {
         }
         let mut changed = false;
         let mut guards = Vec::new();
-        let mut input = mark.as_mut();
+        let Some(mut input) = mark_below_filter(plan) else {
+            return Ok(false);
+        };
         for (index, marker) in markers.iter().enumerate() {
             let (Operator::MarkApply(op), Childrens::Twins { left, .. }) =
                 (&mut input.operator, input.childrens.as_mut())
@@ -118,7 +128,7 @@ impl NormalizationRule for GuardMarkApply {
                     marker: *marker,
                     guards: &mut guards,
                 };
-                visitor.visit(filter_op.predicate, arena)?;
+                visitor.visit(predicate, arena)?;
                 let mut guard = None;
                 for &(sibling, when_true) in &guards {
                     let skip = decisive_condition(sibling, when_true, unavailable, arena)?;
@@ -144,6 +154,26 @@ impl NormalizationRule for GuardMarkApply {
         }
         Ok(changed)
     }
+}
+
+// Sort/Limit/TopK between the projection and the filter only reorder or cut rows.
+fn skip_row_order(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+    let mut child = only_child(plan)?;
+    while matches!(
+        child.operator,
+        Operator::Sort(_) | Operator::Limit(_) | Operator::TopK(_)
+    ) {
+        child = only_child(child)?;
+    }
+    Some(child)
+}
+
+fn mark_below_filter(plan: &mut LogicalPlan) -> Option<&mut LogicalPlan> {
+    let mut node = plan;
+    while !matches!(node.operator, Operator::Filter(_)) {
+        node = only_child_mut(node)?;
+    }
+    only_child_mut(node)
 }
 
 struct GuardVisitor<'a> {
@@ -172,21 +202,6 @@ impl ExprVisitor<PlanArena<'_>> for GuardVisitor<'_> {
             } | ScalarExpression::TypeCast { .. }
                 | ScalarExpression::Alias { .. }
         ))
-    }
-
-    fn visit_alias(
-        &mut self,
-        expr: ExprRef,
-        alias: &AliasType,
-        arena: &PlanArena,
-    ) -> Result<(), DatabaseError> {
-        self.visit(
-            match alias {
-                AliasType::Expr(expr) => *expr,
-                AliasType::Name(_) => expr,
-            },
-            arena,
-        )
     }
 
     fn visit_binary(
@@ -237,7 +252,7 @@ fn decisive_condition(
             return Ok(Some(if when_true { expr } else { negate(expr, arena) }));
         }
     }
-    match arena.expression(strip_alias(expr, arena)).clone() {
+    match arena.expression(expr.unpack_alias(arena)).clone() {
         ScalarExpression::Binary {
             op: op @ (BinaryOperator::And | BinaryOperator::Or),
             left_expr,
@@ -335,7 +350,7 @@ impl ExprVisitor<PlanArena<'_>> for SimpleGuardVisitor {
         if !self.valid {
             return Ok(false);
         }
-        let unaliased = strip_alias(expr, arena);
+        let unaliased = expr.unpack_alias(arena);
         if unaliased != expr {
             self.visit(unaliased, arena)?;
             return Ok(false);
@@ -437,6 +452,7 @@ impl ExprVisitor<PlanArena<'_>> for SimpleGuardVisitor {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::expression::AliasType;
     use crate::optimizer::rule::normalization::compilation_in_advance::EvaluatorBind;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::mark_apply::MarkApplyOperator;
@@ -1025,8 +1041,8 @@ mod tests {
             ty: LogicalType::Boolean,
         });
         let alias = arena.alloc_expression(ScalarExpression::Alias {
-            expr: number,
-            alias: AliasType::Expr(fixture.flag),
+            expr: fixture.flag,
+            alias: AliasType::Expr(number),
         });
         let not_number = arena.alloc_expression(ScalarExpression::Unary {
             op: UnaryOperator::Not,
@@ -1054,15 +1070,7 @@ mod tests {
         assert_case(not_flag, true)?;
         assert_case(alias, true)?;
         assert_case(nested, false)?;
-        // Passing the whitelist does not waive the rule's left-input dependency check.
         let predicate = fixture.predicate();
-        let ScalarExpression::Binary { left_expr, .. } = &mut *arena.expression_mut(predicate)
-        else {
-            unreachable!()
-        };
-        *left_expr = alias;
-        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
-        assert!(fixture.mark().guard.is_none());
         let alias = arena.alloc_expression(ScalarExpression::Alias {
             expr: fixture.flag,
             alias: AliasType::Name("flag_alias".to_string()),

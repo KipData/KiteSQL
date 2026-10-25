@@ -822,13 +822,7 @@ impl ExprRef {
     }
 
     pub fn unpack_alias(self, arena: &(impl MetaArena + ?Sized)) -> ExprRef {
-        if let ScalarExpression::Alias {
-            alias: AliasType::Expr(expr),
-            ..
-        } = arena.expression(self)
-        {
-            expr.unpack_alias(arena)
-        } else if let ScalarExpression::Alias { expr, .. } = arena.expression(self) {
+        if let ScalarExpression::Alias { expr, .. } = arena.expression(self) {
             expr.unpack_alias(arena)
         } else {
             self

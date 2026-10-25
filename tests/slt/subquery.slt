@@ -1225,6 +1225,16 @@ select id,b in (select x.b from corr_rows x where x.id=1) as first_match,first_m
 ----
 1 true true
 
+# A marker exposed by a derived table is read above the filter, so it cannot be guarded.
+query IT
+select id,m from (select id,b in (select x.b from corr_rows x where x.id=1) as m from corr_rows) where id>0 or m order by id;
+----
+1 true
+2 false
+3 false
+4 NULL
+5 false
+
 statement error aggregate functions are not allowed in WHERE
 select count(*) in (select x.id from corr_rows x) as matched from corr_rows where matched;
 
@@ -1237,6 +1247,16 @@ insert into guard_bad_cast values(1,'not an integer');
 # A shared numeric guard protects every marker in a consecutive Apply segment.
 query I
 select id from corr_rows where id<0 and (b in (select cast(txt as int) from guard_bad_cast) or b in (select cast(txt as int) from guard_bad_cast));
+----
+
+# An outer filter merged through a derived table also guards the inner Apply.
+query I
+select id from (select id,b from corr_rows where b in (select cast(txt as int) from guard_bad_cast)) x where x.id<0;
+----
+
+# Sort between the projection and the filter does not hide the guard.
+query I
+select id from corr_rows where id<0 and b in (select cast(txt as int) from guard_bad_cast) order by id;
 ----
 
 query I

@@ -506,10 +506,10 @@ mod tests {
             alias: AliasType::Name("g".to_string()),
         });
 
-        let constant = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
+        let identity = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
         let mut target = arena.alloc_expression(ScalarExpression::Alias {
-            expr: constant,
-            alias: AliasType::Expr(group_expr),
+            expr: group_expr,
+            alias: AliasType::Expr(identity),
         });
 
         {

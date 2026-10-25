@@ -178,7 +178,13 @@ mod tests {
             &mut arena,
         )?;
 
+        // Projects are eliminated before filters are combined.
         let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
+                "Collapse Project",
+                HepBatchStrategy::fix_point_topdown(10),
+                vec![NormalizationRuleImpl::EliminateProject],
+            )
             .before_batch(
                 "test_combine_filter",
                 HepBatchStrategy::once_topdown(),
