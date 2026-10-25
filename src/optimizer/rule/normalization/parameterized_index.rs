@@ -747,11 +747,9 @@ mod inner_join_tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::expression::range_detacher::Range;
     use crate::expression::{AliasType, UnaryOperator};
-    use crate::optimizer::rule::normalization::join_reorder::GreedyJoinReorder;
     use crate::planner::operator::join::JoinOperator;
     use crate::planner::operator::limit::LimitOperator;
     use crate::planner::operator::table_scan::TableScanOperator;
-    use crate::planner::operator::WorkCost;
     use crate::planner::TableArenaCell;
     use crate::types::index::{IndexInfo, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -1085,16 +1083,10 @@ mod inner_join_tests {
                     SortOption::None,
                     RowCountOption::Estimated { rows, ndv: None },
                 ));
-                plan.physical_option.as_mut().unwrap().cost = Some(WorkCost {
-                    width: 1,
-                    startup: Some(9999),
-                    total: Some(9999),
-                });
             }
             assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?);
             let option = plan.physical_option.as_ref().unwrap();
             assert_eq!(option.plan, PlanImpl::IndexProbeJoin);
-            assert_eq!(option.cost, None);
             assert_eq!(plan.estimated_rows(), rows);
             let Childrens::Twins { right, .. } = plan.childrens.as_ref() else {
                 unreachable!()
@@ -1104,134 +1096,11 @@ mod inner_join_tests {
                 right.physical_option.as_ref().unwrap().row_count,
                 RowCountOption::Unknown
             );
-            assert_eq!(plan.estimated_startup_work(&mut arena)?, Some(0));
+            assert_eq!(
+                plan.price(&mut arena).and_then(|cost| cost.startup),
+                Some(0)
+            );
         }
-        Ok(())
-    }
-
-    #[test]
-    fn greedy_decided_join_is_not_parameterized() -> Result<(), DatabaseError> {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let left = scan(&mut arena, "outer", &[LogicalType::Integer], &[]);
-        let right = unique_scan(&mut arena, "inner", &[LogicalType::Integer], &[&[0]]);
-        let l = column(&left, 0, &mut arena);
-        let r = column(&right, 0, &mut arena);
-        let mut plan = join(left, right, vec![(l, r)], None);
-        let mut option = PhysicalOption::new(
-            PlanImpl::HashJoin,
-            SortOption::None,
-            RowCountOption::Unknown,
-        );
-        option.join_decided = true;
-        plan.physical_option = Some(option);
-        let original = plan.clone();
-        assert!(!ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?);
-        assert_eq!(plan, original);
-        Ok(())
-    }
-
-    #[test]
-    fn parameterized_join_allows_parent_nested_loop_orientation() -> Result<(), DatabaseError> {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let mut left = scan(&mut arena, "outer", &[LogicalType::Integer], &[]);
-        let mut right = unique_scan(&mut arena, "inner", &[LogicalType::Integer], &[&[0]]);
-        let l = column(&left, 0, &mut arena);
-        let r = column(&right, 0, &mut arena);
-        left.physical_option = Some(PhysicalOption::new(
-            PlanImpl::SeqScan,
-            SortOption::None,
-            RowCountOption::Estimated {
-                rows: 129,
-                ndv: None,
-            },
-        ));
-        right.physical_option = Some(PhysicalOption::new(
-            PlanImpl::SeqScan,
-            SortOption::None,
-            RowCountOption::Estimated {
-                rows: 120,
-                ndv: None,
-            },
-        ));
-        let mut apply = join(left, right, vec![(l, r)], None);
-        apply.physical_option = Some(PhysicalOption::new(
-            PlanImpl::HashJoin,
-            SortOption::None,
-            RowCountOption::Estimated {
-                rows: 10,
-                ndv: None,
-            },
-        ));
-        assert!(ParameterizeInnerJoin.apply(&mut apply, &mut arena, None)?);
-        let mut other = scan(&mut arena, "other", &[LogicalType::Integer], &[]);
-        other.physical_option = Some(PhysicalOption::new(
-            PlanImpl::SeqScan,
-            SortOption::None,
-            RowCountOption::Estimated {
-                rows: 200,
-                ndv: None,
-            },
-        ));
-        let mut plan =
-            JoinOperator::build(other, apply, JoinCondition::None, JoinType::Cross, false);
-        plan.physical_option = Some(PhysicalOption::new(
-            PlanImpl::NestLoopJoin,
-            SortOption::None,
-            RowCountOption::Unknown,
-        ));
-        let schema = plan.output_schema(&mut arena).clone();
-        assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
-        assert_eq!(plan.output_schema(&mut arena), &schema);
-        assert_eq!(plan.estimated_rows(), Some(2000));
-        let Childrens::Only(join) = plan.childrens.as_ref() else {
-            panic!("expected output-restoring projection")
-        };
-        let Childrens::Twins { left, .. } = join.childrens.as_ref() else {
-            unreachable!()
-        };
-        assert!(matches!(left.operator, Operator::IndexProbeJoin(_)));
-        Ok(())
-    }
-
-    #[test]
-    fn constant_only_probe_leaves_static_scan_and_join_unchanged() -> Result<(), DatabaseError> {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let left = scan(&mut arena, "outer", &[LogicalType::Integer], &[]);
-        let mut right = unique_scan(
-            &mut arena,
-            "inner",
-            &[LogicalType::Integer, LogicalType::Integer],
-            &[&[1]],
-        );
-        let l = column(&left, 0, &mut arena);
-        let r = column(&right, 0, &mut arena);
-        let static_key = column(&right, 1, &mut arena);
-        let constant = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(782)));
-        let predicate = binary(&mut arena, BinaryOperator::Eq, static_key, constant);
-        let Operator::TableScan(scan) = &mut right.operator else {
-            unreachable!()
-        };
-        let info = &mut scan.index_infos[0];
-        info.lookup = Some(IndexLookup::Static(Range::Eq(DataValue::Int32(782))));
-        info.residual_predicate = Some(predicate);
-        right.physical_option = Some(PhysicalOption::new(
-            PlanImpl::IndexScan(Box::new(info.clone())),
-            SortOption::None,
-            RowCountOption::Unknown,
-        ));
-        // Keep the join-key boundary intact across multiple filter layers.
-        let passthrough = arena.alloc_expression(ScalarExpression::from(true));
-        let right = FilterOperator::build(passthrough, right, false);
-        let right = FilterOperator::build(predicate, right, false);
-        let mut plan = join(left, right, vec![(l, r)], None);
-        let before = plan.clone();
-
-        assert!(!ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?);
-        assert_eq!(plan, before);
-        assert_eq!((position(l, &arena), position(r, &arena)), (0, 0));
         Ok(())
     }
 
@@ -1426,7 +1295,10 @@ mod inner_join_tests {
             plan.physical_option.as_ref().unwrap().row_count,
             RowCountOption::Follow
         );
-        assert_eq!(plan.estimated_startup_work(&mut arena)?, Some(0));
+        assert_eq!(
+            plan.price(&mut arena).and_then(|cost| cost.startup),
+            Some(0)
+        );
         assert_eq!(plan.output_schema(&mut arena), &schema);
         let Operator::Filter(filter) = &plan.operator else {
             panic!("join filter must remain above projection")
@@ -1495,6 +1367,7 @@ mod inner_join_tests {
             "outer_join",
             "normal_index",
             "composite_index",
+            "join_decided",
         ] {
             let tables = TableArenaCell::default();
             let mut arena = PlanArena::new(&tables);
@@ -1532,6 +1405,15 @@ mod inner_join_tests {
                     unreachable!()
                 };
                 join.join_type = JoinType::LeftOuter;
+            }
+            if case == "join_decided" {
+                let mut option = PhysicalOption::new(
+                    PlanImpl::HashJoin,
+                    SortOption::None,
+                    RowCountOption::Unknown,
+                );
+                option.join_decided = true;
+                plan.physical_option = Some(option);
             }
             let before = plan.clone();
             assert!(

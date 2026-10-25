@@ -84,7 +84,6 @@ impl ReferenceSerialization for PhysicalOption {
             plan: PlanImpl::decode(reader, context, reference_tables, arena)?,
             sort_option: SortOption::decode(reader, context, reference_tables, arena)?,
             row_count: RowCountOption::decode(reader, context, reference_tables, arena)?,
-            cost: None,
             lookup_work: None,
             join_decided: false,
         })
@@ -101,7 +100,6 @@ mod tests {
     use super::*;
     use crate::expression::ScalarExpression;
     use crate::planner::operator::sort::SortField;
-    use crate::planner::operator::WorkCost;
     use crate::planner::{PlanArena, TableArenaCell};
     #[cfg(all(not(feature = "rocksdb"), feature = "lmdb"))]
     use crate::storage::lmdb::LmdbTransaction as TestTransaction;
@@ -146,7 +144,6 @@ mod tests {
                     &mut arena,
                 )?;
                 assert_eq!(decoded, option);
-                assert_eq!(decoded.cost, None);
                 assert!(reader.is_empty());
             }
         }
@@ -154,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn physical_option_keeps_wire_order_and_discards_startup_cache() -> Result<(), DatabaseError> {
+    fn physical_option_keeps_wire_order() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let key = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(1)));
@@ -178,7 +175,7 @@ mod tests {
             ndv: Some(37),
         };
         for is_direct in [false, true] {
-            // This is the pre-cache wire layout: exactly three ordered fields.
+            // The wire layout is exactly three ordered fields.
             let mut expected = Vec::new();
             let mut reference_tables = ReferenceTables::new();
             option
@@ -190,50 +187,42 @@ mod tests {
             option
                 .row_count
                 .encode(&mut expected, is_direct, &mut reference_tables, &arena)?;
-            for cache in [None, Some(None), Some(Some(192))] {
-                option.cost = cache.map(|startup| WorkCost {
-                    width: 1,
-                    startup,
-                    total: startup,
-                });
-                let mut encoded = Vec::new();
-                let mut references = ReferenceTables::new();
-                option.encode(&mut encoded, is_direct, &mut references, &arena)?;
-                assert_eq!(encoded, expected);
-                assert_eq!(references, reference_tables);
-                let mut reader = encoded.as_slice();
-                let decoded = PhysicalOption::decode::<TestTransaction<'_>, _, _>(
-                    &mut reader,
-                    None,
-                    &references,
-                    &mut arena,
-                )?;
-                assert_eq!(decoded.plan, PlanImpl::Sort);
-                assert_eq!(
-                    decoded.row_count,
-                    RowCountOption::Estimated {
-                        rows: 42,
-                        ndv: None
-                    }
-                );
-                assert_eq!(decoded.cost, None);
-                let SortOption::OrderBy {
-                    fields,
-                    ignore_prefix_len,
-                } = decoded.sort_option
-                else {
-                    unreachable!()
-                };
-                assert_eq!(ignore_prefix_len, 1);
-                assert_eq!(fields.len(), 1);
-                assert!(!fields[0].asc);
-                assert!(fields[0].nulls_first);
-                assert_eq!(
-                    arena.expression(fields[0].expr),
-                    &ScalarExpression::Constant(DataValue::Int32(1))
-                );
-                assert!(reader.is_empty());
-            }
+            let mut encoded = Vec::new();
+            let mut references = ReferenceTables::new();
+            option.encode(&mut encoded, is_direct, &mut references, &arena)?;
+            assert_eq!(encoded, expected);
+            assert_eq!(references, reference_tables);
+            let mut reader = encoded.as_slice();
+            let decoded = PhysicalOption::decode::<TestTransaction<'_>, _, _>(
+                &mut reader,
+                None,
+                &references,
+                &mut arena,
+            )?;
+            assert_eq!(decoded.plan, PlanImpl::Sort);
+            assert_eq!(
+                decoded.row_count,
+                RowCountOption::Estimated {
+                    rows: 42,
+                    ndv: None
+                }
+            );
+            let SortOption::OrderBy {
+                fields,
+                ignore_prefix_len,
+            } = decoded.sort_option
+            else {
+                unreachable!()
+            };
+            assert_eq!(ignore_prefix_len, 1);
+            assert_eq!(fields.len(), 1);
+            assert!(!fields[0].asc);
+            assert!(fields[0].nulls_first);
+            assert_eq!(
+                arena.expression(fields[0].expr),
+                &ScalarExpression::Constant(DataValue::Int32(1))
+            );
+            assert!(reader.is_empty());
         }
         Ok(())
     }

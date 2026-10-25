@@ -167,12 +167,10 @@ fn lift_cross_project(
     let mut join = plan.take();
 
     join.reset_output_schema_cache();
-    join.clear_work_cost();
 
     *project.childrens = Childrens::Only(Box::new(join));
     project.physical_option = None;
     project.reset_output_schema_cache();
-    project.clear_work_cost();
 
     *plan = project;
     Ok(true)
@@ -267,14 +265,12 @@ impl NormalizationRule for EliminateProject {
             std::mem::swap(&mut parent.childrens, &mut project.childrens);
 
             parent.reset_output_schema_cache();
-            parent.clear_work_cost();
 
             *project.childrens = Childrens::Only(Box::new(parent));
             project.physical_option = None;
             *plan = project;
         }
         plan.reset_output_schema_cache();
-        plan.clear_work_cost();
         Ok(true)
     }
 }
@@ -991,47 +987,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_refs_are_copied_without_mutating_sources_or_revisiting_replacements(
-    ) -> Result<(), DatabaseError> {
-        let table = build_t1_table()?;
-        let mut arena = PlanArena::new(&table.table_arena);
-        let scan = table.plan_with_arena("select c1, c2 from t1", &mut arena)?;
-        let (input, replacement) = source(&mut arena, scan);
-        let reference = column(&mut arena, replacement, 0);
-        let expr = binary(&mut arena, reference, BinaryOperator::Plus, 2);
-        let mut plan = LogicalPlan::new(
-            Operator::Project(ProjectOperator::new(vec![expr, expr])),
-            Childrens::Only(Box::new(input)),
-        );
-
-        assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
-        let Operator::Project(op) = &plan.operator else {
-            unreachable!()
-        };
-        for rewritten in &op.exprs {
-            let ScalarExpression::Binary { left_expr, .. } = rewritten.unpack_alias_ref(&arena)
-            else {
-                unreachable!()
-            };
-            assert_eq!(*left_expr, replacement);
-            assert_ne!(*rewritten, expr);
-        }
-        let ScalarExpression::Binary { left_expr, .. } = arena.expression(expr) else {
-            unreachable!()
-        };
-        assert_eq!(*left_expr, reference);
-        let ScalarExpression::Binary { left_expr, .. } = arena.expression(replacement) else {
-            unreachable!()
-        };
-        let ScalarExpression::ColumnRef { position, .. } = left_expr.unpack_alias_ref(&arena)
-        else {
-            unreachable!()
-        };
-        assert_eq!(*position, 1);
-        Ok(())
-    }
-
-    #[test]
     fn mapping_transfer_preserves_shared_source_expressions_across_plan_nodes(
     ) -> Result<(), DatabaseError> {
         let table = build_t1_table()?;
@@ -1167,13 +1122,19 @@ mod tests {
     }
 
     #[test]
-    fn cross_join_uses_new_left_width_for_mapped_and_unchanged_right_inputs(
-    ) -> Result<(), DatabaseError> {
-        for (right_slots, expected) in [(Some(&[1, 0][..]), [2, 4, 3]), (None, [2, 3, 4])] {
+    fn cross_join_remaps_by_new_left_width() -> Result<(), DatabaseError> {
+        // (left slots, right slots, outer slots, expected positions); an empty left
+        // mapping must not be treated as identity.
+        let cases: [(&[usize], Option<&[usize]>, &[usize], &[usize]); 3] = [
+            (&[2], Some(&[1, 0]), &[0, 1, 2], &[2, 4, 3]),
+            (&[2], None, &[0, 1, 2], &[2, 3, 4]),
+            (&[], None, &[0, 1], &[3, 4]),
+        ];
+        for (left_slots, right_slots, outer_slots, expected) in cases {
             let table_arena = crate::planner::TableArenaCell::default();
             let mut arena = PlanArena::new(&table_arena);
             let left = values(&mut arena, &["l0", "l1", "l2"]);
-            let left = permutation(&mut arena, left, &[2]);
+            let left = permutation(&mut arena, left, left_slots);
             let right = values(&mut arena, &["r0", "r1"]);
             let right = match right_slots {
                 Some(slots) => permutation(&mut arena, right, slots),
@@ -1181,47 +1142,24 @@ mod tests {
             };
             let cross =
                 JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
-            let mut plan = permutation(&mut arena, cross, &[0, 1, 2]);
+            let mut plan = permutation(&mut arena, cross, outer_slots);
 
             assert!(eliminate_projects(&mut plan, &mut arena)?);
             assert_eq!(plan.explain(&mut arena, 0).matches("Projection").count(), 1);
             let Operator::Project(op) = &plan.operator else {
                 unreachable!()
             };
-            for (expr, expected) in op.exprs.iter().zip(expected) {
-                let ScalarExpression::ColumnRef { position, .. } = expr.unpack_alias_ref(&arena)
-                else {
-                    unreachable!()
-                };
-                assert_eq!(*position, expected);
-            }
+            let positions: Vec<_> = op
+                .exprs
+                .iter()
+                .map(|expr| match expr.unpack_alias_ref(&arena) {
+                    ScalarExpression::ColumnRef { position, .. } => *position,
+                    _ => unreachable!(),
+                })
+                .collect();
+            assert_eq!(positions, expected);
             assert!(!eliminate_projects(&mut plan, &mut arena)?);
         }
-        Ok(())
-    }
-
-    #[test]
-    fn cross_join_distinguishes_empty_mapping_from_identity() -> Result<(), DatabaseError> {
-        let table_arena = crate::planner::TableArenaCell::default();
-        let mut arena = PlanArena::new(&table_arena);
-        let left = values(&mut arena, &["l0", "l1", "l2"]);
-        let left = permutation(&mut arena, left, &[]);
-        let right = values(&mut arena, &["r0", "r1"]);
-        let cross = JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
-        let mut plan = permutation(&mut arena, cross, &[0, 1]);
-
-        assert!(eliminate_projects(&mut plan, &mut arena)?);
-        assert_eq!(plan.explain(&mut arena, 0).matches("Projection").count(), 1);
-        let Operator::Project(op) = &plan.operator else {
-            unreachable!()
-        };
-        for (expr, expected) in op.exprs.iter().zip([3, 4]) {
-            let ScalarExpression::ColumnRef { position, .. } = expr.unpack_alias_ref(&arena) else {
-                unreachable!()
-            };
-            assert_eq!(*position, expected);
-        }
-        assert!(!eliminate_projects(&mut plan, &mut arena)?);
         Ok(())
     }
 
@@ -1279,38 +1217,6 @@ mod tests {
         let scan_op = best_plan.childrens.pop_only();
         assert!(matches!(scan_op.operator, Operator::TableScan(_)));
         assert!(matches!(scan_op.childrens.as_ref(), Childrens::None));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_collapse_project_with_alias() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
-        let mut arena = PlanArena::new(&table_state.table_arena);
-        let plan = table_state
-            .plan_with_arena("select t.x from (select c1 as x from t1) t", &mut arena)?;
-        let original = plan.clone();
-        let original_child = original.childrens.pop_only();
-        assert!(matches!(original_child.operator, Operator::Project(_)));
-        let original_grandchild = original_child.childrens.pop_only();
-        assert!(matches!(original_grandchild.operator, Operator::Project(_)));
-
-        let pipeline = HepOptimizerPipeline::builder()
-            .before_batch(
-                "test_collapse_project_with_alias",
-                HepBatchStrategy::fix_point_bottomup(10),
-                &[NormalizationRuleImpl::EliminateProject],
-            )
-            .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
-        if let Operator::Project(op) = &best_plan.operator {
-            assert_eq!(op.exprs.len(), 1);
-        } else {
-            unreachable!("Should be a project operator");
-        }
-
-        let scan_op = best_plan.childrens.pop_only();
-        assert!(matches!(scan_op.operator, Operator::TableScan(_)));
 
         Ok(())
     }

@@ -1057,13 +1057,13 @@ impl<S: Storage> Database<S> {
                     }
                 }
                 for column in table.columns() {
-                    let column_id = self
-                        .state
-                        .table_arena
-                        .borrow()
-                        .column(*column)
-                        .id()
-                        .unwrap();
+                    let column_id = {
+                        let table_arena = self.state.table_arena.borrow();
+                        let column = table_arena.column(*column);
+                        column
+                            .id()
+                            .ok_or_else(|| DatabaseError::invalid_column(column.name()))?
+                    };
                     if let Some(meta) = transaction.column_statistics(
                         &mut table_codec,
                         name.as_ref(),

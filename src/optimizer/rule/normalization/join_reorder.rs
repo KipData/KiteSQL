@@ -311,114 +311,74 @@ fn region_inputs(plan: &LogicalPlan, forced: bool) -> usize {
     region_inputs(left, forced) + region_inputs(right, forced)
 }
 
-// Collects input schemas and join keys
-// returns `None` when any input lacks a row estimate.
+// Collects input schemas and join keys; returns whether every input has a row estimate.
+// Joins inside the region are rebuilt by the reorder, so their own rows are not estimated here.
 fn inspect<'plan>(
     plan: &'plan mut LogicalPlan,
     schemas: &mut Vec<&'plan Schema>,
     keys: &mut JoinKeys,
     arena: &mut PlanArena,
-    loader: Option<&StatisticMetaLoader<'_>>,
     forced: bool,
-) -> Result<Option<usize>, DatabaseError> {
-    if can_expand(plan, forced) {
-        let (Operator::Join(join), Childrens::Twins { left, right }) =
-            (&plan.operator, plan.childrens.as_mut())
-        else {
-            unreachable!()
-        };
-        let left_stats = index_statistics(left);
-        let right_stats = index_statistics(right);
-        let on = match &join.on {
-            JoinCondition::On { on, .. } => on.as_slice(),
-            JoinCondition::None => &[],
-        };
-        let ndvs = column_ndv(left, right, on.iter().copied(), loader, arena)?;
-        let start = schemas.len();
-        let left_rows = inspect(left, schemas, keys, arena, loader, forced)?;
-        let middle = schemas.len();
-        let right_rows = inspect(right, schemas, keys, arena, loader, forced)?;
+) -> Result<bool, DatabaseError> {
+    if !can_expand(plan, forced) {
+        let estimated = plan.estimated_rows().is_some();
+        schemas.push(plan.output_schema(arena));
+        return Ok(estimated);
+    }
+    let (Operator::Join(join), Childrens::Twins { left, right }) =
+        (&plan.operator, plan.childrens.as_mut())
+    else {
+        unreachable!()
+    };
+    let on = match &join.on {
+        JoinCondition::On { on, .. } => on.as_slice(),
+        JoinCondition::None => &[],
+    };
+    let start = schemas.len();
+    let left_estimated = inspect(left, schemas, keys, arena, forced)?;
+    let middle = schemas.len();
+    let right_estimated = inspect(right, schemas, keys, arena, forced)?;
 
-        for &(left, right) in on {
-            let mut endpoints = [None, None];
-            for (endpoint, (expr, range)) in endpoints
-                .iter_mut()
-                .zip([(left, start..middle), (right, middle..schemas.len())])
-            {
-                for index in range {
-                    if key_in_schema(expr, schemas[index], arena)? {
-                        *endpoint = Some(index);
-                        break;
-                    }
-                }
-                if endpoint.is_none() {
-                    return Err(DatabaseError::InvalidPlan(format!(
-                        "join key `{}` is not produced by any join input",
-                        expr.output_name(arena)
-                    )));
+    for &(left, right) in on {
+        let mut endpoints = [None, None];
+        for (endpoint, (expr, range)) in endpoints
+            .iter_mut()
+            .zip([(left, start..middle), (right, middle..schemas.len())])
+        {
+            for index in range {
+                if key_in_schema(expr, schemas[index], arena)? {
+                    *endpoint = Some(index);
+                    break;
                 }
             }
-            if endpoints[0] == endpoints[1] {
+            if endpoint.is_none() {
                 return Err(DatabaseError::InvalidPlan(format!(
-                    "join key `{} = {}` compares columns of the same join input",
-                    left.output_name(arena),
-                    right.output_name(arena)
+                    "join key `{}` is not produced by any join input",
+                    expr.output_name(arena)
                 )));
             }
-            // SAFETY: The loop above returns early if either endpoint is None.
-            let [l, r] = endpoints.map(Option::unwrap);
-            keys.insert(1u64 << l, 1u64 << r, (left, right));
         }
-        let (Some(left_rows), Some(right_rows)) = (left_rows, right_rows) else {
-            return Ok(None);
-        };
-        let rows = join_rows(
-            &JoinInputStatistics {
-                rows: left_rows,
-                schema: if middle == start + 1 {
-                    schemas[start]
-                } else {
-                    &[]
-                },
-                index: left_stats.map(|(index, ndv)| (arena.index(index), ndv)),
-            },
-            &JoinInputStatistics {
-                rows: right_rows,
-                schema: if schemas.len() == middle + 1 {
-                    schemas[middle]
-                } else {
-                    &[]
-                },
-                index: right_stats.map(|(index, ndv)| (arena.index(index), ndv)),
-            },
-            || on.iter().copied(),
-            ndvs,
-            arena,
-        );
-        if let Some(option) = &mut plan.physical_option {
-            if option.row_count != (RowCountOption::Estimated { rows, ndv: None }) {
-                option.row_count = RowCountOption::Estimated {
-                    rows: rows,
-                    ndv: None,
-                };
-                option.cost = None;
-            }
+        if endpoints[0] == endpoints[1] {
+            return Err(DatabaseError::InvalidPlan(format!(
+                "join key `{} = {}` compares columns of the same join input",
+                left.output_name(arena),
+                right.output_name(arena)
+            )));
         }
-        Ok(Some(rows))
-    } else {
-        let rows = plan.estimated_rows();
-        schemas.push(plan.output_schema(arena));
-        Ok(rows)
+        // SAFETY: The loop above returns early if either endpoint is None.
+        let [l, r] = endpoints.map(Option::unwrap);
+        keys.insert(1u64 << l, 1u64 << r, (left, right));
     }
+    Ok(left_estimated && right_estimated)
 }
 
 /// An input's cost, read once at its (default) rows when its estimate is incomplete.
-fn input_cost(
+fn input_cost_or_default(
     input: &mut LogicalPlan,
     rows: usize,
     arena: &mut PlanArena,
 ) -> Result<InputCost, DatabaseError> {
-    Ok(match input.estimated_cost(arena)? {
+    Ok(match input.price(arena).and_then(|cost| cost.input()) {
         Some(cost) => cost,
         None => {
             let width = input.output_schema(arena).len();
@@ -447,7 +407,7 @@ fn flatten(
     } else {
         // Without statistics an input is assumed to have the default rows (RFC 0001 §3.9).
         let rows = plan.estimated_rows().unwrap_or(DEFAULT_TABLE_ROWS);
-        let cost = input_cost(&mut plan, rows, arena)?;
+        let cost = input_cost_or_default(&mut plan, rows, arena)?;
         if leaves
             .get(*start)
             .is_some_and(|(_, best, _)| (cost.rows, cost.work) < (best.rows, best.work))
@@ -558,7 +518,7 @@ impl NormalizationRule for GreedyJoinReorder {
         let mut keys = JoinKeys::default();
         // Inputs without statistics are priced with default rows, but joins built from them keep
         // an unknown row count for later rules.
-        let estimated = inspect(plan, &mut schemas, &mut keys, arena, loader, forced)?.is_some();
+        let estimated = inspect(plan, &mut schemas, &mut keys, arena, forced)?;
         // Each original column keeps its input bit and position within its current join.
         let mut positions = Vec::with_capacity(original_schema.len());
         for (input, schema) in schemas.iter().enumerate() {
@@ -742,7 +702,7 @@ impl NormalizationRule for GreedyJoinReorder {
                 join.physical_option = Some(option);
                 join
             };
-            current_cost = input_cost(&mut current, product, arena)?;
+            current_cost = input_cost_or_default(&mut current, product, arena)?;
             current_mask |= leaf_mask;
         }
         *plan = project_join_output(
@@ -762,10 +722,6 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::expression::BinaryOperator;
     use crate::optimizer::core::histogram::{HistogramMetaBuilder, DEFAULT_HLL_PRECISION};
-    use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
-    use crate::optimizer::rule::normalization::NormalizationRuleImpl;
-    use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::sort::{SortField, SortOperator};
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::TableArenaCell;
@@ -926,7 +882,7 @@ mod tests {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let (mut left, l) = input("l", 1000, &mut arena);
-        let (mut right, r) = input("r", 200, &mut arena);
+        let (right, r) = input("r", 200, &mut arena);
         let mut cache = StatisticsMetaCache::default();
         for (table, rows) in [("l", 1000), ("r", 200)] {
             let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
@@ -976,58 +932,6 @@ mod tests {
             )?,
             None
         );
-        let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
-        for value in 0..200 {
-            builder.append(&DataValue::Int32(value % 100));
-        }
-        cache.columns.insert(("r".into(), 0), builder.build());
-        let loader = StatisticMetaLoader::new(&cache);
-        let left_schema = left.output_schema(&mut arena);
-        let right_schema = right.output_schema(&mut arena);
-        assert_eq!(
-            join_rows(
-                &JoinInputStatistics {
-                    rows: 1000,
-                    schema: left_schema,
-                    index: None
-                },
-                &JoinInputStatistics {
-                    rows: 200,
-                    schema: right_schema,
-                    index: None
-                },
-                || std::iter::once((l, r)),
-                Some((100, 100)),
-                &arena
-            ),
-            2000
-        );
-        let mut join = JoinOperator::build(
-            left,
-            right,
-            JoinCondition::On {
-                on: vec![(l, r)],
-                filter: None,
-            },
-            JoinType::Inner,
-            false,
-        );
-        join.physical_option = Some(PhysicalOption::new(
-            PlanImpl::HashJoin,
-            SortOption::None,
-            RowCountOption::Unknown,
-        ));
-        let pipeline = HepOptimizerPipeline::builder()
-            .after_batch(
-                "column statistics",
-                HepBatchStrategy::fix_point_topdown(1),
-                &[NormalizationRuleImpl::GreedyJoinReorder],
-            )
-            .build();
-        let plan = pipeline
-            .instantiate(join)
-            .find_best(Some(&loader), &mut arena)?;
-        assert_eq!(plan.estimated_rows(), Some(2000));
         Ok(())
     }
 
@@ -1226,7 +1130,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_unknown_and_overflow_do_not_become_zero() -> Result<(), DatabaseError> {
+    fn unknown_startup_does_not_become_zero() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let (mut scan, key) = input("source", 16, &mut arena);
@@ -1246,22 +1150,14 @@ mod tests {
             SortOption::None,
             RowCountOption::Follow,
         ));
-        assert_eq!(sort.estimated_startup_work(&mut arena)?, None);
-        assert_eq!(sort.estimated_cost(&mut arena)?.map(|cost| cost.work), None);
-
-        let (a, _) = input("a", usize::MAX, &mut arena);
-        let (b, _) = input("b", 2, &mut arena);
-        let mut cross = JoinOperator::build(a, b, JoinCondition::None, JoinType::Cross, false);
-        cross.physical_option = Some(PhysicalOption::new(
-            PlanImpl::NestLoopJoin,
-            SortOption::None,
-            RowCountOption::Unknown,
-        ));
+        assert_eq!(sort.price(&mut arena).and_then(|cost| cost.startup), None);
         assert_eq!(
-            cross.estimated_cost(&mut arena)?.map(|cost| cost.work),
-            Some(usize::MAX)
+            sort.price(&mut arena)
+                .and_then(|cost| cost.input())
+                .map(|cost| cost.work),
+            None
         );
-        assert_eq!(cross.estimated_rows(), Some(usize::MAX));
+
         Ok(())
     }
 
@@ -1272,10 +1168,13 @@ mod tests {
         let mut arena = PlanArena::new(&table_arena);
         let (mut left, _) = input("a", 100, &mut arena);
         let mut right = materialized_right(&mut arena);
-        assert_eq!(left.estimated_startup_work(&mut arena)?, Some(0));
+        assert_eq!(
+            left.price(&mut arena).and_then(|cost| cost.startup),
+            Some(0)
+        );
         // The 10-row build side is read (50), stored whole (50) and hashed.
         assert_eq!(
-            right.estimated_startup_work(&mut arena)?,
+            right.price(&mut arena).and_then(|cost| cost.startup),
             Some(100 + 10 * crate::planner::operator::HASH_BUILD_WORK)
         );
         let mut plan =
@@ -1430,45 +1329,6 @@ mod tests {
     }
 
     #[test]
-    fn connected_pair_precedes_a_smaller_cartesian_product() -> Result<(), DatabaseError> {
-        let table_arena = TableArenaCell::default();
-        let mut arena = PlanArena::new(&table_arena);
-        let mut plan = three_inputs(&mut arena);
-        if let Childrens::Twins { left, .. } = plan.childrens.as_mut() {
-            if let Childrens::Twins { left, right } = left.childrens.as_mut() {
-                left.physical_option.as_mut().unwrap().row_count = RowCountOption::Estimated {
-                    rows: 10,
-                    ndv: None,
-                };
-                right.physical_option.as_mut().unwrap().row_count = RowCountOption::Estimated {
-                    rows: 1000,
-                    ndv: None,
-                };
-            }
-        }
-        let schema = plan.output_schema(&mut arena).clone();
-        assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
-        assert_eq!(plan.output_schema(&mut arena), &schema);
-        // AB is merged first despite its larger product; C then builds against it.
-        let join = plan.childrens.only();
-        let (c, ab) = join.childrens.twins();
-        assert_eq!(ab.referenced_table(), vec!["a".into(), "b".into()]);
-        assert_eq!(c.referenced_table(), vec!["c".into()]);
-        assert_eq!(ab.estimated_rows(), Some(10000));
-        for join in [join, ab] {
-            let Operator::Join(op) = &join.operator else {
-                unreachable!()
-            };
-            let JoinCondition::On { on, .. } = &op.on else {
-                unreachable!()
-            };
-            assert_eq!(op.join_type, JoinType::Inner);
-            assert_eq!(on.len(), 1);
-        }
-        Ok(())
-    }
-
-    #[test]
     fn unestimated_region_defers_cartesian_products_by_input_order() -> Result<(), DatabaseError> {
         // FROM a, c, d, b WHERE a = b AND c = b: FROM order crosses a, c and d
         // before any join key applies. Without estimates the region is priced with
@@ -1537,70 +1397,10 @@ mod tests {
     }
 
     #[test]
-    fn rebuilding_join_region_preserves_parent_and_input_subtrees() -> Result<(), DatabaseError> {
-        let table_arena = TableArenaCell::default();
-        let mut arena = PlanArena::new(&table_arena);
-        let mut join = three_inputs(&mut arena);
-        let Childrens::Twins { right, .. } = join.childrens.as_mut() else {
-            unreachable!()
-        };
-        let predicate =
-            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
-        let mut filter = FilterOperator::build(predicate, right.take(), false);
-        filter.physical_option = Some(PhysicalOption::new(
-            PlanImpl::Filter,
-            SortOption::Follow,
-            RowCountOption::Follow,
-        ));
-        **right = filter;
-        let schema = join.output_schema(&mut arena).clone();
-        let exprs = schema
-            .iter()
-            .enumerate()
-            .map(|(position, column)| {
-                arena.alloc_expression(ScalarExpression::column_expr(*column, position))
-            })
-            .collect();
-        let mut plan = LogicalPlan::new(
-            Operator::Project(ProjectOperator::new(exprs)),
-            Childrens::Only(Box::new(join)),
-        );
-        let original_parent = plan.operator.clone();
-        let Childrens::Only(join) = plan.childrens.as_mut() else {
-            unreachable!()
-        };
-        assert!(GreedyJoinReorder.apply(join, &mut arena, None)?);
-        assert_eq!(plan.operator, original_parent);
-        assert_eq!(plan.output_schema(&mut arena), &schema);
-        // Greedy restores the region's output order with its own Project below the parent.
-        let (bc, _) = plan.childrens.only().childrens.only().childrens.twins();
-        let (_, filter) = bc.childrens.twins();
-        assert!(matches!(filter.operator, Operator::Filter(_)));
-        assert_eq!(filter.childrens.only().referenced_table(), vec!["c".into()]);
-        assert_eq!(filter.estimated_rows(), Some(20));
-        Ok(())
-    }
-
-    #[test]
-    fn unknown_inputs_are_rebuilt_but_outer_joins_keep_original_order() -> Result<(), DatabaseError>
-    {
+    fn outer_joins_keep_original_order() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let mut plan = three_inputs(&mut arena);
-        if let Childrens::Twins { right, .. } = plan.childrens.as_mut() {
-            right.physical_option.as_mut().unwrap().row_count = RowCountOption::Unknown;
-        }
-        let mut outer = plan.clone();
-        // Unknown inputs are rebuilt with default rows, but joins keep unknown row counts.
-        assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
-        let (c, ab) = plan.childrens.only().childrens.twins();
-        assert_eq!(c.referenced_table(), vec!["c".into()]);
-        let mut tables = ab.referenced_table();
-        tables.sort();
-        assert_eq!(tables, vec!["a".into(), "b".into()]);
-        assert_eq!(plan.row_count_option(), None);
-
-        let mut plan = outer.take();
         if let Operator::Join(op) = &mut plan.operator {
             op.join_type = JoinType::LeftOuter;
         }

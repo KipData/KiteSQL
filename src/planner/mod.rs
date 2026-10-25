@@ -26,9 +26,7 @@ use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
-use crate::planner::operator::{
-    input_cost, InputCost, Operator, PhysicalOption, RowCountOption, WorkCost,
-};
+use crate::planner::operator::{ChildCosts, Operator, PhysicalOption, PlanCost, RowCountOption};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -155,43 +153,6 @@ impl<'a> Iterator for ChildrensIter<'a> {
     }
 }
 
-struct StartupWorkVisitor<'r, A> {
-    arena: &'r mut A,
-}
-
-impl<'a, A: MetaArena> OperatorVisitorMut<'a> for StartupWorkVisitor<'_, A> {
-    fn visit_plan(&mut self, plan: &'a mut LogicalPlan) -> Result<(), DatabaseError> {
-        if plan
-            .physical_option
-            .as_ref()
-            .is_none_or(|option| option.cost.is_some())
-        {
-            return Ok(());
-        }
-        let width = plan.output_schema(self.arena).len();
-        let rows = plan.estimated_rows();
-        let LogicalPlan {
-            operator,
-            childrens,
-            physical_option,
-            ..
-        } = plan;
-        let Some(option) = physical_option.as_mut() else {
-            return Ok(());
-        };
-        OperatorVisitorMut::<'_>::visit_children(self, childrens)?;
-        // Children are cached first, so this only prices the current node.
-        let mut cost = WorkCost {
-            width,
-            startup: option.calculate_startup_work(operator, childrens),
-            total: None,
-        };
-        cost.total = option.calculate_work(operator, childrens, rows, &cost);
-        option.cost = Some(cost);
-        Ok(())
-    }
-}
-
 #[derive(Debug)]
 pub struct LogicalPlan {
     pub(crate) operator: Operator,
@@ -262,29 +223,26 @@ impl LogicalPlan {
 
     // Pass-local memoization for NLJ orientation. New physical options start
     // empty; orientation preserves child rows/startup, so their cache is reusable.
-    pub(crate) fn estimated_startup_work<A: MetaArena>(
-        &mut self,
-        arena: &mut A,
-    ) -> Result<Option<usize>, DatabaseError> {
-        StartupWorkVisitor { arena }.visit_plan(self)?;
-        Ok(self
-            .physical_option
-            .as_ref()
-            .and_then(|option| option.cost?.startup))
-    }
-
-    pub(crate) fn estimated_cost<A: MetaArena>(
-        &mut self,
-        arena: &mut A,
-    ) -> Result<Option<InputCost>, DatabaseError> {
-        self.estimated_startup_work(arena)?;
-        Ok(input_cost(self))
-    }
-
-    pub(crate) fn clear_work_cost(&mut self) {
-        if let Some(option) = self.physical_option.as_mut() {
-            option.cost = None;
-        }
+    pub(crate) fn price<A: MetaArena>(&mut self, arena: &mut A) -> Option<PlanCost> {
+        self.physical_option.as_ref()?;
+        let width = self.output_schema(arena).len();
+        let rows = self.estimated_rows();
+        let children = match self.childrens.as_mut() {
+            Childrens::None => ChildCosts::None,
+            Childrens::Only(child) => ChildCosts::Only(child.price(arena)),
+            Childrens::Twins { left, right } => {
+                ChildCosts::Twins(left.price(arena), right.price(arena))
+            }
+        };
+        let option = self.physical_option.as_ref()?;
+        let mut cost = PlanCost {
+            rows,
+            width,
+            startup: option.calculate_startup_work(&self.operator, &children),
+            total: None,
+        };
+        cost.total = option.calculate_work(&self.operator, &children, rows, &cost);
+        Some(cost)
     }
 
     pub fn referenced_table(&self) -> Vec<TableName> {
@@ -302,6 +260,14 @@ impl LogicalPlan {
         tables
     }
 
+    pub(crate) fn visit_referenced_columns<A: MetaArena + ?Sized>(
+        &self,
+        arena: &A,
+        f: &mut impl FnMut(&A, &crate::catalog::ColumnRef) -> bool,
+    ) -> Result<bool, DatabaseError> {
+        Operator::referenced_columns(operator::ColumnVisitRoot::Plan(self), arena, f)
+    }
+
     pub(crate) fn visit_column_refs<A, F>(
         &self,
         arena: &mut A,
@@ -311,14 +277,10 @@ impl LogicalPlan {
         A: MetaArena + ?Sized,
         F: FnMut(&crate::catalog::ColumnRef) + ?Sized,
     {
-        self.operator
-            .visit_referenced_columns(arena, &mut |_, column| {
-                f(column);
-                true
-            })?;
-        for child in self.childrens.iter() {
-            child.visit_column_refs(arena, f)?;
-        }
+        self.visit_referenced_columns(&*arena, &mut |_, column| {
+            f(column);
+            true
+        })?;
         Ok(())
     }
 
@@ -701,101 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_cache_reuses_known_and_unknown_estimates_for_the_round() -> Result<(), DatabaseError>
-    {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let id = column("id", LogicalType::Integer, &mut arena);
-        let key = arena.alloc_expression(ScalarExpression::column_expr(id, 0));
-        let mut scan = table_scan("users", vec![id]);
-        scan.physical_option = Some(PhysicalOption::new(
-            PlanImpl::SeqScan,
-            SortOption::None,
-            RowCountOption::Unknown,
-        ));
-        let mut sort = LogicalPlan::new(
-            Operator::Sort(SortOperator {
-                sort_fields: vec![SortField {
-                    expr: key,
-                    asc: true,
-                    nulls_first: false,
-                }],
-            }),
-            Childrens::Only(Box::new(scan)),
-        );
-        sort.physical_option = Some(PhysicalOption::new(
-            PlanImpl::Sort,
-            SortOption::None,
-            RowCountOption::Follow,
-        ));
-        assert_eq!(sort.estimated_startup_work(&mut arena)?, None);
-        assert_eq!(
-            sort.physical_option
-                .as_ref()
-                .unwrap()
-                .cost
-                .map(|cost| cost.startup),
-            Some(None)
-        );
-        assert_eq!(sort.estimated_startup_work(&mut arena)?, None);
-        assert_eq!(
-            sort.physical_option
-                .as_ref()
-                .unwrap()
-                .cost
-                .map(|cost| cost.startup),
-            Some(None)
-        );
-
-        // A new physical selection starts the next round with empty caches.
-        let Childrens::Only(scan) = sort.childrens.as_mut() else {
-            unreachable!()
-        };
-        scan.physical_option = Some(PhysicalOption::new(
-            PlanImpl::SeqScan,
-            SortOption::None,
-            RowCountOption::Estimated {
-                rows: 16,
-                ndv: None,
-            },
-        ));
-        sort.physical_option = Some(PhysicalOption::new(
-            PlanImpl::Sort,
-            SortOption::None,
-            RowCountOption::Follow,
-        ));
-        // 16 one-column rows (5 each) + 64 comparisons * 2 operator units.
-        assert_eq!(sort.estimated_startup_work(&mut arena)?, Some(208));
-        assert_eq!(
-            sort.physical_option
-                .as_ref()
-                .unwrap()
-                .cost
-                .map(|cost| cost.startup),
-            Some(Some(208))
-        );
-        let Childrens::Only(scan) = sort.childrens.as_mut() else {
-            unreachable!()
-        };
-        assert_eq!(
-            scan.physical_option
-                .as_ref()
-                .unwrap()
-                .cost
-                .map(|cost| cost.startup),
-            Some(Some(0))
-        );
-        // A cached parent does not walk its children again in this round.
-        scan.clear_work_cost();
-        assert_eq!(sort.estimated_startup_work(&mut arena)?, Some(208));
-        let Childrens::Only(scan) = sort.childrens.as_mut() else {
-            unreachable!()
-        };
-        assert_eq!(scan.physical_option.as_ref().unwrap().cost, None);
-        Ok(())
-    }
-
-    #[test]
     fn filter_and_projection_work_preserve_input_without_blocking() -> Result<(), DatabaseError> {
         for output_rows in [0, 8, 98] {
             let tables = TableArenaCell::default();
@@ -821,9 +688,15 @@ mod tests {
                 },
             ));
             assert_eq!(filter.estimated_rows(), Some(output_rows));
-            assert_eq!(filter.estimated_startup_work(&mut arena)?, Some(0));
             assert_eq!(
-                filter.estimated_cost(&mut arena)?.map(|cost| cost.work),
+                filter.price(&mut arena).and_then(|cost| cost.startup),
+                Some(0)
+            );
+            assert_eq!(
+                filter
+                    .price(&mut arena)
+                    .and_then(|cost| cost.input())
+                    .map(|cost| cost.work),
                 Some(392)
             );
             let mut project = LogicalPlan::new(
@@ -835,9 +708,15 @@ mod tests {
                 SortOption::Follow,
                 RowCountOption::Follow,
             ));
-            assert_eq!(project.estimated_startup_work(&mut arena)?, Some(0));
             assert_eq!(
-                project.estimated_cost(&mut arena)?.map(|cost| cost.work),
+                project.price(&mut arena).and_then(|cost| cost.startup),
+                Some(0)
+            );
+            assert_eq!(
+                project
+                    .price(&mut arena)
+                    .and_then(|cost| cost.input())
+                    .map(|cost| cost.work),
                 Some(392)
             );
         }
@@ -884,9 +763,14 @@ mod tests {
         ));
         // 98 one-column input rows (5 each) + 24 comparisons * 2 operator units,
         // then 8 output rows.
-        assert_eq!(sort.estimated_startup_work(&mut arena)?, Some(538));
         assert_eq!(
-            sort.estimated_cost(&mut arena)?.map(|cost| cost.work),
+            sort.price(&mut arena).and_then(|cost| cost.startup),
+            Some(538)
+        );
+        assert_eq!(
+            sort.price(&mut arena)
+                .and_then(|cost| cost.input())
+                .map(|cost| cost.work),
             Some(578)
         );
         let mut unknown = table_scan("unknown", vec![]);
@@ -901,9 +785,15 @@ mod tests {
             SortOption::Follow,
             RowCountOption::Estimated { rows: 8, ndv: None },
         ));
-        assert_eq!(filter.estimated_startup_work(&mut arena)?, Some(0));
         assert_eq!(
-            filter.estimated_cost(&mut arena)?.map(|cost| cost.work),
+            filter.price(&mut arena).and_then(|cost| cost.startup),
+            Some(0)
+        );
+        assert_eq!(
+            filter
+                .price(&mut arena)
+                .and_then(|cost| cost.input())
+                .map(|cost| cost.work),
             None
         );
         Ok(())

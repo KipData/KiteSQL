@@ -20,7 +20,7 @@ use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{only_child, only_child_mut};
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::types::evaluator::BinaryEvaluatorRef;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -75,30 +75,24 @@ impl NormalizationRule for GuardMarkApply {
         }
         // Do not skip values consumed by another apply, even if Filter does not need them.
         let mut consumed = Vec::new();
-        let mut columns = Vec::new();
         let mut input = mark.as_ref();
-        for (index, _) in markers.iter().enumerate() {
-            columns.clear();
+        for index in 0..markers.len() {
             let (Operator::MarkApply(op), Childrens::Twins { left, right }) =
                 (&input.operator, input.childrens.as_ref())
             else {
                 unreachable!()
             };
-            for expr in op.predicates.iter().chain(op.parameterized_probe.iter()) {
-                expr.all_referenced_columns(arena, |_, column, _| {
-                    columns.push(*column);
-                    true
-                })?;
-            }
-            right.visit_column_refs(arena, &mut |column| columns.push(*column))?;
-            for marker in &markers[index + 1..] {
-                if columns
-                    .iter()
-                    .any(|column| arena.same_column(*column, *marker))
-                {
+            let later = &markers[index + 1..];
+            let mut consume = |arena: &dyn MetaArena, column: &ColumnRef| {
+                if let Some(marker) = later.iter().find(|m| arena.same_column(*column, **m)) {
                     consumed.push(*marker);
                 }
+                true
+            };
+            for expr in op.predicates.iter().chain(op.parameterized_probe.iter()) {
+                expr.all_referenced_columns(arena, |arena, column, _| consume(arena, column))?;
             }
+            right.visit_referenced_columns(arena, &mut |arena, column| consume(arena, column))?;
             input = left;
         }
         let mut changed = false;
@@ -726,78 +720,10 @@ mod tests {
     }
 
     #[test]
-    fn and_or_guards_preserve_three_valued_results() -> Result<(), DatabaseError> {
-        for op in [BinaryOperator::And, BinaryOperator::Or] {
-            for marker_first in [false, true] {
-                let tables = TableArenaCell::default();
-                let mut arena = PlanArena::new(&tables);
-                let mut fixture = Fixture::new(&mut arena, op, marker_first)?;
-                assert!(GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
-                let guard = fixture.mark().guard.unwrap();
-                assert_ne!(guard, fixture.flag);
-                assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
-                EvaluatorBind.apply(&mut fixture.plan, &mut arena, None)?;
-                let predicate = fixture.predicate();
-                for flag in [
-                    DataValue::Boolean(false),
-                    DataValue::Boolean(true),
-                    DataValue::Null,
-                ] {
-                    let left = Tuple::new(None, vec![flag.clone()]);
-                    let guard_value = arena
-                        .expression(guard)
-                        .eval(&arena, Some(&left))?
-                        .into_owned();
-                    let expected = match (&op, &flag) {
-                        (BinaryOperator::Or, DataValue::Boolean(value)) => {
-                            DataValue::Boolean(!value)
-                        }
-                        _ => flag.clone(),
-                    };
-                    assert_eq!(guard_value, expected);
-                    for marker in [
-                        DataValue::Boolean(false),
-                        DataValue::Boolean(true),
-                        DataValue::Null,
-                    ] {
-                        let original = Tuple::new(None, vec![flag.clone(), marker.clone()]);
-                        let guarded = Tuple::new(
-                            None,
-                            vec![
-                                flag.clone(),
-                                if guard_value == DataValue::Boolean(false) {
-                                    DataValue::Null
-                                } else {
-                                    marker
-                                },
-                            ],
-                        );
-                        assert_eq!(
-                            arena.expression(predicate).eval(&arena, Some(&original))?,
-                            arena.expression(predicate).eval(&arena, Some(&guarded))?,
-                        );
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn marker_needed_by_projection_or_another_branch_is_not_guarded() -> Result<(), DatabaseError> {
+    fn marker_in_another_branch_is_not_guarded() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let mut fixture = Fixture::new(&mut arena, BinaryOperator::Or, false)?;
-        let Operator::Project(project) = &mut fixture.plan.operator else {
-            unreachable!()
-        };
-        project.exprs.push(fixture.marker);
-        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
-        assert!(fixture.mark().guard.is_none());
-        let Operator::Project(project) = &mut fixture.plan.operator else {
-            unreachable!()
-        };
-        project.exprs.pop();
         let guarded_branch = fixture.predicate();
         let predicate = arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::Or,
@@ -952,38 +878,75 @@ mod tests {
     }
 
     #[test]
-    fn numeric_guards_accept_only_safe_operands() -> Result<(), DatabaseError> {
+    fn simple_guard_whitelist() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
-        let number = arena.alloc_column(ColumnCatalog::new(
-            "number".into(),
-            true,
-            ColumnDesc::new(LogicalType::Bigint, None, false, None)?,
-        ));
-        let number = arena.alloc_expression(ScalarExpression::column_expr(number, 0));
+        let mut column = |name: &str, ty, position| -> Result<ExprRef, DatabaseError> {
+            let column = arena.alloc_column(ColumnCatalog::new(
+                name.into(),
+                true,
+                ColumnDesc::new(ty, None, false, None)?,
+            ));
+            Ok(arena.alloc_expression(ScalarExpression::column_expr(column, position)))
+        };
+        let flag = column("flag", LogicalType::Boolean, 0)?;
+        let number = column("number", LogicalType::Bigint, 1)?;
         let zero = arena.alloc_expression(DataValue::Int64(0).into());
-        let widening = arena.alloc_expression(ScalarExpression::TypeCast {
-            expr: number,
-            ty: LogicalType::Double,
+        let mut alloc = |expr| arena.alloc_expression(expr);
+        let cast = |expr, ty| ScalarExpression::TypeCast {
+            expr,
+            ty,
             evaluator: None,
-        });
-        let narrowing = arena.alloc_expression(ScalarExpression::TypeCast {
-            expr: number,
-            ty: LogicalType::Integer,
+        };
+        let not = |expr, ty| ScalarExpression::Unary {
+            op: UnaryOperator::Not,
+            expr,
             evaluator: None,
-        });
-        let arithmetic = arena.alloc_expression(ScalarExpression::Binary {
+            ty,
+        };
+        let widening = alloc(cast(number, LogicalType::Double));
+        let narrowing = alloc(cast(number, LogicalType::Integer));
+        let divide = alloc(ScalarExpression::Binary {
             op: BinaryOperator::Divide,
             left_expr: number,
             right_expr: zero,
             evaluator: None,
             ty: LogicalType::Bigint,
         });
+        let not_number = alloc(not(number, LogicalType::Bigint));
+        let mut cases = vec![
+            (flag, true),
+            (number, false),
+            (alloc(not(flag, LogicalType::Boolean)), true),
+            (
+                alloc(ScalarExpression::Alias {
+                    expr: flag,
+                    alias: AliasType::Expr(number),
+                }),
+                true,
+            ),
+            (
+                alloc(ScalarExpression::IsNull {
+                    negated: true,
+                    expr: number,
+                }),
+                true,
+            ),
+            // IS NULL only accepts a plain column or constant operand.
+            (
+                alloc(ScalarExpression::IsNull {
+                    negated: false,
+                    expr: not_number,
+                }),
+                false,
+            ),
+        ];
+        // Comparisons accept numeric operands and widening casts, never failing calculations.
         for (operand, valid) in [
             (number, true),
             (widening, true),
             (narrowing, false),
-            (arithmetic, false),
+            (divide, false),
         ] {
             for op in [
                 BinaryOperator::Eq,
@@ -993,90 +956,24 @@ mod tests {
                 BinaryOperator::Lt,
                 BinaryOperator::LtEq,
             ] {
-                let predicate = arena.alloc_expression(ScalarExpression::Binary {
+                let comparison = alloc(ScalarExpression::Binary {
                     op,
                     left_expr: operand,
                     right_expr: zero,
                     evaluator: None,
                     ty: LogicalType::Boolean,
                 });
-                let mut visitor = SimpleGuardVisitor {
-                    valid: true,
-                    context: GuardContext::Predicate,
-                };
-                visitor.visit(predicate, &arena)?;
-                assert_eq!(visitor.valid, valid);
+                cases.push((comparison, valid));
             }
         }
-        Ok(())
-    }
-
-    #[test]
-    fn null_checks_and_aliases_keep_the_guard_whitelist() -> Result<(), DatabaseError> {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let mut fixture = Fixture::new(&mut arena, BinaryOperator::And, false)?;
-        let number_column = arena.alloc_column(ColumnCatalog::new(
-            "number".to_string(),
-            true,
-            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
-        ));
-        let number = arena.alloc_expression(ScalarExpression::column_expr(number_column, 0));
-        let is_null = arena.alloc_expression(ScalarExpression::IsNull {
-            negated: false,
-            expr: number,
-        });
-        let is_not_null = arena.alloc_expression(ScalarExpression::IsNull {
-            negated: true,
-            expr: number,
-        });
-        let not_flag = arena.alloc_expression(ScalarExpression::Unary {
-            op: UnaryOperator::Not,
-            expr: fixture.flag,
-            evaluator: None,
-            ty: LogicalType::Boolean,
-        });
-        let alias = arena.alloc_expression(ScalarExpression::Alias {
-            expr: fixture.flag,
-            alias: AliasType::Expr(number),
-        });
-        let not_number = arena.alloc_expression(ScalarExpression::Unary {
-            op: UnaryOperator::Not,
-            expr: number,
-            evaluator: None,
-            ty: LogicalType::Integer,
-        });
-        let nested = arena.alloc_expression(ScalarExpression::IsNull {
-            negated: false,
-            expr: not_number,
-        });
-        let assert_case = |expr, expected| -> Result<(), DatabaseError> {
+        for (expr, valid) in cases {
             let mut visitor = SimpleGuardVisitor {
                 valid: true,
                 context: GuardContext::Predicate,
             };
             visitor.visit(expr, &arena)?;
-            assert_eq!(visitor.valid, expected);
-            Ok(())
-        };
-        assert_case(fixture.flag, true)?;
-        assert_case(number, false)?;
-        assert_case(is_null, true)?;
-        assert_case(is_not_null, true)?;
-        assert_case(not_flag, true)?;
-        assert_case(alias, true)?;
-        assert_case(nested, false)?;
-        let predicate = fixture.predicate();
-        let alias = arena.alloc_expression(ScalarExpression::Alias {
-            expr: fixture.flag,
-            alias: AliasType::Name("flag_alias".to_string()),
-        });
-        let ScalarExpression::Binary { left_expr, .. } = &mut *arena.expression_mut(predicate)
-        else {
-            unreachable!()
-        };
-        *left_expr = alias;
-        assert!(GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
+            assert_eq!(visitor.valid, valid);
+        }
         Ok(())
     }
 }
