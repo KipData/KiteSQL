@@ -3,6 +3,8 @@ CARGO ?= cargo
 GRCOV ?= grcov
 WASM_PACK ?= wasm-pack
 SQLLOGIC_PATH ?= tests/slt/**/*.slt
+SQLITE_LOGIC_PATH ?= tests/kitesql-testing/data/sqlite/**/*.slt
+SQLITE_LOGIC_ARGS ?=
 PYO3_PYTHON ?= /usr/bin/python3.12
 TPCC_MEASURE_TIME ?= 15
 TPCC_NUM_WARE ?= 1
@@ -67,6 +69,12 @@ test-wasm:
 ## Run the sqllogictest harness against the configured .slt suite.
 test-slt:
 	$(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'
+
+.PHONY: test-slt-sqlite
+
+## Run the external SQLite corpus (select1–5 excluded unless --include-select is passed).
+test-slt-sqlite:
+	$(CARGO) run -p sqllogictest-test --bin sqlite -- --path '$(SQLITE_LOGIC_PATH)' $(SQLITE_LOGIC_ARGS)
 
 ## Convenience target to run every suite in sequence.
 test-all: test test-wasm test-slt test-python
