@@ -1708,6 +1708,36 @@ mod tests {
     }
 
     #[test]
+    fn nested_cross_preserves_parameterized_input_work() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let mut expensive = parameterized_input(100, 2, &mut arena);
+        assert_eq!(expensive.estimated_work()?, Some(508));
+        let (peer, _) = input("peer", 3, &mut arena);
+        let mut cross =
+            JoinOperator::build(expensive, peer, JoinCondition::None, JoinType::Cross, false);
+        cross.physical_option = Some(PhysicalOption::new(
+            PlanImpl::NestLoopJoin,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        // Read the expensive child once, peer twice, then emit six rows.
+        assert_eq!(cross.estimated_work()?, Some(508 + 2 * 12 + 6 * 4));
+        let (outer, _) = input("outer", 2, &mut arena);
+        let mut plan =
+            JoinOperator::build(cross, outer, JoinCondition::None, JoinType::Cross, false);
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::NestLoopJoin,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let original = plan.clone();
+        assert!(!OrientNestedLoopJoin.apply(&mut plan, &mut arena, None)?);
+        assert_eq!(plan, original);
+        Ok(())
+    }
+
+    #[test]
     fn nested_loop_moves_materialization_left_and_restores_positions() -> Result<(), DatabaseError>
     {
         let table_arena = TableArenaCell::default();

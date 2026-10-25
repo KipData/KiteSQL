@@ -242,6 +242,25 @@ impl PhysicalOption {
                         .saturating_add(rows?.saturating_mul(CPU_ROW_WORK)),
                 )
             }
+            (PlanImpl::NestLoopJoin, Operator::Join(join), Childrens::Twins { left, right })
+                if join.join_type == join::JoinType::Cross =>
+            {
+                let left_work = left.physical_option.as_ref()?.calculate_work(
+                    &left.operator,
+                    &left.childrens,
+                    left.estimated_rows(),
+                )?;
+                let right_work = right.physical_option.as_ref()?.calculate_work(
+                    &right.operator,
+                    &right.childrens,
+                    right.estimated_rows(),
+                )?;
+                Some(
+                    left_work
+                        .saturating_add(left.estimated_rows()?.saturating_mul(right_work))
+                        .saturating_add(rows?.saturating_mul(CPU_ROW_WORK)),
+                )
+            }
             _ => Some(
                 self.startup_work
                     .flatten()?
