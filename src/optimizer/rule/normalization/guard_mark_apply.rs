@@ -16,7 +16,7 @@ use super::strip_alias;
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::visitor::ExprVisitor;
-use crate::expression::{AliasType, BinaryOperator, ScalarExpression, UnaryOperator};
+use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TypeCast, UnaryOperator};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::planner::operator::mark_apply::MarkApplyKind;
 use crate::planner::operator::Operator;
@@ -39,61 +39,83 @@ impl NormalizationRule for GuardMarkApply {
         else {
             return Ok(false);
         };
-        let (Operator::MarkApply(op), Childrens::Twins { left, .. }) =
-            (&mut mark.operator, mark.childrens.as_mut())
-        else {
-            return Ok(false);
-        };
-        if op.guard.is_some() || matches!(op.kind, MarkApplyKind::InnerJoin) {
+        let mut markers = Vec::new();
+        let mut input = mark.as_ref();
+        while let (Operator::MarkApply(op), Childrens::Twins { left, .. }) =
+            (&input.operator, input.childrens.as_ref())
+        {
+            if matches!(op.kind, MarkApplyKind::InnerJoin) {
+                break;
+            }
+            if op.guard.is_some() {
+                return Ok(false);
+            }
+            markers.push(*op.output_column());
+            input = left;
+        }
+        if markers.is_empty() {
             return Ok(false);
         }
-        let marker = *op.output_column();
-        // The projection must hide the marker: downstream consumers need its real value otherwise.
+        // No marker in this segment may escape through the projection.
         for expr in &project.exprs {
-            if expr
-                .any_referenced_column(arena, |arena, column| arena.same_column(*column, marker))?
-            {
+            if expr.any_referenced_column(arena, |arena, column| {
+                markers
+                    .iter()
+                    .any(|marker| arena.same_column(*column, *marker))
+            })? {
                 return Ok(false);
             }
         }
         let mut visitor = GuardVisitor {
-            marker,
+            markers: &markers,
             guard: None,
         };
         visitor.visit(filter_op.predicate, arena)?;
         let Some((guard, negated)) = visitor.guard else {
             return Ok(false);
         };
-        let schema = left.output_schema(arena);
+        let schema = mark.output_schema(arena);
         if !guard.all_referenced_columns(arena, |arena, column| {
-            schema
+            !markers
                 .iter()
-                .any(|candidate| arena.same_column(*candidate, *column))
+                .any(|marker| arena.same_column(*marker, *column))
+                && schema
+                    .iter()
+                    .any(|candidate| arena.same_column(*candidate, *column))
         })? {
             return Ok(false);
         }
-        // The guard has its own mutable expression references, but uses the same left positions.
-        let guard = guard.clone_expression(arena)?;
-        op.guard = Some(if negated {
-            arena.alloc_expression(ScalarExpression::Unary {
-                op: UnaryOperator::Not,
-                expr: guard,
-                evaluator: None,
-                ty: LogicalType::Boolean,
-            })
-        } else {
-            guard
-        });
+        let mut input = mark.as_mut();
+        for _ in &markers {
+            let (Operator::MarkApply(op), Childrens::Twins { left, .. }) =
+                (&mut input.operator, input.childrens.as_mut())
+            else {
+                unreachable!()
+            };
+            // Share the logical predicate; isolate mutable expression positions.
+            let guard = guard.clone_expression(arena)?;
+            op.guard = Some(if negated {
+                arena.alloc_expression(ScalarExpression::Unary {
+                    op: UnaryOperator::Not,
+                    expr: guard,
+                    evaluator: None,
+                    ty: LogicalType::Boolean,
+                })
+            } else {
+                guard
+            });
+            input = left;
+        }
         Ok(true)
     }
 }
 
-struct GuardVisitor {
-    marker: ColumnRef,
+struct GuardVisitor<'a> {
+    markers: &'a [ColumnRef],
     guard: Option<(ExprRef, bool)>,
 }
 
-impl ExprVisitor<PlanArena<'_>> for GuardVisitor {
+impl ExprVisitor<PlanArena<'_>> for GuardVisitor<'_> {
     fn visit_expression_ref(&mut self, _: ExprRef, _: &PlanArena) -> Result<bool, DatabaseError> {
         Ok(self.guard.is_none())
     }
@@ -141,10 +163,14 @@ impl ExprVisitor<PlanArena<'_>> for GuardVisitor {
         arena: &PlanArena,
     ) -> Result<(), DatabaseError> {
         let left_marker = left.any_referenced_column(arena, |arena, column| {
-            arena.same_column(*column, self.marker)
+            self.markers
+                .iter()
+                .any(|marker| arena.same_column(*column, *marker))
         })?;
         let right_marker = right.any_referenced_column(arena, |arena, column| {
-            arena.same_column(*column, self.marker)
+            self.markers
+                .iter()
+                .any(|marker| arena.same_column(*column, *marker))
         })?;
         let (branch, sibling) = match (left_marker, right_marker) {
             (true, false) => (left, right),
@@ -153,7 +179,7 @@ impl ExprVisitor<PlanArena<'_>> for GuardVisitor {
         };
         let mut visitor = SimpleGuardVisitor {
             valid: true,
-            null_operand: false,
+            context: GuardContext::Predicate,
         };
         visitor.visit(sibling, arena)?;
         if visitor.valid {
@@ -164,9 +190,16 @@ impl ExprVisitor<PlanArena<'_>> for GuardVisitor {
     }
 }
 
+#[derive(Clone, Copy)]
+enum GuardContext {
+    Predicate,
+    NullOperand,
+    NumericOperand,
+}
+
 struct SimpleGuardVisitor {
     valid: bool,
-    null_operand: bool,
+    context: GuardContext,
 }
 
 impl ExprVisitor<PlanArena<'_>> for SimpleGuardVisitor {
@@ -191,19 +224,48 @@ impl ExprVisitor<PlanArena<'_>> for SimpleGuardVisitor {
         expr: &ScalarExpression,
         arena: &PlanArena,
     ) -> Result<bool, DatabaseError> {
-        self.valid = match expr {
-            ScalarExpression::Constant(value) => {
-                self.null_operand || matches!(value, DataValue::Boolean(_))
+        self.valid = match (self.context, expr) {
+            (
+                GuardContext::NullOperand,
+                ScalarExpression::Constant(_) | ScalarExpression::ColumnRef { .. },
+            ) => true,
+            (GuardContext::Predicate, ScalarExpression::Constant(DataValue::Boolean(_))) => true,
+            (GuardContext::Predicate, ScalarExpression::ColumnRef { column, .. }) => {
+                arena.column(*column).datatype() == &LogicalType::Boolean
             }
-            ScalarExpression::ColumnRef { column, .. } => {
-                self.null_operand || arena.column(*column).datatype() == &LogicalType::Boolean
+            (
+                GuardContext::Predicate,
+                ScalarExpression::IsNull { .. }
+                | ScalarExpression::Unary {
+                    op: UnaryOperator::Not,
+                    ..
+                }
+                | ScalarExpression::Binary {
+                    op:
+                        BinaryOperator::Eq
+                        | BinaryOperator::NotEq
+                        | BinaryOperator::Gt
+                        | BinaryOperator::GtEq
+                        | BinaryOperator::Lt
+                        | BinaryOperator::LtEq,
+                    ..
+                },
+            ) => true,
+            (GuardContext::NumericOperand, ScalarExpression::Constant(value)) => {
+                value.is_null() || value.logical_type().is_numeric()
             }
-            ScalarExpression::IsNull { .. }
-            | ScalarExpression::Unary {
-                op: UnaryOperator::Not,
-                ..
-            } => !self.null_operand,
-            // Do not move arbitrary functions, casts or potentially failing calculations earlier.
+            (GuardContext::NumericOperand, ScalarExpression::ColumnRef { column, .. }) => {
+                arena.column(*column).datatype().is_numeric()
+            }
+            (GuardContext::NumericOperand, ScalarExpression::TypeCast { expr, ty, .. }) => {
+                let from = expr.return_type(arena);
+                // Implicit numeric widening cannot fail; bounded Decimal and narrowing casts can.
+                (from.is_numeric() || *from == LogicalType::SqlNull)
+                    && ty.is_numeric()
+                    && !matches!(ty, LogicalType::Decimal(..))
+                    && LogicalType::can_implicit_cast(&from, ty)
+            }
+            // Do not move arbitrary functions or potentially failing calculations earlier.
             _ => false,
         };
         Ok(self.valid)
@@ -215,9 +277,27 @@ impl ExprVisitor<PlanArena<'_>> for SimpleGuardVisitor {
         expr: ExprRef,
         arena: &PlanArena,
     ) -> Result<(), DatabaseError> {
-        self.null_operand = true;
+        let previous = self.context;
+        self.context = GuardContext::NullOperand;
         self.visit(expr, arena)?;
-        self.null_operand = false;
+        self.context = previous;
+        Ok(())
+    }
+
+    fn visit_binary(
+        &mut self,
+        _: &BinaryOperator,
+        left: ExprRef,
+        right: ExprRef,
+        _: Option<&BinaryEvaluatorRef>,
+        _: &LogicalType,
+        arena: &PlanArena,
+    ) -> Result<(), DatabaseError> {
+        let previous = self.context;
+        self.context = GuardContext::NumericOperand;
+        self.visit(left, arena)?;
+        self.visit(right, arena)?;
+        self.context = previous;
         Ok(())
     }
 }
@@ -290,6 +370,55 @@ mod tests {
             Ok(Self { plan, flag, marker })
         }
 
+        fn add_mark(
+            &mut self,
+            arena: &mut PlanArena,
+            op: BinaryOperator,
+        ) -> Result<ExprRef, DatabaseError> {
+            let column = arena.alloc_column(ColumnCatalog::new(
+                "upper_marker".into(),
+                true,
+                ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
+            ));
+            let upper = arena.alloc_expression(ScalarExpression::column_expr(column, 2));
+            let value = arena.alloc_expression(DataValue::Boolean(true).into());
+            let right = LogicalPlan::new(
+                Operator::Values(ValuesOperator::new(vec![value], 1, vec![column])),
+                Childrens::None,
+            );
+            let Childrens::Only(filter) = self.plan.childrens.as_mut() else {
+                unreachable!()
+            };
+            let Childrens::Only(mark) = filter.childrens.as_mut() else {
+                unreachable!()
+            };
+            let lower = mark.take();
+            **mark = MarkApplyOperator::build_exists(lower, right, column, vec![self.marker]);
+            let markers = arena.alloc_expression(ScalarExpression::Binary {
+                op: if matches!(op, BinaryOperator::And) {
+                    BinaryOperator::Or
+                } else {
+                    BinaryOperator::And
+                },
+                left_expr: self.marker,
+                right_expr: upper,
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            });
+            let predicate = arena.alloc_expression(ScalarExpression::Binary {
+                op,
+                left_expr: self.flag,
+                right_expr: markers,
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            });
+            let Operator::Filter(filter) = &mut filter.operator else {
+                unreachable!()
+            };
+            filter.predicate = predicate;
+            Ok(upper)
+        }
+
         fn mark(&mut self) -> &mut MarkApplyOperator {
             let Childrens::Only(filter) = self.plan.childrens.as_mut() else {
                 unreachable!()
@@ -310,6 +439,139 @@ mod tests {
             };
             op.predicate
         }
+    }
+
+    #[test]
+    fn shared_segment_guard_preserves_all_marker_combinations() -> Result<(), DatabaseError> {
+        for op in [BinaryOperator::And, BinaryOperator::Or] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let mut fixture = Fixture::new(&mut arena, op, false)?;
+            fixture.add_mark(&mut arena, op)?;
+            assert!(GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+            let upper = fixture.mark().guard.unwrap();
+            let Childrens::Only(filter) = fixture.plan.childrens.as_mut() else {
+                unreachable!()
+            };
+            let Childrens::Only(mark) = filter.childrens.as_mut() else {
+                unreachable!()
+            };
+            let Childrens::Twins { left, .. } = mark.childrens.as_mut() else {
+                unreachable!()
+            };
+            let Operator::MarkApply(lower) = &left.operator else {
+                unreachable!()
+            };
+            let lower = lower.guard.unwrap();
+            assert_ne!(upper, lower);
+            let predicate = fixture.predicate();
+            EvaluatorBind.apply(&mut fixture.plan, &mut arena)?;
+            for flag in [
+                DataValue::Boolean(false),
+                DataValue::Boolean(true),
+                DataValue::Null,
+            ] {
+                let input = Tuple::new(None, vec![flag.clone()]);
+                let guard = arena
+                    .expression(upper)
+                    .eval(&arena, Some(&input))?
+                    .into_owned();
+                assert_eq!(
+                    guard,
+                    arena
+                        .expression(lower)
+                        .eval(&arena, Some(&input))?
+                        .into_owned()
+                );
+                for a in [
+                    DataValue::Boolean(false),
+                    DataValue::Boolean(true),
+                    DataValue::Null,
+                ] {
+                    for b in [
+                        DataValue::Boolean(false),
+                        DataValue::Boolean(true),
+                        DataValue::Null,
+                    ] {
+                        let original = Tuple::new(None, vec![flag.clone(), a.clone(), b.clone()]);
+                        let guarded = if guard == DataValue::Boolean(false) {
+                            Tuple::new(None, vec![flag.clone(), DataValue::Null, DataValue::Null])
+                        } else {
+                            original.clone()
+                        };
+                        assert_eq!(
+                            arena
+                                .expression(predicate)
+                                .eval(&arena, Some(&original))?
+                                .into_owned(),
+                            arena
+                                .expression(predicate)
+                                .eval(&arena, Some(&guarded))?
+                                .into_owned()
+                        );
+                    }
+                }
+            }
+            assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn segment_requires_common_protection_and_hidden_markers() -> Result<(), DatabaseError> {
+        for escaped in [0, 1, 2] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let mut fixture = Fixture::new(&mut arena, BinaryOperator::And, false)?;
+            let upper = fixture.add_mark(&mut arena, BinaryOperator::And)?;
+            if escaped == 0 {
+                // (P AND lower) OR upper cannot skip both marks when P=false.
+                let protected = arena.alloc_expression(ScalarExpression::Binary {
+                    op: BinaryOperator::And,
+                    left_expr: fixture.flag,
+                    right_expr: fixture.marker,
+                    evaluator: None,
+                    ty: LogicalType::Boolean,
+                });
+                let predicate = arena.alloc_expression(ScalarExpression::Binary {
+                    op: BinaryOperator::Or,
+                    left_expr: protected,
+                    right_expr: upper,
+                    evaluator: None,
+                    ty: LogicalType::Boolean,
+                });
+                let Childrens::Only(filter) = fixture.plan.childrens.as_mut() else {
+                    unreachable!()
+                };
+                let Operator::Filter(filter) = &mut filter.operator else {
+                    unreachable!()
+                };
+                filter.predicate = predicate;
+            } else {
+                let Operator::Project(project) = &mut fixture.plan.operator else {
+                    unreachable!()
+                };
+                project
+                    .exprs
+                    .push(if escaped == 1 { fixture.marker } else { upper });
+            }
+            assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+            assert!(fixture.mark().guard.is_none());
+            let Childrens::Only(filter) = fixture.plan.childrens.as_mut() else {
+                unreachable!()
+            };
+            let Childrens::Only(mark) = filter.childrens.as_mut() else {
+                unreachable!()
+            };
+            let Childrens::Twins { left, .. } = mark.childrens.as_mut() else {
+                unreachable!()
+            };
+            let Operator::MarkApply(lower) = &left.operator else {
+                unreachable!()
+            };
+            assert!(lower.guard.is_none());
+        }
+        Ok(())
     }
 
     #[test]
@@ -447,6 +709,66 @@ mod tests {
     }
 
     #[test]
+    fn numeric_guards_accept_only_safe_operands() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let number = arena.alloc_column(ColumnCatalog::new(
+            "number".into(),
+            true,
+            ColumnDesc::new(LogicalType::Bigint, None, false, None)?,
+        ));
+        let number = arena.alloc_expression(ScalarExpression::column_expr(number, 0));
+        let zero = arena.alloc_expression(DataValue::Int64(0).into());
+        let widening = arena.alloc_expression(ScalarExpression::TypeCast {
+            expr: number,
+            ty: LogicalType::Double,
+            evaluator: None,
+        });
+        let narrowing = arena.alloc_expression(ScalarExpression::TypeCast {
+            expr: number,
+            ty: LogicalType::Integer,
+            evaluator: None,
+        });
+        let arithmetic = arena.alloc_expression(ScalarExpression::Binary {
+            op: BinaryOperator::Divide,
+            left_expr: number,
+            right_expr: zero,
+            evaluator: None,
+            ty: LogicalType::Bigint,
+        });
+        for (operand, valid) in [
+            (number, true),
+            (widening, true),
+            (narrowing, false),
+            (arithmetic, false),
+        ] {
+            for op in [
+                BinaryOperator::Eq,
+                BinaryOperator::NotEq,
+                BinaryOperator::Gt,
+                BinaryOperator::GtEq,
+                BinaryOperator::Lt,
+                BinaryOperator::LtEq,
+            ] {
+                let predicate = arena.alloc_expression(ScalarExpression::Binary {
+                    op,
+                    left_expr: operand,
+                    right_expr: zero,
+                    evaluator: None,
+                    ty: LogicalType::Boolean,
+                });
+                let mut visitor = SimpleGuardVisitor {
+                    valid: true,
+                    context: GuardContext::Predicate,
+                };
+                visitor.visit(predicate, &arena)?;
+                assert_eq!(visitor.valid, valid);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn null_checks_and_aliases_keep_the_guard_whitelist() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
@@ -488,7 +810,7 @@ mod tests {
         let assert_case = |expr, expected| -> Result<(), DatabaseError> {
             let mut visitor = SimpleGuardVisitor {
                 valid: true,
-                null_operand: false,
+                context: GuardContext::Predicate,
             };
             visitor.visit(expr, &arena)?;
             assert_eq!(visitor.valid, expected);

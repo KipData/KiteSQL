@@ -1126,6 +1126,84 @@ true
 statement error
 select '20' + cast(1 as bigint);
 
+# Projection output aliases must map back to the indexed source column.
+statement ok
+create index corr_b on corr_rows(b);
+
+query I
+select id from corr_rows where b in (select x.b as probe_key from corr_rows x where x.id<3) order by id;
+----
+1
+2
+5
+
+# A computed key is not a probe of its source column.
+query I
+select id from corr_rows where -b in (select -x.b as probe_key from corr_rows x where x.id<3) order by id;
+----
+1
+2
+5
+
+# Probing below LIMIT/OFFSET would change the original RHS set.
+query I
+select id from corr_rows where b in (select x.b as probe_key from corr_rows x order by x.id limit 1) order by id;
+----
+1
+
+query I
+select id from corr_rows where b in (select x.b as probe_key from corr_rows x order by x.id limit 1 offset 1) order by id;
+----
+2
+5
+
+# Numeric guards keep NULL rows that still depend on the IN result.
+query I
+select id from corr_rows where b>15 or id in (select x.id from corr_rows x where x.id=4) order by id;
+----
+2
+3
+4
+5
+
+# A marker visible in SELECT must remain real even when the OR branch is true.
+query IT
+select id,b in (select x.b from corr_rows x where x.id=1) as matched from corr_rows where b>15 or matched order by id;
+----
+1 true
+2 false
+3 false
+5 false
+
+statement ok
+create table guard_bad_cast(id int primary key, txt varchar);
+
+statement ok
+insert into guard_bad_cast values(1,'not an integer');
+
+# A shared numeric guard protects every marker in a consecutive Apply segment.
+query I
+select id from corr_rows where id<0 and (b in (select cast(txt as int) from guard_bad_cast) or b in (select cast(txt as int) from guard_bad_cast));
+----
+
+query I
+select id from corr_rows where id>0 or (b in (select cast(txt as int) from guard_bad_cast) and b in (select cast(txt as int) from guard_bad_cast)) order by id;
+----
+1
+2
+3
+4
+5
+
+statement error invalid digit found in string
+select id from corr_rows where id>0 and b in (select cast(txt as int) from guard_bad_cast);
+
+statement error invalid digit found in string
+select id from corr_rows where b>0 or id in (select cast(txt as int) from guard_bad_cast);
+
+statement ok
+drop table guard_bad_cast;
+
 statement ok
 drop table corr_lookup;
 

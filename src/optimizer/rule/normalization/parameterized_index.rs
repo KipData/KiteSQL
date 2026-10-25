@@ -159,45 +159,47 @@ fn extract_parameterized_probe_side(
 fn parameterize_right_subtree(
     plan: &mut LogicalPlan,
     right_column: &ColumnRef,
-    arena: &dyn MetaArena,
+    arena: &mut PlanArena<'_>,
 ) -> bool {
-    if matches!(plan.operator, Operator::TableScan(_)) {
-        let index_info = {
-            let Operator::TableScan(scan_op) = &mut plan.operator else {
-                unreachable!();
+    match (&mut plan.operator, plan.childrens.as_mut()) {
+        (Operator::Project(project), Childrens::Only(child)) => {
+            let Some(mut expr) = project.exprs.iter().copied().find(|expr| {
+                let column = expr.output_column_ref(arena);
+                arena.same_column(column, *right_column)
+            }) else {
+                return false;
             };
-            let Some(target_index) =
-                pick_parameterized_index_position(scan_op, right_column, arena)
+            // Follow the source, not the projection's output relation/name.
+            // Computed and cast keys are not index probes.
+            while let ScalarExpression::Alias { expr: source, .. } = arena.expression(expr) {
+                expr = *source;
+            }
+            let ScalarExpression::ColumnRef { column, .. } = *arena.expression(expr) else {
+                return false;
+            };
+            parameterize_right_subtree(child, &column, arena)
+        }
+        (Operator::TableScan(scan), _) => {
+            if scan.limit != (None, None) {
+                return false;
+            }
+            let Some(position) = pick_parameterized_index_position(scan, right_column, arena)
             else {
                 return false;
             };
-            scan_op.index_infos[target_index].lookup = Some(IndexLookup::Probe);
-            scan_op.index_infos[target_index].clone()
-        };
-        let sort_option = index_info.sort_option.clone();
-        plan.physical_option = Some(PhysicalOption::new(
-            PlanImpl::IndexScan(Box::new(index_info)),
-            sort_option,
-            RowCountOption::Unknown,
-        ));
-        return true;
-    }
-
-    let passthrough = matches!(
-        plan.operator,
-        Operator::Filter(_)
-            | Operator::Project(_)
-            | Operator::Limit(_)
-            | Operator::Sort(_)
-            | Operator::TopK(_)
-    );
-
-    if !passthrough {
-        return false;
-    }
-
-    match plan.childrens.as_mut() {
-        Childrens::Only(child) => parameterize_right_subtree(child, right_column, arena),
+            scan.index_infos[position].lookup = Some(IndexLookup::Probe);
+            let index_info = scan.index_infos[position].clone();
+            let sort_option = index_info.sort_option.clone();
+            plan.physical_option = Some(PhysicalOption::new(
+                PlanImpl::IndexScan(Box::new(index_info)),
+                sort_option,
+                RowCountOption::Unknown,
+            ));
+            true
+        }
+        (Operator::Filter(_) | Operator::Sort(_), Childrens::Only(child)) => {
+            parameterize_right_subtree(child, right_column, arena)
+        }
         _ => false,
     }
 }
@@ -222,6 +224,7 @@ fn pick_parameterized_index_position(
         .filter(|(_, index_info)| {
             let index_meta = arena.index(index_info.meta);
             index_meta.table_name == *table_name
+                && index_meta.column_ids.len() == 1
                 && index_meta.column_ids.first().copied() == Some(column_id)
         })
         .min_by_key(|(_, index_info)| index_priority(arena.index(index_info.meta).ty))
@@ -557,7 +560,7 @@ mod tests {
         let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
 
         assert!(!ParameterizeMarkApply.apply(&mut plan, &mut arena)?);
-        assert!(!parameterize_right_subtree(&mut plan, &column, &arena));
+        assert!(!parameterize_right_subtree(&mut plan, &column, &mut arena));
 
         let mut filter = LogicalPlan::new(
             Operator::Filter(FilterOperator {
@@ -567,7 +570,11 @@ mod tests {
             }),
             Childrens::None,
         );
-        assert!(!parameterize_right_subtree(&mut filter, &column, &arena));
+        assert!(!parameterize_right_subtree(
+            &mut filter,
+            &column,
+            &mut arena
+        ));
 
         assert_eq!(
             index_priority(IndexType::PrimaryKey { is_multiple: false }),
@@ -588,7 +595,9 @@ mod inner_join_tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::expression::range_detacher::Range;
+    use crate::expression::{AliasType, UnaryOperator};
     use crate::planner::operator::join::JoinOperator;
+    use crate::planner::operator::limit::LimitOperator;
     use crate::planner::operator::mark_apply::MarkApplyKind;
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::TableArenaCell;
@@ -701,6 +710,130 @@ mod inner_join_tests {
             JoinType::Inner,
             false,
         )
+    }
+
+    #[test]
+    fn scalar_probe_rejects_composite_unique_keys() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let mut right = scan(
+            &mut arena,
+            "right",
+            &[LogicalType::Integer, LogicalType::Integer],
+            &[&[0, 1], &[0]],
+        );
+        let (column, single) = {
+            let Operator::TableScan(scan) = &mut right.operator else {
+                unreachable!()
+            };
+            let mut composite = arena.index(scan.index_infos[0].meta).clone();
+            composite.ty = IndexType::Unique;
+            scan.index_infos[0].meta = arena.alloc_index(composite);
+            (scan.columns[0], scan.index_infos.pop().unwrap())
+        };
+        assert!(!parameterize_right_subtree(&mut right, &column, &mut arena));
+        assert!(right.physical_option.is_none());
+        let Operator::TableScan(scan) = &mut right.operator else {
+            unreachable!()
+        };
+        assert!(scan.index_infos[0].lookup.is_none());
+        scan.index_infos.push(single);
+        // Prefer a usable scalar index even though UNIQUE normally ranks higher.
+        assert_eq!(pick_parameterized_index_position(scan, &column, &arena), Some(1));
+        assert!(parameterize_right_subtree(&mut right, &column, &mut arena));
+        let PlanImpl::IndexScan(index) = &right.physical_option.as_ref().unwrap().plan else {
+            unreachable!()
+        };
+        assert_eq!(arena.index(index.meta).column_ids, vec![0]);
+        assert!(matches!(index.lookup, Some(IndexLookup::Probe)));
+        Ok(())
+    }
+
+    #[test]
+    fn projected_probe_resolves_output_alias_but_rejects_computed_keys_and_limits(
+    ) -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let base = scan(&mut arena, "right", &[LogicalType::Integer], &[&[0]]);
+        let source = column(&base, 0, &mut arena);
+        let output = arena.alloc_column(ColumnCatalog::new(
+            "renamed".to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        ));
+        let alias_column = arena.alloc_expression(ScalarExpression::column_expr(output, 0));
+        let alias = arena.alloc_expression(ScalarExpression::Alias {
+            expr: source,
+            alias: AliasType::Expr(alias_column),
+        });
+        let project = |input| {
+            LogicalPlan::new(
+                Operator::Project(ProjectOperator { exprs: vec![alias] }),
+                Childrens::Only(Box::new(input)),
+            )
+        };
+        let mut projected = project(base.clone());
+        assert!(parameterize_right_subtree(
+            &mut projected,
+            &output,
+            &mut arena
+        ));
+        let input = projected.childrens.only();
+        let Operator::TableScan(input) = &input.operator else {
+            unreachable!()
+        };
+        assert_eq!(input.index_infos[0].lookup, Some(IndexLookup::Probe));
+        assert!(matches!(
+            projected
+                .childrens
+                .only()
+                .physical_option
+                .as_ref()
+                .unwrap()
+                .plan,
+            PlanImpl::IndexScan(_)
+        ));
+
+        let mut limited = project(LimitOperator::build(Some(1), Some(1), base.clone()));
+        assert!(!parameterize_right_subtree(
+            &mut limited,
+            &output,
+            &mut arena
+        ));
+        let mut pushed = base.clone();
+        let Operator::TableScan(op) = &mut pushed.operator else {
+            unreachable!()
+        };
+        op.limit = (None, Some(1));
+        let mut pushed = project(pushed);
+        assert!(!parameterize_right_subtree(
+            &mut pushed,
+            &output,
+            &mut arena
+        ));
+
+        let computed = arena.alloc_expression(ScalarExpression::Unary {
+            op: UnaryOperator::Minus,
+            expr: source,
+            evaluator: None,
+            ty: LogicalType::Integer,
+        });
+        let computed = arena.alloc_expression(ScalarExpression::Alias {
+            expr: computed,
+            alias: AliasType::Expr(alias_column),
+        });
+        let mut projected = LogicalPlan::new(
+            Operator::Project(ProjectOperator {
+                exprs: vec![computed],
+            }),
+            Childrens::Only(Box::new(base)),
+        );
+        assert!(!parameterize_right_subtree(
+            &mut projected,
+            &output,
+            &mut arena
+        ));
+        Ok(())
     }
 
     #[test]
