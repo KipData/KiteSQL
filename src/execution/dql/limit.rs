@@ -50,6 +50,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Limit {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Limit {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.skipped = 0;
+        self.emitted = 0;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

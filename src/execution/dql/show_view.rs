@@ -38,6 +38,15 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.metas = None;
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

@@ -141,6 +141,7 @@ impl<S: Storage> State<S> {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::execution::dql::index_scan::IndexScan;
     use crate::expression::range_detacher::Range;
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::filter::FilterOperator;
@@ -314,7 +315,7 @@ mod tests {
             let Childrens::Only(scan) = plan.childrens.as_ref() else {
                 panic!("expected scan")
             };
-            let Operator::TableScan(scan_op) = &scan.operator else {
+            let Operator::TableScan(_) = &scan.operator else {
                 panic!("expected table scan")
             };
             let Some(PhysicalOption {
@@ -330,12 +331,12 @@ mod tests {
             let mut execution_arena = crate::execution::ExecArena::<
                 <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
             >::with_capacity(0);
-            let executor = crate::execution::dql::index_scan::IndexScan::new(
-                scan_op,
+            let ranges = IndexScan::ranges(
                 info,
                 info.lookup.as_ref().expect("lookup"),
-            );
-            let ranges = executor.ranges(&mut execution_arena, &mut arena)?;
+                &mut execution_arena,
+                &mut arena,
+            )?;
             let expected_range = match &expected_index.lookup {
                 Some(IndexLookup::Static(range)) => range,
                 _ => unreachable!(),
@@ -595,7 +596,7 @@ mod tests {
                 .or_else(|| plan.childrens.iter().find_map(find_scan))
         }
         let scan = find_scan(&plan.plan).expect("table scan");
-        let Operator::TableScan(scan_op) = &scan.operator else {
+        let Operator::TableScan(_) = &scan.operator else {
             unreachable!()
         };
         let Some(PhysicalOption {
@@ -608,12 +609,12 @@ mod tests {
         let mut execution_arena = crate::execution::ExecArena::<
             <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
         >::with_capacity(0);
-        let ranges = crate::execution::dql::index_scan::IndexScan::new(
-            scan_op,
+        let ranges = IndexScan::ranges(
             info,
             info.lookup.as_ref().expect("lookup"),
-        )
-        .ranges(&mut execution_arena, &mut bound_arena)?;
+            &mut execution_arena,
+            &mut bound_arena,
+        )?;
         let mut ranges = ranges;
         assert_eq!(
             ranges.next(),

@@ -54,6 +54,17 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.built = false;
+        self.right_counts.clear();
+        arena.reset(self.left_input, plan_arena)?;
+        arena.reset(self.right_input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

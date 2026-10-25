@@ -18,27 +18,20 @@ use crate::planner::operator::values::ValuesOperator;
 use crate::planner::ExprRef;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
-use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
 
 pub struct Values<'a> {
+    op: &'a ValuesOperator,
     rows: std::slice::Iter<'a, ExprRef>,
     remaining_rows: usize,
-    schema_ref: &'a Schema,
 }
 
 impl<'a> From<&'a ValuesOperator> for Values<'a> {
-    fn from(
-        ValuesOperator {
-            rows,
-            row_count,
-            schema_ref,
-        }: &'a ValuesOperator,
-    ) -> Self {
+    fn from(op: &'a ValuesOperator) -> Self {
         Values {
-            rows: rows.iter(),
-            remaining_rows: *row_count,
-            schema_ref,
+            op,
+            rows: op.rows.iter(),
+            remaining_rows: op.row_count,
         }
     }
 }
@@ -59,6 +52,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.rows = self.op.rows.iter();
+        self.remaining_rows = self.op.row_count;
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -69,13 +72,13 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values<'a> {
             return Ok(());
         }
         self.remaining_rows -= 1;
-        let width = self.schema_ref.len();
+        let width = self.op.schema_ref.len();
 
         let output = arena.result_tuple_mut();
         output.pk = None;
         output.values.clear();
         for (i, expr) in self.rows.by_ref().take(width).enumerate() {
-            let ty = plan_arena.column(self.schema_ref[i]).datatype();
+            let ty = plan_arena.column(self.op.schema_ref[i]).datatype();
             output.values.push(
                 plan_arena
                     .expression(*expr)

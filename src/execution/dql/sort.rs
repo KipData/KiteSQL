@@ -49,6 +49,10 @@ impl<'a, T> NullableVec<'a, T> {
         self.0.len()
     }
 
+    pub(crate) fn clear(&mut self) {
+        while self.pop().is_some() {}
+    }
+
     #[inline]
     pub(crate) fn pop(&mut self) -> Option<T> {
         self.0.pop().map(|item| unsafe { item.assume_init() })
@@ -57,7 +61,7 @@ impl<'a, T> NullableVec<'a, T> {
 
 impl<T> Drop for NullableVec<'_, T> {
     fn drop(&mut self) {
-        while self.pop().is_some() {}
+        self.clear();
     }
 }
 
@@ -184,6 +188,15 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.rows.clear();
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -303,6 +316,11 @@ mod test {
             &transaction,
         );
         let mut metadata = ExecMetaArena::new(metadata);
+        let nodes = arena.nodes.items.len();
+        assert!(arena.next_tuple(root, &mut metadata)?);
+        assert_eq!(arena.result_tuple().values, vec![DataValue::Int32(1)]);
+        arena.reset(root, &mut metadata)?;
+        assert_eq!(arena.nodes.items.len(), nodes);
         for expected in [1, 2, 3] {
             assert!(arena.next_tuple(root, &mut metadata)?);
             assert_eq!(
@@ -322,11 +340,25 @@ mod test {
             );
         }
         assert!(!arena.next_tuple(root, &mut metadata)?);
+        arena.reset(root, &mut metadata)?;
+        for expected in [1, 2, 3] {
+            assert!(arena.next_tuple(root, &mut metadata)?);
+            assert_eq!(
+                arena.result_tuple().values,
+                vec![DataValue::Int32(expected)]
+            );
+            assert_eq!(
+                metadata.init_value(result),
+                Some(&DataValue::Int32(expected))
+            );
+        }
+        assert!(!arena.next_tuple(root, &mut metadata)?);
+        assert_eq!(arena.nodes.items.len(), nodes);
         Ok(())
     }
 
     #[test]
-    fn nullable_vec_drops_values() {
+    fn nullable_vec_clear_and_drop_release_values_without_reallocating() {
         struct DropValue<'a>(&'a Cell<usize>);
 
         impl Drop for DropValue<'_> {
@@ -341,8 +373,17 @@ mod test {
             let mut values = NullableVec::new(&arena);
             values.put(DropValue(&dropped));
             values.put(DropValue(&dropped));
+            let allocation = (values.0.as_ptr(), values.0.capacity());
+            values.clear();
+            assert_eq!(dropped.get(), 2);
+            assert_eq!(values.len(), 0);
+            assert_eq!((values.0.as_ptr(), values.0.capacity()), allocation);
+            values.clear();
+            assert_eq!(dropped.get(), 2);
+            values.put(DropValue(&dropped));
+            assert_eq!((values.0.as_ptr(), values.0.capacity()), allocation);
         }
-        assert_eq!(dropped.get(), 2);
+        assert_eq!(dropped.get(), 3);
     }
 
     fn sorted_rows<'a>(

@@ -54,6 +54,14 @@ struct WindowState {
 }
 
 impl WindowState {
+    fn clear(&mut self) {
+        self.buffered.clear();
+        self.pending = None;
+        self.sort_values.clear();
+        self.started = false;
+        self.begin_partition();
+    }
+
     fn begin_partition(&mut self) {
         self.partition_rows = 0;
         self.peer_start = 0;
@@ -219,6 +227,17 @@ impl<'a> Window<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.state.clear();
+        self.input_exhausted = false;
+        self.reset_functions()?;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -289,6 +308,52 @@ mod tests {
 
     fn tuple(values: &[i32]) -> Tuple {
         Tuple::new(None, values.iter().copied().map(DataValue::from).collect())
+    }
+
+    #[test]
+    fn clear_restores_window_state_and_keeps_buffer_capacity() {
+        let mut state = WindowState {
+            buffered: Vec::with_capacity(8),
+            pending: Some((tuple(&[2, 20]), Boundary::Peer)),
+            sort_values: Vec::with_capacity(4),
+            started: true,
+            partition_rows: 5,
+            peer_start: 3,
+            peer_index: 2,
+        };
+        state.buffered.push((0, tuple(&[1, 10])));
+        state.sort_values.push(DataValue::Int32(10));
+        let buffered = (state.buffered.as_ptr(), state.buffered.capacity());
+        let keys = (state.sort_values.as_ptr(), state.sort_values.capacity());
+        for _ in 0..2 {
+            state.clear();
+            assert!(state.buffered.is_empty());
+            assert!(state.pending.is_none());
+            assert!(state.sort_values.is_empty());
+            assert!(!state.started);
+            assert_eq!(
+                (state.partition_rows, state.peer_start, state.peer_index),
+                (0, 0, 0)
+            );
+            assert_eq!(
+                (state.buffered.as_ptr(), state.buffered.capacity()),
+                buffered
+            );
+            assert_eq!(
+                (state.sort_values.as_ptr(), state.sort_values.capacity()),
+                keys
+            );
+        }
+        state.buffered.push((0, tuple(&[3, 30])));
+        state.sort_values.push(DataValue::Int32(30));
+        assert_eq!(
+            (state.buffered.as_ptr(), state.buffered.capacity()),
+            buffered
+        );
+        assert_eq!(
+            (state.sort_values.as_ptr(), state.sort_values.capacity()),
+            keys
+        );
     }
 
     #[test]

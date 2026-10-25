@@ -30,11 +30,17 @@ use crate::types::tuple::Tuple;
 use std::mem;
 
 pub(crate) enum RecursiveInput {
-    One(Option<Tuple>),
+    One {
+        tuple: Tuple,
+        emitted: bool,
+    },
     #[cfg(feature = "spill")]
     Many(SpillReader<Tuple>),
     #[cfg(not(feature = "spill"))]
-    Many(std::vec::IntoIter<Tuple>),
+    Many {
+        rows: Vec<Tuple>,
+        position: usize,
+    },
 }
 
 impl Iterator for RecursiveInput {
@@ -42,12 +48,36 @@ impl Iterator for RecursiveInput {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
-            Self::One(tuple) => tuple.take().map(Ok),
+            Self::One { tuple, emitted } => {
+                if *emitted {
+                    None
+                } else {
+                    *emitted = true;
+                    Some(Ok(tuple.clone()))
+                }
+            }
             #[cfg(feature = "spill")]
             Self::Many(rows) => rows.next(),
             #[cfg(not(feature = "spill"))]
-            Self::Many(rows) => rows.next().map(Ok),
+            Self::Many { rows, position } => {
+                let row = rows.get(*position).cloned();
+                *position += usize::from(row.is_some());
+                row.map(Ok)
+            }
         }
+    }
+}
+
+impl RecursiveInput {
+    fn reset(&mut self) -> Result<(), DatabaseError> {
+        match self {
+            Self::One { emitted, .. } => *emitted = false,
+            #[cfg(feature = "spill")]
+            Self::Many(rows) => rows.reset()?,
+            #[cfg(not(feature = "spill"))]
+            Self::Many { position, .. } => *position = 0,
+        }
+        Ok(())
     }
 }
 
@@ -157,14 +187,17 @@ impl RecursiveRows {
     fn into_input(self) -> Result<Option<RecursiveInput>, DatabaseError> {
         match self {
             Self::Empty => Ok(None),
-            Self::One { tuple, .. } => Ok(Some(RecursiveInput::One(Some(tuple)))),
+            Self::One { tuple, .. } => Ok(Some(RecursiveInput::One {
+                tuple,
+                emitted: false,
+            })),
             #[cfg(feature = "spill")]
             Self::Reading(mut reader) => {
                 reader.reset()?;
                 Ok(Some(RecursiveInput::Many(reader)))
             }
             #[cfg(not(feature = "spill"))]
-            Self::Reading { rows, .. } => Ok(Some(RecursiveInput::Many(rows.into_iter()))),
+            Self::Reading { rows, .. } => Ok(Some(RecursiveInput::Many { rows, position: 0 })),
             Self::Writing(_) => unreachable!("recursive generation must be finished first"),
         }
     }
@@ -248,6 +281,18 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.working = RecursiveRows::default();
+        self.next = RecursiveRows::default();
+        self.phase = RecursivePhase::Anchor;
+        self.recursive_arena.reset_for_rebuild();
+        arena.reset(self.anchor_input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -309,6 +354,14 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.input.reset()
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

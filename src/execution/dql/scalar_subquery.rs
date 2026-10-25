@@ -49,6 +49,15 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.returned = false;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

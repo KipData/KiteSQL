@@ -1979,6 +1979,22 @@ pub struct TupleIter<'a, T: Transaction + 'a> {
     iter: T::IterType<'a>,
 }
 
+impl<'a, T: Transaction + 'a> TupleIter<'a, T> {
+    pub(crate) fn reset(
+        &mut self,
+        tx: &'a T,
+        table_codec: &mut TableCodec,
+        table_name: &TableName,
+        bounds: Bounds,
+    ) -> Result<(), DatabaseError> {
+        self.iter = table_codec.with_tuple_bound(table_name, |min, max| {
+            tx.range(Bound::Included(min), Bound::Included(max))
+        })?;
+        self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
+        Ok(())
+    }
+}
+
 impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
     fn next_tuple_into(
         &mut self,
@@ -2130,6 +2146,15 @@ pub enum IndexIterState<'a, T: Transaction + 'a> {
     Init,
     Range(RangeIter<'a, T>),
     Over,
+}
+
+impl<'a, T: Transaction> IndexIter<'a, T> {
+    pub(crate) fn reset(&mut self, ranges: IndexRanges<'a>, bounds: Bounds) {
+        self.state = IndexIterState::Init;
+        self.params.reverse = ranges.reverse;
+        self.ranges = ranges;
+        self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
+    }
 }
 
 impl<T: Transaction> Iter for IndexIter<'_, T> {

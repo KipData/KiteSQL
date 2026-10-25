@@ -147,6 +147,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.output = None;
+        self.arena.reset();
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

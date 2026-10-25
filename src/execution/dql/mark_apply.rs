@@ -38,14 +38,12 @@ type MaterializedRows = SpillVec<'static, Tuple>;
 #[cfg(not(feature = "spill"))]
 type MaterializedRows = Vec<Tuple>;
 
-enum RightInput<'a> {
-    Rebuild {
-        plan: &'a LogicalPlan,
-        pos: ExecId,
+enum RightInput {
+    Streaming {
+        root: ExecId,
     },
     Materialize {
-        plan: &'a LogicalPlan,
-        pos: ExecId,
+        root: ExecId,
     },
     Materializing {
         root: ExecId,
@@ -54,32 +52,26 @@ enum RightInput<'a> {
     Materialized(MaterializedRows),
 }
 
-impl<'a> RightInput<'a> {
-    fn build<T: Transaction + 'a>(
+impl RightInput {
+    fn reset<'a, T: Transaction + 'a, A: MetaArena + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        plan_arena: &mut ExecMetaArena<A>,
         probe: Option<RuntimeIndexProbe>,
-    ) -> ExecId {
-        let (Self::Rebuild { plan, pos } | Self::Materialize { plan, pos }) = self else {
-            unreachable!("materialized input no longer builds its RHS")
+    ) -> Result<ExecId, DatabaseError> {
+        let (Self::Streaming { root } | Self::Materialize { root }) = self else {
+            unreachable!("materialized input replays its rows")
         };
-        arena.nodes.seek(*pos);
         if let Some(probe) = probe {
             arena.push_runtime_probe(probe);
         }
-        build_read(
-            arena,
-            plan_arena,
-            plan,
-            arena.context(),
-            arena.transaction(),
-        )
+        arena.reset(*root, plan_arena)?;
+        Ok(*root)
     }
 
     // Return the first terminal predicate result, or None after exhausting the RHS.
-    // The caller supplies Mark semantics; this enum owns reconstruction and replay.
-    fn scan<T: Transaction + 'a, A: MetaArena + 'a>(
+    // The caller supplies Mark semantics; this enum owns resetting and replay.
+    fn scan<'a, T: Transaction + 'a, A: MetaArena + 'a>(
         self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -87,8 +79,8 @@ impl<'a> RightInput<'a> {
         mut evaluate: impl FnMut(&Tuple, &ExecMetaArena<A>) -> Result<Option<DataValue>, DatabaseError>,
     ) -> Result<(Self, Option<DataValue>), DatabaseError> {
         match self {
-            input @ Self::Rebuild { .. } => {
-                let root = input.build(arena, plan_arena, probe);
+            input @ Self::Streaming { .. } => {
+                let root = input.reset(arena, plan_arena, probe)?;
                 while arena.next_tuple(root, plan_arena)? {
                     if let Some(value) = evaluate(arena.result_tuple(), plan_arena)? {
                         return Ok((input, Some(value)));
@@ -97,7 +89,7 @@ impl<'a> RightInput<'a> {
                 Ok((input, None))
             }
             input @ Self::Materialize { .. } => {
-                let root = input.build(arena, plan_arena, None);
+                let root = input.reset(arena, plan_arena, None)?;
                 Self::Materializing {
                     root,
                     rows: MaterializedRows::new(),
@@ -152,8 +144,9 @@ impl<'a> RightInput<'a> {
 pub struct MarkApply<'a> {
     op: &'a MarkApplyOperator,
     left_input: ExecId,
+    right_root: ExecId,
     // Temporarily None while scan owns and transitions the right input.
-    right_input: Option<RightInput<'a>>,
+    right_input: Option<RightInput>,
     // Retain a streaming inner input across next_tuple calls, not its result rows.
     join_input: Option<(ExecId, Tuple)>,
 }
@@ -169,22 +162,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
         transaction: &T,
     ) -> ExecId {
         let left_input = build_read(arena, plan_arena, left_input, cache, transaction);
-        let pos = arena.nodes.position();
-        build_read(arena, plan_arena, right_input, cache, transaction);
+        let right_root = build_read(arena, plan_arena, right_input, cache, transaction);
         let right_input = if op.materialize {
-            RightInput::Materialize {
-                plan: right_input,
-                pos,
-            }
+            RightInput::Materialize { root: right_root }
         } else {
-            RightInput::Rebuild {
-                plan: right_input,
-                pos,
-            }
+            RightInput::Streaming { root: right_root }
         };
         arena.push(ExecNode::MarkApply(Self {
             op,
             left_input,
+            right_root,
             right_input: Some(right_input),
             join_input: None,
         }))
@@ -192,6 +179,24 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.join_input = None;
+        self.right_input = Some(if self.op.materialize {
+            RightInput::Materialize {
+                root: self.right_root,
+            }
+        } else {
+            RightInput::Streaming {
+                root: self.right_root,
+            }
+        });
+        arena.reset(self.left_input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -230,7 +235,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
 impl<'a> MarkApply<'a> {
     fn next_join_tuple<T: Transaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        input: &RightInput<'a>,
+        input: &RightInput,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
@@ -256,7 +261,7 @@ impl<'a> MarkApply<'a> {
             }
             let left = arena.materialize_tuple();
             let value = self.parameterized_probe_value(&left, plan_arena)?;
-            let root = input.build(arena, plan_arena, self.runtime_probe_for(value));
+            let root = input.reset(arena, plan_arena, self.runtime_probe_for(value))?;
             self.join_input = Some((root, left));
         }
     }
@@ -297,11 +302,11 @@ impl<'a> MarkApply<'a> {
 
     fn mark_value<T: Transaction + 'a, A: MetaArena + 'a>(
         &self,
-        input: RightInput<'a>,
+        input: RightInput,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
         left_tuple: &Tuple,
-    ) -> Result<(RightInput<'a>, DataValue), DatabaseError> {
+    ) -> Result<(RightInput, DataValue), DatabaseError> {
         let probe = self.parameterized_probe_value(left_tuple, plan_arena)?;
         match self.op.kind {
             MarkApplyKind::InnerJoin => unreachable!("inner join streams tuples"),
@@ -360,13 +365,13 @@ impl<'a> MarkApply<'a> {
 
     fn scan_quantified_right_input<T: Transaction + 'a, A: MetaArena + 'a>(
         &self,
-        input: RightInput<'a>,
+        input: RightInput,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
         probe: Option<DataValue>,
         quantifier: MarkApplyQuantifier,
         left_tuple: &Tuple,
-    ) -> Result<(RightInput<'a>, DataValue), DatabaseError> {
+    ) -> Result<(RightInput, DataValue), DatabaseError> {
         let mut saw_null = false;
         let predicates = self.op.predicates();
         let runtime_probe = self.runtime_probe_for(probe);
@@ -832,12 +837,12 @@ mod tests {
             &transaction,
         );
 
+        let cache = arena.context();
+        let right_root = build_read(&mut arena, &mut plan_arena, &right, cache, &transaction);
         let mut exec: MarkApply = MarkApply {
+            right_root,
             op: &op,
-            right_input: Some(RightInput::Rebuild {
-                plan: &right,
-                pos: arena.nodes.position(),
-            }),
+            right_input: Some(RightInput::Streaming { root: right_root }),
             left_input: 0,
             join_input: None,
         };
@@ -890,12 +895,12 @@ mod tests {
             &transaction,
         );
 
+        let cache = arena.context();
+        let right_root = build_read(&mut arena, &mut plan_arena, &right, cache, &transaction);
         let mut exec: MarkApply = MarkApply {
+            right_root,
             op: &op,
-            right_input: Some(RightInput::Rebuild {
-                plan: &right,
-                pos: arena.nodes.position(),
-            }),
+            right_input: Some(RightInput::Streaming { root: right_root }),
             left_input: 0,
             join_input: None,
         };
@@ -948,12 +953,12 @@ mod tests {
             &transaction,
         );
 
+        let cache = arena.context();
+        let right_root = build_read(&mut arena, &mut plan_arena, &right, cache, &transaction);
         let mut exec: MarkApply = MarkApply {
+            right_root,
             op: &op,
-            right_input: Some(RightInput::Rebuild {
-                plan: &right,
-                pos: arena.nodes.position(),
-            }),
+            right_input: Some(RightInput::Streaming { root: right_root }),
             left_input: 0,
             join_input: None,
         };
@@ -1084,14 +1089,14 @@ mod tests {
                     let mut arena = ExecArena::with_capacity(0);
                     arena.init_context(cache, &transaction);
                     let left_input = build_read(&mut arena, &mut meta, &left, cache, &transaction);
-                    let pos = arena.nodes.position();
-                    build_read(&mut arena, &mut meta, &right, cache, &transaction);
+                    let right_root = build_read(&mut arena, &mut meta, &right, cache, &transaction);
                     let right_input = if op.materialize {
-                        RightInput::Materialize { plan: &right, pos }
+                        RightInput::Materialize { root: right_root }
                     } else {
-                        RightInput::Rebuild { plan: &right, pos }
+                        RightInput::Streaming { root: right_root }
                     };
                     let mut exec = MarkApply {
+                        right_root,
                         op: &op,
                         left_input,
                         right_input: Some(right_input),
@@ -1107,7 +1112,7 @@ mod tests {
                         );
                         assert!(matches!(
                             exec.right_input,
-                            Some(RightInput::Rebuild { .. } | RightInput::Materialize { .. })
+                            Some(RightInput::Streaming { .. } | RightInput::Materialize { .. })
                         ));
                         exec.next_tuple(&mut arena, &mut meta)?;
                         assert!(exec.right_input.is_none());
@@ -1168,14 +1173,14 @@ mod tests {
             let mut arena = ExecArena::with_capacity(0);
             arena.init_context(cache, &transaction);
             let left_input = build_read(&mut arena, &mut meta, &left, cache, &transaction);
-            let pos = arena.nodes.position();
-            build_read(&mut arena, &mut meta, &right, cache, &transaction);
+            let right_root = build_read(&mut arena, &mut meta, &right, cache, &transaction);
             let right_input = if materialize {
-                RightInput::Materialize { plan: &right, pos }
+                RightInput::Materialize { root: right_root }
             } else {
-                RightInput::Rebuild { plan: &right, pos }
+                RightInput::Streaming { root: right_root }
             };
             let mut exec = MarkApply {
+                right_root,
                 op: &op,
                 left_input,
                 right_input: Some(right_input),
@@ -1216,7 +1221,10 @@ mod tests {
                         ));
                     }
                 } else {
-                    assert!(matches!(exec.right_input, Some(RightInput::Rebuild { .. })));
+                    assert!(matches!(
+                        exec.right_input,
+                        Some(RightInput::Streaming { .. })
+                    ));
                 }
             }
             exec.next_tuple(&mut arena, &mut meta)?;
@@ -1257,11 +1265,11 @@ mod tests {
             let mut arena = ExecArena::with_capacity(0);
             arena.init_context(cache, &transaction);
             let left_input = build_read(&mut arena, &mut meta, &left, cache, &transaction);
-            let pos = arena.nodes.position();
-            build_read(&mut arena, &mut meta, &right, cache, &transaction);
+            let right_root = build_read(&mut arena, &mut meta, &right, cache, &transaction);
             let mut exec = MarkApply {
+                right_root,
                 op: &op,
-                right_input: Some(RightInput::Materialize { plan: &right, pos }),
+                right_input: Some(RightInput::Materialize { root: right_root }),
                 left_input,
                 join_input: None,
             };
@@ -1308,7 +1316,11 @@ mod tests {
                 }
             }
             // An empty RHS completes immediately, including for a NULL left value.
-            exec.right_input = Some(RightInput::Materialize { plan: &empty, pos });
+            let cache = arena.context();
+            exec.right_root = build_read(&mut arena, &mut meta, &empty, cache, &transaction);
+            exec.right_input = Some(RightInput::Materialize {
+                root: exec.right_root,
+            });
             let input = exec.right_input.take().unwrap();
             let (input, value) = exec.mark_value(
                 input,

@@ -39,8 +39,6 @@ pub struct ScalarQueryInit<'a> {
     param_bindings: &'a [(ScalarQueryRef, ExprRef)],
     scratch_tuple: Tuple,
 
-    init_plan: &'a LogicalPlan,
-    init_pos: ExecId,
     init: ExecId,
 }
 
@@ -72,7 +70,6 @@ impl<'a> ScalarQueryInit<'a> {
         cache: ExecutionContext<'_>,
         transaction: &T,
     ) -> ExecId {
-        let init_pos = arena.nodes.position();
         let init = build_read(arena, plan_arena, init_plan, cache, transaction);
         arena.push(ExecNode::ScalarQueryInit(Self {
             input,
@@ -88,8 +85,6 @@ impl<'a> ScalarQueryInit<'a> {
             },
             param_bindings: &op.param_bindings,
             scratch_tuple: Tuple::default(),
-            init_plan,
-            init_pos,
         }))
     }
 }
@@ -114,6 +109,20 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.state = if self.reference.is_outer_value {
+            ScalarQueryInitState::ReadOuter
+        } else {
+            ScalarQueryInitState::Initialize
+        };
+        self.scratch_tuple.clear();
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -123,6 +132,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
             match self.state {
                 ScalarQueryInitState::Initialize => {
                     if plan_arena.init_value(self.reference).is_none() {
+                        arena.reset(self.init, plan_arena)?;
                         self.evaluate_init(arena, plan_arena)?;
                     }
                     self.state = ScalarQueryInitState::ReadInput;
@@ -150,16 +160,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
                     self.state = ScalarQueryInitState::EvaluateOuter;
                 }
                 ScalarQueryInitState::EvaluateOuter => {
-                    let previous = arena.nodes.position();
-                    arena.nodes.seek(self.init_pos);
-                    self.init = build_read(
-                        arena,
-                        plan_arena,
-                        self.init_plan,
-                        arena.context(),
-                        arena.transaction(),
-                    );
-                    arena.nodes.seek(previous);
+                    arena.reset(self.init, plan_arena)?;
                     self.evaluate_init(arena, plan_arena)?;
                     std::mem::swap(arena.result_tuple_mut(), &mut self.scratch_tuple);
                     self.state = ScalarQueryInitState::ReadOuter;

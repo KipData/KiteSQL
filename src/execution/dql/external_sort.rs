@@ -69,6 +69,15 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.rows = None;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

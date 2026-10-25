@@ -43,6 +43,15 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain<'a> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.emitted = false;
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

@@ -74,13 +74,12 @@ impl EqualCondition {
 /// | Right/RightSemi/RightAnti/Full |    left        |      right     |
 /// |--------------------------------|----------------|----------------|
 /// | Full                           |    left        |      right     |
-pub struct NestedLoopJoin<'a> {
-    right_input_plan: &'a LogicalPlan,
+pub struct NestedLoopJoin {
     ty: JoinType,
     filter: Option<ExprRef>,
     eq_cond: EqualCondition,
     left_input: ExecId,
-    right_pos: ExecId,
+    right_input: ExecId,
     state: NestedLoopJoinState,
 }
 
@@ -108,7 +107,7 @@ struct ActiveLeftState {
     first_matches: Vec<usize>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin<'a> {
+impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
     type Input = (&'a JoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -139,21 +138,29 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin<'a> {
         };
 
         let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
-        let right_pos = arena.nodes.position();
-        build_read(arena, plan_arena, right_plan, cache, transaction);
+        let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
         arena.push(ExecNode::NestedLoopJoin(NestedLoopJoin {
-            right_input_plan: right_plan,
             ty: join_type,
             filter,
             eq_cond,
             left_input,
-            right_pos,
+            right_input,
             state: NestedLoopJoinState::PullLeft { right_bitmap: None },
         }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
+impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.state = NestedLoopJoinState::PullLeft { right_bitmap: None };
+        arena.reset(self.left_input, plan_arena)?;
+        arena.reset(self.right_input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -167,7 +174,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                     if !arena.next_tuple(self.left_input, plan_arena)? {
                         if matches!(self.ty, JoinType::Full) {
                             state = NestedLoopJoinState::EmitRightUnmatched {
-                                right_input: self.build_right_input(arena, plan_arena),
+                                right_input: self.reset_right_input(arena, plan_arena)?,
                                 right_bitmap,
                                 right_emit_index: 0,
                             };
@@ -182,7 +189,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                     state = NestedLoopJoinState::ScanRight {
                         active_left: ActiveLeftState {
                             left_tuple,
-                            right_input: self.build_right_input(arena, plan_arena),
+                            right_input: self.reset_right_input(arena, plan_arena)?,
                             right_index: 0,
                             has_matched: false,
                             first_matches: Vec::new(),
@@ -321,17 +328,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
     }
 }
 
-impl<'a> NestedLoopJoin<'a> {
-    fn build_right_input<T: Transaction + 'a>(
+impl NestedLoopJoin {
+    fn reset_right_input<'a, T: Transaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-    ) -> ExecId {
-        let cache = arena.context();
-        let transaction = arena.transaction();
-        // The same right-hand plan rebuilds the same slots, including nested joins.
-        arena.nodes.seek(self.right_pos);
-        build_read(arena, plan_arena, self.right_input_plan, cache, transaction)
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<ExecId, DatabaseError> {
+        arena.reset(self.right_input, plan_arena)?;
+        Ok(self.right_input)
     }
 
     /// Emit a tuple according to the join type.

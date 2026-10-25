@@ -44,12 +44,12 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
     }
 
     pub(crate) fn ranges(
-        &self,
+        info: &'a IndexInfo,
+        lookup: &'a IndexLookup,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<IndexRanges<'a>, DatabaseError> {
-        let info = self.info;
-        let mut range = match self.lookup {
+        let mut range = match lookup {
             IndexLookup::Static(range) => Cow::Borrowed(range),
             IndexLookup::Probe => Cow::Owned(match arena.pop_runtime_probe() {
                 RuntimeIndexProbe::Eq(value) => Range::Eq(value),
@@ -99,6 +99,18 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
 }
 
 impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        if let Some(iter) = self.iter.as_mut() {
+            let ranges = Self::ranges(self.info, self.lookup, arena, plan_arena)?;
+            iter.reset(ranges, self.op.limit);
+        }
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -107,7 +119,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
         let iter = match &mut self.iter {
             Some(iter) => iter,
             None => {
-                let ranges = self.ranges(arena, plan_arena)?;
+                let ranges = Self::ranges(self.info, self.lookup, arena, plan_arena)?;
                 let TableScanOperator {
                     table_name,
                     columns,
@@ -140,3 +152,117 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
         Ok(())
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use crate::db::test::build_table;
+    use crate::execution::{empty_context, ExecStatus};
+    use crate::planner::{PlanArena, TableArenaCell};
+    use crate::storage::memory::MemoryStorage;
+    use crate::storage::table_codec::TableCodec;
+    use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
+    use crate::types::tuple::Tuple;
+    use crate::types::value::DataValue;
+    use crate::types::LogicalType;
+    use std::ops::Bound;
+
+    #[test]
+    fn reset_rebinds_probe_after_partial_read_eof_and_missing_key() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
+        let mut tx = storage.transaction()?;
+        let mut tables = TableCache::default();
+        let cell = TableArenaCell::default();
+        let mut meta = PlanArena::new(&cell);
+        build_table(&mut tables, &mut tx, &mut meta)?;
+        let meta = PlanArena::new(&cell);
+        let serializers = [
+            LogicalType::Integer.serializable(),
+            LogicalType::Boolean.serializable(),
+            LogicalType::Integer.serializable(),
+        ];
+        let mut codec = TableCodec::default();
+        for id in 1..=4 {
+            tx.append_tuple(
+                &mut codec,
+                "t1",
+                &Tuple::new(
+                    Some(DataValue::Int32(id)),
+                    vec![
+                        DataValue::Int32(id),
+                        DataValue::Boolean(true),
+                        DataValue::Int32(id * 10),
+                    ],
+                ),
+                &serializers,
+                false,
+            )?;
+        }
+        let table = tables.get("t1").unwrap();
+        let op = TableScanOperator {
+            table_name: "t1".into(),
+            columns: table.columns().copied().collect(),
+            limit: (None, None),
+            index_infos: vec![],
+            with_pk: true,
+        };
+        let info = IndexInfo {
+            meta: *table.indexes().next().unwrap(),
+            sort_option: SortOption::None,
+            lookup: None,
+            residual_predicate: None,
+            covered_deserializers: None,
+            cover_mapping: None,
+            sort_elimination_hint: None,
+            stream_aggregate_hint: None,
+        };
+        let views = ViewCache::default();
+        let statistics = StatisticsMetaCache::default();
+        let mut arena = ExecArena::with_capacity(0);
+        arena.init_context(empty_context(&tables, &views, &statistics), &tx);
+        let mut meta = ExecMetaArena::new(meta);
+        let mut scan = IndexScan::new(&op, &info, &IndexLookup::Probe);
+        arena.push_runtime_probe(RuntimeIndexProbe::Scope {
+            min: Bound::Included(DataValue::Int32(1)),
+            max: Bound::Included(DataValue::Int32(4)),
+        });
+        scan.next_tuple(&mut arena, &mut meta)?;
+        assert_eq!(arena.result_tuple().values[0], DataValue::Int32(1));
+        let iterator = scan.iter.as_ref().unwrap() as *const _;
+        for (probe, expected) in [
+            (RuntimeIndexProbe::Eq(DataValue::Int32(3)), vec![3]),
+            (RuntimeIndexProbe::Eq(DataValue::Int32(99)), vec![]),
+            (
+                RuntimeIndexProbe::Scope {
+                    min: Bound::Included(DataValue::Int32(1)),
+                    max: Bound::Included(DataValue::Int32(4)),
+                },
+                vec![1, 2, 3, 4],
+            ),
+            (
+                RuntimeIndexProbe::Scope {
+                    min: Bound::Excluded(DataValue::Int32(1)),
+                    max: Bound::Excluded(DataValue::Int32(4)),
+                },
+                vec![2, 3],
+            ),
+            (RuntimeIndexProbe::Eq(DataValue::Int32(1)), vec![1]),
+        ] {
+            arena.push_runtime_probe(probe);
+            scan.reset(&mut arena, &mut meta)?;
+            // An initialized scan is ready now, not at its next pull.
+            assert!(arena.runtime_probe_stack.is_empty());
+            for id in expected {
+                scan.next_tuple(&mut arena, &mut meta)?;
+                assert_eq!(arena.result_tuple().values[0], DataValue::Int32(id));
+                assert_eq!(scan.iter.as_ref().unwrap() as *const _, iterator);
+            }
+            scan.next_tuple(&mut arena, &mut meta)?;
+            assert_eq!(arena.result.status, Some(ExecStatus::End));
+            assert!(arena.runtime_probe_stack.is_empty());
+        }
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP

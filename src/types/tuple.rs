@@ -193,6 +193,11 @@ impl<'a> From<&'a Tuple> for &'a [DataValue] {
 }
 
 impl Tuple {
+    pub fn clear(&mut self) {
+        self.pk = None;
+        self.values.clear();
+    }
+
     pub fn new(pk: Option<TupleId>, values: Vec<DataValue>) -> Self {
         Tuple { pk, values }
     }
@@ -311,6 +316,23 @@ mod tests {
             assert_eq!(index, 0);
             &self.0
         }
+    }
+
+    #[test]
+    fn clear_removes_pk_and_values_without_reallocating() {
+        let mut values = Vec::with_capacity(8);
+        values.push(DataValue::Int32(1));
+        values.push(DataValue::Null);
+        let mut tuple = Tuple::new(Some(DataValue::Int32(1)), values);
+        let allocation = (tuple.values.as_ptr(), tuple.values.capacity());
+        for _ in 0..2 {
+            tuple.clear();
+            assert!(tuple.pk.is_none());
+            assert!(tuple.values.is_empty());
+            assert_eq!((tuple.values.as_ptr(), tuple.values.capacity()), allocation);
+        }
+        tuple.values.push(DataValue::Int32(2));
+        assert_eq!((tuple.values.as_ptr(), tuple.values.capacity()), allocation);
     }
 
     #[test]
