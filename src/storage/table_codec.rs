@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::catalog::view::View;
-use crate::catalog::{ColumnCatalog, ColumnRelation, TableMeta};
+use crate::catalog::{ColumnCatalog, ColumnRelation, TableMeta, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::optimizer::core::cm_sketch::{CountMinSketchMeta, CountMinSketchPage};
@@ -1096,6 +1096,15 @@ impl TableCodec {
         let context =
             ReferenceDecodeContext::with_functions(Some(drive), scala_functions, table_functions);
         View::decode(&mut cursor, Some(&context), &reference_tables, arena)
+    }
+
+    pub fn decode_view_name<T: Transaction>(
+        bytes: &[u8],
+        arena: &mut (impl MetaArena + ?Sized),
+    ) -> Result<TableName, DatabaseError> {
+        let mut cursor = Cursor::new(bytes);
+        cursor.seek(SeekFrom::Start(4))?;
+        TableName::decode::<T, _, _>(&mut cursor, None, &EMPTY_REFERENCE_TABLES, arena)
     }
 
     fn encode_root_table_value_into(

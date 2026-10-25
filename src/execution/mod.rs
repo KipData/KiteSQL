@@ -115,14 +115,6 @@ impl<'a> ExecutionContext<'a> {
         self.table_cache
     }
 
-    pub(crate) fn scala_functions(self) -> &'a ScalaFunctions {
-        self.scala_functions
-    }
-
-    pub(crate) fn table_functions(self) -> &'a TableFunctions {
-        self.table_functions
-    }
-
     fn is_same_context(&self, other: ExecutionContext<'_>) -> bool {
         std::ptr::eq(self.table_cache, other.table_cache)
             && std::ptr::eq(self.view_cache, other.view_cache)

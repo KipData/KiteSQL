@@ -920,19 +920,10 @@ pub trait Transaction: Sized {
     fn views<'a>(
         &'a self,
         table_codec: &mut TableCodec,
-        table_cache: &'a TableCache,
-        table_arena: &'a TableArenaCell,
-        scala_functions: &'a ScalaFunctions,
-        table_functions: &'a TableFunctions,
     ) -> Result<ViewIter<'a, Self>, DatabaseError> {
         table_codec.with_view_bound(|min, max| {
             Ok(ViewIter {
                 iter: self.range(Bound::Included(min), Bound::Included(max))?,
-                transaction: self,
-                table_cache,
-                table_arena,
-                scala_functions,
-                table_functions,
             })
         })
     }
@@ -2328,26 +2319,18 @@ impl<T: Transaction> TableIter<'_, T> {
 
 pub struct ViewIter<'a, T: Transaction + 'a> {
     iter: T::IterType<'a>,
-    transaction: &'a T,
-    table_cache: &'a TableCache,
-    table_arena: &'a TableArenaCell,
-    scala_functions: &'a ScalaFunctions,
-    table_functions: &'a TableFunctions,
 }
 
 impl<T: Transaction> ViewIter<'_, T> {
-    pub fn try_next(&mut self) -> Result<Option<View>, DatabaseError> {
+    pub fn try_next(
+        &mut self,
+        arena: &mut (impl MetaArena + ?Sized),
+    ) -> Result<Option<TableName>, DatabaseError> {
         let Some((_, value)) = self.iter.try_next()? else {
             return Ok(None);
         };
 
-        Ok(Some(TableCodec::decode_view(
-            value,
-            (self.transaction, self.table_cache),
-            self.scala_functions,
-            self.table_functions,
-            self.table_arena.borrow_mut(),
-        )?))
+        Ok(Some(TableCodec::decode_view_name::<T>(value, arena)?))
     }
 }
 

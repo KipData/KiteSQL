@@ -850,7 +850,7 @@ insert into corr_rows values (1,10),(2,20),(3,30),(4,null),(5,20);
 query T
 explain select id,(select 7) from corr_rows where b<(select 25);
 ----
-Projection [corr_rows.id, InitValue(1:0)] [Project => (Sort Option: Follow)] ScalarQueryInit InitValue(1:0) Filter (corr_rows.b < InitValue(1:1)), Is Having: false [Filter => (Sort Option: Follow)] ScalarQueryInit InitValue(1:1) TableScan corr_rows -> [corr_rows.id, corr_rows.b] [SeqScan => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [25] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [7] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)]
+Projection [corr_rows.id, InitValue(1:<slt:ignore>)] [Project => (Sort Option: Follow)] ScalarQueryInit InitValue(1:<slt:ignore>) Filter (corr_rows.b < InitValue(1:<slt:ignore>)), Is Having: false [Filter => (Sort Option: Follow)] ScalarQueryInit InitValue(1:<slt:ignore>) TableScan corr_rows -> [corr_rows.id, corr_rows.b] [SeqScan => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [25] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [7] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)]
 
 query II rowsort
 select id,(select 7) from corr_rows where b<(select 25);

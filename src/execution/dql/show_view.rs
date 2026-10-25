@@ -53,23 +53,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
-            let context = arena.context();
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec();
-            self.metas = Some(transaction.views(
-                table_codec,
-                context.table_cache(),
-                plan_arena.table_arena_cell(),
-                context.scala_functions(),
-                context.table_functions(),
-            )?);
+            self.metas = Some(transaction.views(table_codec)?);
         }
 
-        let Some(view) = self
+        let Some(name) = self
             .metas
             .as_mut()
             .expect("show views iterator initialized")
-            .try_next()?
+            .try_next(plan_arena)?
         else {
             arena.finish();
             return Ok(());
@@ -79,7 +72,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: view.name.to_string(),
+            value: name.to_string(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });
