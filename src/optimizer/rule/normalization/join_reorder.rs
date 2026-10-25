@@ -663,7 +663,7 @@ mod tests {
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::TableArenaCell;
     use crate::storage::StatisticsMetaCache;
-    use crate::types::index::IndexInfo;
+    use crate::types::index::{IndexInfo, IndexLookup};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
 
@@ -729,6 +729,87 @@ mod tests {
             RowCountOption::Estimated { rows, ndv },
         ));
         (plan, key, meta)
+    }
+
+    fn parameterized_input(
+        input_rows: usize,
+        output_rows: usize,
+        arena: &mut PlanArena,
+    ) -> LogicalPlan {
+        let (left, probe) = input("probe_input", input_rows, arena);
+        let (mut right, _, _) = indexed_input("lookup", 0, None, arena);
+        let option = right.physical_option.as_mut().unwrap();
+        option.row_count = RowCountOption::Unknown;
+        let PlanImpl::IndexScan(info) = &mut option.plan else {
+            unreachable!()
+        };
+        info.lookup = Some(IndexLookup::Probe);
+        let mut plan = LogicalPlan::new(
+            Operator::MarkApply(MarkApplyOperator::new_inner_join(Vec::new(), probe)),
+            Childrens::Twins {
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+        );
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::MarkApply,
+            SortOption::Follow,
+            RowCountOption::Estimated {
+                rows: output_rows,
+                ndv: None,
+            },
+        ));
+        plan
+    }
+
+    #[test]
+    fn parameterized_join_work_keeps_input_and_probe_cost() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let mut plan = parameterized_input(12, 13, &mut arena);
+        assert_eq!(plan.estimated_startup_work()?, Some(0));
+        assert_eq!(plan.estimated_work()?, Some(48 + 12 + 52));
+        assert_eq!(plan.estimated_rows(), Some(13));
+        let Childrens::Twins { right, .. } = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        assert_eq!(right.estimated_rows(), None);
+
+        let Childrens::Twins { left, .. } = plan.childrens.as_mut() else {
+            unreachable!()
+        };
+        left.physical_option.as_mut().unwrap().row_count = RowCountOption::Unknown;
+        assert_eq!(plan.estimated_work()?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn parameterized_join_work_changes_nested_loop_direction() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let (left, _) = input("cheap", 12, &mut arena);
+        let right = parameterized_input(12, 13, &mut arena);
+        let mut plan =
+            JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::NestLoopJoin,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let schema = plan.output_schema(&mut arena).clone();
+        assert!(OrientNestedLoopJoin.apply(&mut plan, &mut arena, None)?);
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        assert_eq!(plan.estimated_rows(), Some(156));
+        let Childrens::Only(join) = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        let Childrens::Twins { left, right } = join.childrens.as_ref() else {
+            unreachable!()
+        };
+        assert!(matches!(left.operator, Operator::MarkApply(_)));
+        assert_eq!(left.estimated_rows(), Some(13));
+        assert_eq!(right.estimated_rows(), Some(12));
+        Ok(())
     }
 
     #[test]

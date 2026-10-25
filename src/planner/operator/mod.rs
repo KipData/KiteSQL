@@ -55,11 +55,18 @@ pub mod window;
 
 use self::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use self::{
-    aggregate::AggregateOperator, alter_table::add_column::AddColumnOperator,
-    alter_table::change_column::ChangeColumnOperator, filter::FilterOperator, join::JoinOperator,
-    limit::LimitOperator, mark_apply::MarkApplyOperator, project::ProjectOperator,
-    scalar_query_init::ScalarQueryInitOperator, scalar_subquery::ScalarSubqueryOperator,
-    sort::SortOperator, table_scan::TableScanOperator,
+    aggregate::AggregateOperator,
+    alter_table::add_column::AddColumnOperator,
+    alter_table::change_column::ChangeColumnOperator,
+    filter::FilterOperator,
+    join::JoinOperator,
+    limit::LimitOperator,
+    mark_apply::{MarkApplyKind, MarkApplyOperator},
+    project::ProjectOperator,
+    scalar_query_init::ScalarQueryInitOperator,
+    scalar_subquery::ScalarSubqueryOperator,
+    sort::SortOperator,
+    table_scan::TableScanOperator,
 };
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
@@ -206,6 +213,33 @@ impl PhysicalOption {
                     &input.operator,
                     &input.childrens,
                     input.estimated_rows(),
+                )
+            }
+            (PlanImpl::MarkApply, Operator::MarkApply(op), Childrens::Twins { left, right })
+                if matches!(op.kind, MarkApplyKind::InnerJoin)
+                    && op.parameterized_probe().is_some()
+                    && !op.materialize =>
+            {
+                // The output estimate is not the cost of repeatedly reading the
+                // input and probing. Keep Probe rows unknown, but charge at least
+                // one lookup operation and its startup for each input row.
+                //
+                // work = input_work + input_rows × lookup_work + output_rows × CPU_ROW_WORK.
+                let input_work = left.physical_option.as_ref()?.calculate_work(
+                    &left.operator,
+                    &left.childrens,
+                    left.estimated_rows(),
+                )?;
+                let lookup_work = right
+                    .physical_option
+                    .as_ref()?
+                    .startup_work
+                    .flatten()?
+                    .saturating_add(CPU_OPERATOR_WORK);
+                Some(
+                    input_work
+                        .saturating_add(left.estimated_rows()?.saturating_mul(lookup_work))
+                        .saturating_add(rows?.saturating_mul(CPU_ROW_WORK)),
                 )
             }
             _ => Some(
