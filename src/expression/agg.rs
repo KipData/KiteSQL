@@ -47,7 +47,7 @@ impl AggKind {
 
     pub fn allow_distinct(&self) -> bool {
         match self {
-            AggKind::Avg => false,
+            AggKind::Avg => true,
             AggKind::Max => false,
             AggKind::Min => false,
             AggKind::Sum => true,

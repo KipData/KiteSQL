@@ -20,16 +20,19 @@ use crate::types::evaluator::binary_create;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::borrow::Cow;
+use std::collections::HashSet;
 
 pub struct AvgAccumulator {
+    distinct_values: Option<HashSet<DataValue>>,
     inner: Option<SumAccumulator>,
     count: usize,
     result: DataValue,
 }
 
 impl AvgAccumulator {
-    pub fn new() -> Self {
+    pub fn new(distinct: bool) -> Self {
         Self {
+            distinct_values: distinct.then(HashSet::new),
             inner: None,
             count: 0,
             result: DataValue::Null,
@@ -40,6 +43,11 @@ impl AvgAccumulator {
 impl Accumulator for AvgAccumulator {
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError> {
         if !value.is_null() {
+            if let Some(values) = &mut self.distinct_values {
+                if !values.insert(value.clone()) {
+                    return Ok(());
+                }
+            }
             let acc = if let Some(ref mut inner) = self.inner {
                 inner
             } else {
@@ -88,7 +96,7 @@ mod tests {
 
     #[test]
     fn invalidate_cached_result_after_update() -> Result<(), DatabaseError> {
-        let mut accumulator = AvgAccumulator::new();
+        let mut accumulator = AvgAccumulator::new(false);
         accumulator.update_value(&DataValue::Int32(2))?;
         accumulator.evaluate()?;
         let first = accumulator.result().clone();
@@ -105,13 +113,40 @@ mod tests {
     }
 
     #[test]
+    fn distinct_values_ignore_nulls_and_update_cached_result() -> Result<(), DatabaseError> {
+        let mut accumulator = AvgAccumulator::new(true);
+        accumulator.update_value(&DataValue::Null)?;
+        accumulator.evaluate()?;
+        assert_eq!(accumulator.result(), &DataValue::Null);
+
+        for value in [1, 0, 2, 2] {
+            accumulator.update_value(&DataValue::Int32(value))?;
+        }
+        accumulator.evaluate()?;
+        assert_eq!(accumulator.result(), &DataValue::Float64(1.0.into()));
+
+        accumulator.update_value(&DataValue::Int32(2))?;
+        accumulator.update_value(&DataValue::Null)?;
+        accumulator.evaluate()?;
+        assert_eq!(accumulator.result(), &DataValue::Float64(1.0.into()));
+
+        accumulator.update_value(&DataValue::Int32(3))?;
+        accumulator.evaluate()?;
+        assert_eq!(
+            Box::new(accumulator).result_owned(),
+            DataValue::Float64(1.5.into())
+        );
+        Ok(())
+    }
+
+    #[test]
     fn empty_and_unsigned_results() -> Result<(), DatabaseError> {
-        let mut empty = AvgAccumulator::new();
+        let mut empty = AvgAccumulator::new(false);
         empty.evaluate()?;
         assert_eq!(empty.result(), &DataValue::Null);
         assert_eq!(Box::new(empty).result_owned(), DataValue::Null);
 
-        let mut accumulator = AvgAccumulator::new();
+        let mut accumulator = AvgAccumulator::new(false);
         accumulator.update_value(&DataValue::UInt32(2))?;
         accumulator.update_value(&DataValue::UInt32(4))?;
         accumulator.evaluate()?;

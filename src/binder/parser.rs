@@ -2671,6 +2671,14 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                     args.push(arena.alloc_expression(expr))
                 }
                 FunctionArgExpr::Wildcard => {
+                    if is_distinct {
+                        return Err(attach_span_if_absent(
+                            DatabaseError::UnsupportedStmt(
+                                "DISTINCT cannot be used with *".to_string(),
+                            ),
+                            func_span,
+                        ));
+                    }
                     args.push(arena.alloc_expression(Self::wildcard_expr()))
                 }
                 expr => {
