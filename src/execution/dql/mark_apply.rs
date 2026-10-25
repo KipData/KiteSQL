@@ -211,7 +211,15 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
             return Ok(());
         }
         let mut left = arena.materialize_tuple();
-        let (input, marker) = self.mark_value(input, arena, plan_arena, &left)?;
+        let (input, marker) = match self.op.guard {
+            Some(guard)
+                if *plan_arena.expression(guard).eval(plan_arena, Some(&left))?
+                    == DataValue::Boolean(false) =>
+            {
+                (input, DataValue::Null)
+            }
+            _ => self.mark_value(input, arena, plan_arena, &left)?,
+        };
         self.right_input = Some(input);
         left.values.push(marker);
         arena.produce_tuple(left);
@@ -468,7 +476,7 @@ mod tests {
     use crate::planner::{Childrens, ExprRef, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
-    use crate::types::evaluator::binary_create;
+    use crate::types::evaluator::{binary_create, cast_create};
     use crate::types::index::RuntimeIndexProbe;
     use crate::types::tuple::Tuple;
     use crate::types::LogicalType;
@@ -1014,6 +1022,206 @@ mod tests {
             ]
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn guard_false_skips_failing_rhs_but_true_and_null_evaluate_it() -> Result<(), DatabaseError> {
+        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let transaction = storage.transaction()?;
+        let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
+        for kind in [
+            MarkApplyKind::Exists,
+            MarkApplyKind::Quantified(MarkApplyQuantifier::Any),
+            MarkApplyKind::Quantified(MarkApplyQuantifier::All),
+        ] {
+            for materialize in [false, true] {
+                for (flag, use_guard) in [
+                    (DataValue::Boolean(false), true),
+                    (DataValue::Boolean(true), true),
+                    (DataValue::Null, true),
+                    (DataValue::Boolean(false), false),
+                ] {
+                    let tables = crate::planner::TableArenaCell::default();
+                    let mut meta = crate::planner::PlanArena::new(&tables);
+                    let mut left = build_values_with_schema(
+                        &mut meta,
+                        vec![
+                            ("key", LogicalType::Integer),
+                            ("flag", LogicalType::Boolean),
+                        ],
+                        vec![vec![DataValue::Int32(1), flag.clone()]],
+                    );
+                    let mut right =
+                        build_values(&mut meta, "right_key", vec![vec![DataValue::Int32(1)]]);
+                    let text = DataValue::from("not an integer".to_string());
+                    let evaluator = cast_create(&text.logical_type(), &LogicalType::Integer)?;
+                    let expr = meta.alloc_expression(text.into());
+                    let failing = meta.alloc_expression(ScalarExpression::TypeCast {
+                        expr,
+                        ty: LogicalType::Integer,
+                        evaluator: Some(evaluator),
+                    });
+                    let Operator::Values(values) = &mut right.operator else {
+                        unreachable!()
+                    };
+                    values.rows[0] = failing;
+                    let schema = left.output_schema(&mut meta);
+                    let left_column = schema[0];
+                    let flag_column = schema[1];
+                    let right_column = right.output_schema(&mut meta)[0];
+                    let predicate =
+                        build_equality_predicate(&mut meta, left_column, 0, right_column, 2)?;
+                    let mut op =
+                        MarkApplyOperator::new_in(build_marker_column(&mut meta), vec![predicate]);
+                    op.kind = kind;
+                    op.materialize = materialize && !matches!(kind, MarkApplyKind::Exists);
+                    if use_guard {
+                        op.guard = Some(
+                            meta.alloc_expression(ScalarExpression::column_expr(flag_column, 1)),
+                        );
+                    }
+                    let mut arena = ExecArena::with_capacity(0);
+                    arena.init_context(cache, &transaction);
+                    let left_input = build_read(&mut arena, &mut meta, &left, cache, &transaction);
+                    let pos = arena.nodes.position();
+                    build_read(&mut arena, &mut meta, &right, cache, &transaction);
+                    let right_input = if op.materialize {
+                        RightInput::Materialize { plan: &right, pos }
+                    } else {
+                        RightInput::Rebuild { plan: &right, pos }
+                    };
+                    let mut exec = MarkApply {
+                        op: &op,
+                        left_input,
+                        right_input: Some(right_input),
+                        join_input: None,
+                    };
+                    let mut meta = ExecMetaArena::new(meta);
+                    let result = exec.next_tuple(&mut arena, &mut meta);
+                    if use_guard && flag == DataValue::Boolean(false) {
+                        result?;
+                        assert_eq!(
+                            arena.result_tuple().values,
+                            vec![DataValue::Int32(1), flag, DataValue::Null]
+                        );
+                        assert!(matches!(
+                            exec.right_input,
+                            Some(RightInput::Rebuild { .. } | RightInput::Materialize { .. })
+                        ));
+                        exec.next_tuple(&mut arena, &mut meta)?;
+                        assert!(exec.right_input.is_none());
+                    } else {
+                        assert!(matches!(result, Err(DatabaseError::ParseInt(_))));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn guard_skips_preserve_paused_and_completed_rhs() -> Result<(), DatabaseError> {
+        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let transaction = storage.transaction()?;
+        let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
+        let cases = [
+            (99, DataValue::Boolean(false), DataValue::Null),
+            (1, DataValue::Boolean(true), DataValue::Boolean(true)),
+            (99, DataValue::Boolean(false), DataValue::Null),
+            (2, DataValue::Boolean(true), DataValue::Boolean(true)),
+            (99, DataValue::Null, DataValue::Null),
+            (2, DataValue::Boolean(false), DataValue::Null),
+            (1, DataValue::Boolean(true), DataValue::Boolean(true)),
+        ];
+        for materialize in [false, true] {
+            let tables = crate::planner::TableArenaCell::default();
+            let mut meta = crate::planner::PlanArena::new(&tables);
+            let mut left = build_values_with_schema(
+                &mut meta,
+                vec![
+                    ("key", LogicalType::Integer),
+                    ("flag", LogicalType::Boolean),
+                ],
+                cases
+                    .iter()
+                    .map(|(key, flag, _)| vec![DataValue::Int32(*key), flag.clone()])
+                    .collect(),
+            );
+            let mut right = build_values(
+                &mut meta,
+                "right_key",
+                vec![
+                    vec![DataValue::Int32(1)],
+                    vec![DataValue::Int32(2)],
+                    vec![DataValue::Null],
+                ],
+            );
+            let schema = left.output_schema(&mut meta);
+            let left_column = schema[0];
+            let flag_column = schema[1];
+            let right_column = right.output_schema(&mut meta)[0];
+            let predicate = build_equality_predicate(&mut meta, left_column, 0, right_column, 2)?;
+            let mut op = MarkApplyOperator::new_in(build_marker_column(&mut meta), vec![predicate]);
+            op.materialize = materialize;
+            op.guard = Some(meta.alloc_expression(ScalarExpression::column_expr(flag_column, 1)));
+            let mut arena = ExecArena::with_capacity(0);
+            arena.init_context(cache, &transaction);
+            let left_input = build_read(&mut arena, &mut meta, &left, cache, &transaction);
+            let pos = arena.nodes.position();
+            build_read(&mut arena, &mut meta, &right, cache, &transaction);
+            let right_input = if materialize {
+                RightInput::Materialize { plan: &right, pos }
+            } else {
+                RightInput::Rebuild { plan: &right, pos }
+            };
+            let mut exec = MarkApply {
+                op: &op,
+                left_input,
+                right_input: Some(right_input),
+                join_input: None,
+            };
+            let mut meta = ExecMetaArena::new(meta);
+            for (index, (key, flag, marker)) in cases.iter().enumerate() {
+                exec.next_tuple(&mut arena, &mut meta)?;
+                assert_eq!(
+                    arena.result_tuple().values,
+                    vec![DataValue::Int32(*key), flag.clone(), marker.clone()]
+                );
+                if materialize {
+                    if index == 0 {
+                        assert!(matches!(
+                            exec.right_input,
+                            Some(RightInput::Materialize { .. })
+                        ));
+                    } else if index < 4 {
+                        let Some(RightInput::Materializing { rows, .. }) = &exec.right_input else {
+                            panic!("guard must retain the paused RHS")
+                        };
+                        #[cfg(feature = "spill")]
+                        {
+                            let mut cached = 0;
+                            rows.replay::<()>(|_| {
+                                cached += 1;
+                                Ok(None)
+                            })?;
+                            assert_eq!(cached, if index < 3 { 1 } else { 2 });
+                        }
+                        #[cfg(not(feature = "spill"))]
+                        assert_eq!(rows.len(), if index < 3 { 1 } else { 2 });
+                    } else {
+                        assert!(matches!(
+                            exec.right_input,
+                            Some(RightInput::Materialized(_))
+                        ));
+                    }
+                } else {
+                    assert!(matches!(exec.right_input, Some(RightInput::Rebuild { .. })));
+                }
+            }
+            exec.next_tuple(&mut arena, &mut meta)?;
+            assert!(exec.right_input.is_none());
+        }
         Ok(())
     }
 

@@ -400,6 +400,9 @@ impl Operator {
                 if let Some(expr) = &op.parameterized_probe {
                     ExprVisitor::visit(self, *expr, self.arena)?;
                 }
+                if let Some(expr) = op.guard {
+                    ExprVisitor::visit(self, expr, self.arena)?;
+                }
                 Ok(())
             }
 

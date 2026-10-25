@@ -39,6 +39,7 @@ pub struct MarkApplyOperator {
     output_column: Option<ColumnRef>,
     pub parameterized_probe: Option<ExprRef>,
     pub(crate) materialize: bool,
+    pub(crate) guard: Option<ExprRef>,
 }
 
 impl MarkApplyOperator {
@@ -49,6 +50,7 @@ impl MarkApplyOperator {
             output_column: Some(output_column),
             parameterized_probe: None,
             materialize: false,
+            guard: None,
         }
     }
 
@@ -82,6 +84,7 @@ impl MarkApplyOperator {
             output_column: Some(output_column),
             parameterized_probe: None,
             materialize: false,
+            guard: None,
         }
     }
 
@@ -141,6 +144,7 @@ impl MarkApplyOperator {
             output_column: None,
             parameterized_probe: Some(probe),
             materialize: false,
+            guard: None,
         }
     }
 

@@ -40,9 +40,11 @@ mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
 mod elimination;
+mod guard_mark_apply;
 mod join_reorder;
 mod materialize_mark_apply;
 mod min_max_top_k;
+use guard_mark_apply::GuardMarkApply;
 use join_reorder::GreedyJoinReorder;
 use materialize_mark_apply::MaterializeMarkApply;
 mod parameterized_index;
@@ -86,6 +88,7 @@ pub enum NormalizationRuleImpl {
     EliminateIndexFilter,
     GreedyJoinReorder,
     MaterializeMarkApply,
+    GuardMarkApply,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -175,7 +178,9 @@ impl NormalizationRuleImpl {
     pub fn root_tag(&self) -> NormalizationRuleRootTag {
         match self {
             NormalizationRuleImpl::ColumnPruning => NormalizationRuleRootTag::Any,
-            NormalizationRuleImpl::CollapseProject => NormalizationRuleRootTag::Project,
+            NormalizationRuleImpl::CollapseProject | NormalizationRuleImpl::GuardMarkApply => {
+                NormalizationRuleRootTag::Project
+            }
             NormalizationRuleImpl::CollapseGroupByAgg => NormalizationRuleRootTag::Aggregate,
             NormalizationRuleImpl::CombineFilter => NormalizationRuleRootTag::Filter,
             NormalizationRuleImpl::LimitProjectTranspose
@@ -207,6 +212,7 @@ impl NormalizationRule for NormalizationRuleImpl {
         match self {
             NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, arena),
             NormalizationRuleImpl::GreedyJoinReorder => GreedyJoinReorder.apply(plan, arena),
+            NormalizationRuleImpl::GuardMarkApply => GuardMarkApply.apply(plan, arena),
             NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, arena),
             NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(plan, arena),
             NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan, arena),

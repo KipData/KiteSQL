@@ -294,6 +294,9 @@ impl<'a, V: ExprVisitorMut> OperatorVisitorMut<'a> for OperatorExprVisitorMut<'_
         if let Some(expr) = &mut op.parameterized_probe {
             ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
+        if let Some(expr) = &mut op.guard {
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
+        }
         Ok(())
     }
 

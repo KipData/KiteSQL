@@ -436,6 +436,11 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             HepBatchStrategy::fix_point_topdown(10),
             vec![NormalizationRuleImpl::PushPredicateIntoScan],
         )
+        .before_batch(
+            "Guard Mark Apply".to_string(),
+            HepBatchStrategy::fix_point_topdown(1),
+            vec![NormalizationRuleImpl::GuardMarkApply],
+        )
         .after_batch(
             "Greedy Join Reorder".to_string(),
             HepBatchStrategy::once_topdown(),

@@ -672,7 +672,7 @@ impl ColumnPruning {
                             let removed_positions =
                                 &outcome.removed_positions[left_removed_start..right_removed_end];
                             Self::remap_exprs_after_child_change(
-                                op.predicates_mut().iter_mut(),
+                                op.predicates.iter_mut().chain(op.guard.iter_mut()),
                                 removed_positions,
                                 &mut outcome.remapped_exprs,
                                 arena,

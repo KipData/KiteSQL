@@ -240,6 +240,9 @@ impl<'a, V: ExprVisitor<A>, A: MetaArena + ?Sized> OperatorVisitor<'a>
         if let Some(expr) = &op.parameterized_probe {
             ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
+        if let Some(expr) = op.guard {
+            ExprVisitor::visit(self.visitor, expr, self.arena)?;
+        }
         Ok(())
     }
 
