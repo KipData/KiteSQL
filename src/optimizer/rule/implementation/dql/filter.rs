@@ -28,12 +28,9 @@ static FILTER_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
 #[derive(Clone)]
 pub struct FilterImplementation;
 
+// Without a selectivity estimate, retain the input estimate rather than assuming a filtering benefit.
 single_mapping!(
     FilterImplementation,
     FILTER_PATTERN,
-    PhysicalOption::new(
-        PlanImpl::Filter,
-        SortOption::Follow,
-        RowCountOption::Unknown
-    )
+    PhysicalOption::new(PlanImpl::Filter, SortOption::Follow, RowCountOption::Follow)
 );

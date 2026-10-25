@@ -416,7 +416,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         )
         .before_batch(
             "TopK".to_string(),
-            HepBatchStrategy::once_topdown(),
+            HepBatchStrategy::fix_point_topdown(1),
             vec![
                 NormalizationRuleImpl::MinMaxToTopK,
                 NormalizationRuleImpl::TopK,
@@ -437,8 +437,13 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             vec![NormalizationRuleImpl::PushPredicateIntoScan],
         )
         .after_batch(
-            "Parameterize Mark Apply".to_string(),
+            "Greedy Join Reorder".to_string(),
             HepBatchStrategy::once_topdown(),
+            vec![NormalizationRuleImpl::GreedyJoinReorder],
+        )
+        .after_batch(
+            "Parameterize Mark Apply".to_string(),
+            HepBatchStrategy::fix_point_topdown(1),
             vec![
                 NormalizationRuleImpl::ParameterizeMarkApply,
                 NormalizationRuleImpl::ParameterizeInnerJoin,
@@ -448,13 +453,8 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         // lookup. A Probe must not inherit residuals from a replaced static range.
         .after_batch(
             "Eliminate Index Filter".to_string(),
-            HepBatchStrategy::once_topdown(),
+            HepBatchStrategy::fix_point_topdown(1),
             vec![NormalizationRuleImpl::EliminateIndexFilter],
-        )
-        .after_batch(
-            "Greedy Join Reorder".to_string(),
-            HepBatchStrategy::once_bottomup(),
-            vec![NormalizationRuleImpl::GreedyJoinReorder],
         )
         .after_batch(
             "Expression Remapper".to_string(),

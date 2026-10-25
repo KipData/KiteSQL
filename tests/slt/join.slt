@@ -649,6 +649,25 @@ select a.v,b.v,c.v from greedy_a a left join greedy_b b on a.k=b.k left join gre
 50 NULL NULL
 60 NULL NULL
 
+# A comma join initially contains a CrossJoin without a direct a/b key.
+query III rowsort
+select greedy_a.v,greedy_b.v,greedy_c.v from greedy_a,greedy_b,greedy_c where greedy_a.k=greedy_c.k and greedy_b.k=greedy_c.k
+----
+10 100 1000
+10 100 1100
+20 200 2000
+
+# Parameterization must still select an index probe after the join tree is reordered.
+statement ok
+create index greedy_b_k on greedy_b(k)
+
+query III rowsort
+select greedy_a.v,greedy_b.v,greedy_c.v from greedy_a join greedy_b on greedy_a.k=greedy_b.k join greedy_c on greedy_b.k=greedy_c.k
+----
+10 100 1000
+10 100 1100
+20 200 2000
+
 statement ok
 drop table greedy_a
 

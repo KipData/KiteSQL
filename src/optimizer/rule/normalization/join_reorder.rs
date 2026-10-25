@@ -32,13 +32,19 @@ fn estimate_join_rows(left: usize, right: usize) -> usize {
     left.saturating_mul(right)
 }
 
-fn reorderable(plan: &LogicalPlan) -> bool {
-    matches!(&plan.operator, Operator::Join(JoinOperator {
-        join_type: JoinType::Inner,
-        on: JoinCondition::On { on, filter: None },
+fn can_expand(plan: &LogicalPlan) -> bool {
+    let Operator::Join(JoinOperator {
+        join_type,
+        on,
         force_nested_loop: false,
         limit_pushed: false,
-    }) if !on.is_empty())
+    }) = &plan.operator
+    else {
+        return false;
+    };
+    matches!((join_type, on), (JoinType::Cross, JoinCondition::None))
+        || matches!((join_type, on),
+            (JoinType::Inner, JoinCondition::On { on, filter: None }) if !on.is_empty())
 }
 
 fn inspect<'plan>(
@@ -47,18 +53,15 @@ fn inspect<'plan>(
     keys: &mut Vec<(ExprRef, ExprRef)>,
     arena: &mut PlanArena,
 ) -> Option<usize> {
-    if reorderable(plan) {
-        let (
-            Operator::Join(JoinOperator {
-                on: JoinCondition::On { on, .. },
-                ..
-            }),
-            Childrens::Twins { left, right },
-        ) = (&plan.operator, plan.childrens.as_mut())
+    if can_expand(plan) {
+        let (Operator::Join(join), Childrens::Twins { left, right }) =
+            (&plan.operator, plan.childrens.as_mut())
         else {
             unreachable!()
         };
-        keys.extend_from_slice(on);
+        if let JoinCondition::On { on, .. } = &join.on {
+            keys.extend_from_slice(on);
+        }
         let left_rows = inspect(left, schemas, keys, arena)?;
         let right_rows = inspect(right, schemas, keys, arena)?;
         let rows = estimate_join_rows(left_rows, right_rows);
@@ -74,7 +77,7 @@ fn inspect<'plan>(
 }
 
 fn flatten(plan: LogicalPlan, inputs: &mut Vec<(LogicalPlan, usize)>) {
-    if reorderable(&plan) {
+    if can_expand(&plan) {
         let (left, right) = plan.childrens.pop_twins();
         flatten(left, inputs);
         flatten(right, inputs);
@@ -91,6 +94,22 @@ fn key_in_schema(expr: ExprRef, schema: &Schema, arena: &PlanArena) -> Result<bo
             .iter()
             .any(|candidate| arena.same_column(*candidate, *column))
     })
+}
+
+fn key_between(
+    (left, right): (ExprRef, ExprRef),
+    left_schema: &Schema,
+    right_schema: &Schema,
+    arena: &PlanArena,
+) -> Result<Option<(ExprRef, ExprRef)>, DatabaseError> {
+    if key_in_schema(left, left_schema, arena)? && key_in_schema(right, right_schema, arena)? {
+        Ok(Some((left, right)))
+    } else if key_in_schema(right, left_schema, arena)? && key_in_schema(left, right_schema, arena)?
+    {
+        Ok(Some((right, left)))
+    } else {
+        Ok(None)
+    }
 }
 
 struct BindPosition<'a>(&'a Schema);
@@ -113,7 +132,9 @@ impl ExprVisitorMut for BindPosition<'_> {
 
 impl NormalizationRule for GreedyJoinReorder {
     fn apply(&self, plan: &mut LogicalPlan, arena: &mut PlanArena) -> Result<bool, DatabaseError> {
-        if !reorderable(plan) {
+        if !matches!(&plan.operator, Operator::Join(join) if join.join_type == JoinType::Inner)
+            || !can_expand(plan)
+        {
             return Ok(false);
         }
         let original_schema = plan.output_schema(arena).clone();
@@ -158,15 +179,32 @@ impl NormalizationRule for GreedyJoinReorder {
         flatten(plan.take(), &mut inputs);
         while inputs.len() > 1 {
             let mut best = None;
-            for (i, (_, left)) in inputs.iter().enumerate() {
-                for (j, (_, right)) in inputs.iter().enumerate().skip(i + 1) {
-                    let candidate = (estimate_join_rows(*left, *right), i, j);
+            for i in 0..inputs.len() {
+                let (prefix, suffix) = inputs.split_at_mut(i + 1);
+                let (left, left_rows) = &mut prefix[i];
+                let left_schema = left.output_schema(arena);
+                for (offset, (right, right_rows)) in suffix.iter_mut().enumerate() {
+                    let right_schema = right.output_schema(arena);
+                    let mut connected = false;
+                    for &key in &keys {
+                        if key_between(key, left_schema, right_schema, arena)?.is_some() {
+                            connected = true;
+                            break;
+                        }
+                    }
+                    // Apply available join predicates before forming Cartesian intermediates.
+                    let candidate = (
+                        !connected,
+                        estimate_join_rows(*left_rows, *right_rows),
+                        i,
+                        i + 1 + offset,
+                    );
                     if best.is_none_or(|previous| candidate < previous) {
                         best = Some(candidate);
                     }
                 }
             }
-            let Some((product, i, j)) = best else {
+            let Some((_, product, i, j)) = best else {
                 return Ok(false);
             };
             let (mut right, _) = inputs.remove(j);
@@ -176,19 +214,7 @@ impl NormalizationRule for GreedyJoinReorder {
             let mut on = Vec::new();
             let mut index = 0;
             while index < keys.len() {
-                let (l, r) = keys[index];
-                let key = if key_in_schema(l, left_schema, arena)?
-                    && key_in_schema(r, right_schema, arena)?
-                {
-                    Some((l, r))
-                } else if key_in_schema(r, left_schema, arena)?
-                    && key_in_schema(l, right_schema, arena)?
-                {
-                    Some((r, l))
-                } else {
-                    None
-                };
-                if let Some(key) = key {
+                if let Some(key) = key_between(keys[index], left_schema, right_schema, arena)? {
                     keys.remove(index);
                     on.push(key);
                 } else {
@@ -403,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn smallest_pair_without_a_key_defers_both_conditions() -> Result<(), DatabaseError> {
+    fn connected_pair_precedes_a_smaller_cartesian_product() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let mut plan = three_inputs(&mut arena);
@@ -416,29 +442,104 @@ mod tests {
         let schema = plan.output_schema(&mut arena).clone();
         assert!(GreedyJoinReorder.apply(&mut plan, &mut arena)?);
         assert_eq!(plan.output_schema(&mut arena), &schema);
-        let join = plan.childrens.only();
-        let (left, right) = join.childrens.twins();
-        assert_eq!(left.referenced_table(), vec!["a".into(), "c".into()]);
-        assert_eq!(right.referenced_table(), vec!["b".into()]);
-        assert!(matches!(
-            &left.operator,
-            Operator::Join(JoinOperator {
-                join_type: JoinType::Cross,
-                on: JoinCondition::None,
-                ..
-            })
-        ));
-        assert_eq!(
-            left.physical_option.as_ref().unwrap().plan,
-            PlanImpl::NestLoopJoin
+        let (left, right) = plan.childrens.twins();
+        assert_eq!(left.referenced_table(), vec!["a".into(), "b".into()]);
+        assert_eq!(right.referenced_table(), vec!["c".into()]);
+        assert_eq!(left.estimated_rows(), Some(10000));
+        for join in [&plan, left] {
+            let Operator::Join(op) = &join.operator else {
+                unreachable!()
+            };
+            let JoinCondition::On { on, .. } = &op.on else {
+                unreachable!()
+            };
+            assert_eq!(op.join_type, JoinType::Inner);
+            assert_eq!(on.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inner_join_expands_cross_join_but_cross_join_is_not_an_entry() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let (a, a_key) = input("a", 1000, &mut arena);
+        let (b, b_key) = input("b", 10, &mut arena);
+        let (c, c_key) = input("c", 20, &mut arena);
+        let mut cross = JoinOperator::build(a, b, JoinCondition::None, JoinType::Cross, false);
+        let original = cross.clone();
+        assert!(!GreedyJoinReorder.apply(&mut cross, &mut arena)?);
+        assert_eq!(cross, original);
+        let b_column = b_key.output_column_ref(&mut arena);
+        let b_key = arena.alloc_expression(ScalarExpression::column_expr(b_column, 1));
+        let mut plan = JoinOperator::build(
+            cross,
+            c,
+            JoinCondition::On {
+                on: vec![(a_key, c_key), (b_key, c_key)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
         );
-        let Operator::Join(op) = &join.operator else {
-            unreachable!()
-        };
-        let JoinCondition::On { on, .. } = &op.on else {
-            unreachable!()
-        };
-        assert_eq!(on.len(), 2);
+        let schema = plan.output_schema(&mut arena).clone();
+        assert!(GreedyJoinReorder.apply(&mut plan, &mut arena)?);
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        let (left, right) = plan.childrens.twins();
+        assert_eq!(left.referenced_table(), vec!["a".into()]);
+        assert_eq!(right.referenced_table(), vec!["b".into(), "c".into()]);
+        assert_eq!(right.estimated_rows(), Some(200));
+        for join in [&plan, right] {
+            let Operator::Join(op) = &join.operator else {
+                unreachable!()
+            };
+            let JoinCondition::On { on, .. } = &op.on else {
+                unreachable!()
+            };
+            assert_eq!(op.join_type, JoinType::Inner);
+            assert_eq!(on.len(), 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn disconnected_input_keeps_a_final_cross_join() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let (a, a_key) = input("a", 1000, &mut arena);
+        let (b, b_key) = input("b", 10, &mut arena);
+        let (c, c_key) = input("c", 20, &mut arena);
+        let (d, _) = input("d", 1, &mut arena);
+        let ab = JoinOperator::build(a, b, JoinCondition::None, JoinType::Cross, false);
+        let abd = JoinOperator::build(ab, d, JoinCondition::None, JoinType::Cross, false);
+        let b_column = b_key.output_column_ref(&mut arena);
+        let b_key = arena.alloc_expression(ScalarExpression::column_expr(b_column, 1));
+        let mut plan = JoinOperator::build(
+            abd,
+            c,
+            JoinCondition::On {
+                on: vec![(a_key, c_key), (b_key, c_key)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        let schema = plan.output_schema(&mut arena).clone();
+        assert!(GreedyJoinReorder.apply(&mut plan, &mut arena)?);
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        let join = plan.childrens.only();
+        assert!(
+            matches!(&join.operator, Operator::Join(join) if join.join_type == JoinType::Cross)
+        );
+        let (left, right) = join.childrens.twins();
+        assert_eq!(
+            left.referenced_table(),
+            vec!["a".into(), "b".into(), "c".into()]
+        );
+        assert_eq!(right.referenced_table(), vec!["d".into()]);
+        let (_, bc) = left.childrens.twins();
+        assert_eq!(bc.referenced_table(), vec!["b".into(), "c".into()]);
+        assert_eq!(bc.estimated_rows(), Some(200));
         Ok(())
     }
 
@@ -456,7 +557,7 @@ mod tests {
         filter.physical_option = Some(PhysicalOption::new(
             PlanImpl::Filter,
             SortOption::Follow,
-            RowCountOption::Estimated(20),
+            RowCountOption::Follow,
         ));
         **right = filter;
         let schema = join.output_schema(&mut arena).clone();

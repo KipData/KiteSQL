@@ -61,7 +61,13 @@ impl<'a> HepOptimizer<'a> {
         loader: Option<&StatisticMetaLoader<'_>>,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        Self::apply_batches(&mut self.plan, self.before_batches, arena)?;
+        let mut applied_rules = Vec::new();
+        Self::apply_batches(
+            &mut self.plan,
+            self.before_batches,
+            &mut applied_rules,
+            arena,
+        )?;
 
         if let Some(loader) = loader {
             if self.implementation_index.is_empty().not() {
@@ -79,7 +85,12 @@ impl<'a> HepOptimizer<'a> {
                 )?;
             }
         }
-        Self::apply_batches(&mut self.plan, self.after_batches, arena)?;
+        Self::apply_batches(
+            &mut self.plan,
+            self.after_batches,
+            &mut applied_rules,
+            arena,
+        )?;
 
         Ok(self.plan)
     }
@@ -88,22 +99,26 @@ impl<'a> HepOptimizer<'a> {
     fn apply_batches(
         plan: &mut LogicalPlan,
         batches: &[HepBatch],
+        applied_rules: &mut Vec<bool>,
         arena: &mut PlanArena,
     ) -> Result<(), DatabaseError> {
         for batch in batches {
             match batch.strategy {
+                HepBatchStrategy::Once(order) => {
+                    Self::apply_batch(plan, batch, order, applied_rules, arena)?;
+                }
                 HepBatchStrategy::MaxTimes {
                     max_iteration,
                     order,
                 } => {
                     for _ in 0..max_iteration {
-                        if !Self::apply_batch(plan, batch, order, arena)? {
+                        if !Self::apply_batch(plan, batch, order, applied_rules, arena)? {
                             break;
                         }
                     }
                 }
                 HepBatchStrategy::LoopIfApplied(order) => {
-                    while Self::apply_batch(plan, batch, order, arena)? {}
+                    while Self::apply_batch(plan, batch, order, applied_rules, arena)? {}
                 }
             }
         }
@@ -115,6 +130,7 @@ impl<'a> HepOptimizer<'a> {
         plan: &mut LogicalPlan,
         batch: &HepBatch,
         order: HepMatchOrder,
+        applied_rules: &mut Vec<bool>,
         arena: &mut PlanArena,
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
@@ -126,7 +142,11 @@ impl<'a> HepOptimizer<'a> {
                     }
                 }
                 HepBatchStep::LocalRewrite(rules) => {
-                    if Self::apply_local_rules(plan, rules, order, arena)? {
+                    applied_rules.clear();
+                    if matches!(batch.strategy, HepBatchStrategy::Once(_)) {
+                        applied_rules.resize(rules.len(), false);
+                    }
+                    if Self::apply_local_rules(plan, rules, order, applied_rules, arena)? {
                         applied = true;
                     }
                 }
@@ -384,18 +404,26 @@ impl<'a> HepOptimizer<'a> {
         plan: &mut LogicalPlan,
         rules: &HepLocalRewriteBatch,
         order: HepMatchOrder,
+        applied_rules: &mut [bool],
         arena: &mut PlanArena,
     ) -> Result<bool, DatabaseError> {
+        if !applied_rules.is_empty() && applied_rules.iter().all(|done| *done) {
+            return Ok(false);
+        }
         let mut applied = false;
         if matches!(order, HepMatchOrder::TopDown) {
-            applied |= Self::apply_local_rules_current(plan, rules, arena)?;
+            applied |= Self::apply_local_rules_current(plan, rules, applied_rules, arena)?;
         }
 
         let child_applied = match plan.childrens.as_mut() {
-            Childrens::Only(child) => Self::apply_local_rules(child, rules, order, arena)?,
+            Childrens::Only(child) => {
+                Self::apply_local_rules(child, rules, order, applied_rules, arena)?
+            }
             Childrens::Twins { left, right } => {
-                let left_applied = Self::apply_local_rules(left, rules, order, arena)?;
-                let right_applied = Self::apply_local_rules(right, rules, order, arena)?;
+                let left_applied =
+                    Self::apply_local_rules(left, rules, order, applied_rules, arena)?;
+                let right_applied =
+                    Self::apply_local_rules(right, rules, order, applied_rules, arena)?;
                 left_applied || right_applied
             }
             Childrens::None => false,
@@ -406,7 +434,7 @@ impl<'a> HepOptimizer<'a> {
         applied |= child_applied;
 
         if matches!(order, HepMatchOrder::BottomUp) {
-            applied |= Self::apply_local_rules_current(plan, rules, arena)?;
+            applied |= Self::apply_local_rules_current(plan, rules, applied_rules, arena)?;
         }
         Ok(applied)
     }
@@ -414,13 +442,20 @@ impl<'a> HepOptimizer<'a> {
     fn apply_local_rules_current(
         plan: &mut LogicalPlan,
         rules: &HepLocalRewriteBatch,
+        applied_rules: &mut [bool],
         arena: &mut PlanArena,
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
         let mut next_rule_idx = 0;
         while let Some(idx) = rules.next_matching_rule_index_from(&plan.operator, next_rule_idx) {
             next_rule_idx = idx + 1;
+            if applied_rules.get(idx).copied().unwrap_or(false) {
+                continue;
+            }
             if rules.rules[idx].apply(plan, arena)? {
+                if let Some(done) = applied_rules.get_mut(idx) {
+                    *done = true;
+                }
                 applied = true;
                 plan.reset_output_schema_cache_recursive();
             }
@@ -476,13 +511,9 @@ impl ImplementationRuleIndex {
             Operator::Dummy if self.contains(ImplementationRuleImpl::Dummy) => Some(
                 PhysicalOption::new(PlanImpl::Dummy, SortOption::None, RowCountOption::Unknown),
             ),
-            Operator::Filter(_) if self.contains(ImplementationRuleImpl::Filter) => {
-                Some(PhysicalOption::new(
-                    PlanImpl::Filter,
-                    SortOption::Follow,
-                    RowCountOption::Unknown,
-                ))
-            }
+            Operator::Filter(_) if self.contains(ImplementationRuleImpl::Filter) => Some(
+                PhysicalOption::new(PlanImpl::Filter, SortOption::Follow, RowCountOption::Follow),
+            ),
             Operator::Join(join_op) if self.contains(ImplementationRuleImpl::HashJoin) => {
                 Some(PhysicalOption::new(
                     join_op.plan_impl(),
@@ -657,14 +688,18 @@ mod tests {
     use crate::expression::ScalarExpression;
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
     use crate::optimizer::heuristic::batch::{HepBatch, HepBatchStrategy, HepMatchOrder};
-    use crate::optimizer::heuristic::optimizer::{HepOptimizer, HepOptimizerPipeline};
+    use crate::optimizer::heuristic::optimizer::{
+        HepOptimizer, HepOptimizerPipeline, ImplementationRuleIndex,
+    };
     use crate::optimizer::rule::implementation::ImplementationRuleImpl;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::limit::LimitOperator;
     use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::sort::SortField;
-    use crate::planner::operator::{Operator, PlanImpl, SortOption};
+    use crate::planner::operator::{
+        Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
+    };
     use crate::planner::{Childrens, LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::{Storage, Transaction};
     use crate::types::index::IndexLookup;
@@ -683,19 +718,43 @@ mod tests {
     }
 
     #[test]
+    fn filter_fast_path_follows_input_row_count() {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let mut plan = filter_chain(1, &mut arena);
+        let Childrens::Only(child) = plan.childrens.as_mut() else {
+            unreachable!()
+        };
+        child.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Dummy,
+            SortOption::None,
+            RowCountOption::Estimated(12),
+        ));
+        let implementations = ImplementationRuleIndex::new(vec![ImplementationRuleImpl::Filter]);
+        plan.physical_option = implementations.direct_physical_option(&plan.operator);
+        assert_eq!(
+            plan.physical_option.as_ref().unwrap().row_count,
+            RowCountOption::Follow
+        );
+        assert_eq!(plan.estimated_rows(), Some(12));
+    }
+
+    #[test]
     fn local_rule_order_and_sibling_application() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let batch = HepBatch::new(
             "Combine Filters".into(),
-            HepBatchStrategy::once_bottomup(),
+            HepBatchStrategy::fix_point_bottomup(1),
             vec![NormalizationRuleImpl::CombineFilter],
         );
+        let mut applied_rules = Vec::new();
         let mut topdown = filter_chain(3, &mut arena);
         assert!(HepOptimizer::apply_batch(
             &mut topdown,
             &batch,
             HepMatchOrder::TopDown,
+            &mut applied_rules,
             &mut arena
         )?);
         assert!(matches!(
@@ -707,6 +766,7 @@ mod tests {
             &mut bottomup,
             &batch,
             HepMatchOrder::BottomUp,
+            &mut applied_rules,
             &mut arena
         )?);
         assert!(matches!(
@@ -717,12 +777,13 @@ mod tests {
             &mut bottomup,
             &batch,
             HepMatchOrder::BottomUp,
+            &mut applied_rules,
             &mut arena
         )?);
 
         for strategy in [
-            HepBatchStrategy::once_topdown(),
-            HepBatchStrategy::once_bottomup(),
+            HepBatchStrategy::fix_point_topdown(1),
+            HepBatchStrategy::fix_point_bottomup(1),
         ] {
             let plan = LogicalPlan::new(
                 Operator::Dummy,
@@ -744,6 +805,73 @@ mod tests {
             assert!(matches!(right.operator, Operator::Filter(_)));
             assert!(matches!(left.childrens.only().operator, Operator::Dummy));
             assert!(matches!(right.childrens.only().operator, Operator::Dummy));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn once_stops_each_rule_after_its_first_success() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        for strategy in [
+            HepBatchStrategy::once_topdown(),
+            HepBatchStrategy::once_bottomup(),
+        ] {
+            let plan = LogicalPlan::new(
+                Operator::Dummy,
+                Childrens::Twins {
+                    left: Box::new(filter_chain(2, &mut arena)),
+                    right: Box::new(filter_chain(2, &mut arena)),
+                },
+            );
+            let pipeline = HepOptimizerPipeline::builder()
+                .before_batch(
+                    "Combine Filters".into(),
+                    strategy,
+                    vec![NormalizationRuleImpl::CombineFilter],
+                )
+                .build();
+            let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
+            let (left, right) = result.childrens.twins();
+            assert!(matches!(left.childrens.only().operator, Operator::Dummy));
+            assert!(matches!(
+                right.childrens.only().operator,
+                Operator::Filter(_)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn once_does_not_reapply_a_rule_to_its_rewritten_children() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        for (strategy, expected_depth) in [
+            (HepBatchStrategy::once_topdown(), 1),
+            (HepBatchStrategy::fix_point_topdown(1), 3),
+        ] {
+            let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
+            for _ in 0..3 {
+                plan = LogicalPlan::new(
+                    Operator::Project(ProjectOperator { exprs: Vec::new() }),
+                    Childrens::Only(Box::new(plan)),
+                );
+            }
+            plan = LimitOperator::build(None, Some(5), plan);
+            let pipeline = HepOptimizerPipeline::builder()
+                .before_batch(
+                    "Limit Project Transpose".into(),
+                    strategy,
+                    vec![NormalizationRuleImpl::LimitProjectTranspose],
+                )
+                .build();
+            let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
+            let mut cursor = &result;
+            for _ in 0..expected_depth {
+                assert!(matches!(cursor.operator, Operator::Project(_)));
+                cursor = cursor.childrens.only();
+            }
+            assert!(matches!(cursor.operator, Operator::Limit(_)));
         }
         Ok(())
     }

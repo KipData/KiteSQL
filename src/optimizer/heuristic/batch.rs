@@ -132,6 +132,8 @@ pub enum HepMatchOrder {
 
 #[derive(Clone, Copy)]
 pub enum HepBatchStrategy {
+    /// Each local rule may succeed once across the tree.
+    Once(HepMatchOrder),
     /// Stop at a fix point or after the configured number of full-tree iterations.
     MaxTimes {
         max_iteration: usize,
@@ -143,11 +145,11 @@ pub enum HepBatchStrategy {
 
 impl HepBatchStrategy {
     pub fn once_topdown() -> Self {
-        Self::fix_point_topdown(1)
+        Self::Once(HepMatchOrder::TopDown)
     }
 
     pub fn once_bottomup() -> Self {
-        Self::fix_point_bottomup(1)
+        Self::Once(HepMatchOrder::BottomUp)
     }
 
     pub fn fix_point_topdown(max_iteration: usize) -> Self {

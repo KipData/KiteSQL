@@ -324,7 +324,9 @@ mod tests {
     };
     use crate::planner::operator::function_scan::FunctionScanOperator;
     use crate::planner::operator::top_k::TopKOperator;
-    use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+    use crate::planner::operator::{
+        Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
+    };
     use crate::planner::{Childrens, LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::StatisticsMetaCache;
     use crate::types::value::DataValue;
@@ -418,11 +420,15 @@ mod tests {
             |op| matches!(op, Operator::Dummy),
             PlanImpl::Dummy,
         )?;
-        assert_sql_rule(
+        with_operator_from_sql(
             "select * from t1 where c1 = 1",
-            ImplementationRuleImpl::Filter,
             |op| matches!(op, Operator::Filter(_)),
-            PlanImpl::Filter,
+            |filter, arena| {
+                let option = best_option(ImplementationRuleImpl::Filter, &filter, arena)?;
+                assert_eq!(option.plan, PlanImpl::Filter);
+                assert_eq!(option.row_count, RowCountOption::Follow);
+                Ok(())
+            },
         )?;
         assert_sql_rule(
             "select * from t1 limit 1",
