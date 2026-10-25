@@ -1,0 +1,116 @@
+# Binary values preserve arbitrary bytes, including zero bytes and non-UTF8.
+statement ok
+create table binary_values (id int primary key, b varbinary(8) unique);
+
+statement ok
+insert into binary_values values (1,x''),(2,x'00'),(3,x'0000'),(4,x'00ff'),(5,x'80'),(6,x'ff'),(7,null);
+
+query IT
+select id,b from binary_values order by b;
+----
+1 X''
+2 X'00'
+3 X'0000'
+4 X'00FF'
+5 X'80'
+6 X'FF'
+7 NULL
+
+query I
+select id from binary_values where b=x'00ff';
+----
+4
+
+query I
+select id from binary_values where b>=x'00' and b<x'80' order by b;
+----
+2
+3
+4
+
+query TTTTTT
+select x'00'<x'0000',x'ff'>x'80',x'ab'=x'AB',x'00'<>x'01',x'00'<=x'00',x'01'>=x'00';
+----
+true true true true true true
+
+query TTTTT
+select x'00ff' in (select b from binary_values),x'01' in (select b from binary_values),x'01' not in (select b from binary_values),null=x'00',x'00' in (select b from binary_values where false);
+----
+true NULL NULL NULL false
+
+query TT
+select cast(x'00ff' as varbinary(2)),cast(null as blob);
+----
+X'00FF' NULL
+
+query T
+select distinct b from binary_values where b in (x'00',x'ff') order by b desc;
+----
+X'FF'
+X'00'
+
+query I
+select count(*) from binary_values a join binary_values b on a.b=b.b;
+----
+6
+
+statement error
+insert into binary_values values (8,x'00ff');
+
+statement error
+insert into binary_values values (8,x'000102030405060708');
+
+statement error
+select cast(x'0001' as varbinary(1));
+
+statement error
+select x'0';
+
+statement error
+select x'GG';
+
+statement error
+select x'00'+x'01';
+
+statement error
+select cast(x'00' as bigint);
+
+query I
+select count(*) from binary_values;
+----
+7
+
+statement ok
+update binary_values set b=x'fe' where id=6;
+
+query I
+select id from binary_values where b=x'fe';
+----
+6
+
+statement ok
+delete from binary_values where b=x'0000';
+
+query I
+select count(*) from binary_values where b=x'0000';
+----
+0
+
+statement ok
+create table binary_pk (b bytea primary key);
+
+statement ok
+insert into binary_pk values (x''),(x'00'),(x'0000'),(x'ff');
+
+query T
+select b from binary_pk where b>=x'00' order by b;
+----
+X'00'
+X'0000'
+X'FF'
+
+statement ok
+drop table binary_pk;
+
+statement ok
+drop table binary_values;

@@ -73,6 +73,7 @@ const CAST_TIMESTAMP: u16 = 17;
 #[cfg(feature = "decimal")]
 const CAST_DECIMAL: u16 = 18;
 const CAST_TUPLE: u16 = 19;
+const CAST_BINARY: u16 = 20;
 
 // Cast positions are serialized ABI. Type codes above must never be reordered
 // or reused; new cast families should append a new code and keep old positions.
@@ -101,6 +102,7 @@ fn cast_type_code(ty: &LogicalType) -> u16 {
         #[cfg(not(feature = "decimal"))]
         LogicalType::Decimal(_, _) => unreachable!("DECIMAL requires the `decimal` feature"),
         LogicalType::Tuple(_) => CAST_TUPLE,
+        LogicalType::Varbinary(_) => CAST_BINARY,
     }
 }
 
@@ -551,6 +553,10 @@ pub fn cast_create(
     }
 
     match (from, to) {
+        (LogicalType::Varbinary(_), LogicalType::Varbinary(len)) => Ok(CastEvaluatorRef::new(
+            cast_pos(from, to),
+            CastEvaluatorParams::Binary { len: *len },
+        )),
         (LogicalType::SqlNull, _) => cast_ref!(from, to),
         (_, LogicalType::SqlNull) => cast_ref!(from, to),
         (LogicalType::Boolean, LogicalType::Tinyint) => {
@@ -927,6 +933,12 @@ impl CastEvaluatorRef {
         }
 
         match (from_code, to_code) {
+            (CAST_BINARY, CAST_BINARY) => {
+                let CastEvaluatorParams::Binary { len } = params else {
+                    unreachable!()
+                };
+                value.clone().cast(&LogicalType::Varbinary(*len))
+            }
             (CAST_SQL_NULL, _) => run!(null_cast_eval),
             (_, CAST_SQL_NULL) => run!(to_sql_null_cast_eval),
             (CAST_BOOLEAN, CAST_TINYINT) => run!(boolean_to_tinyint_cast_eval),

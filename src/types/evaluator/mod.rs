@@ -14,6 +14,7 @@
 
 pub mod binary;
 pub mod boolean;
+pub mod bytes;
 pub mod cast;
 #[cfg(feature = "time")]
 pub mod date;
@@ -117,6 +118,9 @@ pub enum CastEvaluatorParams {
     },
     Tuple {
         evaluators: Vec<CastEvaluatorRef>,
+    },
+    Binary {
+        len: Option<u32>,
     },
 }
 

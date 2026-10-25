@@ -70,6 +70,7 @@ pub enum LogicalType {
     // decimal (precision, scale)
     Decimal(Option<u8>, Option<u8>),
     Tuple(Vec<LogicalType>),
+    Varbinary(Option<u32>),
 }
 
 impl LogicalType {
@@ -103,6 +104,8 @@ impl LogicalType {
             Some(LogicalType::Float)
         } else if type_id == TypeId::of::<f64>() {
             Some(LogicalType::Double)
+        } else if type_id == TypeId::of::<Vec<u8>>() {
+            Some(LogicalType::Varbinary(None))
         } else if type_id == TypeId::of::<String>() {
             Some(LogicalType::Varchar(None, CharLengthUnits::Characters))
         } else {
@@ -137,7 +140,7 @@ impl LogicalType {
             LogicalType::Float => Some(4),
             LogicalType::Double => Some(8),
             /// Note: The non-fixed length type's raw_len is None e.g. Varchar
-            LogicalType::Varchar(_, _) => None,
+            LogicalType::Varchar(_, _) | LogicalType::Varbinary(_) => None,
             LogicalType::Char(len, unit) => match unit {
                 CharLengthUnits::Characters => None,
                 CharLengthUnits::Octets => Some(*len as usize),
@@ -257,6 +260,9 @@ impl LogicalType {
             ) {
                 return Ok(Cow::Owned(LogicalType::DateTime));
             }
+        }
+        if let (LogicalType::Varbinary(_), LogicalType::Varbinary(_)) = (left, right) {
+            return Ok(Cow::Owned(LogicalType::Varbinary(None)));
         }
         if (left.is_numeric() && matches!(right, LogicalType::Char(..) | LogicalType::Varchar(..)))
             || (right.is_numeric()
@@ -407,7 +413,7 @@ impl LogicalType {
             LogicalType::Float => matches!(to, LogicalType::Double | LogicalType::Decimal(_, _)),
             LogicalType::Double => matches!(to, LogicalType::Decimal(_, _)),
             LogicalType::Char(..) => false,
-            LogicalType::Varchar(..) => false,
+            LogicalType::Varchar(..) | LogicalType::Varbinary(..) => false,
             LogicalType::Date => matches!(
                 to,
                 LogicalType::DateTime | LogicalType::Varchar(..) | LogicalType::Char(..)
@@ -444,6 +450,7 @@ impl std::fmt::Display for LogicalType {
             LogicalType::Double => write!(f, "Double")?,
             LogicalType::Char(len, units) => write!(f, "Char({len}, {units})")?,
             LogicalType::Varchar(len, units) => write!(f, "Varchar({len:?}, {units})")?,
+            LogicalType::Varbinary(len) => write!(f, "Varbinary({len:?})")?,
             LogicalType::Date => write!(f, "Date")?,
             LogicalType::DateTime => write!(f, "DateTime")?,
             LogicalType::TimeStamp(precision, zone) => {
@@ -521,7 +528,10 @@ pub(crate) mod test {
             LogicalType::type_trans::<String>(),
             Some(LogicalType::Varchar(None, CharLengthUnits::Characters))
         );
-        assert_eq!(LogicalType::type_trans::<Vec<u8>>(), None);
+        assert_eq!(
+            LogicalType::type_trans::<Vec<u8>>(),
+            Some(LogicalType::Varbinary(None))
+        );
 
         #[cfg(feature = "decimal")]
         assert_eq!(
@@ -974,6 +984,16 @@ pub(crate) mod test {
             &mut cursor,
             &mut reference_tables,
             LogicalType::Varchar(None, CharLengthUnits::Octets),
+        )?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::Varbinary(Some(8)),
+        )?;
+        fn_assert(
+            &mut cursor,
+            &mut reference_tables,
+            LogicalType::Varbinary(None),
         )?;
         fn_assert(&mut cursor, &mut reference_tables, LogicalType::Date)?;
         fn_assert(&mut cursor, &mut reference_tables, LogicalType::DateTime)?;

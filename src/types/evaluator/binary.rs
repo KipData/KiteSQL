@@ -15,6 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::BinaryOperator;
 use crate::types::evaluator::boolean::*;
+use crate::types::evaluator::bytes::*;
 #[cfg(feature = "time")]
 use crate::types::evaluator::date::*;
 #[cfg(feature = "time")]
@@ -133,6 +134,7 @@ const BINARY_BOOLEAN_BASE: u16 = BINARY_TIME64_BASE + TIMESTAMP_OPS_LEN;
 const BINARY_UTF8_BASE: u16 = BINARY_BOOLEAN_BASE + BOOLEAN_OPS_LEN;
 const BINARY_SQL_NULL: u16 = BINARY_UTF8_BASE + UTF8_OPS_LEN;
 const BINARY_TUPLE_BASE: u16 = BINARY_SQL_NULL + SQL_NULL_OPS_LEN;
+const BINARY_BYTES_BASE: u16 = BINARY_TUPLE_BASE + TUPLE_LT_EQ_OFFSET + 1;
 
 // Evaluator positions are serialized ABI. Do not reorder or reuse existing
 // positions; only append new positions at the end of the current layout.
@@ -181,6 +183,21 @@ pub fn binary_create(
 ) -> Result<BinaryEvaluatorRef, DatabaseError> {
     let ty = ty.as_ref();
     match ty {
+        LogicalType::Varbinary(_) => match op {
+            BinaryOperator::Eq => unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_EQ_OFFSET)),
+            BinaryOperator::NotEq => {
+                unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_NOT_EQ_OFFSET))
+            }
+            BinaryOperator::Gt => unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_GT_OFFSET)),
+            BinaryOperator::GtEq => {
+                unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_GT_EQ_OFFSET))
+            }
+            BinaryOperator::Lt => unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_LT_OFFSET)),
+            BinaryOperator::LtEq => {
+                unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_LT_EQ_OFFSET))
+            }
+            _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
+        },
         LogicalType::Tinyint => numeric_binary_ref(BINARY_INT8_BASE, ty, op),
         LogicalType::Smallint => numeric_binary_ref(BINARY_INT16_BASE, ty, op),
         LogicalType::Integer => numeric_binary_ref(BINARY_INT32_BASE, ty, op),
@@ -511,6 +528,24 @@ pub(crate) fn eval_binary(
         }
         x if x == binary_pos(BINARY_TUPLE_BASE, TUPLE_LT_EQ_OFFSET) => {
             tuple_lt_eq_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_EQ_OFFSET) => {
+            bytes_eq_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_NOT_EQ_OFFSET) => {
+            bytes_not_eq_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_GT_OFFSET) => {
+            bytes_gt_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_GT_EQ_OFFSET) => {
+            bytes_gt_eq_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_LT_OFFSET) => {
+            bytes_lt_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_LT_EQ_OFFSET) => {
+            bytes_lt_eq_binary_eval(left, right)
         }
         _ => unreachable!("unknown binary evaluator position {pos}"),
     }

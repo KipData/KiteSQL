@@ -257,6 +257,7 @@ impl SpillCodec for Tuple {
 fn estimated_dynamic_value_size(value: &DataValue) -> usize {
     match value {
         DataValue::Utf8 { value, .. } => value.capacity(),
+        DataValue::Binary { value, .. } => value.capacity(),
         DataValue::Tuple(values) => values
             .capacity()
             .saturating_mul(size_of::<DataValue>())
@@ -290,6 +291,11 @@ mod tests {
 
     fn values() -> Vec<DataValue> {
         let values = vec![
+            DataValue::Binary {
+                value: vec![0, 255, 128],
+                len: Some(8),
+            },
+            DataValue::from(Vec::<u8>::new()),
             DataValue::Null,
             DataValue::Boolean(false),
             DataValue::Boolean(true),

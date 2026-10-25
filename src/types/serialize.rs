@@ -92,11 +92,17 @@ pub enum TupleValueSerializableImpl {
     Decimal,
     SkipFixed(usize),
     SkipVariable,
+    Varbinary {
+        len: Option<u32>,
+    },
 }
 
 impl TupleValueSerializable for TupleValueSerializableImpl {
     fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError> {
         match self {
+            TupleValueSerializableImpl::Varbinary { len } => {
+                VarbinarySerializable { len: *len }.to_raw(value, writer)
+            }
             TupleValueSerializableImpl::Boolean => BooleanSerializable.to_raw(value, writer),
             TupleValueSerializableImpl::Int8 => Int8Serializable.to_raw(value, writer),
             TupleValueSerializableImpl::Int16 => Int16Serializable.to_raw(value, writer),
@@ -137,6 +143,9 @@ impl TupleValueSerializable for TupleValueSerializableImpl {
 
     fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
         match self {
+            TupleValueSerializableImpl::Varbinary { len } => {
+                VarbinarySerializable { len: *len }.from_raw(reader)
+            }
             TupleValueSerializableImpl::Boolean => BooleanSerializable.from_raw(reader),
             TupleValueSerializableImpl::Int8 => Int8Serializable.from_raw(reader),
             TupleValueSerializableImpl::Int16 => Int16Serializable.from_raw(reader),
@@ -181,6 +190,9 @@ impl TupleValueSerializable for TupleValueSerializableImpl {
         values: &mut std::vec::Vec<DataValue>,
     ) -> Result<(), DatabaseError> {
         match self {
+            TupleValueSerializableImpl::Varbinary { len } => {
+                VarbinarySerializable { len: *len }.filling_value(reader, values)
+            }
             TupleValueSerializableImpl::Boolean => {
                 BooleanSerializable.filling_value(reader, values)
             }
@@ -267,6 +279,11 @@ struct CharSerializable {
 struct VarcharSerializable {
     len: Option<u32>,
     unit: CharLengthUnits,
+}
+
+#[derive(Debug)]
+struct VarbinarySerializable {
+    len: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -488,6 +505,27 @@ impl TupleValueSerializable for VarcharSerializable {
     }
 }
 
+impl TupleValueSerializable for VarbinarySerializable {
+    fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError> {
+        let DataValue::Binary { value, .. } = value else {
+            unsafe { std::hint::unreachable_unchecked() }
+        };
+        write_u32_le(writer, value.len() as u32)?;
+        writer.write_all(value)?;
+        Ok(())
+    }
+
+    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
+        let size = read_u32_le(reader)? as usize;
+        let mut value = vec![0; size];
+        reader.read_exact(&mut value)?;
+        Ok(DataValue::Binary {
+            value,
+            len: self.len,
+        })
+    }
+}
+
 impl_tuple_value_serializable!(
     DateSerializable,
     Date32,
@@ -613,6 +651,7 @@ impl LogicalType {
 
     pub fn serializable(&self) -> TupleValueSerializableImpl {
         match self {
+            LogicalType::Varbinary(len) => TupleValueSerializableImpl::Varbinary { len: *len },
             LogicalType::Boolean => TupleValueSerializableImpl::Boolean,
             LogicalType::Tinyint => TupleValueSerializableImpl::Int8,
             LogicalType::UTinyint => TupleValueSerializableImpl::UInt8,
@@ -669,6 +708,17 @@ mod tests {
     fn test_tuple_value_serializable_impl_roundtrips_all_value_variants(
     ) -> Result<(), DatabaseError> {
         let cases = vec![
+            (
+                TupleValueSerializableImpl::Varbinary { len: Some(8) },
+                DataValue::Binary {
+                    value: vec![0, 255, 128],
+                    len: Some(8),
+                },
+            ),
+            (
+                TupleValueSerializableImpl::Varbinary { len: None },
+                DataValue::from(Vec::<u8>::new()),
+            ),
             (
                 TupleValueSerializableImpl::Boolean,
                 DataValue::Boolean(true),

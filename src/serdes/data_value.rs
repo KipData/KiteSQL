@@ -43,6 +43,7 @@ const TAG_TIME32: u8 = 15;
 const TAG_TIME64: u8 = 16;
 const TAG_DECIMAL: u8 = 17;
 const TAG_TUPLE: u8 = 18;
+const TAG_BINARY: u8 = 19;
 
 impl ReferenceSerialization for Utf8Type {
     fn encode<W: Write, A: MetaArena + ?Sized>(
@@ -144,6 +145,16 @@ impl DataValue {
                 write_u8(writer, TAG_UINT64)?;
                 write_u64(writer, *value)
             }
+            DataValue::Binary { value, len } => {
+                write_u8(writer, TAG_BINARY)?;
+                write_len(writer, value.len())?;
+                writer.write_all(value)?;
+                write_bool(writer, len.is_some())?;
+                if let Some(len) = len {
+                    write_u32(writer, *len)?;
+                }
+                Ok(())
+            }
             DataValue::Utf8 { value, ty, unit } => {
                 write_u8(writer, TAG_UTF8)?;
                 write_string(writer, value)?;
@@ -200,6 +211,17 @@ impl DataValue {
             TAG_UINT16 => Ok(DataValue::UInt16(read_u16(reader)?)),
             TAG_UINT32 => Ok(DataValue::UInt32(read_u32(reader)?)),
             TAG_UINT64 => Ok(DataValue::UInt64(read_u64(reader)?)),
+            TAG_BINARY => {
+                let size = read_len(reader)?;
+                let mut value = vec![0; size];
+                reader.read_exact(&mut value)?;
+                let len = if read_bool(reader)? {
+                    Some(read_u32(reader)?)
+                } else {
+                    None
+                };
+                Ok(DataValue::Binary { value, len })
+            }
             TAG_UTF8 => Ok(DataValue::Utf8 {
                 value: read_string(reader)?,
                 ty: read_utf8_type(reader)?,
@@ -403,7 +425,7 @@ fn read_char_length_units<R: Read>(reader: &mut R) -> Result<CharLengthUnits, Da
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
-    use super::{TAG_BOOLEAN, TAG_INT64, TAG_TIME64, TAG_TUPLE, TAG_UTF8};
+    use super::{TAG_BINARY, TAG_BOOLEAN, TAG_INT64, TAG_TIME64, TAG_TUPLE, TAG_UTF8};
     use crate::errors::DatabaseError;
     use crate::serdes::{ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksTransaction;
@@ -425,6 +447,11 @@ pub(crate) mod test {
     #[test]
     fn test_serialization() -> Result<(), DatabaseError> {
         let sources = vec![
+            DataValue::Binary {
+                value: vec![0, 255, 128],
+                len: Some(8),
+            },
+            DataValue::from(Vec::<u8>::new()),
             DataValue::Null,
             DataValue::Boolean(true),
             DataValue::Float32(OrderedFloat(32.5)),
@@ -497,6 +524,10 @@ pub(crate) mod test {
         assert_invalid_value(&[u8::MAX], "invalid data value tag");
         assert_invalid_value(&[TAG_BOOLEAN, 2], "invalid bool value");
         assert_invalid_value(&[TAG_INT64, 1], "failed to fill whole buffer");
+        assert_invalid_value(
+            &[TAG_BINARY, 2, 0, 0, 0, 255],
+            "failed to fill whole buffer",
+        );
 
         let mut utf8 = vec![TAG_UTF8];
         utf8.extend(0u32.to_le_bytes());

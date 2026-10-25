@@ -212,6 +212,7 @@ impl TableCodec {
                 | LogicalType::UBigint
                 | LogicalType::Char(..)
                 | LogicalType::Varchar(..)
+                | LogicalType::Varbinary(..)
                 | LogicalType::Date
                 | LogicalType::DateTime
                 | LogicalType::Time(..)

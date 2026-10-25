@@ -42,11 +42,11 @@ use crate::storage::{Storage, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
 pub(super) use sqlparser::ast::{
-    AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, BinaryOperator,
-    ColumnDef, ColumnOption, CreateView, DataType, DescribeAlias, Distinct, DuplicateTreatment,
-    Expr, FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
-    IndexColumn, Join, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart,
-    ObjectType, OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
+    AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, BinaryLength,
+    BinaryOperator, ColumnDef, ColumnOption, CreateView, DataType, DescribeAlias, Distinct,
+    DuplicateTreatment, Expr, FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
+    GroupByExpr, Ident, IndexColumn, Join, JoinConstraint, JoinOperator, LimitClause, ObjectName,
+    ObjectNamePart, ObjectType, OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
     SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, TableAlias,
     TableConstraint, TableFactor, TableObject, TableWithJoins, TypedString, UnaryOperator, Value,
     ValueWithSpan, WindowType,
@@ -1667,6 +1667,24 @@ impl TryFrom<&Value> for DataValue {
                 }
             }
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone().into(),
+            Value::HexStringLiteral(hex) => {
+                if hex.len() % 2 != 0 {
+                    return Err(DatabaseError::InvalidValue(
+                        "hex literal must contain pairs of digits".to_string(),
+                    ));
+                }
+                let mut bytes = Vec::with_capacity(hex.len() / 2);
+                for pair in hex.as_bytes().chunks_exact(2) {
+                    let Some(high) = (pair[0] as char).to_digit(16) else {
+                        return Err(DatabaseError::InvalidValue("invalid hex digit".to_string()));
+                    };
+                    let Some(low) = (pair[1] as char).to_digit(16) else {
+                        return Err(DatabaseError::InvalidValue("invalid hex digit".to_string()));
+                    };
+                    bytes.push((high * 16 + low) as u8);
+                }
+                bytes.into()
+            }
             Value::Boolean(b) => (*b).into(),
             Value::Null => Self::Null,
             v => return Err(DatabaseError::UnsupportedStmt(format!("{v:?}"))),
@@ -1727,6 +1745,17 @@ impl TryFrom<DataType> for LogicalType {
                         .unwrap_or(CharLengthUnits::Characters),
                 ))
             }
+            DataType::Varbinary(length) => {
+                let len = match length {
+                    Some(BinaryLength::IntegerLength { length }) => Some(u32::try_from(length)?),
+                    None | Some(BinaryLength::Max) => None,
+                };
+                Ok(Self::Varbinary(len))
+            }
+            DataType::Blob(length) | DataType::Bytes(length) => {
+                Ok(Self::Varbinary(length.map(u32::try_from).transpose()?))
+            }
+            DataType::Bytea => Ok(Self::Varbinary(None)),
             DataType::String(_) | DataType::Text => {
                 Ok(Self::Varchar(None, CharLengthUnits::Characters))
             }

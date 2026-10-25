@@ -163,6 +163,10 @@ pub enum DataValue {
     #[cfg(feature = "decimal")]
     Decimal(Decimal),
     Tuple(Vec<DataValue>),
+    Binary {
+        value: Vec<u8>,
+        len: Option<u32>,
+    },
 }
 
 /// A read-only view of a value, including an unmaterialized tuple slice.
@@ -381,6 +385,8 @@ impl PartialEq for DataValue {
             (UInt32(_), _) => false,
             (UInt64(v1), UInt64(v2)) => v1.eq(v2),
             (UInt64(_), _) => false,
+            (Binary { value: v1, .. }, Binary { value: v2, .. }) => v1.eq(v2),
+            (Binary { .. }, _) => false,
             (Utf8 { value: v1, .. }, Utf8 { value: v2, .. }) => v1.eq(v2),
             (Utf8 { .. }, _) => false,
             (Null, Null) => true,
@@ -473,6 +479,8 @@ impl PartialOrd for DataValue {
             (UInt32(_), _) => None,
             (UInt64(v1), UInt64(v2)) => v1.partial_cmp(v2),
             (UInt64(_), _) => None,
+            (Binary { value: v1, .. }, Binary { value: v2, .. }) => v1.partial_cmp(v2),
+            (Binary { .. }, _) => None,
             (Utf8 { value: v1, .. }, Utf8 { value: v2, .. }) => v1.partial_cmp(v2),
             (Utf8 { .. }, _) => None,
             (Null, Null) => Some(Ordering::Equal),
@@ -564,6 +572,10 @@ impl Hash for DataValue {
             UInt64(v) => {
                 11u8.hash(state);
                 v.hash(state);
+            }
+            Binary { value, .. } => {
+                19u8.hash(state);
+                value.hash(state);
             }
             Utf8 { value: v, .. } => {
                 12u8.hash(state);
@@ -709,6 +721,7 @@ impl DataValue {
             | DataValue::Float64(_)
             | DataValue::Date64(_)
             | DataValue::Time64(_, _, _) => 8,
+            DataValue::Binary { value, .. } => std::mem::size_of::<u32>() + value.len(),
             DataValue::Utf8 { value, ty, unit } => match (ty, unit) {
                 (Utf8Type::Variable(_), _) => std::mem::size_of::<u32>() + value.len(),
                 (Utf8Type::Fixed(len), CharLengthUnits::Characters) => {
@@ -747,6 +760,14 @@ impl DataValue {
         }
     }
 
+    pub fn binary(&self) -> Option<&[u8]> {
+        if let DataValue::Binary { value, .. } = self {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
     pub fn new_utf8(string: String) -> Self {
         DataValue::Utf8 {
             ty: Utf8Type::Fixed(string.len() as u32),
@@ -766,6 +787,9 @@ impl DataValue {
     #[inline]
     pub(crate) fn check_len(&self, logic_type: &LogicalType) -> Result<(), DatabaseError> {
         let is_over_len = match (logic_type, self) {
+            (LogicalType::Varbinary(Some(len)), DataValue::Binary { value, .. }) => {
+                value.len() > *len as usize
+            }
             (LogicalType::Varchar(None, _), _) => false,
             (
                 LogicalType::Varchar(Some(len), CharLengthUnits::Characters),
@@ -885,6 +909,10 @@ impl DataValue {
                 ty: Utf8Type::Variable(*len),
                 unit: *unit,
             },
+            LogicalType::Varbinary(len) => DataValue::Binary {
+                value: Vec::new(),
+                len: *len,
+            },
             LogicalType::Date => {
                 #[cfg(feature = "time")]
                 {
@@ -979,6 +1007,7 @@ impl DataValue {
                 unit,
                 ..
             } => LogicalType::Char(*len, *unit),
+            DataValue::Binary { len, .. } => LogicalType::Varbinary(*len),
             DataValue::Date32(_) => LogicalType::Date,
             DataValue::Date64(_) => LogicalType::DateTime,
             DataValue::Time32(..) => LogicalType::Time(None),
@@ -1115,6 +1144,7 @@ impl DataValue {
             DataValue::UInt32(v) => encode_u!(b, v),
             DataValue::Time32(v, ..) => encode_u!(b, v),
             DataValue::UInt64(v) => encode_u!(b, v),
+            DataValue::Binary { value, .. } => Self::encode_string(b, value),
             DataValue::Utf8 { value: v, .. } => Self::encode_string(b, v.as_bytes()),
             DataValue::Boolean(v) => b.push_byte(if *v { b'1' } else { b'0' }),
             DataValue::Float32(f) => {
@@ -1236,6 +1266,10 @@ impl DataValue {
                 reader.read_exact(&mut b)?;
                 Ok(DataValue::Boolean(b[0] == b'1'))
             }
+            LogicalType::Varbinary(len) => Ok(DataValue::Binary {
+                value: Self::decode_string(reader)?,
+                len: *len,
+            }),
             LogicalType::Varchar(len, unit) => Ok(DataValue::Utf8 {
                 value: String::from_utf8(Self::decode_string(reader)?)?,
                 ty: Utf8Type::Variable(*len),
@@ -1468,6 +1502,11 @@ impl DataValue {
                 Ok(DataValue::Parameter { id, ty: ty.clone() })
             }
             (DataValue::Null, _) => Ok(DataValue::Null),
+            (DataValue::Binary { value, .. }, LogicalType::Varbinary(len)) => {
+                let result = DataValue::Binary { value, len: *len };
+                result.check_len(to)?;
+                Ok(result)
+            }
             (DataValue::Utf8 { value, .. }, LogicalType::Char(len, unit)) => {
                 to_char(value, *len, *unit)
             }
@@ -1688,6 +1727,12 @@ impl From<Option<f64>> for DataValue {
     }
 }
 
+impl From<Vec<u8>> for DataValue {
+    fn from(value: Vec<u8>) -> Self {
+        Self::Binary { value, len: None }
+    }
+}
+
 impl From<String> for DataValue {
     fn from(value: String) -> Self {
         DataValue::Utf8 {
@@ -1800,6 +1845,13 @@ impl fmt::Display for DataValue {
             DataValue::UInt16(e) => write!(f, "{e}")?,
             DataValue::UInt32(e) => write!(f, "{e}")?,
             DataValue::UInt64(e) => write!(f, "{e}")?,
+            DataValue::Binary { value, .. } => {
+                write!(f, "X'")?;
+                for byte in value {
+                    write!(f, "{byte:02X}")?;
+                }
+                write!(f, "'")?;
+            }
             DataValue::Utf8 { value: e, .. } => write!(f, "{e}")?,
             DataValue::Null => write!(f, "NULL")?,
             DataValue::Date32(e) => {
@@ -1870,6 +1922,7 @@ impl fmt::Debug for DataValue {
             DataValue::UInt16(_) => write!(f, "UInt16({self})"),
             DataValue::UInt32(_) => write!(f, "UInt32({self})"),
             DataValue::UInt64(_) => write!(f, "UInt64({self})"),
+            DataValue::Binary { .. } => write!(f, "Binary({self})"),
             DataValue::Utf8 { .. } => write!(f, "Utf8(\"{self}\")"),
             DataValue::Null => write!(f, "null"),
             DataValue::Date32(_) => write!(f, "Date32({self})"),
@@ -1924,6 +1977,57 @@ mod test {
         let scalar = DataValue::Int32(1);
         assert_ne!(left, DataValueRef::Value(&scalar));
         assert_eq!(left.partial_cmp(&DataValueRef::Value(&scalar)), None);
+    }
+
+    #[test]
+    fn binary_values_preserve_bytes_and_index_order() -> Result<(), DatabaseError> {
+        let values: Vec<DataValue> = [
+            vec![],
+            vec![0],
+            vec![0, 0],
+            vec![0, 255],
+            vec![1],
+            vec![255; 8],
+            vec![255; 9],
+        ]
+        .into_iter()
+        .map(DataValue::from)
+        .collect();
+        let mut previous = None;
+        for value in &values {
+            let mut encoded = Vec::new();
+            value.memcomparable_encode(&mut encoded)?;
+            assert_eq!(
+                DataValue::memcomparable_decode(
+                    &mut Cursor::new(&encoded),
+                    &LogicalType::Varbinary(None)
+                )?,
+                *value
+            );
+            if let Some(previous) = previous {
+                assert!(previous < encoded);
+            }
+            previous = Some(encoded);
+        }
+        let bytes = DataValue::from(vec![0, 255]);
+        assert_eq!(bytes.binary(), Some([0, 255].as_slice()));
+        assert_eq!(values[0].binary(), Some([].as_slice()));
+        assert_eq!(DataValue::Null.binary(), None);
+        assert_eq!(DataValue::from("bytes".to_string()).binary(), None);
+        assert_eq!(bytes.to_string(), "X'00FF'");
+        assert_eq!(bytes.logical_type(), LogicalType::Varbinary(None));
+        assert_eq!(bytes.serialized_len_hint(), 6);
+        let bounded = bytes.clone().cast(&LogicalType::Varbinary(Some(2)))?;
+        assert_eq!(bounded, bytes);
+        assert!(matches!(
+            bytes.clone().cast(&LogicalType::Varbinary(Some(1))),
+            Err(DatabaseError::TooLong)
+        ));
+        assert!(matches!(
+            bytes.cast(&LogicalType::Bigint),
+            Err(DatabaseError::CastFail { .. })
+        ));
+        Ok(())
     }
 
     fn utf8(value: &str) -> DataValue {

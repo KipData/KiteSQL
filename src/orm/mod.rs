@@ -3057,7 +3057,21 @@ impl_from_data_value_by_method!(f64, double);
 #[cfg(feature = "decimal")]
 impl_from_data_value_by_method!(Decimal, decimal);
 
-impl_to_data_value_by_clone!(bool, i8, i16, i32, i64, u8, u16, u32, u64, f32, f64, String);
+impl_to_data_value_by_clone!(
+    bool,
+    i8,
+    i16,
+    i32,
+    i64,
+    u8,
+    u16,
+    u32,
+    u64,
+    f32,
+    f64,
+    String,
+    Vec<u8>
+);
 #[cfg(feature = "decimal")]
 impl_to_data_value_by_clone!(Decimal);
 
@@ -3073,6 +3087,7 @@ macro_rules! impl_model_column_type {
     };
 }
 
+impl_model_column_type!(LogicalType::Varbinary(None); Vec<u8>);
 impl_model_column_type!(LogicalType::Boolean; bool);
 impl_model_column_type!(LogicalType::Tinyint; i8);
 impl_model_column_type!(LogicalType::Smallint; i16);
@@ -3123,6 +3138,20 @@ mod chrono_orm {
     impl ToDataValue for NaiveTime {
         fn to_data_value(&self) -> DataValue {
             DataValue::from(self)
+        }
+    }
+}
+
+impl FromDataValue for Vec<u8> {
+    fn logical_type() -> Option<LogicalType> {
+        LogicalType::type_trans::<Self>()
+    }
+
+    fn from_data_value(value: DataValue) -> Result<Self, DatabaseError> {
+        if let DataValue::Binary { value, .. } = value {
+            Ok(value)
+        } else {
+            Err(invalid_from_data_value::<Self>(&value))
         }
     }
 }
@@ -3740,6 +3769,20 @@ mod tests {
             Some(9)
         );
 
+        assert_eq!(
+            Vec::<u8>::from_data_value(DataValue::from(vec![0, 255]))?,
+            vec![0, 255]
+        );
+        assert_eq!(
+            vec![0u8, 255].to_data_value(),
+            DataValue::from(vec![0, 255])
+        );
+        assert_eq!(
+            <Vec<u8> as ModelColumnType>::logical_type(),
+            LogicalType::Varbinary(None)
+        );
+        assert_eq!(Option::<Vec<u8>>::from_data_value(DataValue::Null)?, None);
+        assert!(Vec::<u8>::from_data_value(DataValue::Int32(1)).is_err());
         assert_eq!(true.to_data_value(), DataValue::Boolean(true));
         assert_eq!("name".to_data_value(), DataValue::from("name".to_string()));
         assert_eq!(Option::<i32>::None.to_data_value(), DataValue::Null);
