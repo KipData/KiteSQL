@@ -28,6 +28,7 @@ use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::index::{IndexLookup, IndexType};
 use crate::types::tuple::Schema;
 use crate::types::LogicalType;
+use std::borrow::Cow;
 
 pub(crate) struct ParameterizeMarkApply;
 
@@ -48,9 +49,11 @@ impl NormalizationRule for ParameterizeMarkApply {
                     right.output_schema(arena),
                     arena,
                 )?;
-                let new_probe = probe.and_then(|(right_column, left_expr)| {
-                    parameterize_right_subtree(right, &right_column, arena).then_some(left_expr)
-                });
+                let new_probe = if let Some((right_column, left_expr)) = probe {
+                    parameterize_right_subtree(right, &right_column, left_expr, arena)?
+                } else {
+                    None
+                };
                 (op, new_probe)
             }
             _ => return Ok(false),
@@ -159,15 +162,16 @@ fn extract_parameterized_probe_side(
 fn parameterize_right_subtree(
     plan: &mut LogicalPlan,
     right_column: &ColumnRef,
+    mut left_expr: ExprRef,
     arena: &mut PlanArena<'_>,
-) -> bool {
+) -> Result<Option<ExprRef>, DatabaseError> {
     match (&mut plan.operator, plan.childrens.as_mut()) {
         (Operator::Project(project), Childrens::Only(child)) => {
             let Some(mut expr) = project.exprs.iter().copied().find(|expr| {
                 let column = expr.output_column_ref(arena);
                 arena.same_column(column, *right_column)
             }) else {
-                return false;
+                return Ok(None);
             };
             // Follow the source, not the projection's output relation/name.
             // Computed and cast keys are not index probes.
@@ -175,18 +179,27 @@ fn parameterize_right_subtree(
                 expr = *source;
             }
             let ScalarExpression::ColumnRef { column, .. } = *arena.expression(expr) else {
-                return false;
+                return Ok(None);
             };
-            parameterize_right_subtree(child, &column, arena)
+            parameterize_right_subtree(child, &column, left_expr, arena)
         }
         (Operator::TableScan(scan), _) => {
             if scan.limit != (None, None) {
-                return false;
+                return Ok(None);
             }
             let Some(position) = pick_parameterized_index_position(scan, right_column, arena)
             else {
-                return false;
+                return Ok(None);
             };
+            let key_type = &arena.index(scan.index_infos[position].meta).value_ty;
+            let left_type = left_expr.return_type(arena);
+            if left_type.as_ref() != key_type {
+                let common = LogicalType::max_logical_type(&left_type, key_type)?;
+                if common.as_ref() != key_type {
+                    return Ok(None);
+                }
+                left_expr = left_expr.type_cast(Cow::Owned(common.into_owned()), arena)?;
+            }
             scan.index_infos[position].lookup = Some(IndexLookup::Probe);
             let index_info = scan.index_infos[position].clone();
             let sort_option = index_info.sort_option.clone();
@@ -195,12 +208,12 @@ fn parameterize_right_subtree(
                 sort_option,
                 RowCountOption::Unknown,
             ));
-            true
+            Ok(Some(left_expr))
         }
         (Operator::Filter(_) | Operator::Sort(_), Childrens::Only(child)) => {
-            parameterize_right_subtree(child, right_column, arena)
+            parameterize_right_subtree(child, right_column, left_expr, arena)
         }
-        _ => false,
+        _ => Ok(None),
     }
 }
 
@@ -557,10 +570,11 @@ mod tests {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let column = column(&mut arena, "value");
+        let probe = arena.alloc_expression(ScalarExpression::from(2));
         let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
 
         assert!(!ParameterizeMarkApply.apply(&mut plan, &mut arena)?);
-        assert!(!parameterize_right_subtree(&mut plan, &column, &mut arena));
+        assert!(parameterize_right_subtree(&mut plan, &column, probe, &mut arena)?.is_none());
 
         let mut filter = LogicalPlan::new(
             Operator::Filter(FilterOperator {
@@ -570,11 +584,7 @@ mod tests {
             }),
             Childrens::None,
         );
-        assert!(!parameterize_right_subtree(
-            &mut filter,
-            &column,
-            &mut arena
-        ));
+        assert!(parameterize_right_subtree(&mut filter, &column, probe, &mut arena)?.is_none());
 
         assert_eq!(
             index_priority(IndexType::PrimaryKey { is_multiple: false }),
@@ -602,6 +612,7 @@ mod inner_join_tests {
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::TableArenaCell;
     use crate::types::index::{IndexInfo, IndexMeta, IndexType};
+    use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
 
     fn scan(
@@ -731,7 +742,8 @@ mod inner_join_tests {
             scan.index_infos[0].meta = arena.alloc_index(composite);
             (scan.columns[0], scan.index_infos.pop().unwrap())
         };
-        assert!(!parameterize_right_subtree(&mut right, &column, &mut arena));
+        let probe = arena.alloc_expression(ScalarExpression::from(2));
+        assert!(parameterize_right_subtree(&mut right, &column, probe, &mut arena)?.is_none());
         assert!(right.physical_option.is_none());
         let Operator::TableScan(scan) = &mut right.operator else {
             unreachable!()
@@ -743,12 +755,67 @@ mod inner_join_tests {
             pick_parameterized_index_position(scan, &column, &arena),
             Some(1)
         );
-        assert!(parameterize_right_subtree(&mut right, &column, &mut arena));
+        assert_eq!(
+            parameterize_right_subtree(&mut right, &column, probe, &mut arena)?,
+            Some(probe)
+        );
         let PlanImpl::IndexScan(index) = &right.physical_option.as_ref().unwrap().plan else {
             unreachable!()
         };
         assert_eq!(arena.index(index.meta).column_ids, vec![0]);
         assert!(matches!(index.lookup, Some(IndexLookup::Probe)));
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_probe_normalizes_only_safe_key_types() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let mut right = scan(&mut arena, "right", &[LogicalType::Bigint], &[&[0]]);
+        let Operator::TableScan(op) = &right.operator else {
+            unreachable!()
+        };
+        let column = op.columns[0];
+        let original = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(2)));
+        let probe = parameterize_right_subtree(&mut right, &column, original, &mut arena)?.unwrap();
+        assert_eq!(probe.return_type(&arena).as_ref(), &LogicalType::Bigint);
+        assert_eq!(
+            *arena.expression(probe).eval(&arena, None::<&Tuple>)?,
+            DataValue::Int64(2)
+        );
+        assert_eq!(
+            *arena.expression(original).eval(&arena, None::<&Tuple>)?,
+            DataValue::Int32(2)
+        );
+
+        for value in [
+            DataValue::Float64(2.5.into()),
+            DataValue::from("hello".to_string()),
+        ] {
+            let mut right = scan(&mut arena, "right", &[LogicalType::Bigint], &[&[0]]);
+            let Operator::TableScan(op) = &right.operator else {
+                unreachable!()
+            };
+            let column = op.columns[0];
+            let original = arena.alloc_expression(ScalarExpression::Constant(value));
+            assert!(
+                parameterize_right_subtree(&mut right, &column, original, &mut arena)?.is_none()
+            );
+            assert!(right.physical_option.is_none());
+            let Operator::TableScan(op) = &right.operator else {
+                unreachable!()
+            };
+            assert!(op.index_infos[0].lookup.is_none());
+        }
+
+        let mut right = scan(&mut arena, "narrow", &[LogicalType::Integer], &[&[0]]);
+        let Operator::TableScan(op) = &right.operator else {
+            unreachable!()
+        };
+        let column = op.columns[0];
+        let large = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int64(1 << 40)));
+        assert!(parameterize_right_subtree(&mut right, &column, large, &mut arena)?.is_none());
+        assert!(right.physical_option.is_none());
         Ok(())
     }
 
@@ -775,12 +842,12 @@ mod inner_join_tests {
                 Childrens::Only(Box::new(input)),
             )
         };
+        let probe = arena.alloc_expression(ScalarExpression::from(2));
         let mut projected = project(base.clone());
-        assert!(parameterize_right_subtree(
-            &mut projected,
-            &output,
-            &mut arena
-        ));
+        assert_eq!(
+            parameterize_right_subtree(&mut projected, &output, probe, &mut arena)?,
+            Some(probe)
+        );
         let input = projected.childrens.only();
         let Operator::TableScan(input) = &input.operator else {
             unreachable!()
@@ -798,22 +865,14 @@ mod inner_join_tests {
         ));
 
         let mut limited = project(LimitOperator::build(Some(1), Some(1), base.clone()));
-        assert!(!parameterize_right_subtree(
-            &mut limited,
-            &output,
-            &mut arena
-        ));
+        assert!(parameterize_right_subtree(&mut limited, &output, probe, &mut arena)?.is_none());
         let mut pushed = base.clone();
         let Operator::TableScan(op) = &mut pushed.operator else {
             unreachable!()
         };
         op.limit = (None, Some(1));
         let mut pushed = project(pushed);
-        assert!(!parameterize_right_subtree(
-            &mut pushed,
-            &output,
-            &mut arena
-        ));
+        assert!(parameterize_right_subtree(&mut pushed, &output, probe, &mut arena)?.is_none());
 
         let computed = arena.alloc_expression(ScalarExpression::Unary {
             op: UnaryOperator::Minus,
@@ -831,11 +890,7 @@ mod inner_join_tests {
             }),
             Childrens::Only(Box::new(base)),
         );
-        assert!(!parameterize_right_subtree(
-            &mut projected,
-            &output,
-            &mut arena
-        ));
+        assert!(parameterize_right_subtree(&mut projected, &output, probe, &mut arena)?.is_none());
         Ok(())
     }
 

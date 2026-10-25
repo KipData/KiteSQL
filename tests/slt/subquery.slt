@@ -1231,6 +1231,41 @@ select id from corr_rows where id>0 and b in (select cast(txt as int) from guard
 statement error invalid digit found in string
 select id from corr_rows where b>0 or id in (select cast(txt as int) from guard_bad_cast);
 
+# A scalar index probe must use the comparison's common type, not the raw
+# integer literal or narrower outer column. NULL remains three-valued.
+statement ok
+create table probe_key(id int primary key, k bigint unique);
+
+statement ok
+insert into probe_key values (1, 2), (2, 3), (3, 4), (4, NULL);
+
+query III
+select 2 in (select k from probe_key), 2 not in (select k from probe_key), 9 in (select k from probe_key);
+----
+true false NULL
+
+query I rowsort
+select id from corr_rows where id in (select k from probe_key);
+----
+2
+3
+4
+
+# Casting the indexed side would invalidate a direct lookup. These use the
+# normal comparison path rather than truncate, parse, or overflow a probe.
+query III
+select 2.0 in (select k from probe_key), 2.5 in (select k from probe_key), '2' in (select k from probe_key);
+----
+true NULL true
+
+query III
+select 1099511627776 in (select id from corr_rows), 1.5 in (select id from corr_rows), 'hello' in (select id from corr_rows);
+----
+false false false
+
+statement ok
+drop table probe_key;
+
 statement ok
 drop table guard_bad_cast;
 
