@@ -26,7 +26,7 @@ use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
-use crate::planner::operator::{Operator, PhysicalOption, RowCountOption, CPU_ROW_WORK};
+use crate::planner::operator::{Operator, PhysicalOption, RowCountOption};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -254,13 +254,10 @@ impl LogicalPlan {
     }
 
     pub(crate) fn estimated_work(&mut self) -> Result<Option<usize>, DatabaseError> {
-        let (Some(startup), Some(rows)) = (self.estimated_startup_work()?, self.estimated_rows())
-        else {
-            return Ok(None);
-        };
-        Ok(Some(
-            startup.saturating_add(rows.saturating_mul(CPU_ROW_WORK)),
-        ))
+        self.estimated_startup_work()?;
+        Ok(self.physical_option.as_ref().and_then(|option| {
+            option.calculate_work(&self.operator, &self.childrens, self.estimated_rows())
+        }))
     }
 
     pub(crate) fn clear_startup_work(&mut self) {
@@ -610,10 +607,13 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::expression::ScalarExpression;
     use crate::planner::operator::describe::DescribeOperator;
+    use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::limit::LimitOperator;
+    use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::sort::{SortField, SortOperator};
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::{PlanImpl, SortOption};
+    use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -748,6 +748,107 @@ mod tests {
             unreachable!()
         };
         assert_eq!(scan.physical_option.as_ref().unwrap().startup_work, None);
+        Ok(())
+    }
+
+    #[test]
+    fn filter_and_projection_work_preserve_input_without_blocking() -> Result<(), DatabaseError> {
+        for output_rows in [0, 8, 98] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let predicate =
+                arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+            let mut scan = table_scan("input", vec![]);
+            scan.physical_option = Some(PhysicalOption::new(
+                PlanImpl::SeqScan,
+                SortOption::None,
+                RowCountOption::Estimated {
+                    rows: 98,
+                    ndv: None,
+                },
+            ));
+            let mut filter = FilterOperator::build(predicate, scan, false);
+            filter.physical_option = Some(PhysicalOption::new(
+                PlanImpl::Filter,
+                SortOption::Follow,
+                RowCountOption::Estimated {
+                    rows: output_rows,
+                    ndv: None,
+                },
+            ));
+            assert_eq!(filter.estimated_rows(), Some(output_rows));
+            assert_eq!(filter.estimated_startup_work()?, Some(0));
+            assert_eq!(filter.estimated_work()?, Some(392));
+            let mut project = LogicalPlan::new(
+                Operator::Project(ProjectOperator { exprs: vec![] }),
+                Childrens::Only(Box::new(filter)),
+            );
+            project.physical_option = Some(PhysicalOption::new(
+                PlanImpl::Project,
+                SortOption::Follow,
+                RowCountOption::Follow,
+            ));
+            assert_eq!(project.estimated_startup_work()?, Some(0));
+            assert_eq!(project.estimated_work()?, Some(392));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn blocking_operator_consumes_complete_filtered_input_work() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let id = column("id", LogicalType::Integer, &mut arena);
+        let key = arena.alloc_expression(ScalarExpression::column_expr(id, 0));
+        let predicate =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+        let mut scan = table_scan("input", vec![id]);
+        scan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::SeqScan,
+            SortOption::None,
+            RowCountOption::Estimated {
+                rows: 98,
+                ndv: None,
+            },
+        ));
+        let mut filter = FilterOperator::build(predicate, scan, false);
+        filter.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Filter,
+            SortOption::Follow,
+            RowCountOption::Estimated { rows: 8, ndv: None },
+        ));
+        let mut sort = LogicalPlan::new(
+            Operator::Sort(SortOperator {
+                sort_fields: vec![SortField {
+                    expr: key,
+                    asc: true,
+                    nulls_first: false,
+                }],
+            }),
+            Childrens::Only(Box::new(filter)),
+        );
+        sort.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Sort,
+            SortOption::None,
+            RowCountOption::Follow,
+        ));
+        // 392 input work + 24 comparisons * 2 operator units, then 8 output rows.
+        assert_eq!(sort.estimated_startup_work()?, Some(440));
+        assert_eq!(sort.estimated_work()?, Some(472));
+        let mut unknown = table_scan("unknown", vec![]);
+        unknown.physical_option = Some(PhysicalOption::new(
+            PlanImpl::SeqScan,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let mut filter = FilterOperator::build(predicate, unknown, false);
+        filter.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Filter,
+            SortOption::Follow,
+            RowCountOption::Estimated { rows: 8, ndv: None },
+        ));
+        assert_eq!(filter.estimated_startup_work()?, Some(0));
+        assert_eq!(filter.estimated_work()?, None);
         Ok(())
     }
 

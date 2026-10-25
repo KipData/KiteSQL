@@ -311,22 +311,15 @@ impl<'a> HepOptimizer<'a> {
             })?;
         }
 
-        {
-            let LogicalPlan {
-                operator,
-                physical_option,
-                ..
-            } = plan;
-            if let Some(option) = implementation_index.direct_physical_option(operator) {
-                *physical_option = Some(option);
-            } else {
-                let mut best_physical_option: BestPhysicalOption = None;
-                for rule in implementation_index.for_matching_operator(operator) {
-                    rule.update_best_option(operator, arena, loader, &mut best_physical_option)?;
-                }
-                if let Some((option, _)) = best_physical_option {
-                    *physical_option = Some(option);
-                }
+        if let Some(option) = implementation_index.direct_physical_option(&plan.operator) {
+            plan.physical_option = Some(option);
+        } else {
+            let mut best_physical_option: BestPhysicalOption = None;
+            for rule in implementation_index.for_matching_operator(&plan.operator) {
+                rule.update_best_option(plan, arena, loader, &mut best_physical_option)?;
+            }
+            if let Some((option, _)) = best_physical_option {
+                plan.physical_option = Some(option);
             }
         }
 
@@ -519,9 +512,6 @@ impl ImplementationRuleIndex {
             Operator::Dummy if self.contains(ImplementationRuleImpl::Dummy) => Some(
                 PhysicalOption::new(PlanImpl::Dummy, SortOption::None, RowCountOption::Unknown),
             ),
-            Operator::Filter(_) if self.contains(ImplementationRuleImpl::Filter) => Some(
-                PhysicalOption::new(PlanImpl::Filter, SortOption::Follow, RowCountOption::Follow),
-            ),
             Operator::Join(join_op) if self.contains(ImplementationRuleImpl::HashJoin) => {
                 Some(PhysicalOption::new(
                     join_op.plan_impl(),
@@ -703,6 +693,7 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::expression::ScalarExpression;
+    use crate::optimizer::core::rule::ImplementationRule;
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
     use crate::optimizer::heuristic::batch::{HepBatch, HepBatchStrategy, HepMatchOrder};
     use crate::optimizer::heuristic::optimizer::{
@@ -719,7 +710,7 @@ mod tests {
         Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
     };
     use crate::planner::{Childrens, LogicalPlan, PlanArena, TableArenaCell};
-    use crate::storage::{Storage, Transaction};
+    use crate::storage::{StatisticsMetaCache, Storage, Transaction};
     use crate::types::index::IndexLookup;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -737,7 +728,8 @@ mod tests {
     }
 
     #[test]
-    fn row_preserving_fast_paths_follow_input_row_count() -> Result<(), DatabaseError> {
+    fn filter_fallback_and_row_preserving_fast_paths_follow_input_row_count(
+    ) -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let mut plan = filter_chain(1, &mut arena);
@@ -753,7 +745,18 @@ mod tests {
             },
         ));
         let implementations = ImplementationRuleIndex::new(vec![ImplementationRuleImpl::Filter]);
-        plan.physical_option = implementations.direct_physical_option(&plan.operator);
+        assert!(implementations
+            .direct_physical_option(&plan.operator)
+            .is_none());
+        let cache = StatisticsMetaCache::default();
+        let mut best = None;
+        ImplementationRuleImpl::Filter.update_best_option(
+            &plan,
+            &arena,
+            &StatisticMetaLoader::new(&cache),
+            &mut best,
+        )?;
+        plan.physical_option = best.map(|(option, _)| option);
         assert_eq!(
             plan.physical_option.as_ref().unwrap().row_count,
             RowCountOption::Follow

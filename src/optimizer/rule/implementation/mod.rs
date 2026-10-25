@@ -55,6 +55,7 @@ use crate::optimizer::rule::implementation::dql::top_k::TopKImplementation;
 use crate::optimizer::rule::implementation::dql::values::ValuesImplementation;
 use crate::optimizer::rule::implementation::dql::window::WindowImplementation;
 use crate::planner::operator::Operator;
+use crate::planner::{LogicalPlan, PlanArena};
 
 #[repr(usize)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -258,14 +259,14 @@ impl ImplementationRuleImpl {
 impl ImplementationRule for ImplementationRuleImpl {
     fn update_best_option(
         &self,
-        operator: &Operator,
-        arena: &crate::planner::PlanArena,
+        plan: &LogicalPlan,
+        arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         macro_rules! update {
             ($implementation:expr) => {
-                $implementation.update_best_option(operator, arena, loader, best_physical_option)?
+                $implementation.update_best_option(plan, arena, loader, best_physical_option)?
             };
         }
 
@@ -380,7 +381,8 @@ mod tests {
         let statistics_cache = StatisticsMetaCache::default();
         let loader = StatisticMetaLoader::new(&statistics_cache);
         let mut best = None;
-        rule.update_best_option(operator, arena, &loader, &mut best)?;
+        let plan = LogicalPlan::new(operator.clone(), Childrens::None);
+        rule.update_best_option(&plan, arena, &loader, &mut best)?;
 
         Ok(best
             .expect("implementation rule should produce an option")

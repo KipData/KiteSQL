@@ -191,13 +191,39 @@ impl PhysicalOption {
         &self.sort_option
     }
 
+    pub(crate) fn calculate_work(
+        &self,
+        operator: &Operator,
+        childrens: &Childrens,
+        rows: Option<usize>,
+    ) -> Option<usize> {
+        match (&self.plan, operator, childrens) {
+            (PlanImpl::Filter, Operator::Filter(_), Childrens::Only(input))
+            | (PlanImpl::Project, Operator::Project(_), Childrens::Only(input)) => {
+                // Output selectivity must not erase the work of reading the input.
+                // Predicate and projection CPU are not charged by this lower bound.
+                input.physical_option.as_ref()?.calculate_work(
+                    &input.operator,
+                    &input.childrens,
+                    input.estimated_rows(),
+                )
+            }
+            _ => Some(
+                self.startup_work
+                    .flatten()?
+                    .saturating_add(rows?.saturating_mul(CPU_ROW_WORK)),
+            ),
+        }
+    }
+
     pub(crate) fn calculate_startup_work(&mut self, operator: &Operator, childrens: &Childrens) {
         let startup_work =
             |input: &LogicalPlan| input.physical_option.as_ref()?.startup_work.flatten();
         let work = |input: &LogicalPlan| {
-            Some(
-                startup_work(input)?
-                    .saturating_add(input.estimated_rows()?.saturating_mul(CPU_ROW_WORK)),
+            input.physical_option.as_ref()?.calculate_work(
+                &input.operator,
+                &input.childrens,
+                input.estimated_rows(),
             )
         };
         self.startup_work = Some(match (&self.plan, operator, childrens) {

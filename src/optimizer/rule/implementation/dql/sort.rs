@@ -17,6 +17,7 @@ use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
+use crate::planner::LogicalPlan;
 use std::sync::LazyLock;
 
 static SORT_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -35,12 +36,12 @@ impl MatchPattern for SortImplementation {
 impl ImplementationRule for SortImplementation {
     fn update_best_option(
         &self,
-        op: &Operator,
+        plan: &LogicalPlan,
         _: &crate::planner::PlanArena,
         _: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
-        if let Operator::Sort(op) = op {
+        if let Operator::Sort(op) = &plan.operator {
             crate::optimizer::core::rule::keep_best_physical_option(
                 best_physical_option,
                 PhysicalOption::new(

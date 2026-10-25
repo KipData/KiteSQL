@@ -19,7 +19,7 @@ use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::mark_apply::MarkApplyKind;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
-use crate::planner::PlanArena;
+use crate::planner::{LogicalPlan, PlanArena};
 use std::sync::LazyLock;
 
 static MARK_APPLY_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -38,12 +38,12 @@ impl MatchPattern for MarkApplyImplementation {
 impl ImplementationRule for MarkApplyImplementation {
     fn update_best_option(
         &self,
-        op: &Operator,
+        plan: &LogicalPlan,
         _: &PlanArena,
         _: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
-        let Operator::MarkApply(op) = op else {
+        let Operator::MarkApply(op) = &plan.operator else {
             return Ok(());
         };
         // A mark adds one value to each left row; INNER JOIN may duplicate rows.

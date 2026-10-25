@@ -20,7 +20,7 @@ use crate::optimizer::core::rule::{
 };
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
-use crate::planner::PlanArena;
+use crate::planner::{LogicalPlan, PlanArena};
 use crate::types::index::{IndexLookup, IndexType};
 use std::sync::LazyLock;
 
@@ -40,12 +40,12 @@ impl MatchPattern for SeqScanImplementation {
 impl ImplementationRule for SeqScanImplementation {
     fn update_best_option(
         &self,
-        op: &Operator,
+        plan: &LogicalPlan,
         arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
-        if let Operator::TableScan(scan_op) = op {
+        if let Operator::TableScan(scan_op) = &plan.operator {
             let cost = scan_op
                 .index_infos
                 .iter()
@@ -85,12 +85,12 @@ impl MatchPattern for IndexScanImplementation {
 impl ImplementationRule for IndexScanImplementation {
     fn update_best_option(
         &self,
-        op: &Operator,
+        plan: &LogicalPlan,
         arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
-        if let Operator::TableScan(scan_op) = op {
+        if let Operator::TableScan(scan_op) = &plan.operator {
             for index_info in scan_op.index_infos.iter() {
                 let Some(IndexLookup::Static(range)) = &index_info.lookup else {
                     continue;

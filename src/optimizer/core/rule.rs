@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption};
+use crate::planner::operator::PhysicalOption;
 use crate::planner::{LogicalPlan, PlanArena};
 use std::cmp::Ordering;
 
@@ -63,7 +63,7 @@ pub fn keep_best_physical_option(
 pub trait ImplementationRule: MatchPattern {
     fn update_best_option(
         &self,
-        op: &Operator,
+        plan: &LogicalPlan,
         arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,

@@ -13,22 +13,18 @@
 // limitations under the License.
 
 use crate::catalog::ColumnRef;
-use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::expression::visitor::ExprVisitor;
 use crate::expression::visitor_mut::ExprVisitorMut;
-use crate::expression::{AliasType, ScalarExpression};
+use crate::expression::ScalarExpression;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
+use crate::optimizer::plan_utils::scan_column;
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::operator::project::ProjectOperator;
-use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::operator::visitor::OperatorVisitor;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
 use crate::types::tuple::Schema;
-use crate::types::ColumnId;
 use std::mem::swap;
 
 pub(crate) struct GreedyJoinReorder;
@@ -74,9 +70,9 @@ impl NormalizationRule for OrientNestedLoopJoin {
                 } else if right_rows == 0 {
                     true
                 } else {
-                    // T(input) = startup + rows * row-work. Count the inner
-                    // startup again for every outer row; shared output work is
-                    // omitted from this local direction comparison.
+                    // Repeat the complete inner work for every outer row,
+                    // including rows discarded by filters. Shared output work
+                    // is omitted from this local direction comparison.
                     let (Some(left_work), Some(right_work)) =
                         (left.estimated_work()?, right.estimated_work()?)
                     else {
@@ -152,138 +148,6 @@ struct JoinCandidate {
     rows: usize,
     left: usize,
     right: usize,
-}
-
-struct ScanColumnVisitor<'plan, 'arena, A> {
-    column: Option<ColumnRef>,
-    source: Option<(&'plan TableName, ColumnId)>,
-    arena: &'arena A,
-}
-
-impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'plan, '_, A> {
-    fn visit_plan(&mut self, plan: &'plan LogicalPlan) -> Result<(), DatabaseError> {
-        if self.column.is_none() {
-            return Ok(());
-        }
-        self.visit_operator(&plan.operator, plan.physical_option.as_ref())?;
-        let follow = match &plan.operator {
-            Operator::Project(_) => true,
-            Operator::Join(_) | Operator::Aggregate(_) | Operator::Limit(_) | Operator::TopK(_) => {
-                false
-            }
-            _ => plan
-                .physical_option
-                .as_ref()
-                .is_some_and(|option| matches!(option.row_count, RowCountOption::Follow)),
-        };
-        if follow && self.column.is_some() {
-            self.visit_children(&plan.childrens)?;
-        }
-        Ok(())
-    }
-
-    fn visit_children(&mut self, childrens: &'plan Childrens) -> Result<(), DatabaseError> {
-        match childrens {
-            Childrens::Only(input) | Childrens::Twins { left: input, .. } => self.visit_plan(input),
-            Childrens::None => Ok(()),
-        }
-    }
-
-    fn visit_table_scan(&mut self, scan: &'plan TableScanOperator) -> Result<(), DatabaseError> {
-        if scan.limit == (None, None) {
-            if let Some(source) = self.column.and_then(|column| {
-                scan.columns
-                    .iter()
-                    .find(|source| self.arena.same_column(**source, column))
-            }) {
-                self.source = self
-                    .arena
-                    .column(*source)
-                    .id()
-                    .map(|id| (&scan.table_name, id));
-            }
-        }
-        self.column = None;
-        Ok(())
-    }
-
-    fn visit_project(&mut self, project: &'plan ProjectOperator) -> Result<(), DatabaseError> {
-        let Some(column) = self.column.take() else {
-            return Ok(());
-        };
-        let arena = self.arena;
-        for &candidate in &project.exprs {
-            let source = match arena.expression(candidate) {
-                ScalarExpression::Alias {
-                    expr,
-                    alias: AliasType::Name(_),
-                } if arena.column(column).id().is_none()
-                    && arena.column(column).table_name().is_none()
-                    && candidate.output_name(arena) == arena.column(column).name() =>
-                {
-                    *expr
-                }
-                ScalarExpression::Alias {
-                    expr,
-                    alias: AliasType::Expr(alias),
-                } if matches!(arena.expression(*alias), ScalarExpression::ColumnRef { column: target, .. }
-                        if arena.same_column(*target, column)) =>
-                {
-                    *expr
-                }
-                ScalarExpression::ColumnRef { column: target, .. }
-                    if arena.same_column(*target, column) =>
-                {
-                    candidate
-                }
-                _ => continue,
-            };
-            return ExprVisitor::visit(self, source, arena);
-        }
-        Ok(())
-    }
-}
-
-impl<A: MetaArena> ExprVisitor<A> for ScanColumnVisitor<'_, '_, A> {
-    fn visit_expression(
-        &mut self,
-        expr: &ScalarExpression,
-        _arena: &A,
-    ) -> Result<bool, DatabaseError> {
-        Ok(matches!(
-            expr,
-            ScalarExpression::Alias { .. } | ScalarExpression::ColumnRef { .. }
-        ))
-    }
-
-    fn visit_alias(
-        &mut self,
-        expr: ExprRef,
-        _alias: &AliasType,
-        arena: &A,
-    ) -> Result<(), DatabaseError> {
-        // The alias target describes the output, not the source column.
-        self.visit(expr, arena)
-    }
-
-    fn visit_column_ref(&mut self, column: &ColumnRef) -> Result<(), DatabaseError> {
-        self.column = Some(*column);
-        Ok(())
-    }
-}
-
-fn scan_column<'plan>(
-    plan: &'plan LogicalPlan,
-    column: ColumnRef,
-    arena: &PlanArena,
-) -> Result<Option<(&'plan TableName, ColumnId)>, DatabaseError> {
-    let mut visitor = ScanColumnVisitor {
-        column: Some(column),
-        source: None,
-        arena,
-    };
-    visitor.visit_plan(plan)?;
-    Ok(visitor.source)
 }
 
 fn column_statistics(
@@ -403,6 +267,9 @@ struct JoinInputEstimate {
 }
 
 fn estimate_join_rows(left: JoinInputEstimate, right: JoinInputEstimate) -> usize {
+    // J = min(ceil(L * R / D), left_unique ? R : inf, right_unique ? L : inf).
+    // L/R are rows, N_L/N_R are NDVs; D = max(min(N_L, L), min(N_R, R), 1).
+    // Missing NDV means D = 1; either known NDV of zero means J = 0.
     let mut rows = left.rows.saturating_mul(right.rows);
     if left.ndv == Some(0) || right.ndv == Some(0) {
         return 0;
@@ -781,7 +648,7 @@ impl NormalizationRule for GreedyJoinReorder {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
-    use crate::expression::BinaryOperator;
+    use crate::expression::{AliasType, BinaryOperator};
     use crate::optimizer::core::histogram::{
         HistogramMetaBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
     };
@@ -862,6 +729,54 @@ mod tests {
             RowCountOption::Estimated { rows, ndv },
         ));
         (plan, key, meta)
+    }
+
+    #[test]
+    fn filtered_input_work_changes_nested_loop_direction() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let (left, _) = input("small", 7, &mut arena);
+        let (right, key) = input("filtered", 98, &mut arena);
+        let value = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(1)));
+        let predicate = arena.alloc_expression(ScalarExpression::Binary {
+            op: BinaryOperator::Eq,
+            left_expr: key,
+            right_expr: value,
+            ty: LogicalType::Boolean,
+            evaluator: None,
+        });
+        let mut right = FilterOperator::build(predicate, right, false);
+        right.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Filter,
+            SortOption::Follow,
+            RowCountOption::Estimated { rows: 8, ndv: None },
+        ));
+        assert_eq!(right.estimated_startup_work()?, Some(0));
+        assert_eq!(right.estimated_work()?, Some(392));
+        let column = key.unpack_bound_col(&arena, false).unwrap().0;
+        assert_eq!(
+            scan_column(&right, column, &arena)?,
+            Some((&"filtered".into(), 0))
+        );
+        let mut plan =
+            JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::NestLoopJoin,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let schema = plan.output_schema(&mut arena).clone();
+        assert!(OrientNestedLoopJoin.apply(&mut plan, &mut arena, None)?);
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        assert_eq!(plan.estimated_rows(), Some(56));
+        let Childrens::Only(join) = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        let Childrens::Twins { left, .. } = join.childrens.as_ref() else {
+            unreachable!()
+        };
+        assert!(matches!(left.operator, Operator::Filter(_)));
+        Ok(())
     }
 
     #[test]
