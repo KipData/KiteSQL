@@ -406,8 +406,12 @@ mod test {
         assert_eq!(unindexed.values_len(), 0);
         assert_eq!(unindexed.null_count(), 101);
         assert_eq!(unindexed.distinct_values_len(), 0);
-        let expected_frequency =
-            loader.collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?;
+        let expected_frequency = loader.collect_count(
+            &table_name,
+            1,
+            &Range::Eq(DataValue::Int32(7)),
+            &mut Vec::new(),
+        )?;
 
         // Reload the stored parts instead of reusing ANALYZE's in-memory cache.
         drop(kite_sql);
@@ -421,7 +425,12 @@ mod test {
             assert_eq!(meta.histogram().buckets_len(), buckets);
         }
         assert_eq!(
-            loader.collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?,
+            loader.collect_count(
+                &table_name,
+                1,
+                &Range::Eq(DataValue::Int32(7)),
+                &mut Vec::new()
+            )?,
             expected_frequency
         );
         assert_eq!(
@@ -540,7 +549,12 @@ mod test {
         assert!(loader.load(&table_name, 1)?.is_some());
         assert_eq!(
             loader
-                .collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?
+                .collect_count(
+                    &table_name,
+                    1,
+                    &Range::Eq(DataValue::Int32(7)),
+                    &mut Vec::new()
+                )?
                 .map(|(rows, _)| rows),
             Some(1)
         );
@@ -562,7 +576,12 @@ mod test {
         assert!(loader.load(&table_name, 1)?.is_some());
         assert_eq!(
             loader
-                .collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?
+                .collect_count(
+                    &table_name,
+                    1,
+                    &Range::Eq(DataValue::Int32(7)),
+                    &mut Vec::new()
+                )?
                 .map(|(rows, _)| rows),
             Some(1)
         );

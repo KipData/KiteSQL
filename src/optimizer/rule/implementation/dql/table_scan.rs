@@ -43,6 +43,7 @@ impl ImplementationRule for SeqScanImplementation {
         plan: &LogicalPlan,
         arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
+        _: &mut crate::optimizer::core::rule::HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = &plan.operator {
@@ -88,6 +89,7 @@ impl ImplementationRule for IndexScanImplementation {
         plan: &LogicalPlan,
         arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
+        state: &mut crate::optimizer::core::rule::HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = &plan.operator {
@@ -102,7 +104,12 @@ impl ImplementationRule for IndexScanImplementation {
                 let index_meta = arena.index(index_info.meta);
                 // A PK/Unique equality range has an exact row count even without statistics.
                 let counted = loader
-                    .collect_count(&scan_op.table_name, index_meta.id, range)?
+                    .collect_count(
+                        &scan_op.table_name,
+                        index_meta.id,
+                        range,
+                        &mut state.histogram_buf,
+                    )?
                     .or_else(|| unique_eq_row_count(index_meta.ty, range).map(|rows| (rows, rows)));
                 if let Some((mut row_count, distinct_count)) = counted {
                     row_count = adjust_index_row_count(index_meta.ty, range, row_count);

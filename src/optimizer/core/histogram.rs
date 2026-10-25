@@ -28,7 +28,6 @@ use ordered_float::OrderedFloat;
 use std::borrow::Cow;
 use std::cmp;
 use std::collections::Bound;
-use std::mem;
 use std::sync::OnceLock;
 
 const ANALYZE_STATISTICS_CONFIDENCE: f64 = 0.95;
@@ -472,6 +471,7 @@ impl Histogram {
         ranges: &[Range],
         sketch: &CountMinSketch<DataValue>,
         top_n: &ColumnTopN,
+        buf: &mut Vec<u8>,
     ) -> Result<usize, DatabaseError> {
         if self.buckets.is_empty() || ranges.is_empty() {
             return Ok(0);
@@ -494,31 +494,24 @@ impl Histogram {
         let mut count = 0;
         let mut binary_i = 0;
         let mut bucket_i = 0;
-        let mut bucket_idxs = Vec::new();
-        let mut buf = Vec::new();
 
         while bucket_i < self.buckets.len() && binary_i < ranges.len() {
             let is_dummy = self._collect_count(
                 ranges,
                 &mut binary_i,
                 &mut bucket_i,
-                &mut bucket_idxs,
                 &mut count,
                 sketch,
                 top_n,
                 comparator,
-                &mut buf,
+                buf,
             )?;
             if is_dummy {
                 return Ok(0);
             }
         }
 
-        Ok(bucket_idxs
-            .iter()
-            .map(|idx| self.buckets[*idx].count as usize)
-            .sum::<usize>()
-            + count)
+        Ok(count)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -527,7 +520,6 @@ impl Histogram {
         ranges: &[Range],
         binary_i: &mut usize,
         bucket_i: &mut usize,
-        bucket_idxs: &mut Vec<usize>,
         count: &mut usize,
         sketch: &CountMinSketch<DataValue>,
         top_n: &ColumnTopN,
@@ -555,7 +547,9 @@ impl Histogram {
                     && (is_under(comparator, &bucket.upper, max, false)?
                         || is_eq(&bucket.upper, max))
                 {
-                    bucket_idxs.push(mem::replace(bucket_i, *bucket_i + 1));
+                    // A fully covered bucket counts its rows, without the NULLs added above.
+                    *count += bucket.count as usize;
+                    *bucket_i += 1;
                 } else if is_above(comparator, &bucket.lower, max, false)? {
                     *binary_i += 1;
                 } else if is_under(comparator, &bucket.upper, min, true)? {
@@ -1020,12 +1014,22 @@ mod tests {
             max: Bound::Excluded(DataValue::Tuple(upper)),
         };
         assert_eq!(
-            histogram.collect_count(&[scope(prefix.clone(), prefix.clone())], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(prefix.clone(), prefix.clone())],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             100
         );
         let longer = vec![parameter(1), parameter(2), parameter(3)];
         assert_eq!(
-            histogram.collect_count(&[scope(longer.clone(), longer)], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(longer.clone(), longer)],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             10
         );
         let mut lower = prefix.clone();
@@ -1033,16 +1037,31 @@ mod tests {
         let mut upper = prefix.clone();
         upper.push(parameter(4));
         assert_eq!(
-            histogram.collect_count(&[scope(lower.clone(), prefix)], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(lower.clone(), prefix)],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             25
         );
         assert_eq!(
-            histogram.collect_count(&[scope(lower.clone(), upper.clone())], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(lower.clone(), upper.clone())],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             2
         );
         let full = DataValue::Tuple(vec![parameter(1), parameter(2), parameter(3), parameter(4)]);
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(full.clone())], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(full.clone())],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             1
         );
         assert_eq!(
@@ -1052,7 +1071,8 @@ mod tests {
                     max: Bound::Included(full),
                 }],
                 &sketch,
-                &top_n
+                &top_n,
+                &mut Vec::new()
             )?,
             0
         );
@@ -1060,7 +1080,7 @@ mod tests {
         lower.push(parameter(5));
         upper.push(parameter(5));
         assert_eq!(
-            histogram.collect_count(&[scope(lower, upper)], &sketch, &top_n)?,
+            histogram.collect_count(&[scope(lower, upper)], &sketch, &top_n, &mut Vec::new())?,
             2
         );
         histogram.buckets[0].upper = DataValue::Tuple(vec![
@@ -1069,7 +1089,12 @@ mod tests {
         ]);
         let nested = vec![DataValue::Tuple(vec![parameter(1), parameter(2)])];
         assert_eq!(
-            histogram.collect_count(&[scope(nested.clone(), nested)], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(nested.clone(), nested)],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             100
         );
         Ok(())
@@ -1305,7 +1330,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                histogram.collect_count(&[range], &sketch, &top_n)?,
+                histogram.collect_count(&[range], &sketch, &top_n, &mut Vec::new())?,
                 expected
             );
         }
@@ -1353,6 +1378,7 @@ mod tests {
             ],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_1, 9);
@@ -1364,6 +1390,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_2, 11);
@@ -1375,6 +1402,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_3, 7);
@@ -1386,6 +1414,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_4, 12);
@@ -1397,6 +1426,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_5, 8);
@@ -1408,6 +1438,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_6, 12);
@@ -1419,6 +1450,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_7, 13);
@@ -1430,6 +1462,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_8, 13);
@@ -1441,6 +1474,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_9, 13);
@@ -1452,6 +1486,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_10, 2);
@@ -1463,6 +1498,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_11, 2);
@@ -1512,7 +1548,12 @@ mod tests {
         let top_n = ColumnTopN::default();
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(1))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(1))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             70
         );
 
@@ -1538,7 +1579,12 @@ mod tests {
         sketch.add(&DataValue::Int32(1), 1000);
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(1))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(1))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             70
         );
 
@@ -1566,7 +1612,12 @@ mod tests {
         assert!(estimated_count.saturating_sub(error_bound) <= average_count);
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(7))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             average_count
         );
 
@@ -1597,7 +1648,12 @@ mod tests {
         assert!(estimated_count.saturating_sub(error_bound) > average_count);
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(7))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             estimated_count
         );
 
@@ -1631,7 +1687,12 @@ mod tests {
         assert!(expected < entry.count());
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(7))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             expected
         );
 
@@ -1658,13 +1719,13 @@ mod tests {
             min: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(0)])),
             max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(8)])),
         }];
-        let clean_count = histogram.collect_count(&ranges, &sketch, &top_n)?;
+        let clean_count = histogram.collect_count(&ranges, &sketch, &top_n, &mut Vec::new())?;
 
         sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(0)]));
         sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(8)]));
 
         assert_eq!(
-            histogram.collect_count(&ranges, &sketch, &top_n)?,
+            histogram.collect_count(&ranges, &sketch, &top_n, &mut Vec::new())?,
             clean_count
         );
 

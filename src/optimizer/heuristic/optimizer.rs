@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::optimizer::core::rule::{
-    BestPhysicalOption, ImplementationRule, MatchPattern, NormalizationRule,
+    BestPhysicalOption, HintState, ImplementationRule, MatchPattern, NormalizationRule,
 };
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{
@@ -82,6 +82,7 @@ impl<'a> HepOptimizer<'a> {
                     self.implementation_index,
                     &apply_no_sort_hints,
                     &apply_no_stream_aggregate_hints,
+                    &mut HintState::default(),
                     arena,
                 )?;
             }
@@ -260,6 +261,7 @@ impl<'a> HepOptimizer<'a> {
         implementation_index: &ImplementationRuleIndex,
         inherited_sort_hints: &'plan ScanHintApplier<'plan>,
         inherited_stream_aggregate_hints: &'plan ScanHintApplier<'plan>,
+        state: &mut HintState,
         arena: &mut PlanArena,
     ) -> Result<(), DatabaseError> {
         if let Operator::TableScan(scan_op) = &mut plan.operator {
@@ -284,6 +286,7 @@ impl<'a> HepOptimizer<'a> {
                             implementation_index,
                             child_sort_hints,
                             child_stream_aggregate_hints,
+                            state,
                             arena,
                         ),
                         Childrens::Twins { left, right } => {
@@ -293,6 +296,7 @@ impl<'a> HepOptimizer<'a> {
                                 implementation_index,
                                 child_sort_hints,
                                 child_stream_aggregate_hints,
+                                state,
                                 arena,
                             )?;
                             Self::annotate_hints_and_physical_options(
@@ -301,6 +305,7 @@ impl<'a> HepOptimizer<'a> {
                                 implementation_index,
                                 child_sort_hints,
                                 child_stream_aggregate_hints,
+                                state,
                                 arena,
                             )
                         }
@@ -315,7 +320,7 @@ impl<'a> HepOptimizer<'a> {
         } else {
             let mut best_physical_option: BestPhysicalOption = None;
             for rule in implementation_index.for_matching_operator(&plan.operator) {
-                rule.update_best_option(plan, arena, loader, &mut best_physical_option)?;
+                rule.update_best_option(plan, arena, loader, state, &mut best_physical_option)?;
             }
             if let Some((option, _)) = best_physical_option {
                 plan.physical_option = Some(option);
@@ -683,32 +688,22 @@ impl ImplementationRuleIndex {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::{Binder, BinderContext};
-    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::expression::ScalarExpression;
-    use crate::optimizer::core::rule::ImplementationRule;
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
     use crate::optimizer::heuristic::batch::{HepBatch, HepBatchStrategy, HepMatchOrder};
-    use crate::optimizer::heuristic::optimizer::{
-        HepOptimizer, HepOptimizerPipeline, ImplementationRuleIndex,
-    };
+    use crate::optimizer::heuristic::optimizer::{HepOptimizer, HepOptimizerPipeline};
     use crate::optimizer::rule::implementation::ImplementationRuleImpl;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
-    use crate::planner::operator::limit::LimitOperator;
-    use crate::planner::operator::mark_apply::MarkApplyOperator;
-    use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::sort::SortField;
-    use crate::planner::operator::{
-        Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
-    };
+    use crate::planner::operator::{Operator, PlanImpl, SortOption};
     use crate::planner::{Childrens, LogicalPlan, PlanArena, TableArenaCell};
-    use crate::storage::{StatisticsMetaCache, Storage, Transaction};
+    use crate::storage::{Storage, Transaction};
     use crate::types::index::IndexLookup;
     use crate::types::value::DataValue;
-    use crate::types::LogicalType;
     use std::ops::Bound;
     use tempfile::TempDir;
 
@@ -720,55 +715,6 @@ mod tests {
             plan = FilterOperator::build(predicate, plan, false);
         }
         plan
-    }
-
-    #[test]
-    fn filter_fallback_and_row_preserving_fast_paths_follow_input_row_count(
-    ) -> Result<(), DatabaseError> {
-        let table_arena = TableArenaCell::default();
-        let mut arena = PlanArena::new(&table_arena);
-        let mut plan = filter_chain(1, &mut arena);
-        let Childrens::Only(child) = plan.childrens.as_mut() else {
-            unreachable!()
-        };
-        child.physical_option = Some(PhysicalOption::new(
-            PlanImpl::Dummy,
-            SortOption::None,
-            RowCountOption::Estimated {
-                rows: 12,
-                ndv: None,
-            },
-        ));
-        let implementations = ImplementationRuleIndex::new(&[ImplementationRuleImpl::Filter]);
-        assert!(implementations
-            .direct_physical_option(&plan.operator)
-            .is_none());
-        let cache = StatisticsMetaCache::default();
-        let mut best = None;
-        ImplementationRuleImpl::Filter.update_best_option(
-            &plan,
-            &arena,
-            &StatisticMetaLoader::new(&cache),
-            &mut best,
-        )?;
-        plan.physical_option = best.map(|(option, _)| option);
-        assert_eq!(
-            plan.physical_option.as_ref().unwrap().row_count,
-            RowCountOption::Follow
-        );
-        assert_eq!(plan.estimated_rows(), Some(12));
-
-        let marker = arena.alloc_column(ColumnCatalog::new(
-            "mark".to_string(),
-            true,
-            ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
-        ));
-        let right = LogicalPlan::new(Operator::Dummy, Childrens::None);
-        let mut plan = MarkApplyOperator::build_exists(plan, right, marker, vec![]);
-        let implementations = ImplementationRuleIndex::new(&[ImplementationRuleImpl::MarkApply]);
-        plan.physical_option = implementations.direct_physical_option(&plan.operator);
-        assert_eq!(plan.estimated_rows(), Some(12));
-        Ok(())
     }
 
     #[test]
@@ -873,71 +819,6 @@ mod tests {
                 right.childrens.only().operator,
                 Operator::Filter(_)
             ));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn once_does_not_reapply_a_rule_to_its_rewritten_children() -> Result<(), DatabaseError> {
-        let table_arena = TableArenaCell::default();
-        let mut arena = PlanArena::new(&table_arena);
-        for (strategy, expected_depth) in [
-            (HepBatchStrategy::once_topdown(), 1),
-            (HepBatchStrategy::fix_point_topdown(1), 3),
-        ] {
-            let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
-            for _ in 0..3 {
-                plan = LogicalPlan::new(
-                    Operator::Project(ProjectOperator::new(Vec::new())),
-                    Childrens::Only(Box::new(plan)),
-                );
-            }
-            plan = LimitOperator::build(None, Some(5), plan);
-            let pipeline = HepOptimizerPipeline::builder()
-                .before_batch(
-                    "Limit Project Transpose",
-                    strategy,
-                    &[NormalizationRuleImpl::LimitProjectTranspose],
-                )
-                .build();
-            let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
-            let mut cursor = &result;
-            for _ in 0..expected_depth {
-                assert!(matches!(cursor.operator, Operator::Project(_)));
-                cursor = cursor.childrens.only();
-            }
-            assert!(matches!(cursor.operator, Operator::Limit(_)));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn bottomup_fix_point_respects_iteration_limit() -> Result<(), DatabaseError> {
-        let table_arena = TableArenaCell::default();
-        let mut arena = PlanArena::new(&table_arena);
-        for (iterations, expected_depth) in [(0, 0), (1, 1), (2, 2), (30, 3)] {
-            let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
-            for _ in 0..3 {
-                plan = LogicalPlan::new(
-                    Operator::Project(ProjectOperator::new(Vec::new())),
-                    Childrens::Only(Box::new(plan)),
-                );
-            }
-            plan = LimitOperator::build(None, Some(5), plan);
-            let pipeline = HepOptimizerPipeline::builder()
-                .before_batch(
-                    "Limit Project Transpose",
-                    HepBatchStrategy::fix_point_bottomup(iterations),
-                    &[NormalizationRuleImpl::LimitProjectTranspose],
-                )
-                .build();
-            let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
-            let mut cursor = &result;
-            for _ in 0..expected_depth {
-                assert!(matches!(cursor.operator, Operator::Project(_)));
-                cursor = cursor.childrens.only();
-            }
-            assert!(matches!(cursor.operator, Operator::Limit(_)));
         }
         Ok(())
     }

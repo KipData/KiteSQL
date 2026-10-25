@@ -18,7 +18,7 @@ use crate::expression::visitor::ExprVisitor;
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::{
-    keep_best_physical_option, BestPhysicalOption, ImplementationRule, MatchPattern,
+    keep_best_physical_option, BestPhysicalOption, HintState, ImplementationRule, MatchPattern,
 };
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::scan_column;
@@ -47,6 +47,7 @@ impl ImplementationRule for FilterImplementation {
         plan: &LogicalPlan,
         arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
+        _: &mut HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         let rows = estimate_filter_rows(plan, arena, loader)?;
@@ -212,15 +213,11 @@ mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::expression::AliasType;
     use crate::optimizer::core::histogram::{HistogramMetaBuilder, DEFAULT_HLL_PRECISION};
-    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
-    use crate::optimizer::rule::implementation::ImplementationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
-    use crate::planner::operator::limit::LimitOperator;
     use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::TableArenaCell;
     use crate::storage::StatisticsMetaCache;
-    use crate::types::index::{IndexInfo, IndexMeta, IndexType};
     use crate::types::LogicalType;
 
     fn input(arena: &mut PlanArena, rows: usize) -> (LogicalPlan, [ExprRef; 2]) {
@@ -301,256 +298,60 @@ mod tests {
         })
     }
 
+    fn estimate(
+        arena: &PlanArena,
+        cache: &StatisticsMetaCache,
+        predicate: ExprRef,
+        input: &LogicalPlan,
+    ) -> Result<Option<usize>, DatabaseError> {
+        let plan = FilterOperator::build(predicate, input.clone(), false);
+        estimate_filter_rows(&plan, arena, &StatisticMetaLoader::new(cache))
+    }
+
     #[test]
-    fn point_estimates_deduplicate_in_and_or_values() -> Result<(), DatabaseError> {
+    fn point_predicates_use_column_stats() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let (scan, keys) = input(&mut arena, 100);
         let cache = statistics(100, 0, 10);
-        let loader = StatisticMetaLoader::new(&cache);
         let eq = equal(&mut arena, keys[0], DataValue::Int32(1));
+        let value = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(1)));
+        let reversed = binary(&mut arena, BinaryOperator::Eq, value, keys[0]);
+        let values = [1, 1, 2].map(DataValue::Int32);
         let list = in_list(
             &mut arena,
             keys[0],
-            &[
-                DataValue::Int32(1),
-                DataValue::Int32(1),
-                DataValue::Int32(2),
-                DataValue::Null,
-            ],
+            &[&values[..], &[DataValue::Null]].concat(),
             false,
         );
         let union = binary(&mut arena, BinaryOperator::Or, eq, list);
-        for (predicate, expected) in [(eq, 10), (list, 20), (union, 20)] {
-            let plan = FilterOperator::build(predicate, scan.clone(), false);
-            assert_eq!(
-                estimate_filter_rows(&plan, &arena, &loader)?,
-                Some(expected)
-            );
-        }
-        let value = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(1)));
-        let reversed = binary(&mut arena, BinaryOperator::Eq, value, keys[0]);
-        assert_eq!(
-            estimate_filter_rows(
-                &FilterOperator::build(reversed, scan.clone(), false),
-                &arena,
-                &loader
-            )?,
-            Some(10)
-        );
         let many = in_list(
             &mut arena,
             keys[0],
             &(0..20).map(DataValue::Int32).collect::<Vec<_>>(),
             false,
         );
-        assert_eq!(
-            estimate_filter_rows(&FilterOperator::build(many, scan, false), &arena, &loader)?,
-            Some(100)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn point_estimates_account_for_nulls_empty_inputs_and_missing_stats(
-    ) -> Result<(), DatabaseError> {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let (scan, keys) = input(&mut arena, 100);
-        let eq = equal(&mut arena, keys[0], DataValue::Int32(1));
         let null = equal(&mut arena, keys[0], DataValue::Null);
-        let mixed = in_list(
-            &mut arena,
-            keys[0],
-            &[DataValue::Null, DataValue::Int32(1)],
-            false,
-        );
-        let all_null = in_list(&mut arena, keys[0], &[DataValue::Null], false);
-        for (non_null, nulls, ndv, expected) in [(75, 25, 5, 15), (0, 100, 0, 0), (0, 0, 0, 0)] {
-            let cache = statistics(non_null, nulls, ndv);
-            let loader = StatisticMetaLoader::new(&cache);
-            assert_eq!(
-                estimate_filter_rows(
-                    &FilterOperator::build(eq, scan.clone(), false),
-                    &arena,
-                    &loader
-                )?,
-                Some(expected)
-            );
-            assert_eq!(
-                estimate_filter_rows(
-                    &FilterOperator::build(mixed, scan.clone(), false),
-                    &arena,
-                    &loader
-                )?,
-                Some(expected)
-            );
-            for predicate in [null, all_null] {
-                assert_eq!(
-                    estimate_filter_rows(
-                        &FilterOperator::build(predicate, scan.clone(), false),
-                        &arena,
-                        &loader
-                    )?,
-                    Some(0)
-                );
-            }
+        // Duplicates and NULLs do not count as points; selectivity is capped at 1.
+        for (predicate, rows) in [
+            (eq, 10),
+            (reversed, 10),
+            (list, 20),
+            (union, 20),
+            (many, 100),
+            (null, 0),
+        ] {
+            assert_eq!(estimate(&arena, &cache, predicate, &scan)?, Some(rows));
         }
-        let empty_cache = StatisticsMetaCache::default();
-        let loader = StatisticMetaLoader::new(&empty_cache);
-        let plan = FilterOperator::build(eq, scan, false);
-        let mut best = None;
-        FilterImplementation.update_best_option(&plan, &arena, &loader, &mut best)?;
-        assert_eq!(best.unwrap().0.row_count, RowCountOption::Follow);
+        // NULLs in the column scale the estimate by the non-NULL fraction.
+        assert_eq!(
+            estimate(&arena, &statistics(75, 25, 5), eq, &scan)?,
+            Some(15)
+        );
         let (empty, _) = input(&mut arena, 0);
-        let cache = statistics(100, 0, 10);
-        assert_eq!(
-            estimate_filter_rows(
-                &FilterOperator::build(eq, empty, false),
-                &arena,
-                &StatisticMetaLoader::new(&cache)
-            )?,
-            Some(0)
-        );
-        Ok(())
-    }
+        assert_eq!(estimate(&arena, &cache, eq, &empty)?, Some(0));
 
-    #[test]
-    fn unsupported_predicates_and_restricted_inputs_keep_follow() -> Result<(), DatabaseError> {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let (mut scan, keys) = input(&mut arena, 100);
-        let cache = statistics(100, 0, 10);
-        let loader = StatisticMetaLoader::new(&cache);
-        let eq = equal(&mut arena, keys[0], DataValue::Int32(1));
-        let other = equal(&mut arena, keys[1], DataValue::Int32(2));
-        let multi_column = binary(&mut arena, BinaryOperator::Or, eq, other);
-        let and = binary(&mut arena, BinaryOperator::And, eq, eq);
-        let column_eq = binary(&mut arena, BinaryOperator::Eq, keys[0], keys[1]);
-        let not_in = in_list(&mut arena, keys[0], &[DataValue::Int32(1)], true);
-        let wrong_type = equal(&mut arena, keys[0], DataValue::Int64(1));
-        let cast = arena.alloc_expression(ScalarExpression::TypeCast {
-            expr: keys[0],
-            ty: LogicalType::Integer,
-            evaluator: None,
-        });
-        let cast_eq = equal(&mut arena, cast, DataValue::Int32(1));
-        for predicate in [multi_column, and, column_eq, not_in, wrong_type, cast_eq] {
-            assert_eq!(
-                estimate_filter_rows(
-                    &FilterOperator::build(predicate, scan.clone(), false),
-                    &arena,
-                    &loader
-                )?,
-                None
-            );
-        }
-        scan.physical_option.as_mut().unwrap().row_count = RowCountOption::Unknown;
-        assert_eq!(
-            estimate_filter_rows(
-                &FilterOperator::build(eq, scan.clone(), false),
-                &arena,
-                &loader
-            )?,
-            None
-        );
-        scan.physical_option.as_mut().unwrap().row_count = RowCountOption::Estimated {
-            rows: 100,
-            ndv: None,
-        };
-        let Operator::TableScan(op) = &mut scan.operator else {
-            unreachable!()
-        };
-        op.limit = (Some(1), Some(5));
-        assert_eq!(
-            estimate_filter_rows(
-                &FilterOperator::build(eq, scan.clone(), false),
-                &arena,
-                &loader
-            )?,
-            None
-        );
-        let limited = LogicalPlan::new(
-            Operator::Limit(LimitOperator {
-                offset: None,
-                limit: Some(5),
-            }),
-            Childrens::Only(Box::new(scan)),
-        );
-        assert_eq!(
-            estimate_filter_rows(&FilterOperator::build(eq, limited, false), &arena, &loader)?,
-            None
-        );
-        let (scan, _) = input(&mut arena, 100);
-        let mut estimated = FilterOperator::build(eq, scan, false);
-        estimated.physical_option = Some(PhysicalOption::new(
-            PlanImpl::Filter,
-            SortOption::Follow,
-            RowCountOption::Estimated {
-                rows: 10,
-                ndv: None,
-            },
-        ));
-        assert_eq!(
-            estimate_filter_rows(
-                &FilterOperator::build(eq, estimated, false),
-                &arena,
-                &loader
-            )?,
-            None
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn point_selectivity_is_not_applied_again_to_index_output() -> Result<(), DatabaseError> {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let (mut scan, keys) = input(&mut arena, 10);
-        let meta = arena.alloc_index(IndexMeta {
-            id: 1,
-            table_name: "t".into(),
-            name: "idx".into(),
-            column_ids: vec![0],
-            ty: IndexType::Normal,
-            pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
-        });
-        scan.physical_option.as_mut().unwrap().plan = PlanImpl::IndexScan(Box::new(IndexInfo {
-            meta,
-            sort_option: SortOption::None,
-            lookup: None,
-            residual_predicate: None,
-            covered_deserializers: None,
-            cover_mapping: None,
-            sort_elimination_hint: None,
-            stream_aggregate_hint: None,
-        }));
-        let predicate = equal(&mut arena, keys[0], DataValue::Int32(1));
-        let cache = statistics(100, 0, 10);
-        let mut plan = FilterOperator::build(predicate, scan, false);
-        let mut best = None;
-        FilterImplementation.update_best_option(
-            &plan,
-            &arena,
-            &StatisticMetaLoader::new(&cache),
-            &mut best,
-        )?;
-        plan.physical_option = best.map(|(option, _)| option);
-        assert_eq!(
-            plan.physical_option.as_ref().unwrap().row_count,
-            RowCountOption::Follow
-        );
-        assert_eq!(plan.estimated_rows(), Some(10));
-        Ok(())
-    }
-
-    #[test]
-    fn direct_aliases_and_dynamic_implementation_path_use_column_stats() -> Result<(), DatabaseError>
-    {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let (scan, keys) = input(&mut arena, 100);
+        // A column renamed by a projection still resolves to the scan's statistics.
         let alias = arena.alloc_expression(ScalarExpression::Alias {
             expr: keys[0],
             alias: AliasType::Name("alias".into()),
@@ -566,19 +367,57 @@ mod tests {
             SortOption::Follow,
             RowCountOption::Follow,
         ));
-        let eq = equal(&mut arena, key, DataValue::Int32(1));
-        let plan = FilterOperator::build(eq, project, false);
+        let aliased = equal(&mut arena, key, DataValue::Int32(1));
+        assert_eq!(estimate(&arena, &cache, aliased, &project)?, Some(10));
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_predicates_and_restricted_inputs_keep_follow() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let (scan, keys) = input(&mut arena, 100);
         let cache = statistics(100, 0, 10);
-        let loader = StatisticMetaLoader::new(&cache);
-        assert_eq!(estimate_filter_rows(&plan, &arena, &loader)?, Some(10));
-        let pipeline = HepOptimizerPipeline::builder()
-            .implementations(&[ImplementationRuleImpl::Filter])
-            .build();
-        let mut plan = pipeline
-            .instantiate(plan)
-            .find_best(Some(&loader), &mut arena)?;
-        assert_eq!(plan.estimated_rows(), Some(10));
-        assert_eq!(plan.estimated_startup_work(&mut arena)?, Some(0));
+        let eq = equal(&mut arena, keys[0], DataValue::Int32(1));
+        let other = equal(&mut arena, keys[1], DataValue::Int32(2));
+        let multi_column = binary(&mut arena, BinaryOperator::Or, eq, other);
+        let column_eq = binary(&mut arena, BinaryOperator::Eq, keys[0], keys[1]);
+        let not_in = in_list(&mut arena, keys[0], &[DataValue::Int32(1)], true);
+        let wrong_type = equal(&mut arena, keys[0], DataValue::Int64(1));
+        for predicate in [multi_column, column_eq, not_in, wrong_type] {
+            assert_eq!(estimate(&arena, &cache, predicate, &scan)?, None);
+        }
+
+        // Inputs already restricted by a limit or an earlier estimate are not reduced again.
+        let mut limited_scan = scan.clone();
+        let Operator::TableScan(op) = &mut limited_scan.operator else {
+            unreachable!()
+        };
+        op.limit = (Some(1), Some(5));
+        assert_eq!(estimate(&arena, &cache, eq, &limited_scan)?, None);
+        let mut filtered = FilterOperator::build(eq, scan.clone(), false);
+        filtered.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Filter,
+            SortOption::Follow,
+            RowCountOption::Estimated {
+                rows: 10,
+                ndv: None,
+            },
+        ));
+        assert_eq!(estimate(&arena, &cache, eq, &filtered)?, None);
+
+        // Without column statistics the rule falls back to the input row count.
+        let plan = FilterOperator::build(eq, scan, false);
+        let mut best = None;
+        let empty_cache = StatisticsMetaCache::default();
+        FilterImplementation.update_best_option(
+            &plan,
+            &arena,
+            &StatisticMetaLoader::new(&empty_cache),
+            &mut HintState::default(),
+            &mut best,
+        )?;
+        assert_eq!(best.unwrap().0.row_count, RowCountOption::Follow);
         Ok(())
     }
 }

@@ -39,6 +39,7 @@ impl ImplementationRule for WindowImplementation {
         plan: &LogicalPlan,
         _: &crate::planner::PlanArena,
         _: &StatisticMetaLoader<'_>,
+        _: &mut crate::optimizer::core::rule::HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if let Operator::Window(op) = &plan.operator {

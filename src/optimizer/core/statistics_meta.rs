@@ -56,6 +56,7 @@ impl<'a> StatisticMetaLoader<'a> {
         table_name: &TableName,
         index_id: IndexId,
         range: &Range,
+        buf: &mut Vec<u8>,
     ) -> Result<Option<(usize, usize)>, DatabaseError> {
         let Some(entry) = self.load(table_name, index_id)? else {
             return Ok(None);
@@ -68,7 +69,7 @@ impl<'a> StatisticMetaLoader<'a> {
 
         entry
             .histogram()
-            .collect_count(ranges, entry.sketch(), entry.top_n())
+            .collect_count(ranges, entry.sketch(), entry.top_n(), buf)
             .map(|rows| Some((rows, entry.histogram().distinct_values_len())))
     }
 }
@@ -228,11 +229,16 @@ mod tests {
         );
         let loader = StatisticMetaLoader::new(&cache);
         assert_eq!(
-            loader.collect_count(&index.table_name, index.id, &Range::Eq(DataValue::Int32(7)))?,
+            loader.collect_count(
+                &index.table_name,
+                index.id,
+                &Range::Eq(DataValue::Int32(7)),
+                &mut Vec::new()
+            )?,
             Some((1, histogram.distinct_values_len()))
         );
         assert_eq!(
-            loader.collect_count(&index.table_name, 1, &Range::Dummy)?,
+            loader.collect_count(&index.table_name, 1, &Range::Dummy, &mut Vec::new())?,
             None
         );
         assert_eq!(histogram, index_statistics.histogram);

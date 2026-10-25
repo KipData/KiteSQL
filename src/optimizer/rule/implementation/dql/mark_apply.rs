@@ -40,6 +40,7 @@ impl ImplementationRule for MarkApplyImplementation {
         plan: &LogicalPlan,
         _: &PlanArena,
         _: &StatisticMetaLoader<'_>,
+        _: &mut crate::optimizer::core::rule::HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         if !matches!(plan.operator, Operator::MarkApply(_)) {

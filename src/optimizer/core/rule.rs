@@ -62,12 +62,18 @@ pub fn keep_best_physical_option(
     }
 }
 
+#[derive(Default)]
+pub struct HintState {
+    pub(crate) histogram_buf: Vec<u8>,
+}
+
 pub trait ImplementationRule: MatchPattern {
     fn update_best_option(
         &self,
         plan: &LogicalPlan,
         arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
+        state: &mut HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError>;
 }

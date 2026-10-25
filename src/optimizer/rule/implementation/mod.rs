@@ -19,7 +19,9 @@ pub(crate) mod macros;
 
 use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
+use crate::optimizer::core::rule::{
+    BestPhysicalOption, HintState, ImplementationRule, MatchPattern,
+};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::implementation::ddl::add_column::AddColumnImplementation;
 use crate::optimizer::rule::implementation::ddl::change_column::ChangeColumnImplementation;
@@ -264,11 +266,18 @@ impl ImplementationRule for ImplementationRuleImpl {
         plan: &LogicalPlan,
         arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
+        state: &mut HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         macro_rules! update {
             ($implementation:expr) => {
-                $implementation.update_best_option(plan, arena, loader, best_physical_option)?
+                $implementation.update_best_option(
+                    plan,
+                    arena,
+                    loader,
+                    state,
+                    best_physical_option,
+                )?
             };
         }
 
@@ -383,7 +392,13 @@ mod tests {
         let loader = StatisticMetaLoader::new(&statistics_cache);
         let mut best = None;
         let plan = LogicalPlan::new(operator.clone(), Childrens::None);
-        rule.update_best_option(&plan, arena, &loader, &mut best)?;
+        rule.update_best_option(
+            &plan,
+            arena,
+            &loader,
+            &mut crate::optimizer::core::rule::HintState::default(),
+            &mut best,
+        )?;
 
         Ok(best
             .expect("implementation rule should produce an option")
