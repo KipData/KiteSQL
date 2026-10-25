@@ -27,6 +27,64 @@ select * from t;
 ----
 0 0 0 0
 
+# New parser table fields must reach DROP INDEX binding.
+statement ok
+create index "Index_On" on t using btree (v1 asc);
+
+statement ok
+drop index "Index_On" on "T";
+
+statement ok
+drop index if exists "Index_On" on t;
+
+statement error
+drop index index_on on t;
+
+statement error
+drop index t.index_2.extra;
+
+statement error
+drop index index_2 on missing_table;
+
+# Unsupported options must not silently create a different index.
+statement error CREATE INDEX options
+create index option_index on t (v1) where v1 > 0;
+
+statement error CREATE INDEX options
+create index option_index on t (v1) include (v2);
+
+statement error CREATE INDEX options
+create index option_index on t using hash (v1);
+
+statement error CREATE INDEX options
+create index concurrently option_index on t (v1);
+
+statement error CREATE INDEX options
+create unique index option_index on t (v1) nulls not distinct;
+
+statement error CREATE INDEX options
+create index option_index on t (v1) with (fillfactor=70);
+
+statement error CREATE INDEX column options
+create index option_index on t (v1 desc);
+
+statement error CREATE INDEX column options
+create index option_index on t (v1 nulls first);
+
+statement error CREATE INDEX column options
+create index option_index on t (v1 int4_ops);
+
+statement ok
+create index option_index on t (v1);
+
+statement ok
+drop index option_index on t;
+
+query IIII
+select * from t;
+----
+0 0 0 0
+
 statement ok
 drop index t.index_1
 

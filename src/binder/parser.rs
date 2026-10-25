@@ -43,13 +43,13 @@ use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
 pub(super) use sqlparser::ast::{
     AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, BinaryLength,
-    BinaryOperator, ColumnDef, ColumnOption, CreateView, DataType, DescribeAlias, Distinct,
-    DuplicateTreatment, Expr, FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments,
-    GroupByExpr, Ident, IndexColumn, Join, JoinConstraint, JoinOperator, LimitClause, ObjectName,
-    ObjectNamePart, ObjectType, OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
-    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, TableAlias,
-    TableConstraint, TableFactor, TableObject, TableWithJoins, TypedString, UnaryOperator, Value,
-    ValueWithSpan, WindowType,
+    BinaryOperator, ColumnDef, ColumnOption, CreateIndex, CreateView, DataType, DescribeAlias,
+    Distinct, DuplicateTreatment, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, GroupByExpr, Ident, IndexColumn, IndexOption, IndexType, Join,
+    JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart, ObjectType, OrderByExpr,
+    OrderByKind, Query, Select, SelectInto, SelectItem, SelectItemQualifiedWildcardKind, SetExpr,
+    SetOperator, SetQuantifier, Spanned, TableAlias, TableConstraint, TableFactor, TableObject,
+    TableWithJoins, TypedString, UnaryOperator, Value, ValueWithSpan, WindowType,
 };
 #[cfg(feature = "copy")]
 pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
@@ -402,8 +402,9 @@ where
                     object_type,
                     names,
                     if_exists,
+                    table,
                     ..
-                } => self.drop_object(*object_type, names.clone(), *if_exists)?,
+                } => self.drop_object(*object_type, names.clone(), *if_exists, table.clone())?,
                 Statement::Insert(insert) => self.insert(insert)?,
                 Statement::Update(update) => self.update(update)?,
                 Statement::Delete(delete) => self.delete(delete)?,
@@ -860,10 +861,26 @@ where
         Ok(())
     }
 
-    fn create_index(
-        self,
-        create: sqlparser::ast::CreateIndex,
-    ) -> Result<LogicalPlan, DatabaseError> {
+    fn create_index(self, create: CreateIndex) -> Result<LogicalPlan, DatabaseError> {
+        if create.concurrently
+            || !create.include.is_empty()
+            || create.nulls_distinct.is_some()
+            || !create.with.is_empty()
+            || create.predicate.is_some()
+            || !create.alter_options.is_empty()
+            || create
+                .using
+                .as_ref()
+                .is_some_and(|ty| !matches!(ty, IndexType::BTree))
+            || create
+                .index_options
+                .iter()
+                .any(|option| !matches!(option, IndexOption::Using(IndexType::BTree)))
+        {
+            return Err(DatabaseError::UnsupportedStmt(
+                "CREATE INDEX options".to_string(),
+            ));
+        }
         let table_name = sql_table_name(create.table_name)?;
         let index_name = create
             .name
@@ -875,6 +892,15 @@ where
         let mut columns = Vec::with_capacity(create.columns.len());
 
         for index_column in create.columns {
+            if index_column.operator_class.is_some()
+                || index_column.column.options.asc == Some(false)
+                || index_column.column.options.nulls_first.is_some()
+                || index_column.column.with_fill.is_some()
+            {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "CREATE INDEX column options".to_string(),
+                ));
+            }
             let expr = self
                 .binder
                 .bind_expr(&index_column.column.expr, self.arena)?;
@@ -929,10 +955,16 @@ where
         object_type: ObjectType,
         mut names: Vec<ObjectName>,
         if_exists: bool,
+        table: Option<ObjectName>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        if names.len() > 1 {
+        if names.len() != 1 {
             return Err(DatabaseError::UnsupportedStmt(
-                "only Drop a single `Table` or `View` is allowed".to_string(),
+                "only Drop a single `Table`, `View` or `Index` is allowed".to_string(),
+            ));
+        }
+        if table.is_some() && object_type != ObjectType::Index {
+            return Err(DatabaseError::UnsupportedStmt(
+                "DROP ON is only supported for INDEX".to_string(),
             ));
         }
 
@@ -944,12 +976,17 @@ where
                 .binder
                 .bind_drop_view(sql_table_name(names.remove(0))?, if_exists),
             ObjectType::Index => {
-                let (table_name, index_name) = sql_index_name(names.remove(0))?;
+                let name = names.remove(0);
+                let (table_name, index_name) = if let Some(table) = table {
+                    (sql_table_name(table)?, sql_object_name(name)?)
+                } else {
+                    sql_index_name(name)?
+                };
                 self.binder
                     .bind_drop_index(table_name, index_name, if_exists)
             }
             _ => Err(DatabaseError::UnsupportedStmt(
-                "only `Table` and `View` are allowed to be Dropped".to_string(),
+                "only `Table`, `View` and `Index` are allowed to be Dropped".to_string(),
             )),
         }
     }
@@ -1946,10 +1983,9 @@ fn single_ident_from_object_name(name: &ObjectName) -> Result<Ident, DatabaseErr
 }
 
 fn sql_index_name(name: ObjectName) -> Result<(TableName, String), DatabaseError> {
-    let table_name = name.0.first().ok_or_else(|| {
-        attach_span_if_absent(DatabaseError::invalid_table(name.to_string()), &name)
-    })?;
-    let index_name = name.0.get(1).ok_or(DatabaseError::InvalidIndex)?;
+    let [table_name, index_name] = name.0.as_slice() else {
+        return Err(DatabaseError::InvalidIndex);
+    };
 
     Ok((
         lower_name_part(table_name)?.into(),
