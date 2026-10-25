@@ -19,6 +19,9 @@ use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
 use crate::optimizer::rule::normalization::combine_operators::{CollapseGroupByAgg, CombineFilter};
 use crate::optimizer::rule::normalization::compilation_in_advance::EvaluatorBind;
+use crate::optimizer::rule::normalization::constant_propagation::{
+    PropagateFilterConstants, PropagateJoinConstants,
+};
 use crate::planner::operator::Operator;
 use crate::planner::MetaArena;
 
@@ -37,6 +40,7 @@ use std::collections::HashSet;
 mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
+mod constant_propagation;
 mod elimination;
 mod guard_mark_apply;
 mod join_reorder;
@@ -72,6 +76,8 @@ pub enum NormalizationRuleImpl {
     PushLimitThroughJoin,
     PushLimitIntoTableScan,
     // PushDown predicates
+    PropagateFilterConstants,
+    PropagateJoinConstants,
     PushPredicateThroughJoin,
     PushJoinPredicateIntoScan,
     // Tips: need to be used with `SimplifyFilter`
@@ -190,10 +196,12 @@ impl NormalizationRuleImpl {
             | NormalizationRuleImpl::PushLimitThroughJoin
             | NormalizationRuleImpl::PushLimitIntoTableScan
             | NormalizationRuleImpl::TopK => NormalizationRuleRootTag::Limit,
-            NormalizationRuleImpl::PushPredicateThroughJoin
+            NormalizationRuleImpl::PropagateFilterConstants
+            | NormalizationRuleImpl::PushPredicateThroughJoin
             | NormalizationRuleImpl::PushPredicateIntoScan
             | NormalizationRuleImpl::SimplifyFilter => NormalizationRuleRootTag::Filter,
-            NormalizationRuleImpl::PushJoinPredicateIntoScan => NormalizationRuleRootTag::Join,
+            NormalizationRuleImpl::PropagateJoinConstants
+            | NormalizationRuleImpl::PushJoinPredicateIntoScan => NormalizationRuleRootTag::Join,
             NormalizationRuleImpl::ConstantCalculation => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::MinMaxToTopK => NormalizationRuleRootTag::Aggregate,
@@ -237,6 +245,12 @@ impl NormalizationRule for NormalizationRuleImpl {
             }
             NormalizationRuleImpl::PushLimitIntoTableScan => {
                 PushLimitIntoScan.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::PropagateFilterConstants => {
+                PropagateFilterConstants.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::PropagateJoinConstants => {
+                PropagateJoinConstants.apply(plan, arena, loader)
             }
             NormalizationRuleImpl::PushPredicateThroughJoin => {
                 PushPredicateThroughJoin.apply(plan, arena, loader)

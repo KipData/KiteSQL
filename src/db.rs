@@ -461,6 +461,8 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             "Predicate Pushdown",
             HepBatchStrategy::fix_point_topdown(30),
             vec![
+                NormalizationRuleImpl::PropagateFilterConstants,
+                NormalizationRuleImpl::PropagateJoinConstants,
                 NormalizationRuleImpl::PushPredicateThroughJoin,
                 NormalizationRuleImpl::PushJoinPredicateIntoScan,
             ],

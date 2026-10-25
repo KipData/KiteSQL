@@ -831,3 +831,134 @@ from native_in_points where id <= 12;
 
 statement ok
 drop table native_in_points;
+
+# Constant propagation: `a = b AND a = c` derives `b = c`, so the derived side can use an index.
+
+statement ok
+create table cp_a(id int primary key, c1 int, c2 int);
+
+statement ok
+create table cp_b(id int primary key, c1 int, c2 int);
+
+statement ok
+create table cp_c(id int primary key, c1 int, c2 int);
+
+statement ok
+copy cp_a from 'tests/data/row_20000.csv' ( DELIMITER '|' );
+
+statement ok
+copy cp_b from 'tests/data/row_20000.csv' ( DELIMITER '|' );
+
+statement ok
+copy cp_c from 'tests/data/row_20000.csv' ( DELIMITER '|' );
+
+statement ok
+create index cp_b_c1 on cp_b (c1);
+
+statement ok
+create index cp_c_c1 on cp_c (c1);
+
+statement ok
+analyze table cp_a;
+
+statement ok
+analyze table cp_b;
+
+statement ok
+analyze table cp_c;
+
+# Inner join: a constant on the ON key's left column reaches the right scan.
+query T
+explain select cp_a.id, cp_b.id from cp_a join cp_b on cp_a.c1 = cp_b.c1 where cp_a.c1 = 4;
+----
+Projection [cp_a.id, cp_b.id] [Project => (Sort Option: Follow)] Inner Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+
+query II
+select cp_a.id, cp_b.id from cp_a join cp_b on cp_a.c1 = cp_b.c1 where cp_a.c1 = 4;
+----
+3 3
+
+query T
+explain select cp_a.id, cp_b.id from cp_a, cp_b where cp_a.c1 = cp_b.c1 and cp_a.c1 = 4;
+----
+Projection [cp_a.id, cp_b.id] [Project => (Sort Option: Follow)] Inner Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+
+query II
+select cp_a.id, cp_b.id from cp_a, cp_b where cp_a.c1 = cp_b.c1 and cp_a.c1 = 4;
+----
+3 3
+
+# Chains close transitively inside one filter.
+query T
+explain select cp_a.id, cp_b.id, cp_c.id from cp_a, cp_b, cp_c where cp_a.c1 = cp_b.c1 and cp_b.c1 = cp_c.c1 and cp_a.c1 = 4;
+----
+Projection [cp_a.id, cp_b.id, cp_c.id] [Project => (Sort Option: Follow)] Inner Join On cp_c.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] TableScan cp_c -> [cp_c.id, cp_c.c1] [IndexScan By cp_c_c1 => 4 => (Sort Option: OrderBy: (cp_c.c1 Asc Nulls Last) ignore_prefix_len: 0)] Inner Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+
+query III
+select cp_a.id, cp_b.id, cp_c.id from cp_a, cp_b, cp_c where cp_a.c1 = cp_b.c1 and cp_b.c1 = cp_c.c1 and cp_a.c1 = 4;
+----
+3 3 3
+
+# Single table.
+query T
+explain select id from cp_b where c1 = c2 and c2 = 4;
+----
+Projection [cp_b.id] [Project => (Sort Option: Follow)] Filter ((cp_b.c1 = cp_b.c2) && (cp_b.c2 = 4)), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_b -> [cp_b.id, cp_b.c1, cp_b.c2] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+
+query I
+select id from cp_b where c1 = c2 and c2 = 4;
+----
+
+
+# Left join: the preserved left side may constrain the right side.
+query T
+explain select cp_a.id, cp_b.id from cp_a left join cp_b on cp_a.c1 = cp_b.c1 where cp_a.c1 = 4;
+----
+Projection [cp_a.id, cp_b.id] [Project => (Sort Option: Follow)] LeftOuter Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+
+query II
+select cp_a.id, cp_b.id from cp_a left join cp_b on cp_a.c1 = cp_b.c1 where cp_a.c1 = 4;
+----
+3 3
+
+# Left join: a right-side constant must not filter the preserved left side.
+query T
+explain select count(*), count(cp_b.id) from cp_a left join cp_b on cp_a.c1 = cp_b.c1 and cp_b.c1 = 4;
+----
+Projection [Count(*), Count(cp_b.id)] [Project => (Sort Option: Follow)] Aggregate [Count(*), Count(cp_b.id)] [SimpleAggregate => (Sort Option: None)] LeftOuter Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] TableScan cp_a -> [cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+
+query II
+select count(*), count(cp_b.id) from cp_a left join cp_b on cp_a.c1 = cp_b.c1 and cp_b.c1 = 4;
+----
+20000 1
+
+# Right join: a left-side constant must not filter the preserved right side.
+query T
+explain select count(*), count(cp_a.id) from cp_a right join cp_b on cp_a.c1 = cp_b.c1 and cp_a.c1 = 4;
+----
+Projection [Count(*), Count(cp_a.id)] [Project => (Sort Option: Follow)] Aggregate [Count(*), Count(cp_a.id)] [SimpleAggregate => (Sort Option: None)] RightOuter Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.c1] [SeqScan => (Sort Option: None)]
+
+query II
+select count(*), count(cp_a.id) from cp_a right join cp_b on cp_a.c1 = cp_b.c1 and cp_a.c1 = 4;
+----
+20000 1
+
+# NULL constants carry nothing to propagate.
+query T
+explain select count(*) from cp_a join cp_b on cp_a.c1 = cp_b.c1 where cp_a.c1 = null;
+----
+Projection [Count(*)] [Project => (Sort Option: Follow)] Aggregate [Count(*)] [SimpleAggregate => (Sort Option: None)] Inner Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] Filter (cp_a.c1 = cast (NULL as Integer)), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.c1] [SeqScan => (Sort Option: None)]
+
+query I
+select count(*) from cp_a join cp_b on cp_a.c1 = cp_b.c1 where cp_a.c1 = null;
+----
+0
+
+statement ok
+drop table cp_a;
+
+statement ok
+drop table cp_b;
+
+statement ok
+drop table cp_c;

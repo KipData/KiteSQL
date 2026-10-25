@@ -784,6 +784,7 @@ mod tests {
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
+    use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::limit::LimitOperator;
