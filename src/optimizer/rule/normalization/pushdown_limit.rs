@@ -152,7 +152,7 @@ mod tests {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_limit_project_transpose".to_string(),
+                "test_limit_project_transpose",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::LimitProjectTranspose],
             )
@@ -184,7 +184,7 @@ mod tests {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_push_limit_through_join".to_string(),
+                "test_push_limit_through_join",
                 HepBatchStrategy::once_topdown(),
                 vec![
                     NormalizationRuleImpl::LimitProjectTranspose,
@@ -218,7 +218,7 @@ mod tests {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_push_limit_into_table_scan".to_string(),
+                "test_push_limit_into_table_scan",
                 HepBatchStrategy::once_topdown(),
                 vec![
                     NormalizationRuleImpl::LimitProjectTranspose,

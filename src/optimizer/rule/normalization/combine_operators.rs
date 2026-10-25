@@ -364,7 +364,7 @@ mod tests {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_collapse_project".to_string(),
+                "test_collapse_project",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::CollapseProject],
             )
@@ -403,7 +403,7 @@ mod tests {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_collapse_project_with_alias".to_string(),
+                "test_collapse_project_with_alias",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::CollapseProject],
             )
@@ -492,7 +492,7 @@ mod tests {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_combine_filter".to_string(),
+                "test_combine_filter",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::CombineFilter],
             )
@@ -522,7 +522,7 @@ mod tests {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_collapse_group_by_agg".to_string(),
+                "test_collapse_group_by_agg",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::CollapseGroupByAgg],
             )

@@ -1428,7 +1428,7 @@ mod tests {
         ));
         let pipeline = HepOptimizerPipeline::builder()
             .after_batch(
-                "column statistics".into(),
+                "column statistics",
                 HepBatchStrategy::fix_point_topdown(1),
                 vec![NormalizationRuleImpl::GreedyJoinReorder],
             )

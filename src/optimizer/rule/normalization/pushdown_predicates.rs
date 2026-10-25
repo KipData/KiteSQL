@@ -659,12 +659,12 @@ mod tests {
             plan,
             HepOptimizerPipeline::builder()
                 .before_batch(
-                    "simplify_filter".to_string(),
+                    "simplify_filter",
                     HepBatchStrategy::once_topdown(),
                     vec![NormalizationRuleImpl::SimplifyFilter],
                 )
                 .before_batch(
-                    "test_push_predicate_into_scan".to_string(),
+                    "test_push_predicate_into_scan",
                     HepBatchStrategy::once_topdown(),
                     vec![NormalizationRuleImpl::PushPredicateIntoScan],
                 ),
@@ -760,7 +760,7 @@ mod tests {
             let plan = apply_pipeline(
                 FilterOperator::build(predicate, scan, false),
                 HepOptimizerPipeline::builder().before_batch(
-                    "unique_composite_range".to_string(),
+                    "unique_composite_range",
                     HepBatchStrategy::fix_point_topdown(1),
                     vec![NormalizationRuleImpl::PushPredicateIntoScan],
                 ),
@@ -1019,7 +1019,7 @@ mod tests {
         let best_plan = apply_pipeline(
             filter_plan,
             HepOptimizerPipeline::builder().before_batch(
-                "push_cover_mapping".to_string(),
+                "push_cover_mapping",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateIntoScan],
             ),
@@ -1082,7 +1082,7 @@ mod tests {
         let best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "test_push_predicate_through_join".to_string(),
+                "test_push_predicate_through_join",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
             ),
@@ -1132,7 +1132,7 @@ mod tests {
         let best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "test_push_predicate_through_join".to_string(),
+                "test_push_predicate_through_join",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
             ),
@@ -1182,7 +1182,7 @@ mod tests {
             let plan = apply_pipeline(
                 plan,
                 HepOptimizerPipeline::builder().before_batch(
-                    "cross join pushdown".into(),
+                    "cross join pushdown",
                     HepBatchStrategy::once_topdown(),
                     vec![NormalizationRuleImpl::PushPredicateThroughJoin],
                 ),
@@ -1215,7 +1215,7 @@ mod tests {
         let best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "test_push_predicate_through_join".to_string(),
+                "test_push_predicate_through_join",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushPredicateThroughJoin],
             ),
@@ -1270,7 +1270,7 @@ mod tests {
         let mut best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "push_join_predicate_into_scan".to_string(),
+                "push_join_predicate_into_scan",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
             ),
@@ -1346,7 +1346,7 @@ mod tests {
         let mut best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "push_join_predicate_into_scan".to_string(),
+                "push_join_predicate_into_scan",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
             ),
@@ -1394,7 +1394,7 @@ mod tests {
         let mut best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "push_join_predicate_into_scan".to_string(),
+                "push_join_predicate_into_scan",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
             ),

@@ -443,22 +443,22 @@ impl DataBaseBuilder {
 fn optimizer_pipeline() -> HepOptimizerPipeline {
     HepOptimizerPipeline::builder()
         .before_batch(
-            "Column Pruning".to_string(),
+            "Column Pruning",
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::ColumnPruning],
         )
         .before_batch(
-            "Simplify Filter".to_string(),
+            "Simplify Filter",
             HepBatchStrategy::fix_point_topdown(10),
             vec![NormalizationRuleImpl::SimplifyFilter],
         )
         .before_batch(
-            "Constant Calculation".to_string(),
+            "Constant Calculation",
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::ConstantCalculation],
         )
         .before_batch(
-            "Predicate Pushdown".to_string(),
+            "Predicate Pushdown",
             HepBatchStrategy::fix_point_topdown(30),
             vec![
                 NormalizationRuleImpl::PushPredicateThroughJoin,
@@ -466,7 +466,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             ],
         )
         .before_batch(
-            "Limit Pushdown".to_string(),
+            "Limit Pushdown",
             HepBatchStrategy::fix_point_topdown(10),
             vec![
                 NormalizationRuleImpl::LimitProjectTranspose,
@@ -474,7 +474,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             ],
         )
         .before_batch(
-            "TopK".to_string(),
+            "TopK",
             HepBatchStrategy::fix_point_topdown(1),
             vec![
                 NormalizationRuleImpl::MinMaxToTopK,
@@ -482,31 +482,30 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             ],
         )
         .before_batch(
-            "Combine Operators".to_string(),
+            "Combine Operators",
             HepBatchStrategy::fix_point_topdown(10),
             vec![
-                NormalizationRuleImpl::CollapseProject,
                 NormalizationRuleImpl::CollapseGroupByAgg,
                 NormalizationRuleImpl::CombineFilter,
             ],
         )
         .before_batch(
-            "Predicate Into Scan".to_string(),
+            "Predicate Into Scan",
             HepBatchStrategy::fix_point_topdown(10),
             vec![NormalizationRuleImpl::PushPredicateIntoScan],
         )
         .before_batch(
-            "Guard Mark Apply".to_string(),
+            "Guard Mark Apply",
             HepBatchStrategy::fix_point_topdown(1),
             vec![NormalizationRuleImpl::GuardMarkApply],
         )
         .after_batch(
-            "Greedy Join Reorder".to_string(),
+            "Greedy Join Reorder",
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::GreedyJoinReorder],
         )
         .after_batch(
-            "Parameterize Mark Apply".to_string(),
+            "Parameterize Mark Apply",
             HepBatchStrategy::fix_point_topdown(1),
             vec![
                 NormalizationRuleImpl::ParameterizeMarkApply,
@@ -516,27 +515,32 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         // Only discard predicates after parameterization has chosen the final
         // lookup. A Probe must not inherit residuals from a replaced static range.
         .after_batch(
-            "Eliminate Index Filter".to_string(),
+            "Eliminate Index Filter",
             HepBatchStrategy::fix_point_topdown(1),
             vec![NormalizationRuleImpl::EliminateIndexFilter],
         )
         .after_batch(
-            "Materialize Mark Apply".to_string(),
+            "Materialize Mark Apply",
             HepBatchStrategy::fix_point_bottomup(1),
             vec![NormalizationRuleImpl::MaterializeMarkApply],
         )
         .after_batch(
-            "Orient Nested Loop Join".to_string(),
+            "Orient Nested Loop Join",
             HepBatchStrategy::fix_point_bottomup(1),
             vec![NormalizationRuleImpl::OrientNestedLoopJoin],
         )
         .after_batch(
-            "Expression Remapper".to_string(),
+            "Collapse Project",
+            HepBatchStrategy::fix_point_topdown(10),
+            vec![NormalizationRuleImpl::CollapseProject],
+        )
+        .after_batch(
+            "Expression Remapper",
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::EvaluatorBind],
         )
         .after_batch(
-            "Limit Into Scan".to_string(),
+            "Limit Into Scan",
             HepBatchStrategy::fix_point_topdown(10),
             vec![NormalizationRuleImpl::PushLimitIntoTableScan],
         )
@@ -1535,14 +1539,20 @@ impl<T: Transaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
 pub(crate) mod test {
     use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc};
-    use crate::db::{CatalogKind, DataBaseBuilder, DatabaseError, ResultIter};
-    use crate::expression::ScalarExpression;
-    use crate::planner::operator::join::JoinCondition;
+    use crate::db::{optimizer_pipeline, CatalogKind, DataBaseBuilder, DatabaseError, ResultIter};
+    use crate::execution::dql::projection::Projection;
+    use crate::execution::{empty_context, execute_input};
+    use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
+    use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
+    use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
+    use crate::planner::operator::project::ProjectOperator;
+    use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::PlanArena;
+    use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::{
-        table_codec::TableCodec, Storage, TableCache, Transaction, TransactionIsolationLevel,
+        table_codec::TableCodec, StatisticsMetaCache, Storage, TableCache, Transaction,
+        TransactionIsolationLevel, ViewCache,
     };
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
@@ -1560,6 +1570,170 @@ pub(crate) mod test {
     #[cfg(feature = "unsafe_txdb_checkpoint")]
     use std::time::Duration;
     use tempfile::TempDir;
+
+    fn literal_input(
+        name: &str,
+        values: &[i32],
+        position: usize,
+        arena: &mut PlanArena,
+    ) -> Result<(LogicalPlan, ExprRef), DatabaseError> {
+        let mut column = ColumnCatalog::new(
+            name.into(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        );
+        column.set_ref_table(name.into(), 0, false);
+        let column = arena.alloc_column(column);
+        let key = arena.alloc_expression(ScalarExpression::column_expr(column, position));
+        let rows = values
+            .iter()
+            .map(|value| {
+                arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(*value)))
+            })
+            .collect();
+        Ok((
+            LogicalPlan::new(
+                Operator::Values(ValuesOperator {
+                    rows,
+                    row_count: values.len(),
+                    schema_ref: vec![column].into(),
+                }),
+                Childrens::None,
+            ),
+            key,
+        ))
+    }
+
+    #[test]
+    fn late_project_collapse_preserves_oriented_columns_and_aliases() -> Result<(), DatabaseError> {
+        for alias in [false, true] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let (left, large) = literal_input("large", &[1, 2, 3, 4], 0, &mut arena)?;
+            let (right, small) = literal_input("small", &[99], 1, &mut arena)?;
+            let join =
+                JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
+            let output = if alias {
+                arena.alloc_expression(ScalarExpression::Alias {
+                    expr: large,
+                    alias: AliasType::Name("wanted".into()),
+                })
+            } else {
+                large
+            };
+            // Repeating the selected column must not lose an output slot.
+            let mut plan = LogicalPlan::new(
+                Operator::Project(ProjectOperator {
+                    exprs: vec![output, output, small],
+                }),
+                Childrens::Only(Box::new(join)),
+            );
+            let schema = plan.output_schema(&mut arena).clone();
+            let cache = StatisticsMetaCache::default();
+            let loader = StatisticMetaLoader::new(&cache);
+            let mut plan = optimizer_pipeline()
+                .instantiate(plan)
+                .find_best(Some(&loader), &mut arena)?;
+            plan.populate_output_schema_recursive(&mut arena);
+            assert_eq!(plan.output_schema(&mut arena), &schema);
+            let Childrens::Only(join) = plan.childrens.as_ref() else {
+                unreachable!()
+            };
+            assert!(
+                matches!(join.operator, Operator::Join(_)),
+                "restore Project should be collapsed"
+            );
+            let Childrens::Twins { left, right } = join.childrens.as_ref() else {
+                unreachable!()
+            };
+            assert_eq!(left.estimated_rows(), Some(1));
+            assert_eq!(right.estimated_rows(), Some(4));
+            let Operator::Project(project) = &plan.operator else {
+                unreachable!()
+            };
+            let Childrens::Only(input) = plan.childrens.as_ref() else {
+                unreachable!()
+            };
+            let storage = MemoryStorage::new();
+            let transaction = storage.transaction()?;
+            let table_cache = TableCache::default();
+            let view_cache = ViewCache::default();
+            let context = empty_context(&table_cache, &view_cache, &cache);
+            let mut executor =
+                execute_input::<_, Projection>((project, input), context, arena, &transaction);
+            for value in [1, 2, 3, 4] {
+                assert_eq!(
+                    executor.next_tuple()?.map(|row| row.values.clone()),
+                    Some(vec![
+                        DataValue::Int32(value),
+                        DataValue::Int32(value),
+                        DataValue::Int32(99)
+                    ])
+                );
+            }
+            assert!(executor.next_tuple()?.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn late_project_collapse_keeps_computed_output_boundary() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let (left, large) = literal_input("large", &[1, 2, 3, 4], 0, &mut arena)?;
+        let (right, small) = literal_input("small", &[99], 1, &mut arena)?;
+        let join = JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
+        let ten = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(10)));
+        let computed = arena.alloc_expression(ScalarExpression::Binary {
+            op: BinaryOperator::Plus,
+            left_expr: large,
+            right_expr: ten,
+            evaluator: None,
+            ty: LogicalType::Integer,
+        });
+        let mut plan = LogicalPlan::new(
+            Operator::Project(ProjectOperator {
+                exprs: vec![computed, small],
+            }),
+            Childrens::Only(Box::new(join)),
+        );
+        let schema = plan.output_schema(&mut arena).clone();
+        let cache = StatisticsMetaCache::default();
+        let loader = StatisticMetaLoader::new(&cache);
+        let mut plan = optimizer_pipeline()
+            .instantiate(plan)
+            .find_best(Some(&loader), &mut arena)?;
+        plan.populate_output_schema_recursive(&mut arena);
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        let Childrens::Only(child) = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        assert!(
+            matches!(child.operator, Operator::Project(_)),
+            "computed expressions are not substituted"
+        );
+        let Operator::Project(project) = &plan.operator else {
+            unreachable!()
+        };
+        let Childrens::Only(input) = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        let storage = MemoryStorage::new();
+        let transaction = storage.transaction()?;
+        let table_cache = TableCache::default();
+        let view_cache = ViewCache::default();
+        let context = empty_context(&table_cache, &view_cache, &cache);
+        let mut executor =
+            execute_input::<_, Projection>((project, input), context, arena, &transaction);
+        for value in [11, 12, 13, 14] {
+            assert_eq!(
+                executor.next_tuple()?.map(|row| row.values.clone()),
+                Some(vec![DataValue::Int32(value), DataValue::Int32(99)])
+            );
+        }
+        assert!(executor.next_tuple()?.is_none());
+        Ok(())
+    }
 
     fn assert_send_sync<T: Send + Sync>() {}
 

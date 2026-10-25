@@ -126,13 +126,13 @@ mod test {
 
     fn run_with_single_batch(
         plan: LogicalPlan,
-        name: &str,
+        name: &'static str,
         strategy: HepBatchStrategy,
         rules: Vec<NormalizationRuleImpl>,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
-            .before_batch(name.to_string(), strategy, rules)
+            .before_batch(name, strategy, rules)
             .build()
             .instantiate(plan)
             .find_best(None, arena)
@@ -150,7 +150,7 @@ mod test {
 
         let best_plan = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_simplification".to_string(),
+                "test_simplification",
                 HepBatchStrategy::once_topdown(),
                 vec![
                     NormalizationRuleImpl::SimplifyFilter,

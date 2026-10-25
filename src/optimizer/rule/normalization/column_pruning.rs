@@ -870,7 +870,7 @@ mod tests {
 
         HepOptimizerPipeline::builder()
             .before_batch(
-                format!("column_pruning::{sql}"),
+                "column_pruning",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::ColumnPruning],
             )
@@ -1022,7 +1022,7 @@ mod tests {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_column_pruning".to_string(),
+                "test_column_pruning",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::ColumnPruning],
             )

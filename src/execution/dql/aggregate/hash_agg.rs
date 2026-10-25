@@ -213,7 +213,7 @@ mod test {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "Expression Remapper".to_string(),
+                "Expression Remapper",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::EvaluatorBind],
             )

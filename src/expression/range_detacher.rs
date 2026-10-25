@@ -1313,7 +1313,7 @@ mod test {
     ) -> Result<Option<FilterOperator>, DatabaseError> {
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_simplify_filter".to_string(),
+                "test_simplify_filter",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::SimplifyFilter],
             )

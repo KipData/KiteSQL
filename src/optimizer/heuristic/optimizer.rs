@@ -791,7 +791,7 @@ mod tests {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let batch = HepBatch::new(
-            "Combine Filters".into(),
+            "Combine Filters",
             HepBatchStrategy::fix_point_bottomup(1),
             vec![NormalizationRuleImpl::CombineFilter],
         );
@@ -844,7 +844,7 @@ mod tests {
             );
             let pipeline = HepOptimizerPipeline::builder()
                 .before_batch(
-                    "Combine Filters".into(),
+                    "Combine Filters",
                     strategy,
                     vec![NormalizationRuleImpl::CombineFilter],
                 )
@@ -876,7 +876,7 @@ mod tests {
             );
             let pipeline = HepOptimizerPipeline::builder()
                 .before_batch(
-                    "Combine Filters".into(),
+                    "Combine Filters",
                     strategy,
                     vec![NormalizationRuleImpl::CombineFilter],
                 )
@@ -910,7 +910,7 @@ mod tests {
             plan = LimitOperator::build(None, Some(5), plan);
             let pipeline = HepOptimizerPipeline::builder()
                 .before_batch(
-                    "Limit Project Transpose".into(),
+                    "Limit Project Transpose",
                     strategy,
                     vec![NormalizationRuleImpl::LimitProjectTranspose],
                 )
@@ -941,7 +941,7 @@ mod tests {
             plan = LimitOperator::build(None, Some(5), plan);
             let pipeline = HepOptimizerPipeline::builder()
                 .before_batch(
-                    "Limit Project Transpose".into(),
+                    "Limit Project Transpose",
                     HepBatchStrategy::fix_point_bottomup(iterations),
                     vec![NormalizationRuleImpl::LimitProjectTranspose],
                 )
@@ -1003,12 +1003,12 @@ mod tests {
         let plan = binder.bind(&stmt, &mut plan_arena)?;
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "Simplify Filter".to_string(),
+                "Simplify Filter",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::SimplifyFilter],
             )
             .before_batch(
-                "Predicate Pushdown".to_string(),
+                "Predicate Pushdown",
                 HepBatchStrategy::fix_point_topdown(10),
                 vec![
                     NormalizationRuleImpl::PushPredicateThroughJoin,
@@ -1017,7 +1017,7 @@ mod tests {
                 ],
             )
             .after_batch(
-                "Eliminate Index Filter".to_string(),
+                "Eliminate Index Filter",
                 HepBatchStrategy::once_topdown(),
                 vec![NormalizationRuleImpl::EliminateIndexFilter],
             )
@@ -1124,7 +1124,7 @@ pub struct HepOptimizerPipelineBuilder {
 impl HepOptimizerPipelineBuilder {
     pub fn before_batch(
         mut self,
-        name: String,
+        name: &'static str,
         strategy: HepBatchStrategy,
         rules: Vec<NormalizationRuleImpl>,
     ) -> Self {
@@ -1135,7 +1135,7 @@ impl HepOptimizerPipelineBuilder {
 
     pub fn after_batch(
         mut self,
-        name: String,
+        name: &'static str,
         strategy: HepBatchStrategy,
         rules: Vec<NormalizationRuleImpl>,
     ) -> Self {

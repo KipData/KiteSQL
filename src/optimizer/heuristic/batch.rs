@@ -22,7 +22,7 @@ use std::array;
 #[derive(Clone)]
 pub struct HepBatch {
     #[allow(dead_code)]
-    pub name: String,
+    pub name: &'static str,
     pub strategy: HepBatchStrategy,
     pub steps: Vec<HepBatchStep>,
 }
@@ -90,7 +90,7 @@ impl HepLocalRewriteBatch {
 
 impl HepBatch {
     pub fn new(
-        name: String,
+        name: &'static str,
         strategy: HepBatchStrategy,
         rules: Vec<NormalizationRuleImpl>,
     ) -> Self {
