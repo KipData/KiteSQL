@@ -3903,7 +3903,9 @@ mod tests {
 
     #[test]
     fn database_and_transaction_orm_helpers_bind_expected_plans() -> Result<(), DatabaseError> {
-        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
+        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test")
+            .histogram_buckets(100)
+            .build_in_memory()?;
         database
             .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")?;
         database.create_view("orm_unit_user_names", |ctx| {
@@ -4077,8 +4079,9 @@ mod tests {
             concat!(
                 "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
                 "Sort By 1 Asc Nulls Last [Sort => (Sort Option: OrderBy: (1 Asc Nulls Last) ignore_prefix_len: 0)] ",
-                "Filter (((orm_unit_users.id = 3) || ((orm_unit_users.id = 2) || (orm_unit_users.id = 1))) && (orm_unit_users.id != 3)), Is Having: false ",
-                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)]"
+                "Filter (orm_unit_users.id != 3), Is Having: false ",
+                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.id] ",
+                "[IndexScan By pk_index => 1, 2, 3 Covered => (Sort Option: OrderBy: (orm_unit_users.id Asc Nulls Last) ignore_prefix_len: 0)]"
             ),
             "{list_plan}"
         );
@@ -4436,8 +4439,8 @@ mod tests {
             concat!(
                 "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
                 "InnerJoinApply [MarkApply => (Sort Option: Follow)] ",
-                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [orm_unit_orders.id] [IndexScan By pk_index => Probe ? Covered => (Sort Option: OrderBy: (orm_unit_orders.id Asc Nulls Last) ignore_prefix_len: 0)]"
+                "TableScan orm_unit_orders -> [orm_unit_orders.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id] [IndexScan By pk_index => Probe ? Covered => (Sort Option: OrderBy: (orm_unit_users.id Asc Nulls Last) ignore_prefix_len: 0)]"
             ),
             "{inner_using_plan}"
         );

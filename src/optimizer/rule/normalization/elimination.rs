@@ -847,6 +847,22 @@ mod tests {
         (plan, expr)
     }
 
+    fn eliminate_projects(
+        plan: &mut LogicalPlan,
+        arena: &mut PlanArena,
+    ) -> Result<bool, DatabaseError> {
+        let original = plan.clone();
+        let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
+                "eliminate_projects",
+                HepBatchStrategy::fix_point_bottomup(10),
+                &[NormalizationRuleImpl::EliminateProject],
+            )
+            .build();
+        *plan = pipeline.instantiate(plan.take()).find_best(None, arena)?;
+        Ok(*plan != original)
+    }
+
     #[test]
     fn substitutes_through_filter_and_sort_without_cloning_sources() -> Result<(), DatabaseError> {
         let table = build_t1_table()?;
@@ -881,7 +897,7 @@ mod tests {
             Childrens::Only(Box::new(sort)),
         );
 
-        assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert!(eliminate_projects(&mut plan, &mut arena)?);
         let Operator::Project(op) = &plan.operator else {
             unreachable!()
         };
@@ -911,13 +927,12 @@ mod tests {
             unreachable!()
         };
         assert!(matches!(scan.operator, Operator::TableScan(_)));
-        assert!(!EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert!(!eliminate_projects(&mut plan, &mut arena)?);
         Ok(())
     }
 
     #[test]
-    fn aggregate_consumes_mapping_but_its_output_starts_a_new_slot_space(
-    ) -> Result<(), DatabaseError> {
+    fn aggregate_preserves_input_project_and_separate_output_slots() -> Result<(), DatabaseError> {
         let table = build_t1_table()?;
         let mut arena = PlanArena::new(&table.table_arena);
         let scan = table.plan_with_arena("select c1, c2 from t1", &mut arena)?;
@@ -944,7 +959,9 @@ mod tests {
             Childrens::Only(Box::new(aggregate)),
         );
 
-        assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
+        let original = plan.clone();
+        assert!(!eliminate_projects(&mut plan, &mut arena)?);
+        assert_eq!(plan, original);
         let Operator::Project(op) = &plan.operator else {
             unreachable!()
         };
@@ -958,16 +975,23 @@ mod tests {
         let ScalarExpression::AggCall { args, .. } = arena.expression(op.agg_calls[0]) else {
             unreachable!()
         };
-        assert_eq!(args, &[replacement]);
-        let Childrens::Only(scan) = aggregate.childrens.as_ref() else {
+        assert_eq!(args, &[arg]);
+        let Childrens::Only(input) = aggregate.childrens.as_ref() else {
             unreachable!()
         };
-        assert!(matches!(scan.operator, Operator::TableScan(_)));
+        let Operator::Project(op) = &input.operator else {
+            unreachable!()
+        };
+        assert_eq!(op.exprs[0], replacement);
+        assert!(matches!(
+            input.childrens.only().operator,
+            Operator::TableScan(_)
+        ));
         Ok(())
     }
 
     #[test]
-    fn repeated_refs_are_rewritten_once_and_replacements_are_not_revisited(
+    fn repeated_refs_are_copied_without_mutating_sources_or_revisiting_replacements(
     ) -> Result<(), DatabaseError> {
         let table = build_t1_table()?;
         let mut arena = PlanArena::new(&table.table_arena);
@@ -981,10 +1005,21 @@ mod tests {
         );
 
         assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
+        let Operator::Project(op) = &plan.operator else {
+            unreachable!()
+        };
+        for rewritten in &op.exprs {
+            let ScalarExpression::Binary { left_expr, .. } = rewritten.unpack_alias_ref(&arena)
+            else {
+                unreachable!()
+            };
+            assert_eq!(*left_expr, replacement);
+            assert_ne!(*rewritten, expr);
+        }
         let ScalarExpression::Binary { left_expr, .. } = arena.expression(expr) else {
             unreachable!()
         };
-        assert_eq!(*left_expr, replacement);
+        assert_eq!(*left_expr, reference);
         let ScalarExpression::Binary { left_expr, .. } = arena.expression(replacement) else {
             unreachable!()
         };
@@ -997,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn mapping_transfer_keeps_shared_expressions_visited_across_plan_nodes(
+    fn mapping_transfer_preserves_shared_source_expressions_across_plan_nodes(
     ) -> Result<(), DatabaseError> {
         let table = build_t1_table()?;
         let mut arena = PlanArena::new(&table.table_arena);
@@ -1018,11 +1053,25 @@ mod tests {
             Childrens::Only(Box::new(filter)),
         );
 
-        assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert!(eliminate_projects(&mut plan, &mut arena)?);
+        let Operator::Project(project) = &plan.operator else {
+            unreachable!()
+        };
+        let Operator::Filter(filter) = &plan.childrens.only().operator else {
+            unreachable!()
+        };
+        for rewritten in [project.exprs[0], filter.predicate] {
+            let ScalarExpression::Binary { left_expr, .. } = rewritten.unpack_alias_ref(&arena)
+            else {
+                unreachable!()
+            };
+            assert_eq!(*left_expr, replacement);
+            assert_ne!(rewritten, shared);
+        }
         let ScalarExpression::Binary { left_expr, .. } = arena.expression(shared) else {
             unreachable!()
         };
-        assert_eq!(*left_expr, replacement);
+        assert_eq!(*left_expr, reference);
         let ScalarExpression::Binary { left_expr, .. } = arena.expression(replacement) else {
             unreachable!()
         };
@@ -1031,7 +1080,7 @@ mod tests {
             unreachable!()
         };
         assert_eq!(*position, 1);
-        assert!(!EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert!(!eliminate_projects(&mut plan, &mut arena)?);
         Ok(())
     }
 
@@ -1085,7 +1134,7 @@ mod tests {
         }
         let schema = plan.output_schema(&mut arena).clone();
 
-        assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert!(eliminate_projects(&mut plan, &mut arena)?);
         assert_eq!(plan.output_schema(&mut arena), &schema);
         assert_eq!(plan.explain(&mut arena, 0).matches("Projection").count(), 1);
         let Operator::Project(op) = &plan.operator else {
@@ -1113,7 +1162,7 @@ mod tests {
             names,
             ["d2", "e2", "c5", "a3", "e3", "x3", "b4", "d4", "b9", "d9", "a1", "e1"]
         );
-        assert!(!EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert!(!eliminate_projects(&mut plan, &mut arena)?);
         Ok(())
     }
 
@@ -1134,7 +1183,7 @@ mod tests {
                 JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
             let mut plan = permutation(&mut arena, cross, &[0, 1, 2]);
 
-            assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
+            assert!(eliminate_projects(&mut plan, &mut arena)?);
             assert_eq!(plan.explain(&mut arena, 0).matches("Projection").count(), 1);
             let Operator::Project(op) = &plan.operator else {
                 unreachable!()
@@ -1146,7 +1195,7 @@ mod tests {
                 };
                 assert_eq!(*position, expected);
             }
-            assert!(!EliminateProject.apply(&mut plan, &mut arena, None)?);
+            assert!(!eliminate_projects(&mut plan, &mut arena)?);
         }
         Ok(())
     }
@@ -1161,7 +1210,7 @@ mod tests {
         let cross = JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
         let mut plan = permutation(&mut arena, cross, &[0, 1]);
 
-        assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert!(eliminate_projects(&mut plan, &mut arena)?);
         assert_eq!(plan.explain(&mut arena, 0).matches("Projection").count(), 1);
         let Operator::Project(op) = &plan.operator else {
             unreachable!()
@@ -1172,7 +1221,7 @@ mod tests {
             };
             assert_eq!(*position, expected);
         }
-        assert!(!EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert!(!eliminate_projects(&mut plan, &mut arena)?);
         Ok(())
     }
 
@@ -1187,7 +1236,7 @@ mod tests {
         let cross = JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
         let mut plan = permutation(&mut arena, cross, &[0, 1, 2]);
 
-        assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert!(eliminate_projects(&mut plan, &mut arena)?);
         assert_eq!(plan.explain(&mut arena, 0).matches("Projection").count(), 1);
         let Operator::Project(op) = &plan.operator else {
             unreachable!()
@@ -1215,7 +1264,7 @@ mod tests {
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
                 "test_collapse_project",
-                HepBatchStrategy::once_topdown(),
+                HepBatchStrategy::fix_point_bottomup(10),
                 &[NormalizationRuleImpl::EliminateProject],
             )
             .build();
@@ -1249,7 +1298,7 @@ mod tests {
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
                 "test_collapse_project_with_alias",
-                HepBatchStrategy::once_topdown(),
+                HepBatchStrategy::fix_point_bottomup(10),
                 &[NormalizationRuleImpl::EliminateProject],
             )
             .build();

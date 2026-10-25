@@ -2946,7 +2946,7 @@ mod test {
         })?;
         assert_eq!(
             plan,
-            "Projection [users.user_name] [Project => (Sort Option: Follow)] Filter (users.id = 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan users -> [users.id, users.user_name] [SeqScan => (Sort Option: None)]"
+            "Projection [users.user_name] [Project => (Sort Option: Follow)] TableScan users -> [users.id, users.user_name] [IndexScan By pk_index => 1 => (Sort Option: OrderBy: (users.id Asc Nulls Last) ignore_prefix_len: 0)]"
         );
 
         let set_plan = database.explain(|ctx| {

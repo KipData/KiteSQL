@@ -367,7 +367,8 @@ mod test {
         create_index(&mut kite_sql, "create index b_index on t1 (b)")?;
         create_index(&mut kite_sql, "create index p_index on t1 (a, b)")?;
 
-        for i in 0..DEFAULT_NUM_OF_BUCKETS + 1 {
+        // Keep this fixture independent of the default histogram bucket count.
+        for i in 0..101 {
             kite_sql
                 .run(format!("insert into t1 values({i}, {}, NULL)", i % 20))?
                 .done()?;
