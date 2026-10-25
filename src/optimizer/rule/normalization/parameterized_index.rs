@@ -22,7 +22,7 @@ use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::index::{IndexLookup, IndexType};
@@ -178,6 +178,7 @@ fn parameterize_right_subtree(
         plan.physical_option = Some(PhysicalOption::new(
             PlanImpl::IndexScan(Box::new(index_info)),
             sort_option,
+            RowCountOption::Unknown,
         ));
         return true;
     }
@@ -314,6 +315,7 @@ fn parameterize(
                 plan.physical_option = Some(PhysicalOption::new(
                     PlanImpl::IndexScan(Box::new(info.clone())),
                     info.sort_option.clone(),
+                    RowCountOption::Unknown,
                 ));
                 return Some(probe);
             }
@@ -379,8 +381,11 @@ impl NormalizationRule for ParameterizeInnerJoin {
                 Operator::Project(ProjectOperator { exprs }),
                 Childrens::None,
             );
-            project.physical_option =
-                Some(PhysicalOption::new(PlanImpl::Project, SortOption::Follow));
+            project.physical_option = Some(PhysicalOption::new(
+                PlanImpl::Project,
+                SortOption::Follow,
+                RowCountOption::Follow,
+            ));
             (Some(project), probe)
         };
 
@@ -422,7 +427,11 @@ impl NormalizationRule for ParameterizeInnerJoin {
         if let Some(filter) = filter {
             // The original join filter uses the original left/right output slots.
             *plan = FilterOperator::build(filter, plan.take(), false);
-            plan.physical_option = Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow));
+            plan.physical_option = Some(PhysicalOption::new(
+                PlanImpl::Filter,
+                SortOption::Follow,
+                RowCountOption::Unknown,
+            ));
         }
         Ok(true)
     }
@@ -731,6 +740,7 @@ mod inner_join_tests {
         right.physical_option = Some(PhysicalOption::new(
             PlanImpl::IndexScan(Box::new(info.clone())),
             SortOption::None,
+            RowCountOption::Unknown,
         ));
         let right = FilterOperator::build(predicate, right, false);
         let mut plan = join(left, right, vec![(l0, r1), (l1, r2)], None);

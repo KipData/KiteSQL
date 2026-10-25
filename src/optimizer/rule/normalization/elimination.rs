@@ -19,7 +19,7 @@ use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan};
 use crate::types::index::{IndexLookup, IndexOrderHint};
 
@@ -56,7 +56,11 @@ impl NormalizationRule for EliminateRedundantSort {
                 offset,
                 limit: Some(limit),
             });
-            plan.physical_option = Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow));
+            plan.physical_option = Some(PhysicalOption::new(
+                PlanImpl::Limit,
+                SortOption::Follow,
+                RowCountOption::Unknown,
+            ));
             return Ok(true);
         }
 
@@ -296,7 +300,11 @@ impl NormalizationRule for UseStreamAggregate {
             return Ok(false);
         }
 
-        plan.physical_option = Some(PhysicalOption::new(implementation, SortOption::Follow));
+        plan.physical_option = Some(PhysicalOption::new(
+            implementation,
+            SortOption::Follow,
+            RowCountOption::Unknown,
+        ));
         Ok(true)
     }
 }
@@ -341,8 +349,16 @@ impl NormalizationRule for ForceSpillAggregate {
             return Ok(false);
         }
         let sort = only_child_mut(plan).expect("aggregate child was wrapped with sort");
-        sort.physical_option = Some(PhysicalOption::new(PlanImpl::Sort, sort_option));
-        plan.physical_option = Some(PhysicalOption::new(implementation, SortOption::Follow));
+        sort.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Sort,
+            sort_option,
+            RowCountOption::Follow,
+        ));
+        plan.physical_option = Some(PhysicalOption::new(
+            implementation,
+            SortOption::Follow,
+            RowCountOption::Unknown,
+        ));
         Ok(true)
     }
 }
@@ -376,6 +392,7 @@ fn ensure_order(
     if let Some(PhysicalOption {
         plan: PlanImpl::IndexScan(index_info),
         sort_option,
+        ..
     }) = plan.physical_option.as_mut()
     {
         if covers(required, &index_info.sort_option, |required, provided| {
@@ -507,7 +524,9 @@ mod tests {
     use crate::planner::operator::sort::{SortField, SortOperator};
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::top_k::TopKOperator;
-    use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+    use crate::planner::operator::{
+        Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
+    };
     use crate::planner::{Childrens, ExprRef, LogicalPlan};
     use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
@@ -544,6 +563,7 @@ mod tests {
         leaf.physical_option = Some(PhysicalOption::new(
             PlanImpl::IndexScan(Box::new(index_info)),
             index_sort_option,
+            RowCountOption::Unknown,
         ));
 
         let predicate =
@@ -556,7 +576,11 @@ mod tests {
             }),
             Childrens::Only(Box::new(leaf)),
         );
-        filter.physical_option = Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow));
+        filter.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Filter,
+            SortOption::Follow,
+            RowCountOption::Unknown,
+        ));
 
         LogicalPlan::new(
             Operator::Sort(SortOperator {
@@ -632,6 +656,7 @@ mod tests {
         scan.physical_option = Some(PhysicalOption::new(
             PlanImpl::IndexScan(Box::new(index_info)),
             sort_option,
+            RowCountOption::Unknown,
         ));
 
         let mut filter = LogicalPlan::new(
@@ -642,7 +667,11 @@ mod tests {
             }),
             Childrens::Only(Box::new(scan)),
         );
-        filter.physical_option = Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow));
+        filter.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Filter,
+            SortOption::Follow,
+            RowCountOption::Unknown,
+        ));
         filter
     }
 
@@ -894,7 +923,11 @@ mod tests {
             offset: None,
             limit: Some(3),
         });
-        filter.physical_option = Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow));
+        filter.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Limit,
+            SortOption::Follow,
+            RowCountOption::Unknown,
+        ));
 
         assert!(!EliminateRedundantSort.apply(&mut plan, &mut arena)?);
         assert!(!scan_is_reverse(&plan));
@@ -1063,12 +1096,14 @@ mod tests {
                 child.physical_option = Some(PhysicalOption::new(
                     PlanImpl::IndexScan(Box::new(index_info)),
                     sort_option,
+                    RowCountOption::Unknown,
                 ));
             }
         }
         plan.physical_option = Some(PhysicalOption::new(
             PlanImpl::HashAggregate,
             SortOption::None,
+            RowCountOption::Unknown,
         ));
 
         let rule = UseStreamAggregate;
@@ -1102,10 +1137,12 @@ mod tests {
         child.physical_option = Some(PhysicalOption::new(
             PlanImpl::IndexScan(Box::new(scan_op.index_infos[0].clone())),
             sort_option,
+            RowCountOption::Unknown,
         ));
         plan.physical_option = Some(PhysicalOption::new(
             PlanImpl::HashAggregate,
             SortOption::None,
+            RowCountOption::Unknown,
         ));
 
         let rule = UseStreamAggregate;
@@ -1132,6 +1169,7 @@ mod tests {
         unordered.physical_option = Some(PhysicalOption::new(
             PlanImpl::HashAggregate,
             SortOption::None,
+            RowCountOption::Unknown,
         ));
         assert!(!rule.apply(&mut unordered, &mut arena)?);
         assert!(matches!(
@@ -1158,6 +1196,7 @@ mod tests {
         plan.physical_option = Some(PhysicalOption::new(
             PlanImpl::HashAggregate,
             SortOption::None,
+            RowCountOption::Unknown,
         ));
 
         let rule = ForceSpillAggregate;
@@ -1238,6 +1277,7 @@ mod tests {
             scan_plan.physical_option = Some(PhysicalOption::new(
                 PlanImpl::IndexScan(Box::new(index_info.clone())),
                 index_info.sort_option,
+                RowCountOption::Unknown,
             ));
         }
 
@@ -1250,7 +1290,11 @@ mod tests {
             }),
             Childrens::Only(Box::new(scan_plan)),
         );
-        filter.physical_option = Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow));
+        filter.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Filter,
+            SortOption::Follow,
+            RowCountOption::Unknown,
+        ));
 
         let mut plan = LogicalPlan::new(
             Operator::Sort(SortOperator {

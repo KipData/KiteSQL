@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use std::sync::LazyLock;
 
 static SORT_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -49,6 +49,7 @@ impl ImplementationRule for SortImplementation {
                         fields: op.sort_fields.clone(),
                         ignore_prefix_len: 0,
                     },
+                    RowCountOption::Follow,
                 ),
                 None,
             );

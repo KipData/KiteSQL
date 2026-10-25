@@ -134,6 +134,13 @@ If code looks similar in multiple places, it probably wants to be reused.
 - Avoid exposing internal details
 - Keep modules small, focused, and cohesive
 
+### 4.3 Rust Imports
+
+- Declare `use` imports at module scope, not inside functions or methods.
+- Import functions and types before using them; do not write fully qualified paths
+  such as `crate::optimizer::rule::normalization::reorder_joins(...)` in function bodies.
+- Use import aliases when names conflict; keep test imports at the test module scope.
+
 ---
 
 ## 5. Dependency Policy

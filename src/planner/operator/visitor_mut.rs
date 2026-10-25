@@ -463,6 +463,7 @@ pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
 mod tests {
     use super::*;
     use crate::planner::operator::visitor::tests::all_operators;
+    use crate::planner::operator::RowCountOption;
     use crate::types::value::DataValue;
 
     struct IncrementConstants(usize);
@@ -504,9 +505,17 @@ mod tests {
         }
 
         let mut child = LogicalPlan::new(Operator::Dummy, Childrens::None);
-        child.physical_option = Some(PhysicalOption::new(PlanImpl::Dummy, SortOption::None));
+        child.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Dummy,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
         let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::Only(Box::new(child)));
-        plan.physical_option = Some(PhysicalOption::new(PlanImpl::Dummy, SortOption::None));
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Dummy,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
 
         let mut counter = Counter {
             operators: 0,

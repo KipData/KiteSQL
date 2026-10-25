@@ -40,7 +40,9 @@ mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
 mod elimination;
+mod join_reorder;
 mod min_max_top_k;
+use join_reorder::GreedyJoinReorder;
 mod parameterized_index;
 mod pushdown_limit;
 mod pushdown_predicates;
@@ -80,6 +82,7 @@ pub enum NormalizationRuleImpl {
     ParameterizeMarkApply,
     ParameterizeInnerJoin,
     EliminateIndexFilter,
+    GreedyJoinReorder,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -184,7 +187,8 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::MinMaxToTopK => NormalizationRuleRootTag::Aggregate,
             NormalizationRuleImpl::EliminateIndexFilter => NormalizationRuleRootTag::Filter,
-            NormalizationRuleImpl::ParameterizeInnerJoin => NormalizationRuleRootTag::Join,
+            NormalizationRuleImpl::ParameterizeInnerJoin
+            | NormalizationRuleImpl::GreedyJoinReorder => NormalizationRuleRootTag::Join,
             NormalizationRuleImpl::ParameterizeMarkApply => NormalizationRuleRootTag::MarkApply,
         }
     }
@@ -198,6 +202,7 @@ impl NormalizationRule for NormalizationRuleImpl {
     ) -> Result<bool, DatabaseError> {
         match self {
             NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, arena),
+            NormalizationRuleImpl::GreedyJoinReorder => GreedyJoinReorder.apply(plan, arena),
             NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, arena),
             NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(plan, arena),
             NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan, arena),

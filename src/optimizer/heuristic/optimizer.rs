@@ -18,7 +18,7 @@ use crate::optimizer::core::rule::{
 };
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::{
-    HepBatch, HepBatchStep, HepBatchStrategy, HepLocalRewriteBatch, HepWholeTreePass,
+    HepBatch, HepBatchStep, HepBatchStrategy, HepLocalRewriteBatch, HepMatchOrder, HepWholeTreePass,
 };
 use crate::optimizer::rule::implementation::{ImplementationRuleImpl, ImplementationRuleRootTag};
 use crate::optimizer::rule::normalization::{
@@ -26,7 +26,7 @@ use crate::optimizer::rule::normalization::{
     evaluator_bind_current, NormalizationRuleImpl, OrderHintKind, ScanOrderHint, WholeTreePassKind,
 };
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
 use std::array;
 use std::ops::Not;
@@ -38,7 +38,6 @@ pub struct HepOptimizer<'a> {
     before_batches: &'a [HepBatch],
     after_batches: &'a [HepBatch],
     implementation_index: &'a ImplementationRuleIndex,
-    max_local_rules_len: usize,
     plan: LogicalPlan,
 }
 
@@ -48,13 +47,11 @@ impl<'a> HepOptimizer<'a> {
         before_batches: &'a [HepBatch],
         after_batches: &'a [HepBatch],
         implementation_index: &'a ImplementationRuleIndex,
-        max_local_rules_len: usize,
     ) -> Self {
         Self {
             before_batches,
             after_batches,
             implementation_index,
-            max_local_rules_len,
             plan,
         }
     }
@@ -64,13 +61,7 @@ impl<'a> HepOptimizer<'a> {
         loader: Option<&StatisticMetaLoader<'_>>,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let mut applied_rules = Vec::with_capacity(self.max_local_rules_len);
-        Self::apply_batches(
-            &mut self.plan,
-            self.before_batches,
-            &mut applied_rules,
-            arena,
-        )?;
+        Self::apply_batches(&mut self.plan, self.before_batches, arena)?;
 
         if let Some(loader) = loader {
             if self.implementation_index.is_empty().not() {
@@ -88,12 +79,7 @@ impl<'a> HepOptimizer<'a> {
                 )?;
             }
         }
-        Self::apply_batches(
-            &mut self.plan,
-            self.after_batches,
-            &mut applied_rules,
-            arena,
-        )?;
+        Self::apply_batches(&mut self.plan, self.after_batches, arena)?;
 
         Ok(self.plan)
     }
@@ -102,20 +88,22 @@ impl<'a> HepOptimizer<'a> {
     fn apply_batches(
         plan: &mut LogicalPlan,
         batches: &[HepBatch],
-        applied_rules: &mut Vec<bool>,
         arena: &mut PlanArena,
     ) -> Result<(), DatabaseError> {
         for batch in batches {
             match batch.strategy {
-                HepBatchStrategy::MaxTimes(max_iteration) => {
+                HepBatchStrategy::MaxTimes {
+                    max_iteration,
+                    order,
+                } => {
                     for _ in 0..max_iteration {
-                        if !Self::apply_batch(plan, batch, applied_rules, arena)? {
+                        if !Self::apply_batch(plan, batch, order, arena)? {
                             break;
                         }
                     }
                 }
-                HepBatchStrategy::LoopIfApplied => {
-                    while Self::apply_batch(plan, batch, applied_rules, arena)? {}
+                HepBatchStrategy::LoopIfApplied(order) => {
+                    while Self::apply_batch(plan, batch, order, arena)? {}
                 }
             }
         }
@@ -126,7 +114,7 @@ impl<'a> HepOptimizer<'a> {
     fn apply_batch(
         plan: &mut LogicalPlan,
         batch: &HepBatch,
-        applied_rules: &mut Vec<bool>,
+        order: HepMatchOrder,
         arena: &mut PlanArena,
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
@@ -138,7 +126,7 @@ impl<'a> HepOptimizer<'a> {
                     }
                 }
                 HepBatchStep::LocalRewrite(rules) => {
-                    if Self::apply_local_rules(plan, rules, applied_rules, arena)? {
+                    if Self::apply_local_rules(plan, rules, order, arena)? {
                         applied = true;
                     }
                 }
@@ -395,59 +383,48 @@ impl<'a> HepOptimizer<'a> {
     fn apply_local_rules(
         plan: &mut LogicalPlan,
         rules: &HepLocalRewriteBatch,
-        applied_rules: &mut Vec<bool>,
+        order: HepMatchOrder,
         arena: &mut PlanArena,
     ) -> Result<bool, DatabaseError> {
-        applied_rules.clear();
-        applied_rules.resize(rules.len(), false);
-        Self::apply_local_rules_inner(plan, rules, applied_rules, arena)
+        let mut applied = false;
+        if matches!(order, HepMatchOrder::TopDown) {
+            applied |= Self::apply_local_rules_current(plan, rules, arena)?;
+        }
+
+        let child_applied = match plan.childrens.as_mut() {
+            Childrens::Only(child) => Self::apply_local_rules(child, rules, order, arena)?,
+            Childrens::Twins { left, right } => {
+                let left_applied = Self::apply_local_rules(left, rules, order, arena)?;
+                let right_applied = Self::apply_local_rules(right, rules, order, arena)?;
+                left_applied || right_applied
+            }
+            Childrens::None => false,
+        };
+        if child_applied {
+            plan.reset_output_schema_cache();
+        }
+        applied |= child_applied;
+
+        if matches!(order, HepMatchOrder::BottomUp) {
+            applied |= Self::apply_local_rules_current(plan, rules, arena)?;
+        }
+        Ok(applied)
     }
 
-    fn apply_local_rules_inner(
+    fn apply_local_rules_current(
         plan: &mut LogicalPlan,
         rules: &HepLocalRewriteBatch,
-        applied_rules: &mut [bool],
         arena: &mut PlanArena,
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
         let mut next_rule_idx = 0;
-
         while let Some(idx) = rules.next_matching_rule_index_from(&plan.operator, next_rule_idx) {
-            let rule = rules.rules[idx];
             next_rule_idx = idx + 1;
-            if applied_rules[idx] {
-                continue;
-            }
-            let applied_rule = rule.apply(plan, arena)?;
-            if applied_rule {
-                applied_rules[idx] = true;
+            if rules.rules[idx].apply(plan, arena)? {
                 applied = true;
                 plan.reset_output_schema_cache_recursive();
             }
         }
-
-        match plan.childrens.as_mut() {
-            Childrens::Only(child) => {
-                let child_applied =
-                    Self::apply_local_rules_inner(child, rules, applied_rules, arena)?;
-                applied |= child_applied;
-                if child_applied {
-                    plan.reset_output_schema_cache();
-                }
-            }
-            Childrens::Twins { left, right } => {
-                let left_applied =
-                    Self::apply_local_rules_inner(left, rules, applied_rules, arena)?;
-                let right_applied =
-                    Self::apply_local_rules_inner(right, rules, applied_rules, arena)?;
-                applied |= left_applied || right_applied;
-                if left_applied || right_applied {
-                    plan.reset_output_schema_cache();
-                }
-            }
-            Childrens::None => {}
-        }
-
         Ok(applied)
     }
 }
@@ -483,6 +460,7 @@ impl ImplementationRuleIndex {
                 Some(PhysicalOption::new(
                     PlanImpl::HashAggregate,
                     SortOption::None,
+                    RowCountOption::Unknown,
                 ))
             }
             Operator::Aggregate(op)
@@ -492,25 +470,42 @@ impl ImplementationRuleIndex {
                 Some(PhysicalOption::new(
                     PlanImpl::SimpleAggregate,
                     SortOption::None,
+                    RowCountOption::Estimated(1),
                 ))
             }
-            Operator::Dummy if self.contains(ImplementationRuleImpl::Dummy) => {
-                Some(PhysicalOption::new(PlanImpl::Dummy, SortOption::None))
-            }
+            Operator::Dummy if self.contains(ImplementationRuleImpl::Dummy) => Some(
+                PhysicalOption::new(PlanImpl::Dummy, SortOption::None, RowCountOption::Unknown),
+            ),
             Operator::Filter(_) if self.contains(ImplementationRuleImpl::Filter) => {
-                Some(PhysicalOption::new(PlanImpl::Filter, SortOption::Follow))
+                Some(PhysicalOption::new(
+                    PlanImpl::Filter,
+                    SortOption::Follow,
+                    RowCountOption::Unknown,
+                ))
             }
             Operator::Join(join_op) if self.contains(ImplementationRuleImpl::HashJoin) => {
-                Some(PhysicalOption::new(join_op.plan_impl(), SortOption::None))
+                Some(PhysicalOption::new(
+                    join_op.plan_impl(),
+                    SortOption::None,
+                    RowCountOption::Unknown,
+                ))
             }
-            Operator::Limit(_) if self.contains(ImplementationRuleImpl::Limit) => {
-                Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow))
-            }
+            Operator::Limit(_) if self.contains(ImplementationRuleImpl::Limit) => Some(
+                PhysicalOption::new(PlanImpl::Limit, SortOption::Follow, RowCountOption::Unknown),
+            ),
             Operator::MarkApply(_) if self.contains(ImplementationRuleImpl::MarkApply) => {
-                Some(PhysicalOption::new(PlanImpl::MarkApply, SortOption::Follow))
+                Some(PhysicalOption::new(
+                    PlanImpl::MarkApply,
+                    SortOption::Follow,
+                    RowCountOption::Unknown,
+                ))
             }
             Operator::Project(_) if self.contains(ImplementationRuleImpl::Projection) => {
-                Some(PhysicalOption::new(PlanImpl::Project, SortOption::Follow))
+                Some(PhysicalOption::new(
+                    PlanImpl::Project,
+                    SortOption::Follow,
+                    RowCountOption::Follow,
+                ))
             }
             Operator::ScalarQueryInit(_)
                 if self.contains(ImplementationRuleImpl::ScalarQueryInit) =>
@@ -518,6 +513,7 @@ impl ImplementationRuleIndex {
                 Some(PhysicalOption::new(
                     PlanImpl::ScalarQueryInit,
                     SortOption::Follow,
+                    RowCountOption::Follow,
                 ))
             }
             Operator::ScalarSubquery(_)
@@ -526,12 +522,14 @@ impl ImplementationRuleIndex {
                 Some(PhysicalOption::new(
                     PlanImpl::ScalarSubquery,
                     SortOption::Follow,
+                    RowCountOption::Follow,
                 ))
             }
             Operator::FunctionScan(_) if self.contains(ImplementationRuleImpl::FunctionScan) => {
                 Some(PhysicalOption::new(
                     PlanImpl::FunctionScan,
                     SortOption::None,
+                    RowCountOption::Unknown,
                 ))
             }
             Operator::Sort(op) if self.contains(ImplementationRuleImpl::Sort) => {
@@ -541,6 +539,7 @@ impl ImplementationRuleIndex {
                         fields: op.sort_fields.clone(),
                         ignore_prefix_len: 0,
                     },
+                    RowCountOption::Follow,
                 ))
             }
             Operator::TopK(op) if self.contains(ImplementationRuleImpl::TopK) => {
@@ -550,57 +549,88 @@ impl ImplementationRuleIndex {
                         fields: op.sort_fields.clone(),
                         ignore_prefix_len: 0,
                     },
+                    RowCountOption::Unknown,
                 ))
             }
-            Operator::Values(_) if self.contains(ImplementationRuleImpl::Values) => {
-                Some(PhysicalOption::new(PlanImpl::Values, SortOption::None))
+            Operator::Values(op) if self.contains(ImplementationRuleImpl::Values) => {
+                Some(PhysicalOption::new(
+                    PlanImpl::Values,
+                    SortOption::None,
+                    RowCountOption::Estimated(op.rows.len() / op.schema_ref.len()),
+                ))
             }
-            Operator::Window(op) if self.contains(ImplementationRuleImpl::Window) => {
-                Some(PhysicalOption::new(PlanImpl::Window, op.sort_option()))
-            }
-            Operator::Analyze(_) if self.contains(ImplementationRuleImpl::Analyze) => {
-                Some(PhysicalOption::new(PlanImpl::Analyze, SortOption::None))
-            }
+            Operator::Window(op) if self.contains(ImplementationRuleImpl::Window) => Some(
+                PhysicalOption::new(PlanImpl::Window, op.sort_option(), RowCountOption::Follow),
+            ),
+            Operator::Analyze(_) if self.contains(ImplementationRuleImpl::Analyze) => Some(
+                PhysicalOption::new(PlanImpl::Analyze, SortOption::None, RowCountOption::Unknown),
+            ),
             #[cfg(feature = "copy")]
             Operator::CopyFromFile(_) if self.contains(ImplementationRuleImpl::CopyFromFile) => {
                 Some(PhysicalOption::new(
                     PlanImpl::CopyFromFile,
                     SortOption::None,
+                    RowCountOption::Unknown,
                 ))
             }
             #[cfg(feature = "copy")]
             Operator::CopyToFile(_) if self.contains(ImplementationRuleImpl::CopyToFile) => {
-                Some(PhysicalOption::new(PlanImpl::CopyToFile, SortOption::None))
+                Some(PhysicalOption::new(
+                    PlanImpl::CopyToFile,
+                    SortOption::None,
+                    RowCountOption::Unknown,
+                ))
             }
-            Operator::Delete(_) if self.contains(ImplementationRuleImpl::Delete) => {
-                Some(PhysicalOption::new(PlanImpl::Delete, SortOption::None))
-            }
-            Operator::Insert(_) if self.contains(ImplementationRuleImpl::Insert) => {
-                Some(PhysicalOption::new(PlanImpl::Insert, SortOption::None))
-            }
-            Operator::Update(_) if self.contains(ImplementationRuleImpl::Update) => {
-                Some(PhysicalOption::new(PlanImpl::Update, SortOption::None))
-            }
+            Operator::Delete(_) if self.contains(ImplementationRuleImpl::Delete) => Some(
+                PhysicalOption::new(PlanImpl::Delete, SortOption::None, RowCountOption::Unknown),
+            ),
+            Operator::Insert(_) if self.contains(ImplementationRuleImpl::Insert) => Some(
+                PhysicalOption::new(PlanImpl::Insert, SortOption::None, RowCountOption::Unknown),
+            ),
+            Operator::Update(_) if self.contains(ImplementationRuleImpl::Update) => Some(
+                PhysicalOption::new(PlanImpl::Update, SortOption::None, RowCountOption::Unknown),
+            ),
             Operator::AddColumn(_) if self.contains(ImplementationRuleImpl::AddColumn) => {
-                Some(PhysicalOption::new(PlanImpl::AddColumn, SortOption::None))
+                Some(PhysicalOption::new(
+                    PlanImpl::AddColumn,
+                    SortOption::None,
+                    RowCountOption::Unknown,
+                ))
             }
             Operator::ChangeColumn(_) if self.contains(ImplementationRuleImpl::ChangeColumn) => {
                 Some(PhysicalOption::new(
                     PlanImpl::ChangeColumn,
                     SortOption::None,
+                    RowCountOption::Unknown,
                 ))
             }
             Operator::CreateTable(_) if self.contains(ImplementationRuleImpl::CreateTable) => {
-                Some(PhysicalOption::new(PlanImpl::CreateTable, SortOption::None))
+                Some(PhysicalOption::new(
+                    PlanImpl::CreateTable,
+                    SortOption::None,
+                    RowCountOption::Unknown,
+                ))
             }
             Operator::DropColumn(_) if self.contains(ImplementationRuleImpl::DropColumn) => {
-                Some(PhysicalOption::new(PlanImpl::DropColumn, SortOption::None))
+                Some(PhysicalOption::new(
+                    PlanImpl::DropColumn,
+                    SortOption::None,
+                    RowCountOption::Unknown,
+                ))
             }
             Operator::DropTable(_) if self.contains(ImplementationRuleImpl::DropTable) => {
-                Some(PhysicalOption::new(PlanImpl::DropTable, SortOption::None))
+                Some(PhysicalOption::new(
+                    PlanImpl::DropTable,
+                    SortOption::None,
+                    RowCountOption::Unknown,
+                ))
             }
             Operator::Truncate(_) if self.contains(ImplementationRuleImpl::Truncate) => {
-                Some(PhysicalOption::new(PlanImpl::Truncate, SortOption::None))
+                Some(PhysicalOption::new(
+                    PlanImpl::Truncate,
+                    SortOption::None,
+                    RowCountOption::Unknown,
+                ))
             }
             _ => None,
         }
@@ -626,17 +656,128 @@ mod tests {
     use crate::expression::range_detacher::Range;
     use crate::expression::ScalarExpression;
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-    use crate::optimizer::heuristic::batch::HepBatchStrategy;
-    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
+    use crate::optimizer::heuristic::batch::{HepBatch, HepBatchStrategy, HepMatchOrder};
+    use crate::optimizer::heuristic::optimizer::{HepOptimizer, HepOptimizerPipeline};
     use crate::optimizer::rule::implementation::ImplementationRuleImpl;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
+    use crate::planner::operator::filter::FilterOperator;
+    use crate::planner::operator::limit::LimitOperator;
+    use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::sort::SortField;
     use crate::planner::operator::{Operator, PlanImpl, SortOption};
+    use crate::planner::{Childrens, LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::{Storage, Transaction};
     use crate::types::index::IndexLookup;
     use crate::types::value::DataValue;
     use std::ops::Bound;
     use tempfile::TempDir;
+
+    fn filter_chain(length: usize, arena: &mut PlanArena) -> LogicalPlan {
+        let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
+        for value in 0..length {
+            let predicate =
+                arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(value as i32)));
+            plan = FilterOperator::build(predicate, plan, false);
+        }
+        plan
+    }
+
+    #[test]
+    fn local_rule_order_and_sibling_application() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let batch = HepBatch::new(
+            "Combine Filters".into(),
+            HepBatchStrategy::once_bottomup(),
+            vec![NormalizationRuleImpl::CombineFilter],
+        );
+        let mut topdown = filter_chain(3, &mut arena);
+        assert!(HepOptimizer::apply_batch(
+            &mut topdown,
+            &batch,
+            HepMatchOrder::TopDown,
+            &mut arena
+        )?);
+        assert!(matches!(
+            topdown.childrens.only().operator,
+            Operator::Filter(_)
+        ));
+        let mut bottomup = filter_chain(3, &mut arena);
+        assert!(HepOptimizer::apply_batch(
+            &mut bottomup,
+            &batch,
+            HepMatchOrder::BottomUp,
+            &mut arena
+        )?);
+        assert!(matches!(
+            bottomup.childrens.only().operator,
+            Operator::Dummy
+        ));
+        assert!(!HepOptimizer::apply_batch(
+            &mut bottomup,
+            &batch,
+            HepMatchOrder::BottomUp,
+            &mut arena
+        )?);
+
+        for strategy in [
+            HepBatchStrategy::once_topdown(),
+            HepBatchStrategy::once_bottomup(),
+        ] {
+            let plan = LogicalPlan::new(
+                Operator::Dummy,
+                Childrens::Twins {
+                    left: Box::new(filter_chain(2, &mut arena)),
+                    right: Box::new(filter_chain(2, &mut arena)),
+                },
+            );
+            let pipeline = HepOptimizerPipeline::builder()
+                .before_batch(
+                    "Combine Filters".into(),
+                    strategy,
+                    vec![NormalizationRuleImpl::CombineFilter],
+                )
+                .build();
+            let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
+            let (left, right) = result.childrens.twins();
+            assert!(matches!(left.operator, Operator::Filter(_)));
+            assert!(matches!(right.operator, Operator::Filter(_)));
+            assert!(matches!(left.childrens.only().operator, Operator::Dummy));
+            assert!(matches!(right.childrens.only().operator, Operator::Dummy));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bottomup_fix_point_respects_iteration_limit() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        for (iterations, expected_depth) in [(0, 0), (1, 1), (2, 2), (30, 3)] {
+            let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
+            for _ in 0..3 {
+                plan = LogicalPlan::new(
+                    Operator::Project(ProjectOperator { exprs: Vec::new() }),
+                    Childrens::Only(Box::new(plan)),
+                );
+            }
+            plan = LimitOperator::build(None, Some(5), plan);
+            let pipeline = HepOptimizerPipeline::builder()
+                .before_batch(
+                    "Limit Project Transpose".into(),
+                    HepBatchStrategy::fix_point_bottomup(iterations),
+                    vec![NormalizationRuleImpl::LimitProjectTranspose],
+                )
+                .build();
+            let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
+            let mut cursor = &result;
+            for _ in 0..expected_depth {
+                assert!(matches!(cursor.operator, Operator::Project(_)));
+                cursor = cursor.childrens.only();
+            }
+            assert!(matches!(cursor.operator, Operator::Limit(_)));
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_find_best_selects_cheapest_scan() -> Result<(), DatabaseError> {
@@ -763,7 +904,6 @@ pub struct HepOptimizerPipeline {
     before_batches: Vec<HepBatch>,
     after_batches: Vec<HepBatch>,
     implementation_index: ImplementationRuleIndex,
-    max_local_rules_len: usize,
 }
 
 impl HepOptimizerPipeline {
@@ -780,22 +920,10 @@ impl HepOptimizerPipeline {
         after_batches: Vec<HepBatch>,
         implementations: Vec<ImplementationRuleImpl>,
     ) -> Self {
-        let max_local_rules_len = before_batches
-            .iter()
-            .chain(after_batches.iter())
-            .flat_map(|batch| batch.steps.iter())
-            .filter_map(|step| match step {
-                HepBatchStep::LocalRewrite(rules) => Some(rules.len()),
-                HepBatchStep::WholeTree(_) => None,
-            })
-            .max()
-            .unwrap_or(0);
-
         Self {
             before_batches,
             after_batches,
             implementation_index: ImplementationRuleIndex::new(implementations),
-            max_local_rules_len,
         }
     }
 
@@ -805,7 +933,6 @@ impl HepOptimizerPipeline {
             &self.before_batches,
             &self.after_batches,
             &self.implementation_index,
-            self.max_local_rules_len,
         )
     }
 }

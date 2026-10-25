@@ -452,6 +452,11 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             vec![NormalizationRuleImpl::EliminateIndexFilter],
         )
         .after_batch(
+            "Greedy Join Reorder".to_string(),
+            HepBatchStrategy::once_bottomup(),
+            vec![NormalizationRuleImpl::GreedyJoinReorder],
+        )
+        .after_batch(
             "Expression Remapper".to_string(),
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::EvaluatorBind],

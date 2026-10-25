@@ -17,7 +17,7 @@ use crate::expression::range_detacher::Range;
 use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::types::index::{IndexLookup, IndexType};
 use std::sync::LazyLock;
 
@@ -59,7 +59,12 @@ impl ImplementationRule for SeqScanImplementation {
 
             crate::optimizer::core::rule::keep_best_physical_option(
                 best_physical_option,
-                PhysicalOption::new(PlanImpl::SeqScan, SortOption::None),
+                PhysicalOption::new(
+                    PlanImpl::SeqScan,
+                    SortOption::None,
+                    cost.map(RowCountOption::Estimated)
+                        .unwrap_or(RowCountOption::Unknown),
+                ),
                 cost,
             );
             Ok(())
@@ -91,12 +96,14 @@ impl ImplementationRule for IndexScanImplementation {
                     continue;
                 };
                 let mut cost = None;
+                let mut estimated_rows = None;
 
                 let index_meta = arena.index(index_info.meta);
                 if let Some(mut row_count) =
                     loader.collect_count(&scan_op.table_name, index_meta.id, range)?
                 {
                     row_count = adjust_index_row_count(index_meta.ty, range, row_count);
+                    estimated_rows = Some(row_count);
                     if index_info.covered_deserializers.is_none()
                         && !matches!(index_meta.ty, IndexType::PrimaryKey { .. })
                     {
@@ -147,6 +154,9 @@ impl ImplementationRule for IndexScanImplementation {
                     PhysicalOption::new(
                         PlanImpl::IndexScan(Box::new(index_info.clone())),
                         index_info.sort_option.clone(),
+                        estimated_rows
+                            .map(RowCountOption::Estimated)
+                            .unwrap_or(RowCountOption::Unknown),
                     ),
                     cost,
                 );

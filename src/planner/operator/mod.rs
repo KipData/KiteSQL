@@ -157,14 +157,26 @@ pub enum SortOption {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
+pub enum RowCountOption {
+    Follow,
+    Unknown,
+    Estimated(usize),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct PhysicalOption {
     pub plan: PlanImpl,
     pub(crate) sort_option: SortOption,
+    pub(crate) row_count: RowCountOption,
 }
 
 impl PhysicalOption {
-    pub fn new(plan: PlanImpl, sort_option: SortOption) -> Self {
-        Self { plan, sort_option }
+    pub fn new(plan: PlanImpl, sort_option: SortOption, row_count: RowCountOption) -> Self {
+        Self {
+            plan,
+            sort_option,
+            row_count,
+        }
     }
 
     pub fn sort_option(&self) -> &SortOption {
@@ -760,7 +772,8 @@ mod tests {
         assert_eq!(SortOption::Follow.explain(&arena).to_string(), "Follow");
         assert_eq!(SortOption::None.explain(&arena).to_string(), "None");
 
-        let physical = PhysicalOption::new(PlanImpl::TopK, sort_option.clone());
+        let physical =
+            PhysicalOption::new(PlanImpl::TopK, sort_option.clone(), RowCountOption::Unknown);
         assert_eq!(
             physical.explain(&arena).to_string(),
             "TopK => (Sort Option: OrderBy: (1 Desc Nulls First) ignore_prefix_len: 2)"

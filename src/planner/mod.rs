@@ -25,7 +25,7 @@ use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
-use crate::planner::operator::{Operator, PhysicalOption};
+use crate::planner::operator::{Operator, PhysicalOption, RowCountOption};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -183,6 +183,18 @@ impl LogicalPlan {
 
     pub(crate) fn take(&mut self) -> Self {
         std::mem::replace(self, Self::new(Operator::Dummy, Childrens::None))
+    }
+
+    pub(crate) fn estimated_rows(&self) -> Option<usize> {
+        match &self.physical_option.as_ref()?.row_count {
+            RowCountOption::Estimated(rows) => Some(*rows),
+            RowCountOption::Unknown => None,
+            RowCountOption::Follow => match self.childrens.as_ref() {
+                Childrens::Only(child) => child.estimated_rows(),
+                Childrens::Twins { left, .. } => left.estimated_rows(),
+                Childrens::None => None,
+            },
+        }
     }
 
     pub fn referenced_table(&self) -> Vec<TableName> {
@@ -561,6 +573,29 @@ mod tests {
     }
 
     #[test]
+    fn row_count_follows_input_and_stops_at_unknown() {
+        let mut input = table_scan("users", Vec::new());
+        input.physical_option = Some(PhysicalOption::new(
+            PlanImpl::SeqScan,
+            SortOption::None,
+            RowCountOption::Estimated(12),
+        ));
+        let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::Only(Box::new(input)));
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Project,
+            SortOption::Follow,
+            RowCountOption::Follow,
+        ));
+        assert_eq!(plan.estimated_rows(), Some(12));
+        plan.physical_option.as_mut().unwrap().row_count = RowCountOption::Unknown;
+        assert_eq!(plan.estimated_rows(), None);
+        plan.physical_option.as_mut().unwrap().row_count = RowCountOption::Estimated(0);
+        assert_eq!(plan.estimated_rows(), Some(0));
+        plan.physical_option = None;
+        assert_eq!(plan.estimated_rows(), None);
+    }
+
+    #[test]
     fn childrens_iterates_and_pops_expected_plans() {
         let left = LogicalPlan::new(Operator::ShowTable, Childrens::None);
         let right = LogicalPlan::new(Operator::ShowView, Childrens::None);
@@ -598,7 +633,11 @@ mod tests {
         let id = column("id", LogicalType::Integer, &mut arena);
         let scan = table_scan("users", vec![id]);
         let mut plan = LimitOperator::build(Some(2), Some(5), scan);
-        plan.physical_option = Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow));
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Limit,
+            SortOption::Follow,
+            RowCountOption::Unknown,
+        ));
 
         let tables = plan
             .referenced_table()

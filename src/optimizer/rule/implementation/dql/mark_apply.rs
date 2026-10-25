@@ -17,7 +17,7 @@ use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::BestPhysicalOption;
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::single_mapping;
 use std::sync::LazyLock;
 
@@ -31,5 +31,9 @@ pub struct MarkApplyImplementation;
 single_mapping!(
     MarkApplyImplementation,
     MARK_APPLY_PATTERN,
-    PhysicalOption::new(PlanImpl::MarkApply, SortOption::Follow)
+    PhysicalOption::new(
+        PlanImpl::MarkApply,
+        SortOption::Follow,
+        RowCountOption::Unknown
+    )
 );

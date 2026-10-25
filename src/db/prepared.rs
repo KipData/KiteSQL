@@ -1,7 +1,7 @@
 use super::*;
 // GRCOV_EXCL_START
 #[cfg(test)]
-use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{PhysicalOption, PlanImpl, RowCountOption, SortOption};
 // GRCOV_EXCL_STOP
 use crate::planner::{ExprRef, ParamArena, PlanInput};
 // GRCOV_EXCL_START
@@ -296,6 +296,7 @@ mod tests {
             scan.physical_option = Some(PhysicalOption::new(
                 PlanImpl::IndexScan(Box::new(index.clone())),
                 sort.clone(),
+                RowCountOption::Unknown,
             ));
             let filter = FilterOperator {
                 predicate,

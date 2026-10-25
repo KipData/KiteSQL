@@ -125,27 +125,47 @@ impl HepBatch {
 }
 
 #[derive(Clone, Copy)]
+pub enum HepMatchOrder {
+    TopDown,
+    BottomUp,
+}
+
+#[derive(Clone, Copy)]
 pub enum HepBatchStrategy {
-    /// An execution_ap strategy for rules that indicates the maximum number of executions. If the
-    /// execution_ap reaches fix point (i.e. converge) before maxIterations, it will stop.
-    ///
-    /// Fix Point means that plan tree not changed after applying all rules.
-    MaxTimes(usize),
+    /// Stop at a fix point or after the configured number of full-tree iterations.
+    MaxTimes {
+        max_iteration: usize,
+        order: HepMatchOrder,
+    },
     #[allow(dead_code)]
-    LoopIfApplied,
+    LoopIfApplied(HepMatchOrder),
 }
 
 impl HepBatchStrategy {
     pub fn once_topdown() -> Self {
-        HepBatchStrategy::MaxTimes(1)
+        Self::fix_point_topdown(1)
+    }
+
+    pub fn once_bottomup() -> Self {
+        Self::fix_point_bottomup(1)
     }
 
     pub fn fix_point_topdown(max_iteration: usize) -> Self {
-        HepBatchStrategy::MaxTimes(max_iteration)
+        Self::MaxTimes {
+            max_iteration,
+            order: HepMatchOrder::TopDown,
+        }
+    }
+
+    pub fn fix_point_bottomup(max_iteration: usize) -> Self {
+        Self::MaxTimes {
+            max_iteration,
+            order: HepMatchOrder::BottomUp,
+        }
     }
 
     #[allow(dead_code)]
     pub fn loop_if_applied() -> Self {
-        HepBatchStrategy::LoopIfApplied
+        Self::LoopIfApplied(HepMatchOrder::TopDown)
     }
 }
