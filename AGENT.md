@@ -77,6 +77,18 @@ PRs that modify logic but leave obvious test gaps untouched may be rejected.
 
 ---
 
+### 2.4 Write Only Necessary Tests
+
+Coverage means each behavior is tested once, not that every case gets its own test.
+
+- Test each distinct branch or behavior once, at the layer that owns it
+- Do not repeat in a driver or caller what the rule or module already tests
+- Group related cases into one table-driven test instead of near-identical tests
+- Skip tests for trivial control flow (simple loops, early returns, plain delegation)
+- When touching a test module, delete tests made redundant by others
+
+---
+
 ## 3. Code Simplicity Rules
 
 ### 3.1 Prefer Simple Code
