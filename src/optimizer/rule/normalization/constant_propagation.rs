@@ -355,7 +355,7 @@ impl NormalizationRule for PropagateJoinConstants {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{eq_operands, for_each_conjunct, table_column};
     use super::{PropagateFilterConstants, PropagateJoinConstants};
