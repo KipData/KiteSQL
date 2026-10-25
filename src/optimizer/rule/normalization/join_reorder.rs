@@ -25,6 +25,15 @@ use crate::types::tuple::Schema;
 
 pub(crate) struct GreedyJoinReorder;
 
+// Prefer equijoins, then fewer rows, then the original input order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct JoinCandidate {
+    cross_join: bool,
+    rows: usize,
+    left: usize,
+    right: usize,
+}
+
 fn estimate_join_rows(left: usize, right: usize) -> usize {
     // TODO: For INNER equijoins, use left_rows * right_rows / max(left_ndv, right_ndv)
     // and cap the estimate with join-key uniqueness. Uniqueness bounds matches;
@@ -178,12 +187,20 @@ impl NormalizationRule for GreedyJoinReorder {
         let mut inputs = Vec::with_capacity(schemas.len());
         flatten(plan.take(), &mut inputs);
         while inputs.len() > 1 {
-            let mut best = None;
+            let mut best: Option<JoinCandidate> = None;
             for i in 0..inputs.len() {
                 let (prefix, suffix) = inputs.split_at_mut(i + 1);
                 let (left, left_rows) = &mut prefix[i];
                 let left_schema = left.output_schema(arena);
                 for (offset, (right, right_rows)) in suffix.iter_mut().enumerate() {
+                    let j = i + 1 + offset;
+                    let product = estimate_join_rows(*left_rows, *right_rows);
+                    if let Some(previous) = best {
+                        // Equal row estimates retain the earlier pair in enumeration order.
+                        if !previous.cross_join && product >= previous.rows {
+                            continue;
+                        }
+                    }
                     let right_schema = right.output_schema(arena);
                     let mut connected = false;
                     for &key in &keys {
@@ -193,18 +210,24 @@ impl NormalizationRule for GreedyJoinReorder {
                         }
                     }
                     // Apply available join predicates before forming Cartesian intermediates.
-                    let candidate = (
-                        !connected,
-                        estimate_join_rows(*left_rows, *right_rows),
-                        i,
-                        i + 1 + offset,
-                    );
+                    let candidate = JoinCandidate {
+                        cross_join: !connected,
+                        rows: product,
+                        left: i,
+                        right: j,
+                    };
                     if best.is_none_or(|previous| candidate < previous) {
                         best = Some(candidate);
                     }
                 }
             }
-            let Some((_, product, i, j)) = best else {
+            let Some(JoinCandidate {
+                rows: product,
+                left: i,
+                right: j,
+                ..
+            }) = best
+            else {
                 return Ok(false);
             };
             let (mut right, _) = inputs.remove(j);
