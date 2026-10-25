@@ -458,7 +458,8 @@ impl<'a> HepOptimizer<'a> {
                     *done = true;
                 }
                 applied = true;
-                plan.reset_output_schema_cache_recursive();
+                // Rules invalidate changed descendants; untouched subtrees retain their caches.
+                plan.reset_output_schema_cache();
             }
         }
         Ok(applied)

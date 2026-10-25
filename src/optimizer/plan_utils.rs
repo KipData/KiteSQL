@@ -102,18 +102,11 @@ pub fn replace_with_only_child(plan: &mut LogicalPlan) -> bool {
     }
 }
 
-#[allow(dead_code)]
-pub fn replace_child_with_only_child(plan: &mut LogicalPlan, child_idx: usize) -> bool {
-    if let Some(child_plan) = child_mut(plan, child_idx) {
-        return replace_with_only_child(child_plan);
-    }
-    false
-}
-
 pub fn wrap_child_with(plan: &mut LogicalPlan, child_idx: usize, operator: Operator) -> bool {
     if let Some(slot) = child_mut(plan, child_idx) {
         let previous = mem::replace(slot, LogicalPlan::new(operator, Childrens::None));
         *slot.childrens = Childrens::Only(Box::new(previous));
+        plan.reset_output_schema_cache();
         true
     } else {
         false
@@ -322,20 +315,10 @@ mod tests {
         let mut parent = LogicalPlan::new(
             Operator::Dummy,
             Childrens::Twins {
-                left: Box::new(LogicalPlan::new(
-                    Operator::ShowView,
-                    Childrens::Only(Box::new(leaf(Operator::ShowTable))),
-                )),
+                left: Box::new(leaf(Operator::ShowTable)),
                 right: Box::new(leaf(Operator::Dummy)),
             },
         );
-        assert!(replace_child_with_only_child(&mut parent, 0));
-        assert!(matches!(
-            child(&parent, 0).unwrap().operator,
-            Operator::ShowTable
-        ));
-        assert!(!replace_child_with_only_child(&mut parent, 1));
-        assert!(!replace_child_with_only_child(&mut parent, 2));
 
         assert!(wrap_child_with(&mut parent, 1, Operator::ShowView));
         let wrapped = child(&parent, 1).unwrap();

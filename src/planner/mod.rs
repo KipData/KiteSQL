@@ -342,8 +342,11 @@ impl LogicalPlan {
             },
             Operator::Join(_) => match childrens {
                 Childrens::Twins { left, right } => {
-                    let mut schema = left.output_schema(arena).clone();
-                    schema.extend_from_slice(right.output_schema(arena));
+                    let left_schema = left.output_schema(arena);
+                    let right_schema = right.output_schema(arena);
+                    let mut schema = Vec::with_capacity(left_schema.len() + right_schema.len());
+                    schema.extend_from_slice(left_schema);
+                    schema.extend_from_slice(right_schema);
                     schema
                 }
                 _ => unreachable!(),
@@ -606,8 +609,13 @@ mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
     use crate::expression::ScalarExpression;
+    use crate::optimizer::core::rule::NormalizationRule;
+    use crate::optimizer::heuristic::batch::HepBatchStrategy;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
+    use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::describe::DescribeOperator;
     use crate::planner::operator::filter::FilterOperator;
+    use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::limit::LimitOperator;
     use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::sort::{SortField, SortOperator};
@@ -946,6 +954,169 @@ mod tests {
         plan.reset_output_schema_cache_recursive();
         let recomputed = plan.output_schema(&mut arena).clone();
         assert_eq!(schema_names(&recomputed, &arena), vec!["name"]);
+    }
+
+    #[test]
+    fn transpose_invalidates_changed_child_before_schema_is_read() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let a = column("a", LogicalType::Integer, &mut arena);
+        let b = column("b", LogicalType::Integer, &mut arena);
+        let expr = arena.alloc_expression(ScalarExpression::column_expr(a, 0));
+        let project = LogicalPlan::new(
+            Operator::Project(ProjectOperator::new(vec![expr])),
+            Childrens::Only(Box::new(table_scan("t", vec![a, b]))),
+        );
+        let mut plan = LimitOperator::build(None, Some(1), project);
+        plan.populate_output_schema_recursive(&mut arena);
+        assert_eq!(plan.childrens.only().output_schema.as_ref().unwrap(), &[a]);
+
+        assert!(NormalizationRuleImpl::LimitProjectTranspose.apply(&mut plan, &mut arena, None)?);
+        let Childrens::Only(limit) = plan.childrens.as_mut() else {
+            panic!("expected a limit below the projection");
+        };
+        assert!(limit.output_schema.is_none());
+        assert_eq!(
+            limit.childrens.only().output_schema.as_ref().unwrap(),
+            &[a, b]
+        );
+        assert_eq!(limit.output_schema(&mut arena), &[a, b]);
+        assert_eq!(plan.output_schema(&mut arena), &[a]);
+        Ok(())
+    }
+
+    #[test]
+    fn local_rewrite_invalidates_ancestors_but_preserves_untouched_caches(
+    ) -> Result<(), DatabaseError> {
+        for strategy in [
+            HepBatchStrategy::once_topdown(),
+            HepBatchStrategy::once_bottomup(),
+        ] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let a = column("a", LogicalType::Integer, &mut arena);
+            let b = column("b", LogicalType::Integer, &mut arena);
+            let c = column("c", LogicalType::Integer, &mut arena);
+            let expr = arena.alloc_expression(ScalarExpression::column_expr(a, 0));
+            let project = LogicalPlan::new(
+                Operator::Project(ProjectOperator::new(vec![expr])),
+                Childrens::Only(Box::new(table_scan("left", vec![a, b]))),
+            );
+            let mut plan = JoinOperator::build(
+                LimitOperator::build(None, Some(1), project),
+                table_scan("right", vec![c]),
+                JoinCondition::None,
+                JoinType::Cross,
+                false,
+            );
+            plan.populate_output_schema_recursive(&mut arena);
+            assert_eq!(plan.output_schema.as_ref().unwrap(), &[a, c]);
+            let pipeline = HepOptimizerPipeline::builder()
+                .before_batch(
+                    "Transpose",
+                    strategy,
+                    vec![NormalizationRuleImpl::LimitProjectTranspose],
+                )
+                .build();
+            let mut plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
+            assert!(plan.output_schema.is_none());
+            let Childrens::Twins { left, right } = plan.childrens.as_mut() else {
+                panic!("expected a join");
+            };
+            assert!(left.output_schema.is_none());
+            assert_eq!(right.output_schema.as_ref().unwrap(), &[c]);
+            let Childrens::Only(limit) = left.childrens.as_mut() else {
+                panic!("expected a limit below the projection");
+            };
+            assert!(limit.output_schema.is_none());
+            assert_eq!(
+                limit.childrens.only().output_schema.as_ref().unwrap(),
+                &[a, b]
+            );
+            assert_eq!(limit.output_schema(&mut arena), &[a, b]);
+            assert_eq!(plan.output_schema(&mut arena), &[a, c]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wrap_child_invalidates_parent_without_clearing_input() {
+        use crate::optimizer::plan_utils::wrap_child_with;
+
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let a = column("a", LogicalType::Integer, &mut arena);
+        let b = column("b", LogicalType::Integer, &mut arena);
+        let expr = arena.alloc_expression(ScalarExpression::column_expr(a, 0));
+        let mut plan = LimitOperator::build(None, Some(1), table_scan("t", vec![a, b]));
+        plan.populate_output_schema_recursive(&mut arena);
+
+        assert!(wrap_child_with(
+            &mut plan,
+            0,
+            Operator::Project(ProjectOperator::new(vec![expr])),
+        ));
+        assert!(plan.output_schema.is_none());
+        assert!(plan
+            .childrens
+            .only()
+            .childrens
+            .only()
+            .output_schema
+            .is_some());
+        assert_eq!(plan.output_schema(&mut arena), &[a]);
+    }
+
+    #[test]
+    fn predicate_pushdown_preserves_untouched_subtree_caches() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let a = column("a", LogicalType::Integer, &mut arena);
+        let b = column("b", LogicalType::Integer, &mut arena);
+        let c = column("c", LogicalType::Integer, &mut arena);
+        let left = JoinOperator::build(
+            table_scan("a", vec![a]),
+            table_scan("b", vec![b]),
+            JoinCondition::None,
+            JoinType::Cross,
+            false,
+        );
+        let join = JoinOperator::build(
+            left,
+            table_scan("c", vec![c]),
+            JoinCondition::None,
+            JoinType::Cross,
+            false,
+        );
+        let c_expr = arena.alloc_expression(ScalarExpression::column_expr(c, 2));
+        let zero = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(0)));
+        let predicate = arena.alloc_expression(ScalarExpression::Binary {
+            op: crate::expression::BinaryOperator::Gt,
+            left_expr: c_expr,
+            right_expr: zero,
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        });
+        let mut plan = FilterOperator::build(predicate, join, false);
+        plan.populate_output_schema_recursive(&mut arena);
+        let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
+                "Push Predicate",
+                HepBatchStrategy::once_topdown(),
+                vec![NormalizationRuleImpl::PushPredicateThroughJoin],
+            )
+            .build();
+        let mut plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
+        assert!(matches!(plan.operator, Operator::Join(_)));
+        assert!(plan.output_schema.is_none());
+        let (left, right) = plan.childrens.twins();
+        assert_eq!(left.output_schema.as_ref().unwrap(), &[a, b]);
+        assert!(left.childrens.twins().0.output_schema.is_some());
+        assert!(left.childrens.twins().1.output_schema.is_some());
+        assert!(matches!(right.operator, Operator::Filter(_)));
+        assert_eq!(right.childrens.only().output_schema.as_ref().unwrap(), &[c]);
+        assert_eq!(plan.output_schema(&mut arena), &[a, b, c]);
+        Ok(())
     }
 
     #[test]

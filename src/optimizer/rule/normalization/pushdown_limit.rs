@@ -48,6 +48,7 @@ impl NormalizationRule for LimitProjectTranspose {
                     &mut child.operator,
                     Operator::Limit(limit_op.clone()),
                 ));
+                child.reset_output_schema_cache();
             }
         }
 

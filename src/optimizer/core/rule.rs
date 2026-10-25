@@ -28,6 +28,8 @@ pub trait MatchPattern {
 
 pub trait NormalizationRule {
     /// Returns true when the plan tree is modified.
+    /// Local rewrites must invalidate changed descendants before reading their schemas.
+    /// The optimizer invalidates the rewrite root and its ancestors, not untouched subtrees.
     fn apply(
         &self,
         plan: &mut LogicalPlan,
