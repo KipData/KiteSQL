@@ -28,10 +28,9 @@ pub struct SumAccumulator {
 
 impl SumAccumulator {
     pub fn new(ty: Cow<'_, LogicalType>) -> Result<Self, DatabaseError> {
-        // `sum(null)` binds with the type of the NULL literal; it never sees a
-        // non-NULL value, so the result is NULL like in release builds.
-        debug_assert!(ty.is_numeric() || matches!(ty.as_ref(), LogicalType::SqlNull));
-
+        // The binder does not restrict SUM/AVG argument types, so `binary_create`
+        // decides: types without `+` (e.g. VARCHAR) return an error instead of
+        // panicking, and `sum(null)` uses the SqlNull evaluator.
         Ok(Self {
             result: DataValue::Null,
             evaluator: binary_create(ty, BinaryOperator::Plus)?,

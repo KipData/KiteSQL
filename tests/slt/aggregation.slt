@@ -98,6 +98,28 @@ select (select sum(null) from sn) from sn where id = 1;
 ----
 NULL
 
+# SUM/AVG over strings is an error, not an assertion failure.
+statement ok
+create table ss(id int primary key, v varchar);
+
+statement ok
+insert into ss values (1, '10'), (2, 'x');
+
+statement error
+select sum(v) from ss;
+
+statement error
+select sum(distinct v) from ss;
+
+statement error
+select avg(v) from ss;
+
+statement error
+select sum('a') from ss;
+
+statement ok
+drop table ss;
+
 # Aggregates, including SELECT aliases containing aggregates, cannot run in WHERE.
 statement error agg miss: aggregate functions are not allowed in WHERE
 select count(*) as n from sn where n is not null;
