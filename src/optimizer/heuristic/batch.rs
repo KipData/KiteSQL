@@ -148,6 +148,7 @@ impl HepBatchStrategy {
         Self::Once(HepMatchOrder::TopDown)
     }
 
+    #[cfg(test)]
     pub fn once_bottomup() -> Self {
         Self::Once(HepMatchOrder::BottomUp)
     }

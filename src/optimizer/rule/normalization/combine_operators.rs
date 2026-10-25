@@ -40,8 +40,6 @@ impl NormalizationRule for CombineFilter {
                 return Ok(false);
             }
         };
-        let parent_filter = parent_filter;
-
         let cursor = match only_child_mut(plan) {
             Some(child) => child,
             None => {
@@ -68,11 +66,11 @@ impl NormalizationRule for CombineFilter {
                 child_op.having = having || child_op.having;
                 child_op.is_optimized = false;
 
-                return Ok(replace_with_only_child(plan));
+                Ok(replace_with_only_child(plan))
             }
             _ => {
                 plan.operator = Operator::Filter(parent_filter);
-                return Ok(false);
+                Ok(false)
             }
         }
     }

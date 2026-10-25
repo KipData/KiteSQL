@@ -1271,7 +1271,7 @@ mod tests {
         for predicate in ["c1 = c3 or c2 = c4", "c1 < c3", "c1 > 0 and c3 < 9"] {
             let mut arena = PlanArena::new(&tables.table_arena);
             let plan = tables.plan_with_arena(
-                &format!("select * from t1, t2 where {predicate}"),
+                format!("select * from t1, t2 where {predicate}"),
                 &mut arena,
             )?;
             let plan = apply_pipeline(

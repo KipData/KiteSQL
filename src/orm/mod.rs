@@ -2065,7 +2065,7 @@ where
                 bind_orm_source(&mut right_binder, source, Some(join_type), self.arena)?;
             (right_plan, right_binder.context)
         };
-        self.binder.extend(right_context, self.arena);
+        self.binder.extend(right_context, self.arena)?;
         let on = with_query_bind_step!(self.binder, QueryBindStep::From, {
             let mut scope = self.expr_scope();
             let handle = scope.handle();

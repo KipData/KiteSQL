@@ -1718,7 +1718,7 @@ impl TryFrom<&Value> for DataValue {
                     ));
                 }
                 let mut bytes = Vec::with_capacity(hex.len() / 2);
-                for pair in hex.as_bytes().chunks_exact(2) {
+                for pair in hex.as_bytes().as_chunks::<2>().0 {
                     let Some(high) = (pair[0] as char).to_digit(16) else {
                         return Err(DatabaseError::InvalidValue("invalid hex digit".to_string()));
                     };

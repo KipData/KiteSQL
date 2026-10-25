@@ -70,6 +70,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Output schema, execution-time arena, and executor of a built statement.
+pub(crate) type Execution<'a, A, T> = (Schema, ExecMetaArena<A>, Executor<'a, T>);
 pub(crate) type ScalaFunctions = HashMap<FunctionSummary, Arc<dyn ScalarFunctionImpl>>;
 pub(crate) type TableFunctions = HashMap<FunctionSummary, TableFunctionCatalog>;
 
@@ -750,14 +752,7 @@ impl<S: Storage> State<S> {
         transaction: &'a mut S::TransactionType<'txn>,
         plan: PlanInput<'a>,
         mut plan_arena: A,
-    ) -> Result<
-        (
-            Schema,
-            ExecMetaArena<A>,
-            Executor<'a, S::TransactionType<'txn>>,
-        ),
-        DatabaseError,
-    >
+    ) -> Result<Execution<'a, A, S::TransactionType<'txn>>, DatabaseError>
     where
         S: 'txn,
     {
@@ -785,14 +780,7 @@ impl<S: Storage> State<S> {
         transaction: &'a mut S::TransactionType<'txn>,
         params: A,
         build: F,
-    ) -> Result<
-        (
-            Schema,
-            ExecMetaArena<PlanArena<'a>>,
-            Executor<'a, S::TransactionType<'txn>>,
-        ),
-        DatabaseError,
-    >
+    ) -> Result<Execution<'a, PlanArena<'a>, S::TransactionType<'txn>>, DatabaseError>
     where
         S: 'txn,
         A: AsRef<[(usize, LogicalType)]>,
@@ -1598,7 +1586,7 @@ pub(crate) mod test {
                 Operator::Values(ValuesOperator {
                     rows,
                     row_count: values.len(),
-                    schema_ref: vec![column].into(),
+                    schema_ref: vec![column],
                 }),
                 Childrens::None,
             ),

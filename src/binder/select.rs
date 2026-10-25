@@ -280,7 +280,7 @@ where
         join_type: JoinType,
         constraint: JoinConstraintInput,
     ) -> Result<Self, DatabaseError> {
-        self.binder.extend(right_context, self.arena);
+        self.binder.extend(right_context, self.arena)?;
         self.plan = self
             .binder
             .bind_join_plans(self.plan, right_plan, join_type, constraint, self.arena)?;

@@ -1125,7 +1125,8 @@ mod tests {
     fn cross_join_remaps_by_new_left_width() -> Result<(), DatabaseError> {
         // (left slots, right slots, outer slots, expected positions); an empty left
         // mapping must not be treated as identity.
-        let cases: [(&[usize], Option<&[usize]>, &[usize], &[usize]); 3] = [
+        type Case<'a> = (&'a [usize], Option<&'a [usize]>, &'a [usize], &'a [usize]);
+        let cases: [Case; 3] = [
             (&[2], Some(&[1, 0]), &[0, 1, 2], &[2, 4, 3]),
             (&[2], None, &[0, 1, 2], &[2, 3, 4]),
             (&[], None, &[0, 1], &[3, 4]),
@@ -1472,13 +1473,12 @@ mod tests {
                 let mut plan = build_filter_with_selected_index(&mut arena, predicate, residual);
                 if through_init {
                     let scan = plan.childrens.pop_only();
-                    plan.childrens =
-                        Box::new(Childrens::Only(Box::new(ScalarQueryInitOperator::build(
-                            scan,
-                            LogicalPlan::new(Operator::Dummy, Childrens::None),
-                            value,
-                            vec![],
-                        ))));
+                    *plan.childrens = Childrens::Only(Box::new(ScalarQueryInitOperator::build(
+                        scan,
+                        LogicalPlan::new(Operator::Dummy, Childrens::None),
+                        value,
+                        vec![],
+                    )));
                 }
                 let input = plan.childrens.only().clone();
                 assert!(rule.apply(&mut plan, &mut arena, None)?);

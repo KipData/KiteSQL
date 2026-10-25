@@ -556,7 +556,7 @@ impl NormalizationRule for GreedyJoinReorder {
                             schema: leaf_schema,
                             index: leaf_stats.map(|(index, ndv)| (arena.index(index), ndv)),
                         },
-                        &candidate_keys,
+                        candidate_keys,
                         ndvs,
                         arena,
                     )
@@ -752,10 +752,7 @@ mod tests {
         plan.physical_option = Some(PhysicalOption::new(
             PlanImpl::SeqScan,
             SortOption::None,
-            RowCountOption::Estimated {
-                rows: rows,
-                ndv: None,
-            },
+            RowCountOption::Estimated { rows, ndv: None },
         ));
         (plan, key)
     }
@@ -798,10 +795,8 @@ mod tests {
     fn malformed_regions_are_planning_errors() {
         // (outer join key, expected message). Each side of a key is only searched in its own
         // input range, so a left column used on the right is reported as not produced.
-        let cases: [(
-            fn(ExprRef, ExprRef, &mut PlanArena) -> (ExprRef, ExprRef),
-            &str,
-        ); 2] = [
+        type OuterKey = fn(ExprRef, ExprRef, &mut PlanArena) -> (ExprRef, ExprRef);
+        let cases: [(OuterKey, &str); 2] = [
             (|a, _, _| (a, a), "is not produced by any join input"),
             (
                 |_, c, arena| (input("z", 1, arena).1, c),
@@ -893,15 +888,24 @@ mod tests {
         }
         let loader = StatisticMetaLoader::new(&cache);
         assert_eq!(
-            column_ndv(&left, &right, &[(l, r)], Some(&loader), &arena)?,
+            column_ndv(&left, &right, [(l, r)], Some(&loader), &arena)?,
             Some((100, 100))
         );
-        assert_eq!(column_ndv(&left, &right, &[(l, r)], None, &arena)?, None);
-        assert_eq!(column_ndv(&left, &right, &[], Some(&loader), &arena)?, None);
+        assert_eq!(column_ndv(&left, &right, [(l, r)], None, &arena)?, None);
+        assert_eq!(
+            column_ndv(
+                &left,
+                &right,
+                [] as [(ExprRef, ExprRef); 0],
+                Some(&loader),
+                &arena
+            )?,
+            None
+        );
         left.physical_option.as_mut().unwrap().row_count =
             RowCountOption::Estimated { rows: 8, ndv: None };
         assert_eq!(
-            column_ndv(&left, &right, &[(l, r)], Some(&loader), &arena)?,
+            column_ndv(&left, &right, [(l, r)], Some(&loader), &arena)?,
             Some((8, 100))
         );
         left.physical_option.as_mut().unwrap().row_count = RowCountOption::Estimated {
@@ -915,7 +919,7 @@ mod tests {
             column_ndv(
                 &left,
                 &right,
-                &[(l, r)],
+                [(l, r)],
                 Some(&StatisticMetaLoader::new(&cache)),
                 &arena
             )?,
@@ -926,7 +930,7 @@ mod tests {
             column_ndv(
                 &left,
                 &right,
-                &[(l, r)],
+                [(l, r)],
                 Some(&StatisticMetaLoader::new(&cache)),
                 &arena
             )?,
@@ -953,12 +957,12 @@ mod tests {
         let right_schema = right.output_schema(&mut arena);
         let l_input = JoinInputStatistics {
             rows: 1000,
-            schema: &left_schema,
+            schema: left_schema,
             index: Some((arena.index(li), Some(100))),
         };
         let r_input = JoinInputStatistics {
             rows: 200,
-            schema: &right_schema,
+            schema: right_schema,
             index: Some((arena.index(ri), Some(100))),
         };
         assert_eq!(
@@ -973,7 +977,7 @@ mod tests {
         unique_right.ty = IndexType::Unique;
         let r_input = JoinInputStatistics {
             rows: 200,
-            schema: &right_schema,
+            schema: right_schema,
             index: Some((&unique_right, None)),
         };
         assert_eq!(
@@ -984,7 +988,7 @@ mod tests {
         unique_left.ty = IndexType::PrimaryKey { is_multiple: false };
         let l_input = JoinInputStatistics {
             rows: 1000,
-            schema: &left_schema,
+            schema: left_schema,
             index: Some((&unique_left, None)),
         };
         assert_eq!(
@@ -994,12 +998,12 @@ mod tests {
         unique_right.column_ids.push(1);
         let r_input = JoinInputStatistics {
             rows: 200,
-            schema: &right_schema,
+            schema: right_schema,
             index: Some((&unique_right, Some(100))),
         };
         let l_input = JoinInputStatistics {
             rows: 1000,
-            schema: &left_schema,
+            schema: left_schema,
             index: Some((arena.index(li), Some(100))),
         };
         assert_eq!(
@@ -1008,7 +1012,7 @@ mod tests {
         );
         let r_input = JoinInputStatistics {
             rows: 200,
-            schema: &right_schema,
+            schema: right_schema,
             index: Some((arena.index(ri), Some(100))),
         };
         assert_eq!(

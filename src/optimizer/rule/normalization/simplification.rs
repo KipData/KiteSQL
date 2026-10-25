@@ -674,7 +674,7 @@ mod test {
             for negated in ["", "not "] {
                 let mut arena = PlanArena::new(&table_state.table_arena);
                 let plan = table_state.plan_with_arena(
-                    &format!("select * from t1 where c1 {negated}in ({list})"),
+                    format!("select * from t1 where c1 {negated}in ({list})"),
                     &mut arena,
                 )?;
                 let Operator::Filter(filter) = plan.childrens.pop_only().operator else {
@@ -703,7 +703,7 @@ mod test {
         ] {
             let mut arena = PlanArena::new(&table_state.table_arena);
             let plan = table_state
-                .plan_with_arena(&format!("select * from t1 where {predicate}"), &mut arena)?;
+                .plan_with_arena(format!("select * from t1 where {predicate}"), &mut arena)?;
             let Operator::Filter(filter) = plan.childrens.pop_only().operator else {
                 unreachable!();
             };
