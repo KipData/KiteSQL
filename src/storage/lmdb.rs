@@ -291,6 +291,11 @@ impl Transaction for LmdbTransaction<'_> {
         = LmdbIter<'a>
     where
         Self: 'a;
+
+    type PointCursor<'a>
+        = RoCursor<'a>
+    where
+        Self: 'a;
     fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
         const STATEMENT_BITS: u32 = 20;
         self.statements += 1;
@@ -310,6 +315,22 @@ impl Transaction for LmdbTransaction<'_> {
     ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
         match self.tx.get(self.db, &key) {
             Ok(value) => Ok(Some(value)),
+            Err(lmdb::Error::NotFound) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn point_cursor(&self) -> Result<Self::PointCursor<'_>, DatabaseError> {
+        Ok(self.tx.open_ro_cursor(self.db)?)
+    }
+
+    fn get_at<'a>(
+        &'a self,
+        cursor: &Self::PointCursor<'a>,
+        key: &[u8],
+    ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
+        match cursor.get(Some(key), None, lmdb_sys::MDB_SET) {
+            Ok((_, value)) => Ok(Some(value)),
             Err(lmdb::Error::NotFound) => Ok(None),
             Err(err) => Err(err.into()),
         }

@@ -651,6 +651,16 @@ macro_rules! impl_transaction {
                 = $iter<'storage, 'iter>
             where
                 Self: 'iter;
+
+            type PointCursor<'a>
+                = ()
+            where
+                Self: 'a;
+
+            fn point_cursor(&self) -> Result<Self::PointCursor<'_>, DatabaseError> {
+                Ok(())
+            }
+
             fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
                 statement_stamp(self.db, &mut self.statements)
             }
@@ -1136,6 +1146,7 @@ mod test {
                 deserializers: std::borrow::Cow::Owned(deserializers),
                 total_len: table.columns_len(),
                 tx: &transaction,
+                cursor: None,
                 cover_mapping: None,
                 with_pk: true,
                 reverse: false,
