@@ -18,14 +18,14 @@ use crate::execution::{
 };
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 pub struct Union {
     left_input: ExecId,
     right_input: ExecId,
     reading_left: bool,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Union {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Union {
     type Input = (&'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -45,7 +45,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Union {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Union {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Union {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

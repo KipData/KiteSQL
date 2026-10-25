@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 
@@ -25,7 +25,7 @@ pub struct Explain<'a> {
     emitted: bool,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Explain<'a> {
     type Input = &'a LogicalPlan;
 
     fn into_executor(
@@ -42,7 +42,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Explain<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Explain<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Explain<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecArena<'a, T>,

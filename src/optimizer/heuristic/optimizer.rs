@@ -701,7 +701,7 @@ mod tests {
     use crate::planner::operator::sort::SortField;
     use crate::planner::operator::{Operator, PlanImpl, SortOption};
     use crate::planner::{Childrens, LogicalPlan, PlanArena, TableArenaCell};
-    use crate::storage::{Storage, Transaction};
+    use crate::storage::{Storage, StorageTransaction};
     use crate::types::index::IndexLookup;
     use crate::types::value::DataValue;
     use std::ops::Bound;

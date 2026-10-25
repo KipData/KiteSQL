@@ -548,7 +548,7 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
         )
     }
 
-    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: MetaArena + ?Sized>(
+    fn decode<T: crate::storage::StorageTransaction, R: std::io::Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &crate::serdes::ReferenceTables,

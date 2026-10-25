@@ -42,7 +42,7 @@ mod app {
         // Optimistic transactions are currently backed by RocksDB.
         let mut database = DataBaseBuilder::path(EXAMPLE_DB_PATH).build_optimistic()?;
         database.ddl("create table if not exists t1 (c1 int primary key, c2 int)")?;
-        let mut transaction = database.new_transaction()?;
+        let mut transaction = database.new_transaction(false)?;
 
         transaction
             .run("insert into t1 values(0, 0), (1, 1)")?
@@ -66,7 +66,7 @@ mod app {
         assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
 
-        let mut tx2 = database.new_transaction()?;
+        let mut tx2 = database.new_transaction(false)?;
         tx2.run("update t1 set c2 = 99 where c1 = 0")?.done()?;
         let mut c2_iter = database.run("select c2 from t1 where c1 = 0")?;
         assert_eq!(

@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::planner::operator::{PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 
 impl ReferenceSerialization for RowCountOption {
@@ -38,7 +38,7 @@ impl ReferenceSerialization for RowCountOption {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -74,7 +74,7 @@ impl ReferenceSerialization for PhysicalOption {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

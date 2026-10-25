@@ -17,7 +17,7 @@ use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNo
 use crate::expression::function::table::TableFunction;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::Tuple;
 
 pub struct FunctionScan<'a> {
@@ -34,7 +34,7 @@ impl<'a> From<&'a FunctionScanOperator> for FunctionScan<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for FunctionScan<'a> {
     type Input = &'a FunctionScanOperator;
 
     fn into_executor(
@@ -49,7 +49,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for FunctionScan<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecArena<'a, T>,

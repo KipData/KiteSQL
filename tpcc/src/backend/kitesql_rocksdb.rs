@@ -18,9 +18,9 @@ use super::{
 };
 use crate::TpccError;
 use kite_sql::binder::{command_type, CommandType};
-use kite_sql::db::{DBTransaction, DataBaseBuilder, Database, Statement, TransactionIter};
+use kite_sql::db::{DataBaseBuilder, Database, Statement, Transaction, TransactionIter};
 use kite_sql::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
-use kite_sql::storage::{Storage, Transaction};
+use kite_sql::storage::{Storage, StorageTransaction};
 use kite_sql::types::tuple::TupleImpl;
 
 pub type KiteSqlRocksDbBackend = KiteSqlRocksBackend<RocksStorage>;
@@ -74,7 +74,7 @@ impl<S: Storage> KiteSqlRocksBackend<S> {
 
     fn start_transaction(&self) -> Result<KiteSqlRocksTransaction<'_, S>, TpccError> {
         Ok(KiteSqlRocksTransaction {
-            inner: self.database.new_transaction()?,
+            inner: self.database.new_transaction(false)?,
         })
     }
 }
@@ -154,14 +154,14 @@ pub(crate) fn execute_kitesql_batch<S: Storage>(
         return Ok(());
     }
 
-    let mut transaction = database.new_transaction()?;
+    let mut transaction = database.new_transaction(false)?;
     transaction.run(sql)?.done()?;
     transaction.commit()?;
     Ok(())
 }
 
 pub struct KiteSqlRocksTransaction<'a, S: Storage> {
-    inner: DBTransaction<'a, S>,
+    inner: Transaction<'a, S>,
 }
 
 impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
@@ -234,9 +234,9 @@ impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
     }
 }
 
-pub struct KiteSqlTxnResult<'a, T: Transaction + 'a>(TransactionIter<'a, T>);
+pub struct KiteSqlTxnResult<'a, T: StorageTransaction + 'a>(TransactionIter<'a, T>);
 
-impl<'a, T: Transaction + 'a> KiteSqlTxnResult<'a, T> {
+impl<'a, T: StorageTransaction + 'a> KiteSqlTxnResult<'a, T> {
     pub(crate) fn new(iter: TransactionIter<'a, T>) -> Self {
         Self(iter)
     }

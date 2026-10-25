@@ -24,7 +24,7 @@ use crate::execution::{
 };
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::bitset::BitSet;
 use crate::types::tuple::{SplitTupleRef, TupleImpl, TupleLike};
 use crate::types::value::DataValue;
@@ -107,7 +107,7 @@ struct ActiveLeftState {
     first_matches: Vec<usize>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
     type Input = (&'a JoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -150,7 +150,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -329,7 +329,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
 }
 
 impl NestedLoopJoin {
-    fn reset_right_input<'a, T: Transaction + 'a, A: MetaArena + 'a>(
+    fn reset_right_input<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,

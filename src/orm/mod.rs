@@ -6,7 +6,7 @@ use crate::binder::{
 };
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableName};
 use crate::db::{
-    BindSource, DBTransaction, Database, DatabaseIter, OrmIter, ResultIter, TransactionIter,
+    BindSource, Database, DatabaseIter, OrmIter, ResultIter, Transaction, TransactionIter,
 };
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
@@ -17,7 +17,7 @@ use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::sort::SortField;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena};
-use crate::storage::{Storage, Transaction};
+use crate::storage::{Storage, StorageTransaction};
 use crate::types::tuple::{SchemaView, TupleImpl};
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
@@ -71,7 +71,7 @@ impl OrmField {
     }
 }
 
-/// One row returned by [`Database::describe`] or [`DBTransaction::describe`].
+/// One row returned by [`Database::describe`] or [`Transaction::describe`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeColumn {
     pub field: String,
@@ -222,7 +222,7 @@ impl<M, T> FieldSort<M, T> {
 #[doc(hidden)]
 pub trait BindOrmScalar<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
@@ -233,7 +233,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmScalar<'bind, 'parent, 'arena, T, A> for Field<M, V>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
@@ -246,7 +246,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> BindOrmScalar<'bind, 'parent, 'arena, T, A> for ScalarExpression
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
@@ -260,7 +260,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> BindOrmScalar<'bind, 'parent, 'arena, T, A>
     for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
@@ -274,7 +274,7 @@ where
 #[doc(hidden)]
 pub trait BindOrmSort<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -285,7 +285,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmSort<'bind, 'parent, 'arena, T, A> for Field<M, V>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -299,7 +299,7 @@ where
 impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmSort<'bind, 'parent, 'arena, T, A>
     for FieldSort<M, V>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -315,7 +315,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A> for ScalarExpression
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -328,7 +328,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A> for SortField
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -342,7 +342,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A>
     for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -382,7 +382,7 @@ impl WindowSpec {
 
 impl<'bind, 'parent, 'arena, T, A> From<CtxExpression<'bind, 'parent, 'arena, T, A>> for ExprRef
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn from(expr: CtxExpression<'bind, 'parent, 'arena, T, A>) -> Self {
@@ -420,7 +420,7 @@ where
 #[doc(hidden)]
 pub trait BindOrmScalarList<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar_list(
@@ -435,7 +435,7 @@ macro_rules! impl_bind_orm_scalar_list {
             impl<'bind, 'parent, 'arena, Tx, Args, $($name),+> BindOrmScalarList<'bind, 'parent, 'arena, Tx, Args>
                 for ($($name,)+)
             where
-                Tx: Transaction,
+                Tx: StorageTransaction,
                 Args: AsRef<[(usize, LogicalType)]>,
                 $($name: BindOrmScalar<'bind, 'parent, 'arena, Tx, Args>,)+
             {
@@ -487,7 +487,7 @@ macro_rules! impl_quantified_subquery_methods {
 #[allow(clippy::type_complexity)]
 struct ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: NonNull<Binder<'bind, 'parent, T, A>>,
@@ -497,7 +497,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> Clone for ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn clone(&self) -> Self {
@@ -507,14 +507,14 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> Copy for ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
 }
 
 impl<'bind, 'parent, 'arena, T, A> ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn new<'ctx>(scope: &ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>) -> Self {
@@ -691,7 +691,7 @@ where
 /// internal scope handle is private.
 pub struct CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     expr: ExprRef,
@@ -700,7 +700,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub fn into_scalar(self) -> ExprRef {
@@ -971,7 +971,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> fmt::Debug for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -981,7 +981,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> Clone for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn clone(&self) -> Self {
@@ -994,7 +994,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> PartialEq for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn eq(&self, other: &Self) -> bool {
@@ -1004,14 +1004,14 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> Eq for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
 }
 
 impl<'bind, 'parent, 'arena, T, A> Hash for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -1021,7 +1021,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> IntoOrmExpression for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn into_orm_expression(self) -> OrmExpression {
@@ -1029,7 +1029,11 @@ where
     }
 }
 
-fn bind_orm_context<'a, E, F>(executor: E, build: F) -> Result<E::Iter, DatabaseError>
+fn bind_orm_context<'a, E, F>(
+    executor: E,
+    read_only: bool,
+    build: F,
+) -> Result<E::Iter, DatabaseError>
 where
     E: BindSource<'a>,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
@@ -1044,7 +1048,7 @@ where
     ) -> Result<LogicalPlan, DatabaseError>,
 {
     static EMPTY_BIND_PARAMS: &[(usize, LogicalType)] = &[];
-    executor.execute(|state, tx| {
+    executor.execute(read_only, |state, tx| {
         state.build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
             let mut context = OrmContext { binder, arena };
             build(&mut context)
@@ -1075,12 +1079,12 @@ where
 
 /// Binder-backed ORM query context.
 ///
-/// This context is created by [`Database::bind`] or [`DBTransaction::bind`]. Query construction inside
+/// This context is created by [`Database::bind`] or [`Transaction::bind`]. Query construction inside
 /// the closure binds directly into [`ScalarExpression`] and [`LogicalPlan`]
 /// values; it does not build an ORM expression tree first.
 pub struct OrmContext<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
@@ -1090,7 +1094,7 @@ where
 /// Narrow expression binding scope borrowed from an [`OrmContext`].
 pub struct ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
@@ -1099,7 +1103,7 @@ where
 
 pub struct UpdateBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
@@ -1110,7 +1114,7 @@ where
 
 impl<'ctx, 'bind, 'parent, 'arena, T, A> OrmContext<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub fn from<'scope, M: Model>(
@@ -1331,7 +1335,7 @@ where
 
 impl<'ctx, 'bind, 'parent, 'arena, T, A> ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn handle(&self) -> ExprBindScopeHandle<'bind, 'parent, 'arena, T, A> {
@@ -1859,7 +1863,7 @@ where
 
 impl<'ctx, 'bind, 'parent, 'arena, T, A> UpdateBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub fn set_value<M, V, D>(&mut self, field: Field<M, V>, value: D) -> Result<(), DatabaseError>
@@ -1955,7 +1959,7 @@ where
 impl<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
     BindPlanFrom<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
@@ -2408,7 +2412,7 @@ where
 impl<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
     BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
@@ -2577,7 +2581,7 @@ pub trait Projection: FromQueryRow {
         relation: &str,
     ) -> Result<Vec<ExprRef>, DatabaseError>
     where
-        T: Transaction,
+        T: StorageTransaction,
         A: AsRef<[(usize, LogicalType)]>;
 }
 
@@ -2595,7 +2599,7 @@ fn bind_orm_source<'bind, 'parent, 'arena, T, A>(
     arena: &mut PlanArena<'arena>,
 ) -> Result<LogicalPlan, DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     let alias = orm_table_alias(&source);
@@ -2609,7 +2613,7 @@ fn bind_orm_target_column<'bind, 'parent, 'arena, T, A>(
     arena: &mut PlanArena<'arena>,
 ) -> Result<ColumnRef, DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     match binder.bind_column_ref_by_name(None, column_name, Some(source_name), arena)? {
@@ -2627,7 +2631,7 @@ fn bind_orm_insert_plan<'bind, 'parent, 'arena, T, A>(
     arena: &mut PlanArena<'arena>,
 ) -> Result<LogicalPlan, DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     let table_name: TableName = table_name.into();
@@ -2695,7 +2699,7 @@ fn bind_orm_insert_model<'bind, 'parent, 'arena, T, A, M>(
     arena: &mut PlanArena<'arena>,
 ) -> Result<LogicalPlan, DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
@@ -3399,7 +3403,7 @@ fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut TupleImpl) -> Result<T
 
 fn orm_analyze<'a, E: BindSource<'a>, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
-        .execute(|state, tx| {
+        .execute(false, |state, tx| {
             state.build_plan(&[], tx, |binder, arena| {
                 binder.bind_analyze(M::table_name().into(), arena)
             })
@@ -3413,7 +3417,7 @@ fn orm_insert<'a, E: BindSource<'a>, M: Model>(
 ) -> Result<(), DatabaseError> {
     let params = model.params();
     executor
-        .execute(|state, tx| {
+        .execute(false, |state, tx| {
             state.build_plan(&[], tx, |binder, arena| {
                 bind_orm_insert_model::<_, _, M>(binder, params, arena)
             })
@@ -3427,7 +3431,7 @@ fn orm_get<'a, E: BindSource<'a>, M: Model>(
 ) -> Result<Option<M>, DatabaseError> {
     let primary_key = M::primary_key_field();
     let key = key.to_data_value();
-    extract_optional_model(bind_orm_context(executor, |ctx| {
+    extract_optional_model(bind_orm_context(executor, true, |ctx| {
         let plan: LogicalPlan = ctx
             .from::<M>()?
             .filter(|expr| {
@@ -3445,7 +3449,7 @@ fn orm_get<'a, E: BindSource<'a>, M: Model>(
 fn orm_list<'a, E: BindSource<'a>, M: Model>(
     executor: E,
 ) -> Result<OrmIter<E::Iter, M>, DatabaseError> {
-    Ok(bind_orm_context(executor, |ctx| {
+    Ok(bind_orm_context(executor, true, |ctx| {
         let plan: LogicalPlan = ctx.from::<M>()?.finish()?;
         Ok(plan)
     })?
@@ -3886,7 +3890,7 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].name, expected);
         }
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         let tx_plan = tx.prepare(&types, |ctx| {
             ctx.from::<OrmUnitUser>()?
                 .filter(|e| e.column(OrmUnitUser::id())?.eq(e.param(1)?))?
@@ -3962,7 +3966,7 @@ mod tests {
             .iter()
             .any(|column| column.field == "name"));
 
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         tx.insert(&OrmUnitUser {
             id: 4,
             name: "Dora".to_string(),

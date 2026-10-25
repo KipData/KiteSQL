@@ -20,6 +20,15 @@ pub(crate) enum PlanInput<'p> {
     Borrowed(&'p LogicalPlan),
 }
 
+impl PlanInput<'_> {
+    pub(crate) fn root(&self) -> &LogicalPlan {
+        match self {
+            PlanInput::Owned(plan) => plan,
+            PlanInput::Borrowed(plan) => plan,
+        }
+    }
+}
+
 impl From<LogicalPlan> for PlanInput<'_> {
     fn from(plan: LogicalPlan) -> Self {
         PlanInput::Owned(plan)

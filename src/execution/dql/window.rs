@@ -21,7 +21,7 @@ use crate::planner::operator::sort::SortField;
 use crate::planner::operator::window::WindowOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 
@@ -84,7 +84,7 @@ pub struct Window<'a> {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Window<'a> {
     type Input = (&'a WindowOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -225,7 +225,7 @@ impl<'a> Window<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

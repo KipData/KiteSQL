@@ -21,7 +21,7 @@ use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple_builder::TupleBuilder;
 
 pub struct CopyToFile<'a> {
@@ -30,7 +30,7 @@ pub struct CopyToFile<'a> {
     input: Option<ExecId>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for CopyToFile<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for CopyToFile<'a> {
     type Input = (&'a CopyToFileOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -83,7 +83,7 @@ impl CopyToFile<'_> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

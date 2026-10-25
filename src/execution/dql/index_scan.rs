@@ -18,18 +18,18 @@ use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::SortOption;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{IndexIter, IndexRanges, Iter, Transaction};
+use crate::storage::{IndexIter, IndexRanges, Iter, StorageTransaction};
 use crate::types::index::{IndexInfo, IndexLookup};
 use std::borrow::Cow;
 
-pub(crate) struct IndexScan<'a, T: Transaction + 'a> {
+pub(crate) struct IndexScan<'a, T: StorageTransaction + 'a> {
     op: &'a TableScanOperator,
     info: &'a IndexInfo,
     lookup: &'a IndexLookup,
     iter: Option<IndexIter<'a, T>>,
 }
 
-impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
+impl<'a, T: StorageTransaction + 'a> IndexScan<'a, T> {
     pub(crate) fn new(
         op: &'a TableScanOperator,
         info: &'a IndexInfo,
@@ -83,7 +83,7 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
     type Input = (&'a TableScanOperator, &'a IndexInfo, &'a IndexLookup);
 
     fn into_executor(
@@ -97,7 +97,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

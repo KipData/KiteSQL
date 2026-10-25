@@ -15,15 +15,15 @@
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{Transaction, ViewIter};
+use crate::storage::{StorageTransaction, ViewIter};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 
-pub struct ShowViews<'a, T: Transaction + 'a> {
+pub struct ShowViews<'a, T: StorageTransaction + 'a> {
     pub(crate) metas: Option<ViewIter<'a, T>>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
     type Input = ();
 
     fn into_executor(
@@ -37,7 +37,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecArena<'a, T>,

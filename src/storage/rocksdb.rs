@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::storage::{
-    CheckpointableStorage, InnerIter, Storage, Transaction, TransactionIsolationLevel,
+    CheckpointableStorage, InnerIter, Storage, StorageTransaction, TransactionIsolationLevel,
 };
 #[cfg(feature = "unsafe_txdb_checkpoint")]
 use librocksdb_sys as ffi;
@@ -446,6 +446,7 @@ impl Storage for OptimisticRocksStorage {
     fn transaction_with_isolation(
         &self,
         isolation: TransactionIsolationLevel,
+        _read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
         let tx = if self.config.sync {
@@ -502,6 +503,7 @@ impl Storage for RocksStorage {
     fn transaction_with_isolation(
         &self,
         isolation: TransactionIsolationLevel,
+        _read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
         let tx = if self.config.sync {
@@ -636,7 +638,7 @@ fn build_read_options<D: rocksdb::DBAccess>(
 #[macro_export]
 macro_rules! impl_transaction {
     ($tx:ident, $iter:ident) => {
-        impl<'storage> Transaction for $tx<'storage> {
+        impl<'storage> StorageTransaction for $tx<'storage> {
             type BorrowedBytes<'a>
                 = DBPinnableSlice<'a>
             where
@@ -899,7 +901,7 @@ mod test {
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
         IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, InnerIter, IterBounds,
-        PrimaryKeyIndexImpl, Storage, Transaction,
+        PrimaryKeyIndexImpl, Storage, StorageTransaction,
     };
     use crate::types::index::IndexType;
     use crate::types::tuple::Tuple;

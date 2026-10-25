@@ -636,7 +636,70 @@ pub(crate) enum ColumnVisitRoot<'a> {
     Plan(&'a LogicalPlan),
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum CommandType {
+    DQL,
+    DML,
+    DDL,
+    Analyze,
+}
+
+impl CommandType {
+    /// Only queries leave storage untouched.
+    pub fn is_read_only(self) -> bool {
+        matches!(self, CommandType::DQL)
+    }
+}
+
 impl Operator {
+    /// Classifies a plan by its root, matching `command_type` of SQL statements.
+    pub fn command_type(&self) -> CommandType {
+        match self {
+            Operator::Dummy
+            | Operator::Aggregate(_)
+            | Operator::ScalarQueryInit(_)
+            | Operator::MarkApply(_)
+            | Operator::Filter(_)
+            | Operator::Join(_)
+            | Operator::Project(_)
+            | Operator::ScalarSubquery(_)
+            | Operator::TableScan(_)
+            | Operator::FunctionScan(_)
+            | Operator::Sort(_)
+            | Operator::Limit(_)
+            | Operator::TopK(_)
+            | Operator::Values(_)
+            | Operator::ShowTable
+            | Operator::ShowView
+            | Operator::Explain
+            | Operator::Describe(_)
+            | Operator::SetMembership(_)
+            | Operator::Union(_)
+            | Operator::RecursiveCte(_)
+            | Operator::RecursiveScan(_)
+            | Operator::IndexProbeJoin(_)
+            | Operator::Window(_) => CommandType::DQL,
+            #[cfg(feature = "copy")]
+            Operator::CopyToFile(_) => CommandType::DQL,
+            Operator::Insert(_)
+            | Operator::Update(_)
+            | Operator::Delete(_)
+            | Operator::Truncate(_) => CommandType::DML,
+            #[cfg(feature = "copy")]
+            Operator::CopyFromFile(_) => CommandType::DML,
+            Operator::Analyze(_) => CommandType::Analyze,
+            Operator::AddColumn(_)
+            | Operator::ChangeColumn(_)
+            | Operator::DropColumn(_)
+            | Operator::CreateTable(_)
+            | Operator::CreateIndex(_)
+            | Operator::CreateView(_)
+            | Operator::DropTable(_)
+            | Operator::DropView(_)
+            | Operator::DropIndex(_) => CommandType::DDL,
+        }
+    }
+
     pub fn visit_referenced_columns<A: MetaArena + ?Sized>(
         &self,
         arena: &A,

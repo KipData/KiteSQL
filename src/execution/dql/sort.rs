@@ -20,7 +20,7 @@ use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::planner::ScalarQueryRef;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
@@ -161,7 +161,7 @@ pub struct Sort<'a> {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
     type Input = (&'a SortOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -187,7 +187,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

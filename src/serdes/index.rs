@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::index::{IndexMeta, IndexMetaRef};
 use std::io::{Read, Write};
 
@@ -32,7 +32,7 @@ impl ReferenceSerialization for IndexMetaRef {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

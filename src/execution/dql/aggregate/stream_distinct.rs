@@ -20,7 +20,7 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 
@@ -30,7 +30,7 @@ pub struct StreamDistinctExecutor<'a> {
     last_keys: Option<TupleImpl>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -49,7 +49,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a>
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

@@ -23,7 +23,7 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ pub struct HashAggExecutor<'a> {
     output: Option<HashAggOutput>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -64,7 +64,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

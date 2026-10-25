@@ -65,7 +65,7 @@ impl FromStr for ExtSource {
     }
 }
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(super) fn bind_copy_to_file(
         &mut self,
         target: ExtSource,

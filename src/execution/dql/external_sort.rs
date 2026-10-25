@@ -21,7 +21,7 @@ use crate::execution::{
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use std::fs::File;
 use std::io::BufReader;
 use std::mem;
@@ -49,7 +49,7 @@ pub struct ExternalSort<'a> {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
     type Input = (&'a SortOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -68,7 +68,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

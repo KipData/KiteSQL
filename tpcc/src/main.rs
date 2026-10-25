@@ -916,7 +916,7 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
     ] {
         database.load(CatalogKind::Table(table_name.to_string().into()))?;
     }
-    let mut tx = database.new_transaction()?;
+    let mut tx = database.new_transaction(false)?;
 
     let (c_w_id, c_d_id, c_id, c_last, c_balance, c_data) = with_next_tuple(
         tx.run("SELECT c_w_id, c_d_id, c_id, c_last, c_balance, c_data FROM customer limit 1")?,

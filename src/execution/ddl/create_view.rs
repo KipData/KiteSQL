@@ -18,13 +18,13 @@ use crate::execution::{
 };
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 
 pub struct CreateView<'a> {
     op: &'a CreateViewOperator,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateView<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateView<'a> {
     type Input = &'a CreateViewOperator;
 
     fn into_executor(
@@ -38,7 +38,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CreateView<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateView<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateView<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

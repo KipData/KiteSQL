@@ -20,7 +20,7 @@ use crate::execution::{
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexType};
 use crate::types::value::DataValue;
 
@@ -28,7 +28,7 @@ pub struct AddColumn<'a> {
     op: &'a AddColumnOperator,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for AddColumn<'a> {
     type Input = &'a AddColumnOperator;
 
     fn into_executor(
@@ -42,7 +42,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for AddColumn<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

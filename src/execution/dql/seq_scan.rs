@@ -16,14 +16,14 @@ use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{Iter, Transaction, TupleIter};
+use crate::storage::{Iter, StorageTransaction, TupleIter};
 
-pub(crate) struct SeqScan<'a, T: Transaction + 'a> {
+pub(crate) struct SeqScan<'a, T: StorageTransaction + 'a> {
     op: &'a TableScanOperator,
     iter: Option<TupleIter<'a, T>>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
     type Input = &'a TableScanOperator;
 
     fn into_executor(
@@ -37,7 +37,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

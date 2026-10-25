@@ -20,7 +20,7 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
 use crate::planner::ExecMetaArena;
 use crate::planner::{ExprRef, LogicalPlan, MetaArena, ScalarQueryRef};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 
@@ -43,7 +43,7 @@ pub struct ScalarQueryInit<'a> {
 }
 
 impl<'a> ScalarQueryInit<'a> {
-    fn evaluate_init<T: Transaction + 'a, A: MetaArena + 'a>(
+    fn evaluate_init<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -61,7 +61,7 @@ impl<'a> ScalarQueryInit<'a> {
         Ok(())
     }
 
-    pub(crate) fn build<T: Transaction + 'a>(
+    pub(crate) fn build<T: StorageTransaction + 'a>(
         op: &'a ScalarQueryInitOperator,
         input: ExecId,
         init_plan: &'a LogicalPlan,
@@ -89,7 +89,7 @@ impl<'a> ScalarQueryInit<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit<'a> {
     type Input = (
         &'a ScalarQueryInitOperator,
         &'a LogicalPlan,
@@ -108,7 +108,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

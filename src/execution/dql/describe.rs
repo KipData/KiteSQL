@@ -17,7 +17,7 @@ use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use std::sync::LazyLock;
@@ -56,7 +56,7 @@ impl From<&DescribeOperator> for Describe {
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Describe {
     type Input = &'a DescribeOperator;
 
     fn into_executor(
@@ -71,7 +71,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Describe {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecArena<'a, T>,

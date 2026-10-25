@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::CharLengthUnits;
 use std::io::{Read, Write};
 
@@ -36,7 +36,7 @@ impl ReferenceSerialization for CharLengthUnits {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &ReferenceTables,

@@ -22,7 +22,7 @@ impl<S: Storage> Database<S> {
     {
         let transaction = self
             .storage
-            .transaction_with_isolation(self.transaction_isolation)?;
+            .transaction_with_isolation(self.transaction_isolation, true)?;
         self.state
             .prepare_plan_with(params, &transaction, |binder, arena| {
                 let mut context = OrmContext { binder, arena };
@@ -44,7 +44,7 @@ impl<S: Storage> Database<S> {
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        bind_orm_context(self, build)
+        bind_orm_context(self, false, build)
     }
 
     /// Explains a binder-backed plan built inside a closure.
@@ -185,7 +185,7 @@ impl<S: Storage> Database<S> {
     }
 }
 
-impl<'a, S: Storage> DBTransaction<'a, S> {
+impl<'a, S: Storage> Transaction<'a, S> {
     /// Prepares an ORM-built plan for repeated execution inside this transaction.
     pub fn prepare<F>(
         &self,
@@ -228,7 +228,7 @@ impl<'a, S: Storage> DBTransaction<'a, S> {
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        bind_orm_context(self, build)
+        bind_orm_context(self, false, build)
     }
 
     /// Explains a binder-backed plan inside the current transaction.

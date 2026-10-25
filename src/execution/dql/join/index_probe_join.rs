@@ -19,7 +19,7 @@ use crate::execution::{
 };
 use crate::planner::operator::index_probe_join::IndexProbeJoinOperator;
 use crate::planner::{ExecMetaArena, LogicalPlan, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::index::RuntimeIndexProbe;
 
 pub struct IndexProbeJoin<'a> {
@@ -28,7 +28,7 @@ pub struct IndexProbeJoin<'a> {
     right_input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexProbeJoin<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexProbeJoin<'a> {
     type Input = (&'a IndexProbeJoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -48,7 +48,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for IndexProbeJoin<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

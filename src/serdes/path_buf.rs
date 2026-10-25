@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -33,7 +33,7 @@ impl ReferenceSerialization for PathBuf {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: std::io::Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: std::io::Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

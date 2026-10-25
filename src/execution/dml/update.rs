@@ -22,7 +22,7 @@ use crate::planner::operator::update::UpdateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexMeta, IndexType};
 use crate::types::tuple::{Schema, Tuple};
 use crate::types::tuple_builder::TupleBuilder;
@@ -36,7 +36,7 @@ pub struct Update<'a> {
     input: Option<ExecId>,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Update<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Update<'a> {
     type Input = (&'a UpdateOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -87,7 +87,7 @@ impl Update<'_> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

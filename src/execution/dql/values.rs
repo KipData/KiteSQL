@@ -17,7 +17,7 @@ use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNo
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::ExprRef;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 
 pub struct Values<'a> {
@@ -36,7 +36,7 @@ impl<'a> From<&'a ValuesOperator> for Values<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Values<'a> {
     type Input = &'a ValuesOperator;
 
     fn into_executor(
@@ -51,7 +51,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Values<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Values<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Values<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecArena<'a, T>,

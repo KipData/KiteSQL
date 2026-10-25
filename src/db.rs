@@ -54,7 +54,7 @@ use crate::storage::memory::MemoryStorage;
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{
-    CheckpointableStorage, StatisticsMetaCache, Storage, TableCache, Transaction,
+    CheckpointableStorage, StatisticsMetaCache, Storage, StorageTransaction, TableCache,
     TransactionIsolationLevel, ViewCache,
 };
 use crate::types::tuple::{Schema, SchemaView, TupleImpl};
@@ -84,12 +84,15 @@ pub enum CatalogKind {
 
 pub(crate) trait BindSource<'a> {
     type Iter: ResultIter;
-    type Transaction: Transaction;
+    type Transaction: StorageTransaction;
 
     type Storage: Storage;
 
+    /// `read_only` lets a fresh transaction use the storage's read path; executors
+    /// that already hold a transaction ignore it.
     fn execute<P: Into<PlanInput<'a>>, A: MetaArena + 'a, F>(
         self,
+        read_only: bool,
         build: F,
     ) -> Result<Self::Iter, DatabaseError>
     where
@@ -586,7 +589,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .build()
 }
 
-fn statement_stamp<T: Transaction>(
+fn statement_stamp<T: StorageTransaction>(
     transaction: &mut T,
     plan: &LogicalPlan,
 ) -> Result<u64, DatabaseError> {
@@ -700,7 +703,7 @@ impl<S: Storage> State<S> {
         Ok(())
     }
 
-    pub(crate) fn build_plan<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>, F>(
+    pub(crate) fn build_plan<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>, F>(
         &'a self,
         params: A,
         transaction: &T,
@@ -963,7 +966,7 @@ impl<S: Storage> Database<S> {
     {
         let transaction = Box::into_raw(Box::new(
             self.storage
-                .transaction_with_isolation(self.transaction_isolation)?,
+                .transaction_with_isolation(self.transaction_isolation, false)?,
         ));
         let state = std::ptr::from_mut(&mut self.state);
         let (schema, plan_arena, executor) =
@@ -1022,7 +1025,10 @@ impl<S: Storage> Database<S> {
                 Ok(())
             }
             CatalogKind::Table(name) => {
-                let transaction = self.storage.transaction()?;
+                let transaction = self.storage.transaction_with_isolation(
+                    self.storage.default_transaction_isolation(),
+                    true,
+                )?;
                 let mut table_codec = TableCodec::default();
                 let table = transaction
                     .load_table(
@@ -1077,7 +1083,10 @@ impl<S: Storage> Database<S> {
                 Ok(())
             }
             CatalogKind::View(name) => {
-                let transaction = self.storage.transaction()?;
+                let transaction = self.storage.transaction_with_isolation(
+                    self.storage.default_transaction_isolation(),
+                    true,
+                )?;
                 let mut table_codec = TableCodec::default();
                 let view = transaction
                     .load_view(
@@ -1099,15 +1108,18 @@ impl<S: Storage> Database<S> {
     /// Opens a new explicit transaction.
     ///
     /// Statements executed through the returned transaction share the same
-    /// transactional context until [`DBTransaction::commit`] is called.
-    pub fn new_transaction(&self) -> Result<DBTransaction<'_, S>, DatabaseError> {
+    /// transactional context until [`Transaction::commit`] is called.
+    /// A `read_only` transaction rejects statements that write; on LMDB it runs
+    /// alongside the single writer instead of waiting for it.
+    pub fn new_transaction(&self, read_only: bool) -> Result<Transaction<'_, S>, DatabaseError> {
         let transaction = self
             .storage
-            .transaction_with_isolation(self.transaction_isolation)?;
+            .transaction_with_isolation(self.transaction_isolation, read_only)?;
 
-        Ok(DBTransaction {
+        Ok(Transaction {
             inner: transaction,
             state: &self.state,
+            read_only,
         })
     }
 
@@ -1136,6 +1148,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
 
     fn execute<P: Into<PlanInput<'a>>, A: MetaArena + 'a, F>(
         self,
+        read_only: bool,
         build: F,
     ) -> Result<Self::Iter, DatabaseError>
     where
@@ -1143,7 +1156,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
     {
         let transaction = Box::into_raw(Box::new(
             self.storage
-                .transaction_with_isolation(self.transaction_isolation)?,
+                .transaction_with_isolation(self.transaction_isolation, read_only)?,
         ));
         let result = (|| {
             let transaction = unsafe { &mut *transaction };
@@ -1178,7 +1191,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
     {
         let mut transaction = self
             .storage
-            .transaction_with_isolation(self.transaction_isolation)?;
+            .transaction_with_isolation(self.transaction_isolation, true)?;
         transaction.begin_statement_scope()?;
         let (plan, mut arena) = self.state.build_plan(params, &transaction, build)?;
         Ok(plan.explain(&mut arena, 0))
@@ -1335,12 +1348,13 @@ impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
 }
 
 /// Explicit transaction handle created by [`Database::new_transaction`].
-pub struct DBTransaction<'a, S: Storage + 'a> {
+pub struct Transaction<'a, S: Storage + 'a> {
     pub(crate) inner: S::TransactionType<'a>,
     pub(crate) state: &'a State<S>,
+    read_only: bool,
 }
 
-impl<'txn, S: Storage> DBTransaction<'txn, S> {
+impl<'txn, S: Storage> Transaction<'txn, S> {
     /// Commits the current transaction.
     pub fn commit(self) -> Result<(), DatabaseError> {
         self.inner.commit()?;
@@ -1349,7 +1363,7 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
     }
 }
 
-impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
+impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut Transaction<'txn, S> {
     type Iter = TransactionIter<'a, S::TransactionType<'txn>>;
     type Transaction = S::TransactionType<'txn>;
 
@@ -1357,6 +1371,7 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
 
     fn execute<P: Into<PlanInput<'a>>, A: MetaArena + 'a, F>(
         self,
+        _read_only: bool,
         build: F,
     ) -> Result<Self::Iter, DatabaseError>
     where
@@ -1364,10 +1379,16 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
     {
         self.inner.begin_statement_scope()?;
         let (plan, arena) = build(self.state, &self.inner)?;
+        let plan = plan.into();
+        if self.read_only && !plan.root().operator.command_type().is_read_only() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "cannot write in a read-only transaction".into(),
+            ));
+        }
         let transaction = std::ptr::from_mut(&mut self.inner);
         let (schema, arena, executor) =
             self.state
-                .execute(unsafe { &mut *transaction }, plan.into(), arena)?;
+                .execute(unsafe { &mut *transaction }, plan, arena)?;
         Ok(TransactionIter::new(
             schema,
             arena.boxed(),
@@ -1391,13 +1412,13 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
     }
 }
 
-struct TransactionGuard<'a, T: Transaction + 'a> {
+struct TransactionGuard<'a, T: StorageTransaction + 'a> {
     executor: Option<Executor<'a, T>>,
     transaction: *mut T,
     statement_scope_active: bool,
 }
 
-impl<T: Transaction> TransactionGuard<'_, T> {
+impl<T: StorageTransaction> TransactionGuard<'_, T> {
     #[inline]
     fn finish_statement_scope(
         &mut self,
@@ -1415,14 +1436,18 @@ impl<T: Transaction> TransactionGuard<'_, T> {
     }
 }
 
-impl<T: Transaction> Drop for TransactionGuard<'_, T> {
+impl<T: StorageTransaction> Drop for TransactionGuard<'_, T> {
     fn drop(&mut self) {
         let _ = self.finish_statement_scope(&mut Vec::new());
     }
 }
 
 /// Raw result iterator returned by transaction execution APIs.
-pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn MetaArena + 'a>> {
+pub struct TransactionIter<
+    'a,
+    T: StorageTransaction + 'a,
+    A: MetaArena + 'a = Box<dyn MetaArena + 'a>,
+> {
     // Drop execution before the metadata arena it borrows from.
     guard: TransactionGuard<'a, T>,
     plan_arena: ExecMetaArena<A>,
@@ -1430,7 +1455,7 @@ pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn 
     ddl_apply: Vec<DDLApply>,
 }
 
-impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
+impl<'a, T: StorageTransaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     pub(crate) fn new(
         schema: Schema,
         plan_arena: ExecMetaArena<A>,
@@ -1493,7 +1518,7 @@ impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     }
 }
 
-impl<'a, T: Transaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
+impl<'a, T: StorageTransaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
     fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         let Self {
@@ -1507,7 +1532,7 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
     }
 }
 
-impl<T: Transaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
+impl<T: StorageTransaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         TransactionIter::schema(self, f)
     }
@@ -1541,7 +1566,7 @@ pub(crate) mod test {
     use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::{
-        table_codec::TableCodec, StatisticsMetaCache, Storage, TableCache, Transaction,
+        table_codec::TableCodec, StatisticsMetaCache, Storage, StorageTransaction, TableCache,
         TransactionIsolationLevel, ViewCache,
     };
     use crate::types::tuple::{Tuple, TupleImpl};
@@ -1772,7 +1797,7 @@ pub(crate) mod test {
         Ok(())
     }
 
-    pub(crate) fn build_table<T: Transaction>(
+    pub(crate) fn build_table<T: StorageTransaction>(
         table_cache: &mut TableCache,
         transaction: &mut T,
         plan_arena: &mut PlanArena,
@@ -2376,8 +2401,8 @@ pub(crate) mod test {
 
         kite_sql.ddl("create table t1 (a int primary key, b int)")?;
 
-        let mut tx_1 = kite_sql.new_transaction()?;
-        let mut tx_2 = kite_sql.new_transaction()?;
+        let mut tx_1 = kite_sql.new_transaction(false)?;
+        let mut tx_2 = kite_sql.new_transaction(false)?;
 
         tx_1.run("insert into t1 values(0, 0)")?.done()?;
         tx_1.run("insert into t1 values(1, 1)")?.done()?;
@@ -2407,7 +2432,7 @@ pub(crate) mod test {
         tx_1.commit()?;
         tx_2.commit()?;
 
-        let mut tx_3 = kite_sql.new_transaction()?;
+        let mut tx_3 = kite_sql.new_transaction(false)?;
         let res = tx_3.run("create table t2 (a int primary key, b int)");
         assert!(res.is_err());
 
@@ -2421,7 +2446,7 @@ pub(crate) mod test {
 
         kite_sql.ddl("create table t_multi_tx (a int primary key, b int)")?;
 
-        let mut tx = kite_sql.new_transaction()?;
+        let mut tx = kite_sql.new_transaction(false)?;
         let mut iter = tx.run(
             "insert into t_multi_tx values(0, 0); insert into t_multi_tx values(1, 1); select * from t_multi_tx order by a",
         )?;
@@ -2454,7 +2479,7 @@ pub(crate) mod test {
 
         kite_sql.ddl("create table t_iter_drop (a int primary key, b int)")?;
 
-        let mut tx = kite_sql.new_transaction()?;
+        let mut tx = kite_sql.new_transaction(false)?;
         tx.run("insert into t_iter_drop values (0, 0), (1, 1)")?
             .done()?;
 
@@ -2503,8 +2528,8 @@ pub(crate) mod test {
         kite_sql.ddl("create table t_rc (a int primary key, b int)")?;
         kite_sql.run("insert into t_rc values (1, 10)")?.done()?;
 
-        let mut reader = kite_sql.new_transaction()?;
-        let mut writer = kite_sql.new_transaction()?;
+        let mut reader = kite_sql.new_transaction(false)?;
+        let mut writer = kite_sql.new_transaction(false)?;
 
         assert_eq!(
             read_single_i32(reader.run("select b from t_rc where a = 1")?)?,
@@ -2546,8 +2571,8 @@ pub(crate) mod test {
         kite_sql.ddl("create table t_rr (a int primary key, b int)")?;
         kite_sql.run("insert into t_rr values (1, 10)")?.done()?;
 
-        let mut reader = kite_sql.new_transaction()?;
-        let mut writer = kite_sql.new_transaction()?;
+        let mut reader = kite_sql.new_transaction(false)?;
+        let mut writer = kite_sql.new_transaction(false)?;
 
         assert_eq!(
             read_single_i32(reader.run("select b from t_rr where a = 1")?)?,
@@ -2573,8 +2598,8 @@ pub(crate) mod test {
 
         kite_sql.ddl("create table t1 (a int primary key, b int)")?;
 
-        let mut tx_1 = kite_sql.new_transaction()?;
-        let mut tx_2 = kite_sql.new_transaction()?;
+        let mut tx_1 = kite_sql.new_transaction(false)?;
+        let mut tx_2 = kite_sql.new_transaction(false)?;
 
         tx_1.run("insert into t1 values(0, 0)")?.done()?;
         tx_1.run("insert into t1 values(1, 1)")?.done()?;
@@ -2609,7 +2634,7 @@ pub(crate) mod test {
 
         assert!(tx_2.commit().is_err());
 
-        let mut tx_3 = kite_sql.new_transaction()?;
+        let mut tx_3 = kite_sql.new_transaction(false)?;
         let res = tx_3.run("create table t2 (a int primary key, b int)");
         assert!(res.is_err());
 
@@ -2686,7 +2711,7 @@ pub(crate) mod test {
             vec![DataValue::Int32(7)]
         );
         iter.done()?;
-        let mut tx = db.new_transaction()?;
+        let mut tx = db.new_transaction(false)?;
         let mut iter = tx.run(&sql)?;
         assert_eq!(
             iter.next_tuple(|_, row| row.clone())?.unwrap(),

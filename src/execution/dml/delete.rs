@@ -20,7 +20,7 @@ use crate::execution::{
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexType};
 use crate::types::tuple_builder::TupleBuilder;
 
@@ -29,7 +29,7 @@ pub struct Delete<'a> {
     input: Option<ExecId>,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
     type Input = (&'a DeleteOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -50,7 +50,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

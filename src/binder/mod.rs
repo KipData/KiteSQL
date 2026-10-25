@@ -51,8 +51,9 @@ mod truncate;
 mod update;
 mod window;
 
+pub use crate::planner::operator::CommandType;
 #[cfg(feature = "parser")]
-pub use parser::{command_type, CommandType, Statement};
+pub use parser::{command_type, Statement};
 #[cfg(feature = "orm")]
 pub use select::{BindPlanFrom, BindPlanSelectList};
 #[cfg(feature = "orm")]
@@ -67,7 +68,7 @@ use crate::expression::{ScalarExpression, TypeCast};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena, PlanRef, ScalarQueryRef};
-use crate::storage::{TableCache, Transaction, ViewCache};
+use crate::storage::{StorageTransaction, TableCache, ViewCache};
 use crate::types::tuple::Schema;
 use crate::types::LogicalType;
 
@@ -258,7 +259,7 @@ pub(crate) struct BoundScalarQuery {
     param_bindings: Vec<(ScalarQueryRef, ExprRef)>,
 }
 
-pub struct BinderContext<'a, T: Transaction> {
+pub struct BinderContext<'a, T: StorageTransaction> {
     pub(crate) scala_functions: &'a ScalaFunctions,
     pub(crate) table_functions: &'a TableFunctions,
     pub(crate) table_cache: &'a TableCache,
@@ -325,7 +326,7 @@ impl Source<'_> {
     }
 }
 
-impl<'a, T: Transaction> BinderContext<'a, T> {
+impl<'a, T: StorageTransaction> BinderContext<'a, T> {
     pub fn new(
         table_cache: &'a TableCache,
         view_cache: &'a ViewCache,
@@ -766,7 +767,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
     }
 }
 
-pub struct Binder<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> {
+pub struct Binder<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> {
     pub(crate) context: BinderContext<'a, T>,
     pub(crate) args: &'a A,
     pub(crate) force_spill: bool,
@@ -775,7 +776,9 @@ pub struct Binder<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>>
     pub(crate) parent: Option<&'parent BinderContext<'a, T>>,
 }
 
-impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'parent, T, A> {
+impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
+    Binder<'a, 'parent, T, A>
+{
     pub fn new(
         context: BinderContext<'a, T>,
         args: &'a A,
@@ -846,7 +849,9 @@ pub mod test {
     use crate::errors::DatabaseError;
     use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::{table_codec::TableCodec, Storage, TableCache, Transaction, ViewCache};
+    use crate::storage::{
+        table_codec::TableCodec, Storage, StorageTransaction, TableCache, ViewCache,
+    };
     use crate::types::ColumnId;
     use crate::types::LogicalType::Integer;
     use std::path::PathBuf;

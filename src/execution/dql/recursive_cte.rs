@@ -25,7 +25,7 @@ use crate::execution::{
 use crate::planner::operator::recursive_cte::RecursiveScanOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::TupleImpl;
 use std::mem;
 
@@ -209,7 +209,7 @@ enum RecursivePhase {
     Recursive,
 }
 
-pub struct RecursiveCte<'a, T: Transaction + 'a> {
+pub struct RecursiveCte<'a, T: StorageTransaction + 'a> {
     recursive_plan: &'a LogicalPlan,
     anchor_input: ExecId,
     recursive_arena: ExecArena<'a, T>,
@@ -219,7 +219,7 @@ pub struct RecursiveCte<'a, T: Transaction + 'a> {
     phase: RecursivePhase,
 }
 
-impl<'a, T: Transaction + 'a> RecursiveCte<'a, T> {
+impl<'a, T: StorageTransaction + 'a> RecursiveCte<'a, T> {
     fn new(
         anchor_input: ExecId,
         recursive_plan: &'a LogicalPlan,
@@ -259,7 +259,7 @@ impl<'a, T: Transaction + 'a> RecursiveCte<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
     type Input = (&'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -280,7 +280,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -338,7 +338,7 @@ pub struct RecursiveScan {
     input: RecursiveInput,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
     type Input = &'a RecursiveScanOperator;
 
     fn into_executor(
@@ -353,7 +353,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecArena<'a, T>,

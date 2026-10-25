@@ -22,7 +22,7 @@ use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::planner::{LogicalPlan, ScalarQueryRef};
 use crate::storage::table_codec::BumpBytes;
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
@@ -117,7 +117,7 @@ pub struct TopK<'a> {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
     type Input = (&'a TopKOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -146,7 +146,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

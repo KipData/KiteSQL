@@ -121,17 +121,18 @@ impl Display for EmptyStorageMetrics {
 pub trait Storage: Clone {
     type Metrics: Display;
 
-    type TransactionType<'a>: Transaction
+    type TransactionType<'a>: StorageTransaction
     where
         Self: 'a;
 
     fn transaction(&self) -> Result<Self::TransactionType<'_>, DatabaseError> {
-        self.transaction_with_isolation(self.default_transaction_isolation())
+        self.transaction_with_isolation(self.default_transaction_isolation(), false)
     }
 
     fn transaction_with_isolation(
         &self,
         isolation: TransactionIsolationLevel,
+        read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError>;
 
     fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
@@ -165,7 +166,7 @@ pub trait CheckpointableStorage: Storage {
 /// Optional bounds of the reader, of the form (offset, limit).
 pub(crate) type Bounds = (Option<usize>, Option<usize>);
 
-pub trait Transaction: Sized {
+pub trait StorageTransaction: Sized {
     type BorrowedBytes<'a>: AsRef<[u8]>
     where
         Self: 'a;
@@ -1359,7 +1360,7 @@ fn encode_bound<'a>(
     bound: &Bound<DataValue>,
     is_upper: bool,
     buffer: &'a mut Bytes,
-    params: &IndexImplParams<'_, impl Transaction>,
+    params: &IndexImplParams<'_, impl StorageTransaction>,
     inner: &IndexImplEnum,
 ) -> Result<Bound<&'a [u8]>, DatabaseError> {
     match bound {
@@ -1375,7 +1376,7 @@ fn encode_bound<'a>(
     }
 }
 
-trait IndexImpl<T: Transaction> {
+trait IndexImpl<T: StorageTransaction> {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1455,7 +1456,7 @@ impl TupleMapping {
     }
 }
 
-struct IndexImplParams<'a, T: Transaction> {
+struct IndexImplParams<'a, T: StorageTransaction> {
     index_meta: IndexMetaRef,
     meta_arena: &'a dyn MetaArena,
     table_name: TableName,
@@ -1468,7 +1469,7 @@ struct IndexImplParams<'a, T: Transaction> {
     reverse: bool,
 }
 
-impl<T: Transaction> IndexImplParams<'_, T> {
+impl<T: StorageTransaction> IndexImplParams<'_, T> {
     #[inline]
     pub(crate) fn index_meta(&self) -> &IndexMeta {
         self.meta_arena.index(self.index_meta)
@@ -1502,18 +1503,18 @@ impl<T: Transaction> IndexImplParams<'_, T> {
     }
 }
 
-enum IndexResult<'a, T: Transaction + 'a> {
+enum IndexResult<'a, T: StorageTransaction + 'a> {
     Hit,
     Miss,
     Scope(RangeIter<'a, T>),
 }
 
-pub enum RangeIter<'a, T: Transaction + 'a> {
+pub enum RangeIter<'a, T: StorageTransaction + 'a> {
     Forward(T::IterType<'a>),
     Reverse(T::RevIterType<'a>),
 }
 
-impl<'a, T: Transaction + 'a> RangeIter<'a, T> {
+impl<'a, T: StorageTransaction + 'a> RangeIter<'a, T> {
     fn open(
         tx: &'a T,
         min: Bound<&[u8]>,
@@ -1528,7 +1529,7 @@ impl<'a, T: Transaction + 'a> RangeIter<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> InnerIter for RangeIter<'a, T> {
+impl<'a, T: StorageTransaction + 'a> InnerIter for RangeIter<'a, T> {
     fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
         match self {
             RangeIter::Forward(iter) => iter.try_next(),
@@ -1537,7 +1538,7 @@ impl<'a, T: Transaction + 'a> InnerIter for RangeIter<'a, T> {
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for IndexImplEnum {
+impl<T: StorageTransaction> IndexImpl<T> for IndexImplEnum {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1621,7 +1622,7 @@ impl<T: Transaction> IndexImpl<T> for IndexImplEnum {
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
     fn index_lookup_into(
         &self,
         _: &mut TableCodec,
@@ -1698,7 +1699,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
 }
 
 #[inline(always)]
-fn secondary_index_lookup<T: Transaction>(
+fn secondary_index_lookup<T: StorageTransaction>(
     table_codec: &mut TableCodec,
     tuple: &mut Tuple,
     bytes: &[u8],
@@ -1712,7 +1713,7 @@ fn secondary_index_lookup<T: Transaction>(
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1780,7 +1781,7 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for NormalIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1832,7 +1833,7 @@ impl<T: Transaction> IndexImpl<T> for NormalIndexImpl {
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for CompositeIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1884,7 +1885,7 @@ impl<T: Transaction> IndexImpl<T> for CompositeIndexImpl {
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
     fn index_lookup_into(
         &self,
         _: &mut TableCodec,
@@ -1952,7 +1953,7 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
 }
 
 #[inline(always)]
-fn eq_to_res_scope<'a, T: Transaction + 'a>(
+fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
     table_codec: &mut TableCodec,
     tuple: &mut Tuple,
     index_impl: &impl IndexImpl<T>,
@@ -1974,7 +1975,7 @@ fn eq_to_res_scope<'a, T: Transaction + 'a>(
     Ok(IndexResult::Scope(iter))
 }
 
-pub struct TupleIter<'a, T: Transaction + 'a> {
+pub struct TupleIter<'a, T: StorageTransaction + 'a> {
     bounds: IterBounds,
     pk_ty: Option<LogicalType>,
     deserializers: Vec<TupleValueSerializableImpl>,
@@ -1982,7 +1983,7 @@ pub struct TupleIter<'a, T: Transaction + 'a> {
     iter: T::IterType<'a>,
 }
 
-impl<'a, T: Transaction + 'a> TupleIter<'a, T> {
+impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
     pub(crate) fn reset(
         &mut self,
         tx: &'a T,
@@ -1998,7 +1999,7 @@ impl<'a, T: Transaction + 'a> TupleIter<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
+impl<'a, T: StorageTransaction + 'a> Iter for TupleIter<'a, T> {
     fn next_tuple_into(
         &mut self,
         table_codec: &mut TableCodec,
@@ -2135,7 +2136,7 @@ impl IterBounds {
     }
 }
 
-pub struct IndexIter<'a, T: Transaction> {
+pub struct IndexIter<'a, T: StorageTransaction> {
     bounds: IterBounds,
     params: IndexImplParams<'a, T>,
     inner: IndexImplEnum,
@@ -2145,13 +2146,13 @@ pub struct IndexIter<'a, T: Transaction> {
     encode_max_buffer: Bytes,
 }
 
-pub enum IndexIterState<'a, T: Transaction + 'a> {
+pub enum IndexIterState<'a, T: StorageTransaction + 'a> {
     Init,
     Range(RangeIter<'a, T>),
     Over,
 }
 
-impl<'a, T: Transaction> IndexIter<'a, T> {
+impl<'a, T: StorageTransaction> IndexIter<'a, T> {
     pub(crate) fn reset(&mut self, ranges: IndexRanges<'a>, bounds: Bounds) {
         self.params.reverse = ranges.reverse;
         self.ranges = ranges;
@@ -2173,7 +2174,7 @@ impl<'a, T: Transaction> IndexIter<'a, T> {
     }
 }
 
-impl<T: Transaction> Iter for IndexIter<'_, T> {
+impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
     fn next_tuple_into(
         &mut self,
         table_codec: &mut TableCodec,
@@ -2300,11 +2301,11 @@ pub trait Iter {
     ) -> Result<bool, DatabaseError>;
 }
 
-pub struct TableIter<'a, T: Transaction + 'a> {
+pub struct TableIter<'a, T: StorageTransaction + 'a> {
     iter: T::IterType<'a>,
 }
 
-impl<T: Transaction> TableIter<'_, T> {
+impl<T: StorageTransaction> TableIter<'_, T> {
     pub fn try_next(
         &mut self,
         arena: &mut (impl MetaArena + ?Sized),
@@ -2317,11 +2318,11 @@ impl<T: Transaction> TableIter<'_, T> {
     }
 }
 
-pub struct ViewIter<'a, T: Transaction + 'a> {
+pub struct ViewIter<'a, T: StorageTransaction + 'a> {
     iter: T::IterType<'a>,
 }
 
-impl<T: Transaction> ViewIter<'_, T> {
+impl<T: StorageTransaction> ViewIter<'_, T> {
     pub fn try_next(
         &mut self,
         arena: &mut (impl MetaArena + ?Sized),
@@ -2336,7 +2337,7 @@ impl<T: Transaction> ViewIter<'_, T> {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
-pub(crate) fn check_range_rev_matches_range<T: Transaction>(
+pub(crate) fn check_range_rev_matches_range<T: StorageTransaction>(
     tx: &mut T,
 ) -> Result<(), DatabaseError> {
     fn keys<I: InnerIter>(mut iter: I) -> Result<Vec<Vec<u8>>, DatabaseError> {
@@ -2415,7 +2416,7 @@ pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
     mut db: crate::db::Database<S>,
 ) -> Result<(), DatabaseError> {
     db.ddl("create table t (id int primary key, v int not null)")?;
-    let mut tx = db.new_transaction()?;
+    let mut tx = db.new_transaction(false)?;
     tx.run("insert into t values (1,1), (2,2), (3,3), (4,4), (5,5)")?
         .done()?;
     tx.run("update t set id = id + 1000 where id > 3 and id < 3000")?
@@ -2437,7 +2438,7 @@ pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
 }
 
 #[cfg(test)]
-pub(crate) fn check_remove_range<T: Transaction>(tx: &mut T) -> Result<(), DatabaseError> {
+pub(crate) fn check_remove_range<T: StorageTransaction>(tx: &mut T) -> Result<(), DatabaseError> {
     let data: Vec<[u8; 4]> = (0u32..3000).map(u32::to_be_bytes).collect();
     let [k0, k1, k10, k2500, k2999, k5000] = [0u32, 1, 10, 2500, 2999, 5000].map(u32::to_be_bytes);
     type Case<'a> = (Bound<&'a [u8]>, Bound<&'a [u8]>);
@@ -2496,7 +2497,7 @@ mod test {
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
-        IndexIter, InnerIter, Storage, TableCache, Transaction, TransactionIsolationLevel,
+        IndexIter, InnerIter, Storage, StorageTransaction, TableCache, TransactionIsolationLevel,
     };
     use crate::types::index::{Index, IndexType};
     use crate::types::tuple::Tuple;
@@ -3111,7 +3112,7 @@ mod test {
             index_id
         };
         let reader_tx =
-            storage.transaction_with_isolation(TransactionIsolationLevel::ReadCommitted)?;
+            storage.transaction_with_isolation(TransactionIsolationLevel::ReadCommitted, true)?;
         let tuple_id = {
             let mut index_iter = table_codec.with_index_bound("t1", index_id, |min, max| {
                 reader_tx.range(Bound::Included(min), Bound::Included(max))

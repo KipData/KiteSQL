@@ -44,7 +44,7 @@ use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, ScalarQueryRef};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
 
@@ -118,7 +118,7 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for ProjectionOutputBinder<'_> {
 
 pub(crate) struct BindPlanStart<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) binder: &'s mut Binder<'a, 'b, T, A>,
@@ -127,7 +127,7 @@ where
 
 pub struct BindPlanFrom<'s, 'a, 'b, 'arena, T, A, M = ()>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) binder: &'s mut Binder<'a, 'b, T, A>,
@@ -138,7 +138,7 @@ where
 
 pub struct BindPlanSelectList<'s, 'a, 'b, 'arena, T, A, M = ()>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) binder: &'s mut Binder<'a, 'b, T, A>,
@@ -150,7 +150,7 @@ where
 
 pub(crate) struct BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(super) binder: &'s mut Binder<'a, 'b, T, A>,
@@ -161,7 +161,7 @@ where
 
 pub(crate) struct BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -174,7 +174,7 @@ where
 
 pub(crate) struct BindPlanHaving<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -186,7 +186,7 @@ where
 
 pub(crate) struct BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -198,7 +198,7 @@ where
 
 pub(crate) struct BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -210,7 +210,7 @@ where
 
 pub(crate) struct BindPlanSorted<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -221,7 +221,7 @@ where
 
 pub(crate) struct BindPlanProjected<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     plan: LogicalPlan,
@@ -251,7 +251,7 @@ pub(crate) enum JoinConstraintInput {
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A, M> BindPlanFrom<'s, 'a, 'b, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     #[cfg(feature = "orm")]
@@ -303,7 +303,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A, M> BindPlanSelectList<'s, 'a, 'b, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     #[cfg(feature = "orm")]
@@ -452,7 +452,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanStart<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     #[allow(clippy::wrong_self_convention)]
@@ -471,7 +471,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A, M> BindPlanSelectList<'s, 'a, 'b, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn filter_expr(
@@ -495,7 +495,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn aggregate<O>(
@@ -608,7 +608,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn having(
@@ -630,7 +630,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanHaving<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn window(
@@ -688,7 +688,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn distinct(
@@ -740,7 +740,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn order_by(
@@ -761,7 +761,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanSorted<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn project(
@@ -782,7 +782,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanProjected<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn insert_into(
@@ -810,7 +810,7 @@ impl BindPlanComplete {
     }
 }
 
-impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b, T, A> {
+impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b, T, A> {
     pub(crate) fn bind_scalar_queries(
         &mut self,
         mut plan: LogicalPlan,

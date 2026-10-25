@@ -18,7 +18,7 @@ use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 use crate::{
     expression::ScalarExpression,
@@ -41,7 +41,7 @@ impl ExprVisitor<dyn MetaArena + '_> for AggregateCallCollector<'_> {
     }
 }
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub fn bind_aggregate(
         &mut self,
         children: LogicalPlan,

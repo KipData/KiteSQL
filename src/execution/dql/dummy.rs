@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::Tuple;
 
 pub struct Dummy {
@@ -30,7 +30,7 @@ impl Default for Dummy {
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Dummy {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Dummy {
     type Input = ();
 
     fn into_executor(
@@ -45,7 +45,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Dummy {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Dummy {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Dummy {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecArena<'a, T>,

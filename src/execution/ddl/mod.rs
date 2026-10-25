@@ -26,7 +26,7 @@ pub(crate) mod truncate;
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::TableCodec;
-use crate::storage::{InnerIter, Transaction};
+use crate::storage::{InnerIter, StorageTransaction};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId, TupleImpl};
 use crate::types::LogicalType;
@@ -47,7 +47,7 @@ fn read_tuple_batch<T, D, I>(
     batch_size: usize,
 ) -> Result<usize, DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     D: FnMut() -> I,
     I: IntoIterator<Item = TupleValueSerializableImpl>,
 {
@@ -108,7 +108,7 @@ pub(crate) fn visit_table_in_batches<T, D, I, F>(
     mut visit: F,
 ) -> Result<(), DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     D: FnMut() -> I,
     I: IntoIterator<Item = TupleValueSerializableImpl>,
     F: FnMut(&TupleImpl) -> Result<(), DatabaseError>,
@@ -160,7 +160,7 @@ pub(crate) fn rewrite_table_in_batches<T, D, I, S, J, F, G>(
     mut after_write: G,
 ) -> Result<(), DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     D: FnMut() -> I,
     I: IntoIterator<Item = TupleValueSerializableImpl>,
     S: FnMut() -> J,

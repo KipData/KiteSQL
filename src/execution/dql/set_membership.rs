@@ -19,7 +19,7 @@ use crate::execution::{
 use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::TupleImpl;
 use std::collections::HashMap;
 
@@ -31,7 +31,7 @@ pub struct SetMembership {
     built: bool,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SetMembership {
     type Input = (SetMembershipKind, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -53,7 +53,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

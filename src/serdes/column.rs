@@ -16,7 +16,7 @@ use crate::catalog::{ColumnCatalog, ColumnRef, ColumnRelation};
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::ColumnId;
 use std::io::{Read, Write};
 
@@ -33,7 +33,7 @@ impl ReferenceSerialization for ColumnRef {
             .encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -94,7 +94,7 @@ impl ReferenceSerialization for ColumnRelation {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -141,7 +141,7 @@ pub(crate) mod test {
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::rocksdb::RocksTransaction;
-    use crate::storage::{Storage, Transaction};
+    use crate::storage::{Storage, StorageTransaction};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::io::{Cursor, Seek, SeekFrom};

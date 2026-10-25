@@ -25,7 +25,7 @@ use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
 
@@ -37,7 +37,7 @@ macro_rules! try_default {
     };
 }
 
-impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> {
+impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> {
     pub(crate) fn bind_temp_table(
         &mut self,
         expr: ScalarExpression,

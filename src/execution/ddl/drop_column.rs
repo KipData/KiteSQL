@@ -20,13 +20,13 @@ use crate::execution::{
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 
 pub struct DropColumn<'a> {
     op: &'a DropColumnOperator,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropColumn<'a> {
     type Input = &'a DropColumnOperator;
 
     fn into_executor(
@@ -40,7 +40,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropColumn<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

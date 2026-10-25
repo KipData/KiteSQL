@@ -20,10 +20,10 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::operator::sort::SortField;
 use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub fn bind_distinct(
         &mut self,
         children: LogicalPlan,

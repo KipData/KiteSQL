@@ -82,7 +82,7 @@ use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
+use crate::storage::{StatisticsMetaCache, StorageTransaction, TableCache, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{ConcatPool, Input, Tuple, TupleId, TupleImpl};
 
@@ -164,7 +164,7 @@ impl RewriteExpression for ScalarExpression {
     }
 }
 
-pub struct Executor<'a, T: Transaction + 'a> {
+pub struct Executor<'a, T: StorageTransaction + 'a> {
     arena: ExecArena<'a, T>,
     root: ExecId,
     // Never read: it only keeps the plan that `arena` borrows from alive, and must stay
@@ -173,7 +173,7 @@ pub struct Executor<'a, T: Transaction + 'a> {
     keeper: PlanKeeper<'a>,
 }
 
-impl<'a, T: Transaction + 'a> Executor<'a, T> {
+impl<'a, T: StorageTransaction + 'a> Executor<'a, T> {
     pub(crate) fn new(arena: ExecArena<'a, T>, root: ExecId, keeper: PlanKeeper<'a>) -> Self {
         Self {
             arena,
@@ -198,7 +198,7 @@ impl<'a, T: Transaction + 'a> Executor<'a, T> {
 }
 
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
+pub(crate) enum ExecNode<'a, T: StorageTransaction + 'a> {
     AddColumn(AddColumn<'a>),
     Analyze(Analyze<'a>),
     ChangeColumn(ChangeColumn<'a>),
@@ -250,7 +250,7 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Window(Window<'a>),
 }
 
-pub(crate) trait ExecutorNode<'a, T: Transaction + 'a>: Sized {
+pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
     // Reads restore their local state and reset inputs. Writes must not be replayed.
     fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -269,7 +269,7 @@ pub(crate) trait ExecutorNode<'a, T: Transaction + 'a>: Sized {
     ) -> Result<(), DatabaseError>;
 }
 
-impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -567,13 +567,13 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
     }
 }
 
-struct ExecNodes<'a, T: Transaction + 'a> {
+struct ExecNodes<'a, T: StorageTransaction + 'a> {
     items: Vec<std::cell::RefCell<ExecNode<'a, T>>>,
     pos: ExecId,
     executing: usize,
 }
 
-impl<'a, T: Transaction + 'a> ExecNodes<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecNodes<'a, T> {
     #[cfg(test)]
     fn seek(&mut self, pos: ExecId) {
         assert!(pos <= self.items.len(), "node position out of bounds");
@@ -599,7 +599,7 @@ impl<'a, T: Transaction + 'a> ExecNodes<'a, T> {
     }
 }
 
-pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
+pub(crate) struct ExecArena<'a, T: StorageTransaction + 'a> {
     nodes: ExecNodes<'a, T>,
     result: ExecResult,
     table_codec: TableCodec,
@@ -610,7 +610,7 @@ pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     recursive_input: Option<RecursiveInput>,
 }
 
-pub(crate) struct ExecArenaLocalState<'b, 'a, T: Transaction + 'a> {
+pub(crate) struct ExecArenaLocalState<'b, 'a, T: StorageTransaction + 'a> {
     transaction: *mut T,
     pub(crate) table_codec: &'b mut TableCodec,
     pub(crate) context: ExecutionContext<'a>,
@@ -619,7 +619,7 @@ pub(crate) struct ExecArenaLocalState<'b, 'a, T: Transaction + 'a> {
     ddl_apply: &'b mut Vec<DDLApply>,
 }
 
-impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
+impl<'b, 'a, T: StorageTransaction + 'a> ExecArenaLocalState<'b, 'a, T> {
     pub(crate) fn transaction(&self) -> &'a T {
         unsafe { &*self.transaction }
     }
@@ -655,7 +655,7 @@ impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
     pub(crate) fn set_statement_stamp(&mut self, stamp: u64) {
         self.table_codec.set_stamp(stamp);
     }
@@ -678,7 +678,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
     pub(crate) fn init_context(&mut self, context: ExecutionContext<'a>, transaction: &'a T) {
         if let Some(current) = &self.context {
             debug_assert!(current.is_same_context(context));
@@ -900,7 +900,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     }
 }
 
-pub(crate) trait ReadExecutor<'a, T: Transaction + 'a>: Sized {
+pub(crate) trait ReadExecutor<'a, T: StorageTransaction + 'a>: Sized {
     type Input;
 
     fn into_executor(
@@ -912,7 +912,7 @@ pub(crate) trait ReadExecutor<'a, T: Transaction + 'a>: Sized {
     ) -> ExecId;
 }
 
-pub(crate) trait WriteExecutor<'a, T: Transaction + 'a>: Sized {
+pub(crate) trait WriteExecutor<'a, T: StorageTransaction + 'a>: Sized {
     type Input;
 
     fn into_executor(
@@ -932,7 +932,7 @@ pub(crate) fn build_read<'a, T>(
     transaction: &T,
 ) -> ExecId
 where
-    T: Transaction + 'a,
+    T: StorageTransaction + 'a,
 {
     macro_rules! read {
         ($executor:ty, $input:expr) => {
@@ -1065,7 +1065,7 @@ pub(crate) fn build_write<'a, T>(
     transaction: &'a T,
 ) -> ExecId
 where
-    T: Transaction + 'a,
+    T: StorageTransaction + 'a,
 {
     arena.init_context(cache, transaction);
     let transaction_ref: &T = transaction;
@@ -1139,12 +1139,12 @@ mod test_utils {
         )
     }
 
-    pub(crate) struct TestExecutor<'a, T: Transaction + 'a> {
+    pub(crate) struct TestExecutor<'a, T: StorageTransaction + 'a> {
         executor: Executor<'a, T>,
         plan_arena: ExecMetaArena<PlanArena<'a>>,
     }
 
-    impl<T: Transaction> TestExecutor<'_, T> {
+    impl<T: StorageTransaction> TestExecutor<'_, T> {
         pub(crate) fn next_tuple(&mut self) -> Result<Option<&mut TupleImpl>, DatabaseError> {
             self.executor.next_tuple(&mut self.plan_arena)
         }
@@ -1157,7 +1157,7 @@ mod test_utils {
         transaction: &'a T,
     ) -> TestExecutor<'a, T>
     where
-        T: Transaction + 'a,
+        T: StorageTransaction + 'a,
         E: ReadExecutor<'a, T>,
     {
         let mut arena = ExecArena::with_capacity(0);
@@ -1183,7 +1183,7 @@ mod test_utils {
         transaction: &'a T,
     ) -> TestExecutor<'a, T>
     where
-        T: Transaction + 'a,
+        T: StorageTransaction + 'a,
         E: WriteExecutor<'a, T>,
     {
         let mut arena = ExecArena::with_capacity(0);
@@ -1201,7 +1201,7 @@ mod test_utils {
         }
     }
 
-    pub fn try_collect<T: Transaction>(
+    pub fn try_collect<T: StorageTransaction>(
         executor: TestExecutor<'_, T>,
     ) -> Result<Vec<TupleImpl>, DatabaseError> {
         let mut executor = executor;

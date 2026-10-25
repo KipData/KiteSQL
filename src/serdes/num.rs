@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use ordered_float::OrderedFloat;
 use std::io::Read;
 use std::io::Write;
@@ -37,7 +37,7 @@ macro_rules! implement_num_serialization {
                 Ok(())
             }
 
-            fn decode<T: Transaction, R: Read, A: $crate::planner::MetaArena + ?Sized>(
+            fn decode<T: StorageTransaction, R: Read, A: $crate::planner::MetaArena + ?Sized>(
                 reader: &mut R,
                 _: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
                 _: &ReferenceTables,
@@ -75,7 +75,7 @@ impl ReferenceSerialization for OrderedFloat<f64> {
         self.0.encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -96,7 +96,7 @@ impl ReferenceSerialization for usize {
         (*self as u32).encode(writer, is_direct, reference_tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

@@ -15,7 +15,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use comfy_table::{Cell, Table};
-    use kite_sql::db::{DBTransaction, DataBaseBuilder, Database, ResultIter};
+    use kite_sql::db::{DataBaseBuilder, Database, ResultIter, Transaction};
     use kite_sql::errors::DatabaseError;
     use kite_sql::storage::rocksdb::RocksStorage;
     use rustyline::config::Configurer;
@@ -46,7 +46,7 @@ Metacommands:
   .views        Show views
   .schema NAME  Describe a table or view
 
-Transaction commands:
+StorageTransaction commands:
   BEGIN
   COMMIT
   ROLLBACK
@@ -224,7 +224,7 @@ Transaction commands:
 
     fn run_sql<'a>(
         database: &Database<RocksStorage>,
-        tx: &mut Option<DBTransaction<'a, RocksStorage>>,
+        tx: &mut Option<Transaction<'a, RocksStorage>>,
         sql: &str,
     ) -> Result<(), DatabaseError> {
         let started = Instant::now();
@@ -240,7 +240,7 @@ Transaction commands:
     fn handle_meta_command<'a>(
         command: &str,
         database: &Database<RocksStorage>,
-        tx: &mut Option<DBTransaction<'a, RocksStorage>>,
+        tx: &mut Option<Transaction<'a, RocksStorage>>,
     ) -> Result<Mode, DatabaseError> {
         let trimmed = command.trim();
         if trimmed.is_empty() {
@@ -283,7 +283,7 @@ Transaction commands:
     fn handle_command<'a>(
         command: &str,
         database: &'a Database<RocksStorage>,
-        tx: &mut Option<DBTransaction<'a, RocksStorage>>,
+        tx: &mut Option<Transaction<'a, RocksStorage>>,
     ) -> Result<Mode, DatabaseError> {
         let trimmed = command.trim();
         if trimmed.is_empty() {
@@ -302,7 +302,7 @@ Transaction commands:
             if tx.is_some() {
                 eprintln!("transaction already started");
             } else {
-                *tx = Some(database.new_transaction()?);
+                *tx = Some(database.new_transaction(false)?);
                 println!("OK");
             }
             return Ok(Mode::Continue);

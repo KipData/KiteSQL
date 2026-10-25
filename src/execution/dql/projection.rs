@@ -20,7 +20,7 @@ use crate::planner::operator::project::ProjectOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 
 pub struct Projection<'a> {
@@ -28,7 +28,7 @@ pub struct Projection<'a> {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
     type Input = (&'a ProjectOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -43,7 +43,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

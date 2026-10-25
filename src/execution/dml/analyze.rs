@@ -28,7 +28,7 @@ use crate::optimizer::core::statistics_meta::IndexStatistics;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{table_codec::TableCodec, Transaction};
+use crate::storage::{table_codec::TableCodec, StorageTransaction};
 use crate::types::index::IndexId;
 use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
@@ -46,7 +46,7 @@ pub struct Analyze<'a> {
     statistics_relative_error: Option<OrderedFloat<f64>>,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
     type Input = (&'a AnalyzeOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -82,7 +82,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -176,7 +176,7 @@ struct State {
 }
 
 impl<'a> Analyze<'a> {
-    fn persist_statistics<U: Transaction>(
+    fn persist_statistics<U: StorageTransaction>(
         table_name: &TableName,
         columns: Vec<(ColumnId, usize, HistogramMetaBuilder)>,
         builders: Vec<State>,
@@ -251,7 +251,7 @@ mod test {
     use crate::optimizer::core::cm_sketch::COUNT_MIN_SKETCH_STORAGE_PAGE_LEN;
     use crate::optimizer::core::histogram::{HistogramMetaBuilder, DEFAULT_HLL_PRECISION};
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-    use crate::storage::{table_codec::TableCodec, InnerIter, Storage, Transaction};
+    use crate::storage::{table_codec::TableCodec, InnerIter, Storage, StorageTransaction};
     use crate::types::value::DataValue;
     use std::ops::Bound;
     use tempfile::TempDir;

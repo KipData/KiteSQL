@@ -1110,7 +1110,7 @@ mod test {
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::rocksdb::RocksTransaction;
-    use crate::storage::{Storage, Transaction};
+    use crate::storage::{Storage, StorageTransaction};
     use crate::types::evaluator::{binary_create, cast_create, unary_create};
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;

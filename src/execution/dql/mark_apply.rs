@@ -23,7 +23,7 @@ use crate::execution::{
 use crate::expression::{BinaryOperator, ScalarExpression, TypeCast};
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::evaluator::BinaryEvaluatorRef;
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{SplitTupleRef, TupleImpl};
@@ -59,7 +59,7 @@ enum RightInput {
 }
 
 impl RightInput {
-    fn reset<'a, T: Transaction + 'a, A: MetaArena + 'a>(
+    fn reset<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -76,7 +76,7 @@ impl RightInput {
     }
 
     // Return the first terminal predicate result, or None after exhausting the RHS.
-    fn scan<'a, T: Transaction + 'a, A: MetaArena + 'a>(
+    fn scan<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -104,7 +104,7 @@ pub struct MarkApply<'a> {
     right_input: Option<RightInput>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
     type Input = (&'a MarkApplyOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -130,7 +130,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -221,7 +221,7 @@ impl<'a> MarkApply<'a> {
             .transpose()
     }
 
-    fn mark_value<T: Transaction + 'a, A: MetaArena + 'a>(
+    fn mark_value<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &self,
         mut input: RightInput,
         arena: &mut ExecArena<'a, T>,
@@ -280,7 +280,7 @@ impl<'a> MarkApply<'a> {
         Ok((*op, *left_expr, *right_expr, evaluator))
     }
 
-    fn materialize_keys<T: Transaction + 'a, A: MetaArena + 'a>(
+    fn materialize_keys<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &self,
         root: ExecId,
         arena: &mut ExecArena<'a, T>,
@@ -369,7 +369,7 @@ impl<'a> MarkApply<'a> {
         })
     }
 
-    fn scan_quantified_right_input<T: Transaction + 'a, A: MetaArena + 'a>(
+    fn scan_quantified_right_input<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &self,
         input: &RightInput,
         arena: &mut ExecArena<'a, T>,

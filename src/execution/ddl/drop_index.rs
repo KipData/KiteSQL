@@ -18,13 +18,13 @@ use crate::execution::{
 };
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 
 pub struct DropIndex<'a> {
     op: &'a DropIndexOperator,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
     type Input = &'a DropIndexOperator;
 
     fn into_executor(
@@ -38,7 +38,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

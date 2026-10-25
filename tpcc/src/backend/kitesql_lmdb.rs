@@ -18,7 +18,7 @@ use super::{
     StatementSpec,
 };
 use crate::TpccError;
-use kite_sql::db::{DBTransaction, DataBaseBuilder, Database};
+use kite_sql::db::{DataBaseBuilder, Database, Transaction};
 use kite_sql::storage::lmdb::{LmdbStorage, LmdbTransaction as KiteSqlLmdbTransaction};
 use kite_sql::types::tuple::TupleImpl;
 
@@ -53,7 +53,7 @@ impl KiteSqlLmdbBackend {
 
     fn start_transaction(&self) -> Result<KiteSqlLmdbTransactionWrapper<'_>, TpccError> {
         Ok(KiteSqlLmdbTransactionWrapper {
-            inner: self.database.new_transaction()?,
+            inner: self.database.new_transaction(false)?,
         })
     }
 }
@@ -88,7 +88,7 @@ impl SimpleExecutor for KiteSqlLmdbBackend {
 }
 
 pub struct KiteSqlLmdbTransactionWrapper<'a> {
-    inner: DBTransaction<'a, LmdbStorage>,
+    inner: Transaction<'a, LmdbStorage>,
 }
 
 impl<'a> KiteSqlLmdbTransactionWrapper<'a> {

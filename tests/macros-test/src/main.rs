@@ -1491,7 +1491,7 @@ mod test {
             vec![(1, Some(100)), (1, Some(200)), (2, Some(300)), (3, None)]
         );
 
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         let in_tx = tx
             .bind(|ctx| {
                 ctx.from::<User>()?
@@ -2840,7 +2840,7 @@ mod test {
         });
         assert_eq!(set_query_ages, vec![None, Some(30), Some(18), Some(18)]);
 
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         tx.insert_many([User {
             id: 4,
             name: "Dora".to_string(),
@@ -2961,7 +2961,7 @@ mod test {
             "Aggregate [] -> Group By [users.id] [HashAggregate => (Sort Option: None)] Union: [users.id] Projection [users.id] [Project => (Sort Option: Follow)] TableScan users -> [users.id] [SeqScan => (Sort Option: None)] Projection [wallets.id] [Project => (Sort Option: Follow)] TableScan wallets -> [wallets.id] [SeqScan => (Sort Option: None)]"
         );
 
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         let tx_tables = tx.show_tables()?.collect::<Result<Vec<_>, _>>()?;
         assert!(tx_tables.iter().any(|name| name == "users"));
         let tx_describe = tx.describe::<Wallet>()?.collect::<Result<Vec<_>, _>>()?;

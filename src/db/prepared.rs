@@ -16,6 +16,7 @@ pub struct PreparedPlan<'db> {
     pub(crate) plan: LogicalPlan,
     pub(crate) arena: PlanArena<'db>,
     parameter_expressions: Vec<ExprRef>,
+    pub(crate) read_only: bool,
 }
 
 impl<'db> PreparedPlan<'db> {
@@ -40,7 +41,7 @@ impl<S: Storage> Database<S> {
             ));
         }
         let arena = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, |_, _| {
+        BindSource::execute(self, prepared.read_only, |_, _| {
             Ok((PlanInput::Borrowed(&prepared.plan), arena))
         })
     }
@@ -56,12 +57,12 @@ impl<S: Storage> Database<S> {
         let statement = self.state.parse_statement(sql)?;
         let transaction = self
             .storage
-            .transaction_with_isolation(self.transaction_isolation)?;
+            .transaction_with_isolation(self.transaction_isolation, true)?;
         self.state.prepare_plan(&statement, params, &transaction)
     }
 }
 
-impl<'db, S: Storage> DBTransaction<'db, S> {
+impl<'db, S: Storage> Transaction<'db, S> {
     /// Executes a prepared SQL or ORM plan inside this transaction.
     pub fn execute<'a>(
         &'a mut self,
@@ -74,7 +75,7 @@ impl<'db, S: Storage> DBTransaction<'db, S> {
             ));
         }
         let arena = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, |_, _| {
+        BindSource::execute(self, prepared.read_only, |_, _| {
             Ok((PlanInput::Borrowed(&prepared.plan), arena))
         })
     }
@@ -114,7 +115,12 @@ impl<S: Storage> State<S> {
         })
     }
 
-    pub(crate) fn prepare_plan_with<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>, F>(
+    pub(crate) fn prepare_plan_with<
+        'a,
+        T: StorageTransaction,
+        A: AsRef<[(usize, LogicalType)]>,
+        F,
+    >(
         &'a self,
         params: A,
         transaction: &T,
@@ -128,10 +134,12 @@ impl<S: Storage> State<S> {
     {
         let (plan, mut arena) = self.build_plan(params, transaction, build)?;
         let parameter_expressions = arena.parameter_expressions();
+        let read_only = plan.operator.command_type().is_read_only();
         Ok(PreparedPlan {
             plan,
             arena,
             parameter_expressions,
+            read_only,
         })
     }
 }
@@ -177,7 +185,7 @@ mod tests {
             assert!(iter.next_tuple(|_, _| ())?.is_none());
             iter.done()?;
         }
-        let mut tx = db.new_transaction()?;
+        let mut tx = db.new_transaction(false)?;
         let mut iter = tx.execute(&plan, [(1, DataValue::Int64(7))])?;
         assert_eq!(
             iter.next_tuple(|_, row| row.clone())?.unwrap(),

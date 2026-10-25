@@ -19,10 +19,10 @@ use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_analyze(
         &mut self,
         table_name: TableName,

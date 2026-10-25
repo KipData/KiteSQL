@@ -24,7 +24,7 @@ use crate::optimizer::core::top_n::ColumnTopN;
 use crate::planner::MetaArena;
 use crate::serdes::stable_hash::{StableHasher, TABLE_NAME_HASH_KEYS};
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
-use crate::storage::{TableCache, Transaction};
+use crate::storage::{StorageTransaction, TableCache};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId, TupleLike};
@@ -613,7 +613,7 @@ impl TableCodec {
         )
     }
 
-    pub fn decode_column_statistics<T: Transaction>(
+    pub fn decode_column_statistics<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<HistogramMeta, DatabaseError> {
@@ -869,7 +869,7 @@ impl TableCodec {
         index_meta.encode(value, true, reference_tables, arena)
     }
 
-    pub fn decode_index_meta<T: Transaction>(
+    pub fn decode_index_meta<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<IndexMeta, DatabaseError> {
@@ -927,7 +927,7 @@ impl TableCodec {
         col.encode(value, true, reference_tables, arena)
     }
 
-    pub fn decode_column<T: Transaction, R: Read>(
+    pub fn decode_column<T: StorageTransaction, R: Read>(
         reader: &mut R,
         reference_tables: &ReferenceTables,
         arena: &mut (impl MetaArena + ?Sized),
@@ -936,7 +936,7 @@ impl TableCodec {
         ColumnCatalog::decode::<T, R, _>(reader, None, reference_tables, arena)
     }
 
-    pub fn decode_index_statistics<T: Transaction>(
+    pub fn decode_index_statistics<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<IndexStatisticsRoot, DatabaseError> {
@@ -957,7 +957,7 @@ impl TableCodec {
         sketch_meta.encode(value, true, reference_tables, arena)
     }
 
-    pub fn decode_index_statistics_sketch_meta<T: Transaction>(
+    pub fn decode_index_statistics_sketch_meta<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<CountMinSketchMeta, DatabaseError> {
@@ -978,7 +978,7 @@ impl TableCodec {
         sketch_page.encode(value, true, reference_tables, arena)
     }
 
-    pub fn decode_index_statistics_sketch_page<T: Transaction>(
+    pub fn decode_index_statistics_sketch_page<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<CountMinSketchPage, DatabaseError> {
@@ -1012,7 +1012,7 @@ impl TableCodec {
         IndexStatisticsCodecType::from_tag(tag)
     }
 
-    pub fn decode_index_statistics_bucket<T: Transaction>(
+    pub fn decode_index_statistics_bucket<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Bucket, DatabaseError> {
@@ -1033,7 +1033,7 @@ impl TableCodec {
         top_n.encode(value, true, reference_tables, arena)
     }
 
-    pub fn decode_index_statistics_top_n<T: Transaction>(
+    pub fn decode_index_statistics_top_n<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<ColumnTopN, DatabaseError> {
@@ -1076,7 +1076,7 @@ impl TableCodec {
         Ok(())
     }
 
-    pub fn decode_view<T: Transaction>(
+    pub fn decode_view<T: StorageTransaction>(
         bytes: &[u8],
         drive: (&T, &TableCache),
         scala_functions: &ScalaFunctions,
@@ -1098,7 +1098,7 @@ impl TableCodec {
         View::decode(&mut cursor, Some(&context), &reference_tables, arena)
     }
 
-    pub fn decode_view_name<T: Transaction>(
+    pub fn decode_view_name<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<TableName, DatabaseError> {
@@ -1116,7 +1116,7 @@ impl TableCodec {
         meta.encode(value, true, reference_tables, arena)
     }
 
-    pub fn decode_root_table<T: Transaction>(
+    pub fn decode_root_table<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<TableMeta, DatabaseError> {
