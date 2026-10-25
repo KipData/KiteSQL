@@ -86,9 +86,13 @@ fn classify_join_filters(
     let mut common_filter = None;
     split_conjunctive_predicates(predicate, arena, &mut |expr, arena| {
         let (mut left, mut right) = (true, true);
-        expr.all_referenced_columns(arena, |_, column| {
-            left = left && left_columns.contains(column);
-            right = right && right_columns.contains(column);
+        expr.all_referenced_columns(arena, |_, column, position| {
+            let side_holds = |columns: &[ColumnRef], position: Option<usize>| {
+                position.and_then(|position| columns.get(position)) == Some(column)
+                    || columns.contains(column)
+            };
+            left = left && side_holds(left_columns, Some(position));
+            right = right && side_holds(right_columns, position.checked_sub(left_len));
             left || right
         })?;
         if left {
@@ -145,161 +149,159 @@ impl NormalizationRule for PushPredicateThroughJoin {
         arena: &mut PlanArena,
         _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
-        let mut applied = false;
-
-        let parent_replacement = {
-            let LogicalPlan {
-                operator,
-                childrens,
-                ..
-            } = plan;
-            let filter_op = match operator {
-                Operator::Filter(op) => op,
-                _ => return Ok(false),
-            };
-
-            let Childrens::Only(join_plan) = childrens.as_mut() else {
-                return Ok(false);
-            };
-            let join_plan = join_plan.as_mut();
-
-            let join_type = match &join_plan.operator {
-                Operator::Join(op) => op.join_type,
-                _ => return Ok(false),
-            };
-
-            if !matches!(
-                join_type,
-                JoinType::Inner | JoinType::Cross | JoinType::LeftOuter | JoinType::RightOuter
-            ) {
-                return Ok(false);
-            }
-
-            let (left_filter, mut right_filter, mut common_filter, left_len) =
-                classify_join_filters(filter_op.predicate, join_plan.childrens.as_mut(), arena)?;
-
-            if join_type == JoinType::Cross {
-                if let Some(predicate) = common_filter {
-                    let Childrens::Twins { left, right } = join_plan.childrens.as_mut() else {
-                        return Ok(false);
-                    };
-                    let left_schema = left.output_schema(arena).clone();
-                    let right_schema = right.output_schema(arena).clone();
-                    let mut keys = Vec::new();
-                    let mut residual = Vec::new();
-                    extract_join_keys(
-                        predicate,
-                        &mut keys,
-                        &mut residual,
-                        &left_schema,
-                        &right_schema,
-                        arena,
-                    )?;
-                    if !keys.is_empty() {
-                        for (_, right) in &mut keys {
-                            // WHERE uses joined positions; join keys use each input's local positions.
-                            *right = right.clone_expression(arena)?;
-                            PositionShift {
-                                delta: -(left_len as isize),
-                            }
-                            .visit(right, arena)?;
-                        }
-                        if let Operator::Join(op) = &mut join_plan.operator {
-                            op.join_type = JoinType::Inner;
-                            op.on = JoinCondition::On {
-                                on: keys,
-                                filter: None,
-                            };
-                        }
-                        common_filter = reduce_filters(residual, filter_op.having, arena)
-                            .map(|op| op.predicate);
-                        applied = true;
-                    }
-                }
-            }
-
-            let mut new_ops = (None, None, None);
-            match join_type {
-                JoinType::Inner | JoinType::Cross => {
-                    if let Some(left_filter_op) =
-                        reduce_filters(left_filter, filter_op.having, arena)
-                    {
-                        new_ops.0 = Some(Operator::Filter(left_filter_op));
-                    }
-
-                    if let Some(expr) = &mut right_filter {
-                        PositionShift {
-                            delta: -(left_len as isize),
-                        }
-                        .visit(expr, arena)?;
-                    }
-                    if let Some(right_filter_op) =
-                        reduce_filters(right_filter, filter_op.having, arena)
-                    {
-                        new_ops.1 = Some(Operator::Filter(right_filter_op));
-                    }
-                    new_ops.2 = reduce_filters(common_filter, filter_op.having, arena)
-                        .map(Operator::Filter);
-                }
-                JoinType::LeftOuter => {
-                    if let Some(left_filter_op) =
-                        reduce_filters(left_filter, filter_op.having, arena)
-                    {
-                        new_ops.0 = Some(Operator::Filter(left_filter_op));
-                    }
-                    new_ops.2 = reduce_filters(
-                        common_filter.into_iter().chain(right_filter),
-                        filter_op.having,
-                        arena,
-                    )
-                    .map(Operator::Filter);
-                }
-                JoinType::RightOuter => {
-                    if let Some(expr) = &mut right_filter {
-                        PositionShift {
-                            delta: -(left_len as isize),
-                        }
-                        .visit(expr, arena)?;
-                    }
-                    if let Some(right_filter_op) =
-                        reduce_filters(right_filter, filter_op.having, arena)
-                    {
-                        new_ops.1 = Some(Operator::Filter(right_filter_op));
-                    }
-                    new_ops.2 = reduce_filters(
-                        common_filter.into_iter().chain(left_filter),
-                        filter_op.having,
-                        arena,
-                    )
-                    .map(Operator::Filter);
-                }
-                _ => {}
-            }
-
-            if let Some(left_op) = new_ops.0 {
-                applied |= wrap_child_with(join_plan, 0, left_op);
-            }
-
-            if let Some(right_op) = new_ops.1 {
-                applied |= wrap_child_with(join_plan, 1, right_op);
-            }
-
-            new_ops.2
+        let Operator::Filter(filter_op) = &plan.operator else {
+            return Ok(false);
         };
-
-        match parent_replacement {
-            Some(common_op) => {
-                plan.operator = common_op;
+        let (predicate, having) = (filter_op.predicate, filter_op.having);
+        let Childrens::Only(join_plan) = plan.childrens.as_mut() else {
+            return Ok(false);
+        };
+        let Some((mut applied, common)) = push_through_join(join_plan, predicate, having, arena)?
+        else {
+            return Ok(false);
+        };
+        match common {
+            Some(common) => {
+                plan.operator = Operator::Filter(filter(common, having));
                 applied = true;
             }
             None if applied => {
                 applied |= replace_with_only_child(plan);
             }
-            _ => {}
+            None => {}
         }
-
         Ok(applied)
     }
+}
+
+fn filter(predicate: ExprRef, having: bool) -> FilterOperator {
+    FilterOperator {
+        predicate,
+        is_optimized: false,
+        having,
+    }
+}
+
+fn push_through_join(
+    join_plan: &mut LogicalPlan,
+    predicate: ExprRef,
+    having: bool,
+    arena: &mut PlanArena,
+) -> Result<Option<(bool, Option<ExprRef>)>, DatabaseError> {
+    let join_type = match &join_plan.operator {
+        Operator::Join(op) => op.join_type,
+        _ => return Ok(None),
+    };
+    if !matches!(
+        join_type,
+        JoinType::Inner | JoinType::Cross | JoinType::LeftOuter | JoinType::RightOuter
+    ) {
+        return Ok(None);
+    }
+    let mut applied = false;
+
+    let (left_filter, mut right_filter, mut common_filter, left_len) =
+        classify_join_filters(predicate, join_plan.childrens.as_mut(), arena)?;
+
+    if join_type == JoinType::Cross {
+        if let Some(predicate) = common_filter {
+            let Childrens::Twins { left, right } = join_plan.childrens.as_mut() else {
+                return Ok(None);
+            };
+            let left_schema = left.output_schema(arena).clone();
+            let right_schema = right.output_schema(arena).clone();
+            let mut keys = Vec::new();
+            let mut residual = Vec::new();
+            extract_join_keys(
+                predicate,
+                &mut keys,
+                &mut residual,
+                &left_schema,
+                &right_schema,
+                arena,
+            )?;
+            if !keys.is_empty() {
+                for (_, right) in &mut keys {
+                    // WHERE uses joined positions; join keys use each input's local positions.
+                    *right = right.clone_expression(arena)?;
+                    PositionShift {
+                        delta: -(left_len as isize),
+                    }
+                    .visit(right, arena)?;
+                }
+                if let Operator::Join(op) = &mut join_plan.operator {
+                    op.join_type = JoinType::Inner;
+                    op.on = JoinCondition::On {
+                        on: keys,
+                        filter: None,
+                    };
+                }
+                common_filter = reduce_filters(residual, having, arena).map(|op| op.predicate);
+                applied = true;
+            }
+        }
+    }
+
+    if let Some(expr) = &mut right_filter {
+        if matches!(
+            join_type,
+            JoinType::Inner | JoinType::Cross | JoinType::RightOuter
+        ) {
+            PositionShift {
+                delta: -(left_len as isize),
+            }
+            .visit(expr, arena)?;
+        }
+    }
+    let (left, right, common) = match join_type {
+        JoinType::Inner | JoinType::Cross => (left_filter, right_filter, common_filter),
+        JoinType::LeftOuter => (
+            left_filter,
+            None,
+            reduce_filters(common_filter.into_iter().chain(right_filter), having, arena)
+                .map(|op| op.predicate),
+        ),
+        JoinType::RightOuter => (
+            None,
+            right_filter,
+            reduce_filters(common_filter.into_iter().chain(left_filter), having, arena)
+                .map(|op| op.predicate),
+        ),
+        _ => unreachable!(),
+    };
+    if let Some(left) = left {
+        applied |= push_into_child(join_plan, 0, left, having, arena)?;
+    }
+    if let Some(right) = right {
+        applied |= push_into_child(join_plan, 1, right, having, arena)?;
+    }
+    Ok(Some((applied, common)))
+}
+
+/// Pushes `predicate` into the `child_idx` input of `join_plan`, through it when it is a join.
+fn push_into_child(
+    join_plan: &mut LogicalPlan,
+    child_idx: usize,
+    predicate: ExprRef,
+    having: bool,
+    arena: &mut PlanArena,
+) -> Result<bool, DatabaseError> {
+    let Childrens::Twins { left, right } = join_plan.childrens.as_mut() else {
+        return Ok(false);
+    };
+    let child = if child_idx == 0 { left } else { right };
+    let remaining = match push_through_join(child, predicate, having, arena)? {
+        Some((_, remaining)) => remaining,
+        None => Some(predicate),
+    };
+    if let Some(remaining) = remaining {
+        wrap_child_with(
+            join_plan,
+            child_idx,
+            Operator::Filter(filter(remaining, having)),
+        );
+    }
+    Ok(true)
 }
 
 pub struct PushPredicateIntoScan;
@@ -714,16 +716,17 @@ mod tests {
                 )),
             };
             for expr in [left, right, unknown, common, constant, alias] {
-                let expected =
-                    if expr.all_referenced_columns(&arena, |_, column| *column == left_column)? {
-                        (Some(expr), None, None, 1)
-                    } else if expr.all_referenced_columns(&arena, |_, column| {
-                        right_columns.contains(column)
-                    })? {
-                        (None, Some(expr), None, 1)
-                    } else {
-                        (None, None, Some(expr), 1)
-                    };
+                let expected = if expr
+                    .all_referenced_columns(&arena, |_, column, _| *column == left_column)?
+                {
+                    (Some(expr), None, None, 1)
+                } else if expr
+                    .all_referenced_columns(&arena, |_, column, _| right_columns.contains(column))?
+                {
+                    (None, Some(expr), None, 1)
+                } else {
+                    (None, None, Some(expr), 1)
+                };
                 assert_eq!(
                     super::classify_join_filters(expr, &mut children, &mut arena)?,
                     expected

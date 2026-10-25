@@ -437,7 +437,7 @@ pub(crate) fn apply_scan_order_hint(
             ScanOrderHint::SortFields(fields) => fields[index].expr,
             ScanOrderHint::GroupBy(groupby_exprs) => groupby_exprs[index],
         };
-        if !expr.all_referenced_columns(arena, |arena, column| {
+        if !expr.all_referenced_columns(arena, |arena, column, _| {
             scan_op
                 .columns
                 .iter()

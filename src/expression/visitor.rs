@@ -79,7 +79,11 @@ pub trait ExprVisitor<A: MetaArena + ?Sized>: Sized {
     fn visit_constant(&mut self, _value: &DataValue) -> Result<(), DatabaseError> {
         Ok(())
     }
-    fn visit_column_ref(&mut self, _column: &ColumnRef) -> Result<(), DatabaseError> {
+    fn visit_column_ref(
+        &mut self,
+        _column: &ColumnRef,
+        _position: usize,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
     fn visit_alias(
@@ -322,7 +326,9 @@ pub fn walk_expr<A: MetaArena + ?Sized, V: ExprVisitor<A>>(
         ScalarExpression::OuterParam { id, ty } => visitor.visit_outer_param(*id, ty, arena),
         ScalarExpression::OuterValue { id, ty } => visitor.visit_outer_value(*id, ty, arena),
         ScalarExpression::InitValue { id, ty } => visitor.visit_init_value(*id, ty, arena),
-        ScalarExpression::ColumnRef { column, .. } => visitor.visit_column_ref(column),
+        ScalarExpression::ColumnRef { column, position } => {
+            visitor.visit_column_ref(column, *position)
+        }
         ScalarExpression::Alias { expr, alias } => visitor.visit_alias(*expr, alias, arena),
         ScalarExpression::TypeCast {
             expr,

@@ -98,6 +98,7 @@ impl ExprVisitor<dyn MetaArena + '_> for ReferencedColumnCollector<'_, '_> {
     fn visit_column_ref(
         &mut self,
         column: &crate::catalog::ColumnRef,
+        _: usize,
     ) -> Result<(), DatabaseError> {
         self.referenced_columns.insert(*column, self.arena);
         Ok(())

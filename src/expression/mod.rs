@@ -858,7 +858,7 @@ impl ExprRef {
                 Ok(())
             }
 
-            fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
+            fn visit_column_ref(&mut self, col: &ColumnRef, _: usize) -> Result<(), DatabaseError> {
                 self.any = (self.f)(self.arena, col);
                 Ok(())
             }
@@ -876,7 +876,7 @@ impl ExprRef {
     pub fn all_referenced_columns(
         self,
         arena: &(dyn MetaArena + '_),
-        mut predicate: impl FnMut(&(dyn MetaArena + '_), &ColumnRef) -> bool,
+        mut predicate: impl FnMut(&(dyn MetaArena + '_), &ColumnRef, usize) -> bool,
     ) -> Result<bool, DatabaseError> {
         struct ColumnRefVisitor<'a, 'arena, F> {
             f: &'a mut F,
@@ -884,8 +884,8 @@ impl ExprRef {
             arena: &'a (dyn MetaArena + 'arena),
         }
 
-        impl<F: FnMut(&(dyn MetaArena + '_), &ColumnRef) -> bool> ExprVisitor<dyn MetaArena + '_>
-            for ColumnRefVisitor<'_, '_, F>
+        impl<F: FnMut(&(dyn MetaArena + '_), &ColumnRef, usize) -> bool>
+            ExprVisitor<dyn MetaArena + '_> for ColumnRefVisitor<'_, '_, F>
         {
             fn visit(
                 &mut self,
@@ -898,8 +898,12 @@ impl ExprRef {
                 Ok(())
             }
 
-            fn visit_column_ref(&mut self, col: &ColumnRef) -> Result<(), DatabaseError> {
-                self.all = (self.f)(self.arena, col);
+            fn visit_column_ref(
+                &mut self,
+                col: &ColumnRef,
+                position: usize,
+            ) -> Result<(), DatabaseError> {
+                self.all = (self.f)(self.arena, col, position);
                 Ok(())
             }
         }

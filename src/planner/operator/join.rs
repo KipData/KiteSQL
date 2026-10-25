@@ -209,9 +209,9 @@ pub(crate) fn extract_join_keys(
                         }
                         _other => {
                             // example: baz > 1
-                            if left_expr.all_referenced_columns(arena, |_, column| {
+                            if left_expr.all_referenced_columns(arena, |_, column, _| {
                                 fn_or_contains(*column)
-                            })? && right_expr.all_referenced_columns(arena, |_, column| {
+                            })? && right_expr.all_referenced_columns(arena, |_, column, _| {
                                 fn_or_contains(*column)
                             })? {
                                 accum_filter.push(expr);
@@ -244,9 +244,9 @@ pub(crate) fn extract_join_keys(
                 }
                 _ => {
                     if left_expr
-                        .all_referenced_columns(arena, |_, column| fn_or_contains(*column))?
+                        .all_referenced_columns(arena, |_, column, _| fn_or_contains(*column))?
                         && right_expr
-                            .all_referenced_columns(arena, |_, column| fn_or_contains(*column))?
+                            .all_referenced_columns(arena, |_, column, _| fn_or_contains(*column))?
                     {
                         accum_filter.push(expr);
                     }
@@ -254,7 +254,7 @@ pub(crate) fn extract_join_keys(
             }
         }
         _ => {
-            if expr.all_referenced_columns(arena, |_, column| fn_or_contains(*column))? {
+            if expr.all_referenced_columns(arena, |_, column, _| fn_or_contains(*column))? {
                 // example: baz > 1
                 accum_filter.push(expr);
             }

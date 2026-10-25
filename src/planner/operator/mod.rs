@@ -640,7 +640,11 @@ impl Operator {
                 Ok(())
             }
 
-            fn visit_column_ref(&mut self, column: &ColumnRef) -> Result<(), DatabaseError> {
+            fn visit_column_ref(
+                &mut self,
+                column: &ColumnRef,
+                _position: usize,
+            ) -> Result<(), DatabaseError> {
                 if self.keep_going {
                     self.keep_going = (self.f)(self.arena, column);
                 }
@@ -745,8 +749,8 @@ impl Operator {
                 &mut self,
                 op: &'operator TableScanOperator,
             ) -> Result<(), DatabaseError> {
-                for column in &op.columns {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op.columns.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -800,8 +804,8 @@ impl Operator {
             }
 
             fn visit_values(&mut self, op: &'operator ValuesOperator) -> Result<(), DatabaseError> {
-                for column in &op.schema_ref {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op.schema_ref.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -811,8 +815,13 @@ impl Operator {
                 op: &'operator UnionOperator,
                 _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
-                for column in op.left_schema_ref.iter().chain(&op._right_schema_ref) {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op
+                    .left_schema_ref
+                    .iter()
+                    .chain(&op._right_schema_ref)
+                    .enumerate()
+                {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -822,8 +831,8 @@ impl Operator {
                 op: &'operator RecursiveCteOperator,
                 _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
-                for column in &op.schema_ref {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op.schema_ref.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -832,8 +841,8 @@ impl Operator {
                 &mut self,
                 op: &'operator RecursiveScanOperator,
             ) -> Result<(), DatabaseError> {
-                for column in &op.schema_ref {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op.schema_ref.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -843,8 +852,13 @@ impl Operator {
                 op: &'operator SetMembershipOperator,
                 _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
-                for column in op.left_schema_ref.iter().chain(&op._right_schema_ref) {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op
+                    .left_schema_ref
+                    .iter()
+                    .chain(&op._right_schema_ref)
+                    .enumerate()
+                {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -854,8 +868,8 @@ impl Operator {
                 op: &'operator DeleteOperator,
                 _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
-                for column in &op.primary_keys {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op.primary_keys.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }

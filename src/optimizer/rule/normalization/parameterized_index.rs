@@ -152,7 +152,7 @@ fn extract_parameterized_probe_side(
     if !schema_contains_column(right_schema, &right_column, arena) {
         return Ok(None);
     }
-    if !left_expr.all_referenced_columns(arena, |arena, candidate| {
+    if !left_expr.all_referenced_columns(arena, |arena, candidate, _| {
         schema_contains_column(left_schema, candidate, arena)
     })? {
         return Ok(None);

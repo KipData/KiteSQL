@@ -2086,7 +2086,7 @@ pub(crate) mod test {
             unreachable!("expected join filter");
         };
         let mut referenced_columns = Vec::new();
-        filter.all_referenced_columns(&source_plan_arena, |_, column| {
+        filter.all_referenced_columns(&source_plan_arena, |_, column, _| {
             referenced_columns.push(*column);
             true
         })?;

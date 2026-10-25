@@ -89,7 +89,7 @@ impl NormalizationRule for GuardMarkApply {
                 unreachable!()
             };
             for expr in op.predicates.iter().chain(op.parameterized_probe.iter()) {
-                expr.all_referenced_columns(arena, |_, column| {
+                expr.all_referenced_columns(arena, |_, column, _| {
                     columns.push(*column);
                     true
                 })?;
@@ -137,7 +137,7 @@ impl NormalizationRule for GuardMarkApply {
                 }
                 if let Some(guard) = guard {
                     let schema = left.output_schema(arena);
-                    if guard.all_referenced_columns(arena, |arena, column| {
+                    if guard.all_referenced_columns(arena, |arena, column, _| {
                         !unavailable
                             .iter()
                             .any(|marker| arena.same_column(*marker, *column))

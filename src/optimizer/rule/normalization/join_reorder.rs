@@ -461,7 +461,7 @@ fn flatten(
 }
 
 fn key_in_schema(expr: ExprRef, schema: &Schema, arena: &PlanArena) -> Result<bool, DatabaseError> {
-    expr.all_referenced_columns(arena, |arena, column| {
+    expr.all_referenced_columns(arena, |arena, column, _| {
         schema
             .iter()
             .any(|candidate| arena.same_column(*candidate, *column))

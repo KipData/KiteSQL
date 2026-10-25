@@ -126,7 +126,7 @@ impl<A: MetaArena + ?Sized> ExprVisitor<A> for EqIgnoreColRefPosVisitor<'_, A> {
         Ok(())
     }
 
-    fn visit_column_ref(&mut self, lhs: &ColumnRef) -> Result<(), DatabaseError> {
+    fn visit_column_ref(&mut self, lhs: &ColumnRef, _: usize) -> Result<(), DatabaseError> {
         self.equal = matches!(
             self.rhs(),
             ScalarExpression::ColumnRef { column: rhs, .. }

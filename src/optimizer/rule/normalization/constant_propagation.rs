@@ -96,13 +96,22 @@ fn eq_operands(expr: ExprRef, arena: &PlanArena<'_>) -> Option<(ExprRef, ExprRef
     }
 }
 
-fn as_fact(expr: ExprRef, arena: &PlanArena<'_>, left: bool) -> Option<Fact> {
+fn as_fact(
+    expr: ExprRef,
+    arena: &PlanArena<'_>,
+    left: bool,
+    has_col_connection: &mut bool,
+) -> Option<Fact> {
     let (lhs, rhs) = eq_operands(expr, arena)?;
     let ((column, position), constant) = match (table_column(lhs, arena), table_column(rhs, arena))
     {
         (Some(column), None) => (column, rhs.unpack_alias(arena)),
         (None, Some(column)) => (column, lhs.unpack_alias(arena)),
-        _ => return None,
+        (Some(_), Some(_)) => {
+            *has_col_connection = true;
+            return None;
+        }
+        (None, None) => return None,
     };
     matches!(arena.expression(constant), ScalarExpression::Constant(value) if !value.is_null())
         .then_some(Fact {
@@ -171,10 +180,12 @@ impl NormalizationRule for PropagateFilterConstants {
         let predicate = filter.predicate;
 
         let mut facts = Vec::new();
+        let mut has_col_connection = false;
         for_each_conjunct(predicate, arena, &mut |conjunct| {
-            facts.extend(as_fact(conjunct, arena, false));
+            facts.extend(as_fact(conjunct, arena, false, &mut has_col_connection));
         });
-        if facts.is_empty() {
+        // Without both a constant and a column pair nothing can be derived.
+        if facts.is_empty() || !has_col_connection {
             return Ok(false);
         }
 
@@ -225,7 +236,7 @@ fn collect_facts(plan: &LogicalPlan, arena: &PlanArena<'_>, left: bool, facts: &
     match (&plan.operator, plan.childrens.as_ref()) {
         (Operator::Filter(filter), Childrens::Only(child)) => {
             for_each_conjunct(filter.predicate, arena, &mut |conjunct| {
-                facts.extend(as_fact(conjunct, arena, left));
+                facts.extend(as_fact(conjunct, arena, left, &mut false));
             });
             collect_facts(child, arena, left, facts);
         }
@@ -278,7 +289,7 @@ impl NormalizationRule for PropagateJoinConstants {
             let preserved_columns = preserved.output_schema(arena);
             for_each_conjunct(join_filter, arena, &mut |conjunct| {
                 facts.extend(
-                    as_fact(conjunct, arena, preserved_left)
+                    as_fact(conjunct, arena, preserved_left, &mut false)
                         .filter(|fact| preserved_columns.contains(&fact.column)),
                 );
             });

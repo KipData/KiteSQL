@@ -227,7 +227,7 @@ impl<A: MetaArena> ExprVisitor<A> for ScanColumnVisitor<'_, '_, A> {
         ))
     }
 
-    fn visit_column_ref(&mut self, column: &ColumnRef) -> Result<(), DatabaseError> {
+    fn visit_column_ref(&mut self, column: &ColumnRef, _: usize) -> Result<(), DatabaseError> {
         self.column = Some(*column);
         Ok(())
     }
