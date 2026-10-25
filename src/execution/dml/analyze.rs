@@ -21,7 +21,8 @@ use crate::execution::{
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::optimizer::core::histogram::{
-    HistogramBuilder, HistogramMetaBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
+    HistogramBuilder, HistogramMetaBuilder, DEFAULT_HLL_PRECISION,
+    DEFAULT_STATISTICS_RELATIVE_ERROR,
 };
 use crate::optimizer::core::statistics_meta::IndexStatistics;
 use crate::planner::operator::analyze::AnalyzeOperator;
@@ -31,6 +32,7 @@ use crate::storage::{table_codec::TableCodec, Transaction};
 use crate::types::index::IndexId;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId};
+use ordered_float::OrderedFloat;
 use std::fmt::{self, Formatter};
 
 const DEFAULT_NUM_OF_BUCKETS: usize = 100;
@@ -39,6 +41,8 @@ pub struct Analyze<'a> {
     table_name: &'a TableName,
     input: Option<ExecId>,
     histogram_buckets: Option<usize>,
+    hll_precision: Option<u8>,
+    statistics_relative_error: Option<OrderedFloat<f64>>,
 }
 
 impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
@@ -49,6 +53,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
             AnalyzeOperator {
                 table_name,
                 histogram_buckets,
+                hll_precision,
+                statistics_relative_error,
                 ..
             },
             input_plan,
@@ -69,6 +75,8 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
             table_name,
             input,
             histogram_buckets: *histogram_buckets,
+            hll_precision: *hll_precision,
+            statistics_relative_error: *statistics_relative_error,
         }))
     }
 }
@@ -84,6 +92,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
             return Ok(());
         };
 
+        let hll_precision = self.hll_precision.unwrap_or(DEFAULT_HLL_PRECISION);
+        let relative_error = self
+            .statistics_relative_error
+            .map_or(DEFAULT_STATISTICS_RELATIVE_ERROR, |error| error.0);
         let (mut columns, mut builders) = {
             let table = arena
                 .transaction()
@@ -100,7 +112,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
                     Ok((
                         column_id,
                         position,
-                        HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?,
+                        HistogramMetaBuilder::new(hll_precision)?,
                     ))
                 })
                 .collect::<Result<Vec<_>, DatabaseError>>()?;
@@ -109,7 +121,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
                 .map(|index| {
                     let index = plan_arena.index(*index);
                     let index_id = index.id;
-                    let builder = HistogramBuilder::new(index, ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+                    let builder = HistogramBuilder::new(index, relative_error, hll_precision)?;
                     let exprs = index.column_exprs(table).collect::<Result<Vec<_>, _>>()?;
                     Ok(State {
                         index_id,
@@ -234,7 +246,9 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::execution::dml::analyze::DEFAULT_NUM_OF_BUCKETS;
     use crate::expression::range_detacher::Range;
+    use crate::iter_ext::Itertools;
     use crate::optimizer::core::cm_sketch::COUNT_MIN_SKETCH_STORAGE_PAGE_LEN;
+    use crate::optimizer::core::histogram::{HistogramMetaBuilder, DEFAULT_HLL_PRECISION};
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
     use crate::storage::{table_codec::TableCodec, InnerIter, Storage, Transaction};
     use crate::types::value::DataValue;
@@ -247,7 +261,80 @@ mod test {
         test_meta_loader_uses_cache()?;
         test_meta_loader_negative_cache()?;
         test_clean_expired_index()?;
+        test_hll_precision_is_configurable()?;
+        test_statistics_relative_error_is_configurable()?;
 
+        Ok(())
+    }
+
+    fn test_hll_precision_is_configurable() -> Result<(), DatabaseError> {
+        let rows = 1000;
+        let ndv_with = |precision: u8| -> Result<usize, DatabaseError> {
+            let mut builder = HistogramMetaBuilder::new(precision)?;
+            for i in 0..rows {
+                builder.append(&DataValue::Int32(i));
+            }
+            Ok(builder.build().distinct_values_len())
+        };
+        let (coarse, default) = (ndv_with(4)?, ndv_with(DEFAULT_HLL_PRECISION)?);
+        // Precision 4 has 16 registers, so its estimate must differ from the default sketch.
+        assert_ne!(coarse, default);
+
+        let values = (0..rows).map(|i| format!("({i})")).join(", ");
+        for (builder, expected) in [
+            (DataBaseBuilder::path("."), default),
+            (DataBaseBuilder::path(".").hll_precision(4), coarse),
+        ] {
+            let mut kite_sql = builder.build_in_memory()?;
+            kite_sql.ddl("create table t1 (a int primary key)")?;
+            kite_sql
+                .run(format!("insert into t1 values {values}"))?
+                .done()?;
+            kite_sql.analyze("t1")?;
+
+            let table_name = "t1".to_string().into();
+            let a_id = *kite_sql
+                .state
+                .table_cache()
+                .get(&table_name)
+                .unwrap()
+                .get_column_id_by_name("a")
+                .unwrap();
+            let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
+            let column = loader.load_column(&table_name, a_id).unwrap();
+            assert_eq!(column.distinct_values_len(), expected);
+            let index = loader.load(&table_name, 0)?.unwrap();
+            assert_eq!(index.histogram().distinct_values_len(), expected);
+        }
+        Ok(())
+    }
+
+    fn test_statistics_relative_error_is_configurable() -> Result<(), DatabaseError> {
+        // Count-Min width is next_power_of_two(2 / error): 0.001 -> 2048, 0.01 -> 256,
+        // and error_bound(n) = ceil(2n / width).
+        for (builder, width) in [
+            (DataBaseBuilder::path("."), 2048),
+            (
+                DataBaseBuilder::path(".").statistics_relative_error(0.01),
+                256,
+            ),
+        ] {
+            let mut kite_sql = builder.build_in_memory()?;
+            kite_sql.ddl("create table t1 (a int primary key)")?;
+            // ANALYZE needs at least DEFAULT_NUM_OF_BUCKETS rows.
+            let values = (0..DEFAULT_NUM_OF_BUCKETS)
+                .map(|i| format!("({i})"))
+                .join(", ");
+            kite_sql
+                .run(format!("insert into t1 values {values}"))?
+                .done()?;
+            kite_sql.analyze("t1")?;
+
+            let table_name = "t1".to_string().into();
+            let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
+            let index = loader.load(&table_name, 0)?.unwrap();
+            assert_eq!(index.sketch().error_bound(width), 2);
+        }
         Ok(())
     }
 

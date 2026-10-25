@@ -1115,7 +1115,8 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::iter_ext::Itertools;
     use crate::optimizer::core::histogram::{
-        HistogramBuilder, HistogramMetaBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
+        HistogramBuilder, HistogramMetaBuilder, DEFAULT_HLL_PRECISION,
+        DEFAULT_STATISTICS_RELATIVE_ERROR,
     };
     use crate::optimizer::core::statistics_meta::IndexStatistics;
     use crate::planner::{PlanArena, TableArenaCell};
@@ -1228,7 +1229,11 @@ mod tests {
             name: "pk_c1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
         };
-        let mut builder = HistogramBuilder::new(&index_meta, ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta,
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for value in 0..4 {
             builder.append(DataValue::Int32(value))?;
@@ -1247,7 +1252,7 @@ mod tests {
         let index_key =
             table_codec
                 .with_index_statistics("t1", 0, None, &plan_arena, |key, _| Ok(key.to_vec()))?;
-        let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
         for value in [
             DataValue::Int32(1),
             DataValue::Int32(1),

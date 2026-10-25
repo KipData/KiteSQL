@@ -47,6 +47,8 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
                 table_name,
                 index_metas,
                 histogram_buckets: None,
+                hll_precision: None,
+                statistics_relative_error: None,
             }),
             Childrens::Only(Box::new(scan_op)),
         ))

@@ -249,6 +249,9 @@ pub struct BinderContext<'a, T: Transaction> {
     // Tips: retain binding order so wildcard expansion and position derivation
     // follow FROM/JOIN order directly.
     pub(crate) bind_table: Vec<BoundSource<'a>>,
+    // Sources before this index were inherited from an enclosing query by `fork`
+    // and do not share the current FROM namespace.
+    source_scope_start: usize,
     ctes: Vec<CteBinding>,
     pub(crate) cte_depth: usize,
     // alias
@@ -318,6 +321,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             view_cache,
             transaction,
             bind_table: Default::default(),
+            source_scope_start: 0,
             ctes: Default::default(),
             cte_depth: 0,
             expr_aliases: Default::default(),
@@ -347,6 +351,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
             view_cache: self.view_cache,
             transaction: self.transaction,
             bind_table: self.bind_table.clone(),
+            source_scope_start: self.bind_table.len(),
             ctes: self.ctes.clone(),
             cte_depth: self.cte_depth,
             expr_aliases: self.expr_aliases.clone(),
@@ -549,6 +554,19 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
         Ok(source)
     }
 
+    /// Rejects a FROM source whose visible name is already bound in the current
+    /// FROM namespace. Two such sources would also expose identical column
+    /// identities, which later stages cannot tell apart.
+    pub(crate) fn ensure_unique_source_name(&self, name: &TableName) -> Result<(), DatabaseError> {
+        if self.bind_table[self.source_scope_start..]
+            .iter()
+            .any(|bound_source| bound_source.visible_name() == name)
+        {
+            return Err(DatabaseError::DuplicateTableName(name.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn add_bound_source(
         &mut self,
         table_name: TableName,
@@ -658,8 +676,10 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         false
     }
 
-    pub(crate) fn extend(&mut self, context: BinderContext<'a, T>) {
+    pub(crate) fn extend(&mut self, context: BinderContext<'a, T>) -> Result<(), DatabaseError> {
         for bound_source in context.bind_table {
+            self.context
+                .ensure_unique_source_name(bound_source.visible_name())?;
             self.context.add_bound_source(
                 bound_source.table_name,
                 bound_source.alias,
@@ -673,6 +693,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         for (key, table_name) in context.table_aliases {
             self.context.table_aliases.insert(key, table_name);
         }
+        Ok(())
     }
 }
 

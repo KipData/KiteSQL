@@ -35,6 +35,7 @@ use crate::function::lower::Lower;
 use crate::function::numbers::Numbers;
 use crate::function::octet_length::OctetLength;
 use crate::function::upper::Upper;
+use crate::optimizer::core::hll;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::HepBatchStrategy;
 use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
@@ -59,6 +60,7 @@ use crate::storage::{
 use crate::types::tuple::{Schema, SchemaView, Tuple};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
+use ordered_float::OrderedFloat;
 #[cfg(any(feature = "parser", feature = "orm"))]
 pub use prepared::PreparedPlan;
 use std::collections::{HashMap, HashSet};
@@ -112,6 +114,8 @@ pub struct DataBaseBuilder {
     ))]
     path: PathBuf,
     histogram_buckets: Option<usize>,
+    hll_precision: Option<u8>,
+    statistics_relative_error: Option<f64>,
     parser_recursion_limit: Option<usize>,
     transaction_isolation: Option<TransactionIsolationLevel>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -144,6 +148,8 @@ impl DataBaseBuilder {
             ))]
             path,
             histogram_buckets: None,
+            hll_precision: None,
+            statistics_relative_error: None,
             parser_recursion_limit: None,
             transaction_isolation: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -156,6 +162,26 @@ impl DataBaseBuilder {
     /// Sets the default histogram bucket count used by `ANALYZE`.
     pub fn histogram_buckets(mut self, buckets: usize) -> Self {
         self.histogram_buckets = Some(buckets);
+        self
+    }
+
+    /// Sets the HyperLogLog precision `p` used by `ANALYZE` to estimate column NDV.
+    ///
+    /// Each sketch has `2^p` registers (one byte each) with a standard error of
+    /// about `1.04 / sqrt(2^p)`. Valid range is 4..=26; unset uses 14
+    /// (16 KiB, ~0.81% error).
+    pub fn hll_precision(mut self, precision: u8) -> Self {
+        self.hll_precision = Some(precision);
+        self
+    }
+
+    /// Sets the relative error `ε` of the quantile (KLL) and frequency
+    /// (Count-Min) sketches built by `ANALYZE`.
+    ///
+    /// Sketch size grows roughly as `1 / ε` (Count-Min width is
+    /// `next_power_of_two(2 / ε)`). Must be in `(0, 1)`; unset uses 0.001.
+    pub fn statistics_relative_error(mut self, relative_error: f64) -> Self {
+        self.statistics_relative_error = Some(relative_error);
         self
     }
 
@@ -250,6 +276,8 @@ impl DataBaseBuilder {
         Self::_build::<T>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -263,6 +291,8 @@ impl DataBaseBuilder {
         Self::_build::<MemoryStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -276,6 +306,8 @@ impl DataBaseBuilder {
         Self::_build::<RocksStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -290,6 +322,8 @@ impl DataBaseBuilder {
         Self::_build::<MemoryStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -303,6 +337,8 @@ impl DataBaseBuilder {
         Self::_build::<LmdbStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -317,6 +353,8 @@ impl DataBaseBuilder {
         Self::_build::<OptimisticRocksStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -325,6 +363,8 @@ impl DataBaseBuilder {
     fn _build<T: Storage>(
         storage: T,
         histogram_buckets: Option<usize>,
+        hll_precision: Option<u8>,
+        statistics_relative_error: Option<f64>,
         parser_recursion_limit: Option<usize>,
         transaction_isolation: Option<TransactionIsolationLevel>,
     ) -> Result<Database<T>, DatabaseError> {
@@ -332,6 +372,23 @@ impl DataBaseBuilder {
             return Err(DatabaseError::InvalidValue(
                 "histogram buckets must be >= 1".to_string(),
             ));
+        }
+        // Reject out-of-range values when the database opens, not at the first ANALYZE.
+        if let Some(precision) = hll_precision {
+            if !(hll::MIN_PRECISION..=hll::MAX_PRECISION).contains(&precision) {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "hll precision must be between {} and {}, got {precision}",
+                    hll::MIN_PRECISION,
+                    hll::MAX_PRECISION
+                )));
+            }
+        }
+        if let Some(relative_error) = statistics_relative_error {
+            if !(relative_error > 0.0 && relative_error < 1.0) {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "statistics relative error must be in (0, 1), got {relative_error}"
+                )));
+            }
         }
         if matches!(parser_recursion_limit, Some(0)) {
             return Err(DatabaseError::InvalidValue(
@@ -355,6 +412,8 @@ impl DataBaseBuilder {
             table_arena,
             optimizer_pipeline: optimizer_pipeline(),
             histogram_buckets,
+            hll_precision,
+            statistics_relative_error: statistics_relative_error.map(OrderedFloat),
             parser_recursion_limit,
             _p: Default::default(),
         };
@@ -549,6 +608,8 @@ pub(crate) struct State<S> {
     table_arena: TableArenaCell,
     optimizer_pipeline: HepOptimizerPipeline,
     histogram_buckets: Option<usize>,
+    hll_precision: Option<u8>,
+    statistics_relative_error: Option<OrderedFloat<f64>>,
     #[cfg_attr(not(feature = "parser"), allow(dead_code))]
     parser_recursion_limit: Option<usize>,
     _p: PhantomData<S>,
@@ -666,6 +727,12 @@ impl<S: Storage> State<S> {
             if op.histogram_buckets.is_none() {
                 op.histogram_buckets = self.histogram_buckets;
             }
+            if op.hll_precision.is_none() {
+                op.hll_precision = self.hll_precision;
+            }
+            if op.statistics_relative_error.is_none() {
+                op.statistics_relative_error = self.statistics_relative_error;
+            }
         }
         plan.populate_output_schema_recursive(&mut arena);
 
@@ -738,6 +805,8 @@ impl<S: Storage> State<S> {
             table_arena,
             optimizer_pipeline,
             histogram_buckets,
+            hll_precision,
+            statistics_relative_error,
             ..
         } = self;
         let mut plan_arena = PlanArena::new(table_arena);
@@ -761,6 +830,12 @@ impl<S: Storage> State<S> {
         if let Operator::Analyze(op) = &mut plan.operator {
             if op.histogram_buckets.is_none() {
                 op.histogram_buckets = *histogram_buckets;
+            }
+            if op.hll_precision.is_none() {
+                op.hll_precision = *hll_precision;
+            }
+            if op.statistics_relative_error.is_none() {
+                op.statistics_relative_error = *statistics_relative_error;
             }
         }
 
@@ -2396,6 +2471,34 @@ pub(crate) mod test {
             result,
             Err(DatabaseError::InvalidValue(message)) if message == "histogram buckets must be >= 1"
         ));
+    }
+
+    #[test]
+    fn test_invalid_statistics_relative_error() {
+        for relative_error in [0.0, 1.0, -0.5, f64::NAN] {
+            let result = DataBaseBuilder::path(".")
+                .statistics_relative_error(relative_error)
+                .build_in_memory();
+            assert!(matches!(
+                result,
+                Err(DatabaseError::InvalidValue(message))
+                    if message == format!("statistics relative error must be in (0, 1), got {relative_error}")
+            ));
+        }
+    }
+
+    #[test]
+    fn test_invalid_hll_precision() {
+        for precision in [3, 27] {
+            let result = DataBaseBuilder::path(".")
+                .hll_precision(precision)
+                .build_in_memory();
+            assert!(matches!(
+                result,
+                Err(DatabaseError::InvalidValue(message))
+                    if message == format!("hll precision must be between 4 and 26, got {precision}")
+            ));
+        }
     }
 
     #[test]

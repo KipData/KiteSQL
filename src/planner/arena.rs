@@ -152,7 +152,7 @@ pub struct PlanArena<'a> {
     plans: Vec<LogicalPlan>,
 }
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ExprRef {
     pos: usize,
 }

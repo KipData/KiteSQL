@@ -169,7 +169,9 @@ impl IndexStatistics {
 mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
-    use crate::optimizer::core::histogram::{HistogramBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR};
+    use crate::optimizer::core::histogram::{
+        HistogramBuilder, DEFAULT_HLL_PRECISION, DEFAULT_STATISTICS_RELATIVE_ERROR,
+    };
     use crate::optimizer::core::statistics_meta::{IndexStatistics, StatisticMetaLoader};
     use crate::storage::StatisticsMetaCache;
     use crate::types::index::{IndexMeta, IndexType};
@@ -188,7 +190,11 @@ mod tests {
             ty: IndexType::PrimaryKey { is_multiple: false },
         };
 
-        let mut builder = HistogramBuilder::new(&index, ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index,
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         builder.append(DataValue::Int32(14))?;
         builder.append(DataValue::Int32(13))?;

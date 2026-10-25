@@ -211,9 +211,7 @@ mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::expression::AliasType;
-    use crate::optimizer::core::histogram::{
-        HistogramMetaBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
-    };
+    use crate::optimizer::core::histogram::{HistogramMetaBuilder, DEFAULT_HLL_PRECISION};
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::implementation::ImplementationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
@@ -258,7 +256,7 @@ mod tests {
     }
 
     fn statistics(non_null: usize, nulls: usize, ndv: usize) -> StatisticsMetaCache {
-        let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR).unwrap();
+        let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION).unwrap();
         for i in 0..non_null {
             builder.append(&DataValue::Int32((i % ndv) as i32));
         }

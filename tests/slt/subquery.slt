@@ -37,6 +37,29 @@ select x.a from (select -a as a from t1) as x;
 -1
 -3
 
+# A derived table does not see sources bound earlier in the same FROM.
+query IIIII rowsort
+select * from t1 x, (select a, b from t1) y;
+----
+0 1 2 1 2
+0 1 2 3 4
+1 3 4 1 2
+1 3 4 3 4
+
+query I rowsort
+select y.* from t1 x, (select id from t1) y;
+----
+0
+0
+1
+1
+
+statement error
+select * from t1 x, (select a from t1 where t1.a = x.a) y;
+
+statement error LATERAL derived tables are not supported
+select * from t1 x, lateral (select a from t1) y;
+
 query III
 select * from t1 where a <= (select 4) and a > (select 1)
 ----

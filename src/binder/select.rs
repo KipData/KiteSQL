@@ -1204,6 +1204,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_alias = alias.as_ref().map(|alias| alias.name.clone());
+        self.context
+            .ensure_unique_source_name(table_alias.as_ref().unwrap_or(&table_name))?;
 
         if let Some(plan_ref) = self.context.cte(&table_name).map(|cte| cte.plan_ref) {
             let mut plan = arena.plan(plan_ref).clone();
@@ -1275,6 +1277,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         if let Some(alias) = alias {
+            self.context.ensure_unique_source_name(&alias.name)?;
             let source_name = arena.temp_table();
 
             plan = self.bind_alias(
@@ -1304,6 +1307,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                     None
                 }
             };
+            if let Some(source_name) = &passthrough_source {
+                self.context.ensure_unique_source_name(source_name)?;
+            }
             let needs_virtual_source = passthrough_source.is_none();
             let source_name = passthrough_source.unwrap_or_else(|| arena.temp_table());
 
@@ -1337,6 +1343,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 
         let mut table_alias = None;
         let table_name: TableName = function.summary().name.clone();
+        self.context.ensure_unique_source_name(
+            alias
+                .as_ref()
+                .map(|alias| &alias.name)
+                .unwrap_or(&table_name),
+        )?;
         let mut plan = FunctionScanOperator::build(function);
 
         if let Some(alias) = alias {

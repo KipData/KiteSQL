@@ -16,6 +16,7 @@ use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use crate::storage::Transaction;
+use ordered_float::OrderedFloat;
 use std::io::Read;
 use std::io::Write;
 use std::mem::size_of;
@@ -62,6 +63,27 @@ implement_num_serialization!(u64);
 
 implement_num_serialization!(f32);
 implement_num_serialization!(f64);
+
+impl ReferenceSerialization for OrderedFloat<f64> {
+    fn encode<W: Write, A: MetaArena + ?Sized>(
+        &self,
+        writer: &mut W,
+        is_direct: bool,
+        reference_tables: &mut ReferenceTables,
+        arena: &A,
+    ) -> Result<(), DatabaseError> {
+        self.0.encode(writer, is_direct, reference_tables, arena)
+    }
+
+    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+        reader: &mut R,
+        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
+        reference_tables: &ReferenceTables,
+        arena: &mut A,
+    ) -> Result<Self, DatabaseError> {
+        f64::decode(reader, drive, reference_tables, arena).map(OrderedFloat)
+    }
+}
 
 impl ReferenceSerialization for usize {
     fn encode<W: Write, A: MetaArena + ?Sized>(

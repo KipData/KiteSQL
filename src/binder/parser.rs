@@ -2091,10 +2091,15 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                 sql_optional_table_alias(alias.clone()),
                 arena,
             ),
+            TableFactor::Derived { lateral: true, .. } => Err(DatabaseError::UnsupportedStmt(
+                "LATERAL derived tables are not supported".to_string(),
+            )),
             TableFactor::Derived {
                 subquery, alias, ..
             } => {
-                let mut binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
+                // A non-LATERAL derived table cannot see the sources bound before
+                // it in the same FROM clause.
+                let mut binder = Binder::new(self.context.fork_empty(), self.args, None);
                 let plan = binder.bind_query(subquery, arena)?;
                 self.bind_derived_source(
                     plan,
@@ -2157,7 +2162,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             let right = binder.bind_single_table_ref_sql(relation, Some(join_type), arena)?;
             (right, binder.context)
         };
-        self.extend(context);
+        self.extend(context)?;
 
         let constraint = match joint_condition {
             Some(constraint) => self.bind_join_constraint_sql(constraint, arena)?,

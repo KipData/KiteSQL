@@ -25,6 +25,8 @@ use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOptio
 use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
 use crate::types::tuple::Schema;
+use std::borrow::Borrow;
+use std::collections::{btree_map::Entry, BTreeMap, HashMap};
 use std::mem::swap;
 
 pub(crate) struct GreedyJoinReorder;
@@ -150,13 +152,17 @@ struct JoinCandidate {
     right: usize,
 }
 
-fn column_statistics(
+fn column_ndv<K: Borrow<(ExprRef, ExprRef)>>(
     left: &LogicalPlan,
     right: &LogicalPlan,
-    keys: &[(ExprRef, ExprRef)],
+    keys: impl IntoIterator<Item = K>,
     loader: Option<&StatisticMetaLoader<'_>>,
     arena: &PlanArena,
 ) -> Result<Option<(usize, usize)>, DatabaseError> {
+    // scan_column cannot trace columns through a join.
+    if matches!(&left.operator, Operator::Join(_)) || matches!(&right.operator, Operator::Join(_)) {
+        return Ok(None);
+    }
     let Some(loader) = loader else {
         return Ok(None);
     };
@@ -166,7 +172,8 @@ fn column_statistics(
     };
     let mut result = None;
     let mut divisor = 0;
-    for &(left_key, right_key) in keys {
+    for key in keys {
+        let &(left_key, right_key) = key.borrow();
         let (
             ScalarExpression::ColumnRef { column: l, .. },
             ScalarExpression::ColumnRef { column: r, .. },
@@ -225,15 +232,15 @@ fn index_column(column: ColumnRef, index: &IndexMeta, arena: &PlanArena) -> bool
         && column.id().is_some_and(|id| index.column_ids.contains(&id))
 }
 
-fn covers_index(
+fn covers_index<I: Iterator<Item = (ExprRef, ExprRef)>>(
     index: &IndexMeta,
     other: &JoinInputStatistics,
-    keys: &[(ExprRef, ExprRef)],
+    keys: impl Fn() -> I,
     require_other_index: bool,
     arena: &PlanArena,
 ) -> bool {
     index.column_ids.iter().all(|id| {
-        keys.iter().any(|&(left, right)| {
+        keys().any(|(left, right)| {
             let (
                 ScalarExpression::ColumnRef { column: left, .. },
                 ScalarExpression::ColumnRef { column: right, .. },
@@ -291,11 +298,11 @@ fn estimate_join_rows(left: JoinInputEstimate, right: JoinInputEstimate) -> usiz
     rows
 }
 
-fn join_rows(
+fn join_rows<I: Iterator<Item = (ExprRef, ExprRef)>>(
     left: &JoinInputStatistics,
     right: &JoinInputStatistics,
-    keys: &[(ExprRef, ExprRef)],
-    columns: Option<(usize, usize)>,
+    keys: impl Fn() -> I,
+    ndvs: Option<(usize, usize)>,
     arena: &PlanArena,
 ) -> usize {
     let mut left_estimate = JoinInputEstimate {
@@ -311,15 +318,15 @@ fn join_rows(
     if let (Some((left_index, Some(left_ndv))), Some((right_index, Some(right_ndv)))) =
         (left.index, right.index)
     {
-        if covers_index(left_index, right, keys, true, arena)
-            && covers_index(right_index, left, keys, true, arena)
+        if covers_index(left_index, right, &keys, true, arena)
+            && covers_index(right_index, left, &keys, true, arena)
         {
             left_estimate.ndv = Some(left_ndv);
             right_estimate.ndv = Some(right_ndv);
         }
     }
     if left_estimate.ndv.is_none() || right_estimate.ndv.is_none() {
-        if let Some((left_ndv, right_ndv)) = columns {
+        if let Some((left_ndv, right_ndv)) = ndvs {
             left_estimate.ndv = Some(left_ndv);
             right_estimate.ndv = Some(right_ndv);
         }
@@ -330,7 +337,7 @@ fn join_rows(
     ] {
         if let Some((index, _)) = own.index {
             if matches!(index.ty, IndexType::PrimaryKey { .. } | IndexType::Unique)
-                && covers_index(index, other, keys, false, arena)
+                && covers_index(index, other, &keys, false, arena)
             {
                 estimate.unique = true;
             }
@@ -356,10 +363,33 @@ fn can_expand(plan: &LogicalPlan) -> bool {
             (JoinType::Inner, JoinCondition::On { on, filter: None }) if !on.is_empty())
 }
 
+// Counts a region's inputs and reports whether it already contains a Cartesian product.
+fn region_shape(plan: &LogicalPlan) -> (usize, bool) {
+    if !can_expand(plan) {
+        return (1, false);
+    }
+    let (left, right) = plan.childrens.twins();
+    let (left_inputs, left_cross) = region_shape(left);
+    let (right_inputs, right_cross) = region_shape(right);
+    let cross = matches!(
+        &plan.operator,
+        Operator::Join(JoinOperator {
+            join_type: JoinType::Cross,
+            ..
+        })
+    );
+    (
+        left_inputs + right_inputs,
+        cross || left_cross || right_cross,
+    )
+}
+
+// Collects input schemas and join keys
+// returns `None` when any input lacks a row estimate.
 fn inspect<'plan>(
     plan: &'plan mut LogicalPlan,
     schemas: &mut Vec<&'plan Schema>,
-    keys: &mut Vec<(ExprRef, ExprRef)>,
+    keys: &mut JoinKeys,
     arena: &mut PlanArena,
     loader: Option<&StatisticMetaLoader<'_>>,
 ) -> Result<Option<usize>, DatabaseError> {
@@ -369,22 +399,46 @@ fn inspect<'plan>(
         else {
             unreachable!()
         };
-        if let JoinCondition::On { on, .. } = &join.on {
-            keys.extend_from_slice(on);
-        }
         let left_stats = index_statistics(left);
         let right_stats = index_statistics(right);
         let on = match &join.on {
             JoinCondition::On { on, .. } => on.as_slice(),
             JoinCondition::None => &[],
         };
-        let columns = column_statistics(left, right, on, loader, arena)?;
+        let ndvs = column_ndv(left, right, on.iter().copied(), loader, arena)?;
         let start = schemas.len();
-        let Some(left_rows) = inspect(left, schemas, keys, arena, loader)? else {
-            return Ok(None);
-        };
+        let left_rows = inspect(left, schemas, keys, arena, loader)?;
         let middle = schemas.len();
-        let Some(right_rows) = inspect(right, schemas, keys, arena, loader)? else {
+        let right_rows = inspect(right, schemas, keys, arena, loader)?;
+
+        for &(left, right) in on {
+            let mut endpoints = [None, None];
+            for (endpoint, expr) in endpoints.iter_mut().zip([left, right]) {
+                for (index, schema) in schemas.iter().enumerate() {
+                    if key_in_schema(expr, schema, arena)? {
+                        *endpoint = Some(index);
+                        break;
+                    }
+                }
+                if endpoint.is_none() {
+                    return Err(DatabaseError::InvalidPlan(format!(
+                        "join key `{}` is not produced by any join input",
+                        expr.output_name(arena)
+                    )));
+                }
+            }
+            if endpoints[0] == endpoints[1] {
+                return Err(DatabaseError::InvalidPlan(format!(
+                    "join key `{} = {}` compares columns of the same join input",
+                    left.output_name(arena),
+                    right.output_name(arena)
+                )));
+            }
+            // SAFETY: The loop above returns early if either endpoint is None.
+            let [l, r] = endpoints.map(Option::unwrap);
+            keys.insert(1u64 << l, 1u64 << r, (left, right));
+        }
+        let (Some(left_rows), Some(right_rows)) = (left_rows, right_rows) else {
             return Ok(None);
         };
         let rows = join_rows(
@@ -406,8 +460,8 @@ fn inspect<'plan>(
                 },
                 index: right_stats.map(|(index, ndv)| (arena.index(index), ndv)),
             },
-            on,
-            columns,
+            || on.iter().copied(),
+            ndvs,
             arena,
         );
         if let Some(option) = &mut plan.physical_option {
@@ -421,23 +475,22 @@ fn inspect<'plan>(
         }
         Ok(Some(rows))
     } else {
-        let Some(rows) = plan.estimated_rows() else {
-            return Ok(None);
-        };
+        let rows = plan.estimated_rows();
         schemas.push(plan.output_schema(arena));
-        Ok(Some(rows))
+        Ok(rows)
     }
 }
 
-fn flatten(plan: LogicalPlan, inputs: &mut Vec<(LogicalPlan, usize)>) {
+fn flatten(plan: LogicalPlan, inputs: &mut Vec<(LogicalPlan, usize, u64)>) {
     if can_expand(&plan) {
         let (left, right) = plan.childrens.pop_twins();
         flatten(left, inputs);
         flatten(right, inputs);
     } else {
-        // SAFETY: inspect has already verified every input's row estimate before detaching the region.
-        let rows = plan.estimated_rows().unwrap();
-        inputs.push((plan, rows));
+        // Unused when the region is not fully estimated.
+        let rows = plan.estimated_rows().unwrap_or(0);
+        let mask = 1u64 << inputs.len();
+        inputs.push((plan, rows, mask));
     }
 }
 
@@ -449,19 +502,84 @@ fn key_in_schema(expr: ExprRef, schema: &Schema, arena: &PlanArena) -> Result<bo
     })
 }
 
-fn key_between(
-    (left, right): (ExprRef, ExprRef),
-    left_schema: &Schema,
-    right_schema: &Schema,
-    arena: &PlanArena,
-) -> Result<Option<(ExprRef, ExprRef)>, DatabaseError> {
-    if key_in_schema(left, left_schema, arena)? && key_in_schema(right, right_schema, arena)? {
-        Ok(Some((left, right)))
-    } else if key_in_schema(right, left_schema, arena)? && key_in_schema(left, right_schema, arena)?
-    {
-        Ok(Some((right, left)))
-    } else {
-        Ok(None)
+#[derive(Default)]
+struct JoinKeys {
+    links: BTreeMap<(u64, u64), usize>,
+    // Link IDs are indices here; consumed lists leave empty slots.
+    on_keys: Vec<Vec<(ExprRef, ExprRef)>>,
+}
+
+impl JoinKeys {
+    fn insert(&mut self, left: u64, right: u64, mut exprs: (ExprRef, ExprRef)) {
+        if left > right {
+            swap(&mut exprs.0, &mut exprs.1);
+        }
+        match self.links.entry((left, right)) {
+            Entry::Occupied(entry) => self.on_keys[*entry.get()].push(exprs),
+            Entry::Vacant(entry) => {
+                let id = self.on_keys.len();
+                self.on_keys.push(vec![exprs]);
+                entry.insert(id);
+                self.links.insert((right, left), id);
+            }
+        }
+    }
+
+    // Both directions share one canonically oriented list; take aligns the selected ON.
+    fn get(&self, left: u64, right: u64) -> impl Iterator<Item = (ExprRef, ExprRef)> + '_ {
+        self.links
+            .get(&(left, right))
+            .into_iter()
+            .flat_map(|&id| self.on_keys[id].iter().copied())
+    }
+
+    fn pairs(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.links
+            .keys()
+            .copied()
+            .filter(|(left, right)| left < right)
+    }
+
+    fn take(&mut self, left: u64, right: u64) -> Vec<(ExprRef, ExprRef)> {
+        let Some(id) = self.links.remove(&(left, right)) else {
+            return Vec::new();
+        };
+        self.links.remove(&(right, left));
+        let mut on = std::mem::take(&mut self.on_keys[id]);
+        if left > right {
+            for (l, r) in &mut on {
+                swap(l, r);
+            }
+        }
+        on
+    }
+
+    fn rewrite(&mut self, left: u64, right: u64) {
+        // take has already consumed the internal edge; only external links remain.
+        debug_assert!(!self.links.contains_key(&(left, right)));
+        let merged = left | right;
+        for old in [left, right] {
+            loop {
+                let link = self
+                    .links
+                    .extract_if((old, 0)..=(old, u64::MAX), |_, _| true)
+                    .next();
+                let Some(((_, other), id)) = link else { break };
+                self.links.remove(&(other, old));
+                if (old > other) != (merged > other) {
+                    for (l, r) in &mut self.on_keys[id] {
+                        swap(l, r);
+                    }
+                }
+                if let Some(&existing) = self.links.get(&(merged, other)) {
+                    let mut extra = std::mem::take(&mut self.on_keys[id]);
+                    self.on_keys[existing].append(&mut extra);
+                } else {
+                    self.links.insert((merged, other), id);
+                    self.links.insert((other, merged), id);
+                }
+            }
+        }
     }
 }
 
@@ -495,59 +613,47 @@ impl NormalizationRule for GreedyJoinReorder {
         {
             return Ok(false);
         }
-        let original_schema = plan.output_schema(arena).clone();
-        let mut schemas = Vec::new();
-        let mut keys = Vec::new();
-        if inspect(plan, &mut schemas, &mut keys, arena, loader)?.is_none() || schemas.len() < 3 {
+        let (input_count, cross_join) = region_shape(plan);
+        if input_count > u64::BITS as usize {
             return Ok(false);
         }
-        // Ambiguous column identities cannot be rebound to an individual input.
-        for (i, left) in schemas.iter().enumerate() {
-            for right in &schemas[i + 1..] {
-                if left
-                    .iter()
-                    .any(|l| right.iter().any(|r| arena.same_column(*l, *r)))
-                {
-                    return Ok(false);
-                }
-            }
-        }
-        // Constants and keys spanning several inputs need separate predicate handling.
-        for &(left, right) in &keys {
-            let mut endpoints = [None, None];
-            for (endpoint, expr) in endpoints.iter_mut().zip([left, right]) {
-                if !expr.any_referenced_column(arena, |_, _| true)? {
-                    return Ok(false);
-                }
-                for (index, schema) in schemas.iter().enumerate() {
-                    if key_in_schema(expr, schema, arena)? {
-                        *endpoint = Some(index);
-                        break;
-                    }
-                }
-                if endpoint.is_none() {
-                    return Ok(false);
-                }
-            }
-            if endpoints[0] == endpoints[1] {
-                return Ok(false);
-            }
+        let original_schema = plan.output_schema(arena).clone();
+        let mut schemas = Vec::new();
+        let mut keys = JoinKeys::default();
+        let estimated = inspect(plan, &mut schemas, &mut keys, arena, loader)?.is_some();
+        // Without row estimates the greedy order degrades to the heuristic
+        // "equijoins first, then input order", which only helps by deferring
+        // Cartesian products already present in the region.
+        if input_count < 3 || (!estimated && !cross_join) {
+            return Ok(false);
         }
         let mut inputs = Vec::with_capacity(schemas.len());
         flatten(plan.take(), &mut inputs);
+        let mut row_cache = HashMap::new();
         while inputs.len() > 1 {
             let mut best: Option<JoinCandidate> = None;
-            for i in 0..inputs.len() {
-                let (prefix, suffix) = inputs.split_at_mut(i + 1);
-                let (left, left_rows) = &mut prefix[i];
-                let left_stats = index_statistics(left);
-                for (offset, (right, right_rows)) in suffix.iter_mut().enumerate() {
-                    let j = i + 1 + offset;
+            let connected = !keys.links.is_empty();
+            let mut evaluate = |inputs: &mut [(LogicalPlan, usize, u64)],
+                                i: usize,
+                                j: usize|
+             -> Result<(), DatabaseError> {
+                let (prefix, suffix) = inputs.split_at_mut(j);
+                let (left, left_rows, left_mask) = &mut prefix[i];
+                let (right, right_rows, right_mask) = &mut suffix[0];
+                // This pair's inputs and keys stay fixed until either input is merged.
+                let cache_key = (*left_mask, *right_mask);
+                let candidate_keys = || keys.get(*left_mask, *right_mask);
+                let product = if !estimated {
+                    0
+                } else if let Some(rows) = row_cache.get(&cache_key) {
+                    *rows
+                } else {
+                    let ndvs = column_ndv(left, right, candidate_keys(), loader, arena)?;
+                    let left_stats = index_statistics(left);
                     let right_stats = index_statistics(right);
-                    let columns = column_statistics(left, right, &keys, loader, arena)?;
                     let left_schema = left.output_schema(arena);
                     let right_schema = right.output_schema(arena);
-                    let product = join_rows(
+                    let rows = join_rows(
                         &JoinInputStatistics {
                             rows: *left_rows,
                             schema: left_schema,
@@ -558,32 +664,49 @@ impl NormalizationRule for GreedyJoinReorder {
                             schema: right_schema,
                             index: right_stats.map(|(index, ndv)| (arena.index(index), ndv)),
                         },
-                        &keys,
-                        columns,
+                        &candidate_keys,
+                        ndvs,
                         arena,
                     );
-                    if let Some(previous) = best {
-                        // Equal row estimates retain the earlier pair in enumeration order.
-                        if !previous.cross_join && product >= previous.rows {
-                            continue;
-                        }
-                    }
-                    let mut connected = false;
-                    for &key in &keys {
-                        if key_between(key, left_schema, right_schema, arena)?.is_some() {
-                            connected = true;
-                            break;
-                        }
-                    }
-                    // Apply available join predicates before forming Cartesian intermediates.
-                    let candidate = JoinCandidate {
-                        cross_join: !connected,
-                        rows: product,
-                        left: i,
-                        right: j,
-                    };
-                    if best.is_none_or(|previous| candidate < previous) {
-                        best = Some(candidate);
+                    row_cache.insert(cache_key, rows);
+                    rows
+                };
+                // Edge order differs from input order: equal rows must reach the tie-breaker.
+                if best.is_some_and(|previous| product > previous.rows) {
+                    return Ok(());
+                }
+                let candidate = JoinCandidate {
+                    cross_join: !connected,
+                    rows: product,
+                    left: i,
+                    right: j,
+                };
+                if best.is_none_or(|previous| candidate < previous) {
+                    best = Some(candidate);
+                }
+                Ok(())
+            };
+            if connected {
+                for (left, right) in keys.pairs() {
+                    // SAFETY: keys only contains active input masks; merge rewrites removed
+                    // endpoints. Disjoint masks have unique lowest bits, and inserting each
+                    // merged input at the earlier position preserves their sorted order.
+                    let i = inputs
+                        .binary_search_by_key(&(left.trailing_zeros(), left), |(_, _, mask)| {
+                            (mask.trailing_zeros(), *mask)
+                        })
+                        .unwrap();
+                    let j = inputs
+                        .binary_search_by_key(&(right.trailing_zeros(), right), |(_, _, mask)| {
+                            (mask.trailing_zeros(), *mask)
+                        })
+                        .unwrap();
+                    evaluate(&mut inputs, i.min(j), i.max(j))?;
+                }
+            } else {
+                for i in 0..inputs.len() {
+                    for j in i + 1..inputs.len() {
+                        evaluate(&mut inputs, i, j)?;
                     }
                 }
             }
@@ -596,20 +719,11 @@ impl NormalizationRule for GreedyJoinReorder {
             else {
                 return Ok(false);
             };
-            let (mut right, _) = inputs.remove(j);
-            let (mut left, _) = inputs.remove(i);
+            let (mut right, _, right_mask) = inputs.remove(j);
+            let (mut left, _, left_mask) = inputs.remove(i);
             let left_schema = left.output_schema(arena);
             let right_schema = right.output_schema(arena);
-            let mut on = Vec::new();
-            let mut index = 0;
-            while index < keys.len() {
-                if let Some(key) = key_between(keys[index], left_schema, right_schema, arena)? {
-                    keys.remove(index);
-                    on.push(key);
-                } else {
-                    index += 1;
-                }
-            }
+            let mut on = keys.take(left_mask, right_mask);
             for (l, r) in &mut on {
                 *l = l.clone_expression(arena)?;
                 *r = r.clone_expression(arena)?;
@@ -629,15 +743,20 @@ impl NormalizationRule for GreedyJoinReorder {
             join.physical_option = Some(PhysicalOption::new(
                 implementation,
                 SortOption::None,
-                RowCountOption::Estimated {
-                    rows: product,
-                    ndv: None,
+                if estimated {
+                    RowCountOption::Estimated {
+                        rows: product,
+                        ndv: None,
+                    }
+                } else {
+                    RowCountOption::Unknown
                 },
             ));
-            inputs.insert(i, (join, product));
+            keys.rewrite(left_mask, right_mask);
+            inputs.insert(i, (join, product, left_mask | right_mask));
         }
         // SAFETY: At this point, there should be exactly one plan left in the inputs vector, which is the final join result.
-        let (join, _) = inputs.pop().unwrap();
+        let (join, _, _) = inputs.pop().unwrap();
         *plan = restore_join_output(join, original_schema, arena);
         Ok(true)
     }
@@ -649,9 +768,7 @@ mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::expression::{AliasType, BinaryOperator};
-    use crate::optimizer::core::histogram::{
-        HistogramMetaBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
-    };
+    use crate::optimizer::core::histogram::{HistogramMetaBuilder, DEFAULT_HLL_PRECISION};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
@@ -861,14 +978,367 @@ mod tests {
     }
 
     #[test]
-    fn column_statistics_are_read_from_scan_without_an_index() -> Result<(), DatabaseError> {
+    fn join_keys_share_on_ids_and_move_vectors_without_copy() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let (_, a) = input("a", 10, &mut arena);
+        let (_, b) = input("b", 10, &mut arena);
+        let (_, c) = input("c", 10, &mut arena);
+        let (_, d) = input("d", 10, &mut arena);
+        let alias = a.clone_expression(&mut arena)?;
+        let mut keys = JoinKeys::default();
+        keys.insert(1, 4, (a, c));
+        keys.insert(1, 4, (alias, c));
+        keys.insert(4, 1, (c, a));
+        keys.insert(2, 4, (b, c));
+        keys.insert(1, 2, (a, b));
+        keys.insert(2, 8, (b, d));
+        keys.insert(4, 8, (c, d));
+        assert_eq!(keys.links.len(), 10);
+        assert_eq!(keys.on_keys.len(), 5);
+        let ac = keys.links[&(1, 4)];
+        assert_eq!(keys.links[&(4, 1)], ac);
+        assert_eq!(keys.on_keys[ac], vec![(a, c), (alias, c), (a, c)]);
+        let bd = keys.links[&(2, 8)];
+        let bd_data = keys.on_keys[bd].as_ptr();
+        assert_eq!(
+            keys.pairs().collect::<Vec<_>>(),
+            vec![(1, 2), (1, 4), (2, 4), (2, 8), (4, 8)]
+        );
+        assert_eq!(
+            keys.get(4, 1).collect::<Vec<_>>(),
+            vec![(a, c), (alias, c), (a, c)]
+        );
+        assert!(keys.get(1, 8).next().is_none());
+        let ab_data = keys.on_keys[keys.links[&(1, 2)]].as_ptr();
+        let on = keys.take(1, 2);
+        assert_eq!(on, vec![(a, b)]);
+        assert_eq!(on.as_ptr(), ab_data);
+        assert!(keys.links.contains_key(&(1, 4)));
+        keys.rewrite(1, 2);
+        assert_eq!(
+            keys.get(3, 4).collect::<Vec<_>>(),
+            vec![(a, c), (alias, c), (a, c), (b, c)]
+        );
+        assert_eq!(keys.get(3, 8).collect::<Vec<_>>(), vec![(b, d)]);
+        assert_eq!(keys.links[&(3, 8)], bd);
+        assert_eq!(keys.on_keys[bd].as_ptr(), bd_data);
+        assert!(keys.get(1, 4).next().is_none());
+        assert!(keys.get(1, 2).next().is_none());
+        assert_eq!(keys.take(4, 3), vec![(c, a), (c, alias), (c, a), (c, b)]);
+        keys.rewrite(4, 3);
+        assert_eq!(keys.take(8, 7), vec![(d, c), (d, b)]);
+        keys.rewrite(8, 7);
+        assert!(keys.links.is_empty());
+        assert!(keys.on_keys.iter().all(Vec::is_empty));
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_inserts_keys_directly_and_keeps_duplicate_conditions() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let (a, ak) = input("a", 1, &mut arena);
+        let (b, bk) = input("b", 1, &mut arena);
+        let (c, ck) = input("c", 1, &mut arena);
+        let ab = JoinOperator::build(
+            a,
+            b,
+            JoinCondition::On {
+                on: vec![(ak, bk), (ak, bk)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        let mut plan = JoinOperator::build(
+            ab,
+            c,
+            JoinCondition::On {
+                on: vec![(ak, bk), (bk, ck)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        let mut schemas = Vec::new();
+        let mut keys = JoinKeys::default();
+        assert!(inspect(&mut plan, &mut schemas, &mut keys, &mut arena, None)?.is_some());
+        assert_eq!(keys.links.len(), 4);
+        assert_eq!(keys.links[&(1, 2)], keys.links[&(2, 1)]);
+        assert_eq!(keys.on_keys.len(), 2);
+        assert_eq!(keys.take(1, 2), vec![(ak, bk); 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn link_prefixes_update_incoming_edges_without_copying_on() {
+        let (a, b, c) = (ExprRef::new(0), ExprRef::new(1), ExprRef::new(2));
+        let mut keys = JoinKeys::default();
+        keys.insert(1, 8, (a, b));
+        keys.insert(8, 16, (b, c));
+        let id = keys.links[&(1, 8)];
+        let data = keys.on_keys[id].as_ptr();
+        assert_eq!(keys.take(8, 16), vec![(b, c)]);
+        assert!(keys.links.contains_key(&(1, 8)));
+        assert!(!keys.links.contains_key(&(1, 24)));
+        keys.rewrite(8, 16);
+        assert_eq!(keys.links[&(1, 24)], id);
+        assert_eq!(keys.links[&(24, 1)], id);
+        assert_eq!(keys.on_keys[id].as_ptr(), data);
+        assert_eq!(keys.get(24, 1).collect::<Vec<_>>(), vec![(a, b)]);
+        assert_eq!(keys.pairs().collect::<Vec<_>>(), vec![(1, 24)]);
+        assert!(keys
+            .links
+            .keys()
+            .all(|(l, r)| ![8, 16].contains(l) && ![8, 16].contains(r)));
+        assert_eq!(keys.take(24, 1), vec![(b, a)]);
+        assert!(keys.links.is_empty());
+    }
+
+    #[test]
+    fn shared_on_id_preserves_order_when_merged_direction_flips() {
+        let (a, b, c, d, e) = (
+            ExprRef::new(0),
+            ExprRef::new(1),
+            ExprRef::new(2),
+            ExprRef::new(3),
+            ExprRef::new(4),
+        );
+        let mut keys = JoinKeys::default();
+        keys.insert(2, 4, (b, c));
+        keys.insert(2, 4, (d, a));
+        keys.insert(8, 4, (e, c));
+        let id = keys.links[&(2, 4)];
+        assert!(keys.take(2, 8).is_empty());
+        keys.rewrite(2, 8);
+        assert_eq!(keys.links[&(10, 4)], id);
+        assert_eq!(keys.links[&(4, 10)], id);
+        assert_eq!(
+            keys.get(10, 4).collect::<Vec<_>>(),
+            vec![(c, b), (a, d), (c, e)]
+        );
+        assert_eq!(keys.take(10, 4), vec![(b, c), (d, a), (e, c)]);
+        assert!(keys.links.is_empty());
+        assert!(keys.on_keys.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn malformed_regions_are_planning_errors() {
+        // (outer join key, expected message)
+        let cases: [(
+            fn(ExprRef, ExprRef, &mut PlanArena) -> (ExprRef, ExprRef),
+            &str,
+        ); 2] = [
+            (|a, _, _| (a, a), "compares columns of the same join input"),
+            (
+                |_, c, arena| (input("z", 1, arena).1, c),
+                "is not produced by any join input",
+            ),
+        ];
+        for (outer_key, message) in cases {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let (a, ak) = input("a", 1, &mut arena);
+            let (b, bk) = input("b", 1, &mut arena);
+            let (c, ck) = input("c", 1, &mut arena);
+            let ab = JoinOperator::build(
+                a,
+                b,
+                JoinCondition::On {
+                    on: vec![(ak, bk)],
+                    filter: None,
+                },
+                JoinType::Inner,
+                false,
+            );
+            let mut plan = JoinOperator::build(
+                ab,
+                c,
+                JoinCondition::On {
+                    on: vec![outer_key(ak, ck, &mut arena)],
+                    filter: None,
+                },
+                JoinType::Inner,
+                false,
+            );
+            let Err(DatabaseError::InvalidPlan(error)) =
+                GreedyJoinReorder.apply(&mut plan, &mut arena, None)
+            else {
+                panic!("expected invalid plan: {message}");
+            };
+            assert!(error.contains(message), "{error}");
+        }
+    }
+
+    #[test]
+    fn input_masks_support_64_inputs_and_skip_larger_regions() -> Result<(), DatabaseError> {
+        for count in [64, 65] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let (mut plan, mut previous) = input("t0", 1, &mut arena);
+            for index in 1..count {
+                let (next, key) = input(&format!("t{index}"), 1, &mut arena);
+                plan = JoinOperator::build(
+                    plan,
+                    next,
+                    JoinCondition::On {
+                        on: vec![(previous, key)],
+                        filter: None,
+                    },
+                    JoinType::Inner,
+                    false,
+                );
+                previous = key;
+            }
+            let schema = plan.output_schema(&mut arena).clone();
+            let original = plan.clone();
+            assert_eq!(
+                GreedyJoinReorder.apply(&mut plan, &mut arena, None)?,
+                count == 64
+            );
+            assert_eq!(plan.output_schema(&mut arena), &schema);
+            if count == 65 {
+                assert_eq!(plan, original);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn column_ndv_skips_unusable_inputs_and_unrelated_keys() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let (a, ka) = input("a", 100, &mut arena);
+        let (b, kb) = input("b", 100, &mut arena);
+        let (c, kc) = input("c", 100, &mut arena);
+        let keys = [(ka, kb), (ka, kc)];
+        let mut join_keys = JoinKeys::default();
+        join_keys.insert(1, 2, (ka, kb));
+        join_keys.insert(1, 4, (ka, kc));
+        let mut cache = StatisticsMetaCache::default();
+        for (name, ndv) in [("a", 10), ("b", 20), ("c", 30)] {
+            let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
+            for value in 0..ndv {
+                builder.append(&DataValue::Int32(value));
+            }
+            cache.columns.insert((name.into(), 0), builder.build());
+        }
+        let loader = StatisticMetaLoader::new(&cache);
+        for (left, right, lm, rm, expected) in [(&a, &b, 1, 2, (10, 20)), (&c, &a, 4, 1, (30, 10))]
+        {
+            let mut visited = 0;
+            let ndvs = column_ndv(
+                left,
+                right,
+                join_keys.get(lm, rm).inspect(|_| visited += 1),
+                Some(&loader),
+                &arena,
+            )?;
+            assert_eq!(ndvs, Some(expected));
+            assert_eq!(visited, 1);
+        }
+        let mut join = JoinOperator::build(
+            a,
+            b,
+            JoinCondition::On {
+                on: vec![(ka, kb)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        join.physical_option = Some(PhysicalOption::new(
+            PlanImpl::HashJoin,
+            SortOption::None,
+            RowCountOption::Estimated {
+                rows: 100,
+                ndv: None,
+            },
+        ));
+        let mut visited = 0;
+        assert_eq!(
+            column_ndv(
+                &join,
+                &c,
+                keys.iter().inspect(|_| visited += 1),
+                Some(&loader),
+                &arena
+            )?,
+            None
+        );
+        assert_eq!(visited, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn merged_inputs_do_not_reuse_leaf_pair_row_estimates() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let (a, ak) = input("a", 100, &mut arena);
+        let (b, bk) = input("b", 100, &mut arena);
+        let (c, ck) = input("c", 100, &mut arena);
+        let (d, dk) = input("d", 100, &mut arena);
+        let ab = JoinOperator::build(
+            a,
+            b,
+            JoinCondition::On {
+                on: vec![(ak, bk)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        let abc = JoinOperator::build(
+            ab,
+            c,
+            JoinCondition::On {
+                on: vec![(bk, ck)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        let mut plan = JoinOperator::build(
+            abc,
+            d,
+            JoinCondition::On {
+                on: vec![(ck, dk)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        let schema = plan.output_schema(&mut arena).clone();
+        let mut cache = StatisticsMetaCache::default();
+        for (table, ndv) in [("a", 100), ("b", 100), ("c", 10), ("d", 10)] {
+            let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
+            for value in 0..ndv {
+                builder.append(&DataValue::Int32(value));
+            }
+            cache.columns.insert((table.into(), 0), builder.build());
+        }
+        assert!(GreedyJoinReorder.apply(
+            &mut plan,
+            &mut arena,
+            Some(&StatisticMetaLoader::new(&cache))
+        )?);
+        // A-B estimates 100, C-D estimates 1,000. Their merged inputs must not
+        // reuse any leaf-pair result when Vec positions are removed and reused.
+        assert_eq!(plan.estimated_rows(), Some(100 * 1_000));
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        Ok(())
+    }
+
+    #[test]
+    fn column_ndv_is_read_from_scan_without_an_index() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let (mut left, l) = input("l", 1000, &mut arena);
         let (mut right, r) = input("r", 200, &mut arena);
         let mut cache = StatisticsMetaCache::default();
         for (table, rows) in [("l", 1000), ("r", 200)] {
-            let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+            let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
             for value in 0..rows {
                 builder.append(&DataValue::Int32(value % 100));
             }
@@ -876,32 +1346,26 @@ mod tests {
         }
         let loader = StatisticMetaLoader::new(&cache);
         assert_eq!(
-            column_statistics(&left, &right, &[(l, r)], Some(&loader), &arena)?,
+            column_ndv(&left, &right, &[(l, r)], Some(&loader), &arena)?,
             Some((100, 100))
         );
-        assert_eq!(
-            column_statistics(&left, &right, &[(l, r)], None, &arena)?,
-            None
-        );
-        assert_eq!(
-            column_statistics(&left, &right, &[], Some(&loader), &arena)?,
-            None
-        );
+        assert_eq!(column_ndv(&left, &right, &[(l, r)], None, &arena)?, None);
+        assert_eq!(column_ndv(&left, &right, &[], Some(&loader), &arena)?, None);
         left.physical_option.as_mut().unwrap().row_count =
             RowCountOption::Estimated { rows: 8, ndv: None };
         assert_eq!(
-            column_statistics(&left, &right, &[(l, r)], Some(&loader), &arena)?,
+            column_ndv(&left, &right, &[(l, r)], Some(&loader), &arena)?,
             Some((8, 100))
         );
         left.physical_option.as_mut().unwrap().row_count = RowCountOption::Estimated {
             rows: 1000,
             ndv: None,
         };
-        let mut nulls = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut nulls = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
         nulls.append(&DataValue::Null);
         cache.columns.insert(("r".into(), 0), nulls.build());
         assert_eq!(
-            column_statistics(
+            column_ndv(
                 &left,
                 &right,
                 &[(l, r)],
@@ -912,7 +1376,7 @@ mod tests {
         );
         cache.columns.remove(&("r".into(), 0));
         assert_eq!(
-            column_statistics(
+            column_ndv(
                 &left,
                 &right,
                 &[(l, r)],
@@ -921,7 +1385,7 @@ mod tests {
             )?,
             None
         );
-        let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
         for value in 0..200 {
             builder.append(&DataValue::Int32(value % 100));
         }
@@ -941,7 +1405,7 @@ mod tests {
                     schema: right_schema,
                     index: None
                 },
-                &[(l, r)],
+                || std::iter::once((l, r)),
                 Some((100, 100)),
                 &arena
             ),
@@ -1198,15 +1662,15 @@ mod tests {
         info.meta = index;
         let mut cache = StatisticsMetaCache::default();
         for (table, ndv) in [("l", 30), ("r", 70)] {
-            let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+            let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
             for value in 0..ndv {
                 builder.append(&DataValue::Int32(value));
             }
             cache.columns.insert((table.into(), 0), builder.build());
         }
         let loader = StatisticMetaLoader::new(&cache);
-        let columns = column_statistics(&left, &right, &[(l, r)], Some(&loader), &arena)?;
-        assert_eq!(columns, Some((12, 70)));
+        let ndvs = column_ndv(&left, &right, &[(l, r)], Some(&loader), &arena)?;
+        assert_eq!(ndvs, Some((12, 70)));
         let left_schema = left.output_schema(&mut arena);
         let right_schema = right.output_schema(&mut arena);
         assert_eq!(
@@ -1221,8 +1685,8 @@ mod tests {
                     schema: right_schema,
                     index: None
                 },
-                &[(l, r)],
-                columns,
+                || std::iter::once((l, r)),
+                ndvs,
                 &arena
             ),
             19
@@ -1255,20 +1719,20 @@ mod tests {
         keys.push((extra_keys[0], extra_keys[1]));
         let mut cache = StatisticsMetaCache::default();
         for (table, id, ndv) in [("l", 0, 100), ("r", 0, 100), ("l", 1, 80), ("r", 1, 70)] {
-            let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+            let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
             for value in 0..ndv {
                 builder.append(&DataValue::Int32(value));
             }
             cache.columns.insert((table.into(), id), builder.build());
         }
-        let columns = column_statistics(
+        let ndvs = column_ndv(
             &left,
             &right,
             &keys,
             Some(&StatisticMetaLoader::new(&cache)),
             &arena,
         )?;
-        assert_eq!(columns, Some((100, 100)));
+        assert_eq!(ndvs, Some((100, 100)));
         assert_eq!(
             estimate_join_rows(
                 JoinInputEstimate {
@@ -1286,14 +1750,14 @@ mod tests {
         );
         keys.reverse();
         assert_eq!(
-            column_statistics(
+            column_ndv(
                 &left,
                 &right,
                 &keys,
                 Some(&StatisticMetaLoader::new(&cache)),
                 &arena
             )?,
-            columns
+            ndvs
         );
         Ok(())
     }
@@ -1324,8 +1788,14 @@ mod tests {
             schema: &right_schema,
             index: Some((arena.index(ri), Some(100))),
         };
-        assert_eq!(join_rows(&l_input, &r_input, &[(l, r)], None, &arena), 2000);
-        assert_eq!(join_rows(&l_input, &r_input, &[], None, &arena), 200000);
+        assert_eq!(
+            join_rows(&l_input, &r_input, || std::iter::once((l, r)), None, &arena),
+            2000
+        );
+        assert_eq!(
+            join_rows(&l_input, &r_input, std::iter::empty, None, &arena),
+            200000
+        );
         let mut unique_right = arena.index(ri).clone();
         unique_right.ty = IndexType::Unique;
         let r_input = JoinInputStatistics {
@@ -1333,7 +1803,10 @@ mod tests {
             schema: &right_schema,
             index: Some((&unique_right, None)),
         };
-        assert_eq!(join_rows(&l_input, &r_input, &[(l, r)], None, &arena), 1000);
+        assert_eq!(
+            join_rows(&l_input, &r_input, || std::iter::once((l, r)), None, &arena),
+            1000
+        );
         let mut unique_left = arena.index(li).clone();
         unique_left.ty = IndexType::PrimaryKey { is_multiple: false };
         let l_input = JoinInputStatistics {
@@ -1341,7 +1814,10 @@ mod tests {
             schema: &left_schema,
             index: Some((&unique_left, None)),
         };
-        assert_eq!(join_rows(&l_input, &r_input, &[(l, r)], None, &arena), 200);
+        assert_eq!(
+            join_rows(&l_input, &r_input, || std::iter::once((l, r)), None, &arena),
+            200
+        );
         unique_right.column_ids.push(1);
         let r_input = JoinInputStatistics {
             rows: 200,
@@ -1354,7 +1830,7 @@ mod tests {
             index: Some((arena.index(li), Some(100))),
         };
         assert_eq!(
-            join_rows(&l_input, &r_input, &[(l, r)], None, &arena),
+            join_rows(&l_input, &r_input, || std::iter::once((l, r)), None, &arena),
             200000
         );
         let r_input = JoinInputStatistics {
@@ -1363,7 +1839,13 @@ mod tests {
             index: Some((arena.index(ri), Some(100))),
         };
         assert_eq!(
-            join_rows(&l_input, &r_input, &[(expr_key, r)], None, &arena),
+            join_rows(
+                &l_input,
+                &r_input,
+                || std::iter::once((expr_key, r)),
+                None,
+                &arena
+            ),
             200000
         );
         Ok(())
@@ -1500,11 +1982,17 @@ mod tests {
             index: Some((&r_index, Some(100))),
         };
         assert_eq!(
-            join_rows(&l_input, &r_input, &[(l, r)], None, &arena),
+            join_rows(&l_input, &r_input, || std::iter::once((l, r)), None, &arena),
             200000
         );
         assert_eq!(
-            join_rows(&l_input, &r_input, &[(l, r), (l2, r2)], None, &arena),
+            join_rows(
+                &l_input,
+                &r_input,
+                || [(l, r), (l2, r2)].into_iter(),
+                None,
+                &arena
+            ),
             2000
         );
         Ok(())
@@ -1874,6 +2362,76 @@ mod tests {
     }
 
     #[test]
+    fn input_mask_search_uses_lowest_bit_and_checks_full_mask() {
+        let masks = [9u64, 6, 16];
+        let find = |mask: u64| {
+            masks.binary_search_by_key(&(mask.trailing_zeros(), mask), |mask| {
+                (mask.trailing_zeros(), *mask)
+            })
+        };
+        assert_eq!(find(9), Ok(0));
+        assert_eq!(find(6), Ok(1));
+        assert_eq!(find(16), Ok(2));
+        assert!(find(1).is_err());
+        assert!(find(2).is_err());
+        assert!(find(64).is_err());
+    }
+
+    #[test]
+    fn edge_order_ties_keep_original_input_order() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let (a, ak) = input("a", 1, &mut arena);
+        let (b, bk) = input("b", 1, &mut arena);
+        let (c, ck) = input("c", 1, &mut arena);
+        let (d, dk) = input("d", 1, &mut arena);
+        let (e, ek) = input("e", 10, &mut arena);
+        let bc = JoinOperator::build(
+            b,
+            c,
+            JoinCondition::On {
+                on: vec![(bk, ck)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        let abc = JoinOperator::build(a, bc, JoinCondition::None, JoinType::Cross, false);
+        let abcd = JoinOperator::build(
+            abc,
+            d,
+            JoinCondition::On {
+                on: vec![(ak, dk)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        let mut plan = JoinOperator::build(
+            abcd,
+            e,
+            JoinCondition::On {
+                on: vec![(ak, ek), (bk, ek)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        let schema = plan.output_schema(&mut arena).clone();
+        assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        // AD (mask 9) precedes BC (mask 6) in inputs, despite their reverse tree order.
+        let join = plan.childrens.only();
+        let (left, right) = join.childrens.twins();
+        assert_eq!(
+            left.referenced_table(),
+            vec!["a".into(), "d".into(), "e".into()]
+        );
+        assert_eq!(right.referenced_table(), vec!["b".into(), "c".into()]);
+        Ok(())
+    }
+
+    #[test]
     fn nonadjacent_pair_restores_output_order_and_keeps_all_keys() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
@@ -2052,6 +2610,73 @@ mod tests {
         let (_, bc) = left.childrens.twins();
         assert_eq!(bc.referenced_table(), vec!["b".into(), "c".into()]);
         assert_eq!(bc.estimated_rows(), Some(200));
+        Ok(())
+    }
+
+    #[test]
+    fn unestimated_region_defers_cartesian_products_by_input_order() -> Result<(), DatabaseError> {
+        // FROM a, c, d, b WHERE a = b AND c = b: FROM order crosses a, c and d
+        // before any join key applies. Without estimates the region is rebuilt
+        // by connectivity and input position, and only d stays a cross join.
+        for known_b in [false, true] {
+            let table_arena = TableArenaCell::default();
+            let mut arena = PlanArena::new(&table_arena);
+            let unknown = |name: &str, arena: &mut PlanArena| {
+                let (mut plan, key) = input(name, 10, arena);
+                if !(known_b && name == "b") {
+                    plan.physical_option.as_mut().unwrap().row_count = RowCountOption::Unknown;
+                }
+                (plan, key)
+            };
+            let (a, a_key) = unknown("a", &mut arena);
+            let (c, c_key) = unknown("c", &mut arena);
+            let (d, _) = unknown("d", &mut arena);
+            let (b, b_key) = unknown("b", &mut arena);
+            let ac = JoinOperator::build(a, c, JoinCondition::None, JoinType::Cross, false);
+            let acd = JoinOperator::build(ac, d, JoinCondition::None, JoinType::Cross, false);
+            let c_column = c_key.output_column_ref(&mut arena);
+            let c_key = arena.alloc_expression(ScalarExpression::column_expr(c_column, 1));
+            let mut plan = JoinOperator::build(
+                acd,
+                b,
+                JoinCondition::On {
+                    on: vec![(a_key, b_key), (c_key, b_key)],
+                    filter: None,
+                },
+                JoinType::Inner,
+                false,
+            );
+            let schema = plan.output_schema(&mut arena).clone();
+            assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
+            assert_eq!(plan.output_schema(&mut arena), &schema);
+
+            let cross = plan.childrens.only();
+            assert!(matches!(
+                &cross.operator,
+                Operator::Join(join) if join.join_type == JoinType::Cross
+            ));
+            let (abc, d) = cross.childrens.twins();
+            assert_eq!(d.referenced_table(), vec!["d".into()]);
+            let (ab, c) = abc.childrens.twins();
+            assert_eq!(c.referenced_table(), vec!["c".into()]);
+            let (a, b) = ab.childrens.twins();
+            assert_eq!(a.referenced_table(), vec!["a".into()]);
+            assert_eq!(b.referenced_table(), vec!["b".into()]);
+            for join in [cross, abc, ab] {
+                assert_eq!(join.row_count_option(), None);
+            }
+            for join in [abc, ab] {
+                let Operator::Join(JoinOperator {
+                    join_type: JoinType::Inner,
+                    on: JoinCondition::On { on, .. },
+                    ..
+                }) = &join.operator
+                else {
+                    unreachable!()
+                };
+                assert_eq!(on.len(), 1);
+            }
+        }
         Ok(())
     }
 

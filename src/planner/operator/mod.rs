@@ -1248,6 +1248,8 @@ mod tests {
                 table_name: "users".into(),
                 index_metas: vec![IndexMetaRef::new(1)],
                 histogram_buckets: Some(8),
+                hll_precision: None,
+                statistics_relative_error: None,
             }),
         ];
         for operator in no_reference_operators {
@@ -1491,6 +1493,8 @@ mod tests {
                     table_name: "users".into(),
                     index_metas: vec![index],
                     histogram_buckets: Some(128),
+                    hll_precision: None,
+                    statistics_relative_error: None,
                 }),
                 "Analyze users -> [idx_users_id]",
             ),

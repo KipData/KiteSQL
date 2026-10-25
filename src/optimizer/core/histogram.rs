@@ -32,7 +32,12 @@ use std::mem;
 use std::sync::OnceLock;
 
 const ANALYZE_STATISTICS_CONFIDENCE: f64 = 0.95;
-pub(crate) const ANALYZE_STATISTICS_RELATIVE_ERROR: f64 = 0.001;
+// Relative error of the KLL quantile and Count-Min sketches when
+// `DataBaseBuilder::statistics_relative_error` is unset.
+pub(crate) const DEFAULT_STATISTICS_RELATIVE_ERROR: f64 = 0.001;
+// HyperLogLog precision used for NDV when `DataBaseBuilder::hll_precision` is
+// unset: 2^14 registers (16 KiB per sketch, ~0.81% standard error).
+pub(crate) const DEFAULT_HLL_PRECISION: u8 = 14;
 
 pub struct HistogramMetaBuilder {
     null_count: usize,
@@ -103,11 +108,11 @@ pub struct Bucket {
 }
 
 impl HistogramMetaBuilder {
-    pub fn new(relative_error: f64) -> Result<Self, DatabaseError> {
+    pub fn new(hll_precision: u8) -> Result<Self, DatabaseError> {
         Ok(Self {
             null_count: 0,
             values_len: 0,
-            hll: HyperLogLog::with_relative_error(relative_error)?,
+            hll: HyperLogLog::with_precision(hll_precision)?,
         })
     }
 
@@ -138,10 +143,17 @@ impl HistogramMetaBuilder {
 }
 
 impl HistogramBuilder {
-    pub fn new(index_meta: &IndexMeta, relative_error: f64) -> Result<Self, DatabaseError> {
+    pub fn new(
+        index_meta: &IndexMeta,
+        relative_error: f64,
+        hll_precision: u8,
+    ) -> Result<Self, DatabaseError> {
         Ok(Self {
             index_id: index_meta.id,
-            meta: HistogramMetaBuilder::new(relative_error)?,
+            meta: HistogramMetaBuilder::new(hll_precision)?,
+            // TODO: derive the KLL rank error from the histogram bucket count
+            // (e.g. 1 / (2 * buckets)) instead of sharing `relative_error` with the
+            // Count-Min sketch; 100 buckets only need ~0.5% rank error, not 0.1%.
             quantile: KllSketchBuilder::with_relative_error(relative_error)?,
             sketch: CountMinSketch::with_relative_error(
                 ANALYZE_STATISTICS_CONFIDENCE,
@@ -162,6 +174,11 @@ impl HistogramBuilder {
         Ok(())
     }
 
+    // TODO: shrink the Count-Min sketch to the observed row count before returning it.
+    // Its width is fixed by `relative_error` (2048 x 5 counters, ~80 KiB at 0.001)
+    // and persisted per index even for tiny tables; since the width is a power of
+    // two, rows can be folded in half (summing both halves) down to about
+    // `next_power_of_two(values_len)` without losing accuracy on large tables.
     pub fn build(
         self,
         number_of_buckets: usize,
@@ -727,7 +744,8 @@ mod tests {
     use crate::expression::range_detacher::Range;
     use crate::optimizer::core::cm_sketch::CountMinSketch;
     use crate::optimizer::core::histogram::{
-        Bucket, HistogramBuilder, HistogramMetaBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
+        Bucket, HistogramBuilder, HistogramMetaBuilder, DEFAULT_HLL_PRECISION,
+        DEFAULT_STATISTICS_RELATIVE_ERROR,
     };
     use crate::optimizer::core::top_n::ColumnTopN;
     use crate::types::index::{IndexMeta, IndexType};
@@ -737,12 +755,12 @@ mod tests {
 
     #[test]
     fn column_meta_counts_values_without_histogram_buckets() -> Result<(), DatabaseError> {
-        let empty = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?.build();
+        let empty = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?.build();
         assert_eq!(empty.values_len(), 0);
         assert_eq!(empty.null_count(), 0);
         assert_eq!(empty.distinct_values_len(), 0);
         assert_eq!(empty.buckets_len(), 0);
-        let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
         for value in [
             DataValue::Null,
             DataValue::Int32(1),
@@ -756,7 +774,7 @@ mod tests {
         assert_eq!(meta.null_count(), 1);
         assert_eq!(meta.distinct_values_len(), 2);
         assert_eq!(meta.buckets_len(), 0);
-        let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
         builder.append(&DataValue::Null);
         let meta = builder.build();
         assert_eq!(meta.values_len(), 0);
@@ -779,7 +797,11 @@ mod tests {
 
     #[test]
     fn test_sort_tuples_on_histogram() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         builder.append(DataValue::Int32(0))?;
         builder.append(DataValue::Int32(1))?;
@@ -845,7 +867,11 @@ mod tests {
 
     #[test]
     fn test_rev_sort_tuples_on_histogram() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         builder.append(DataValue::Int32(14))?;
         builder.append(DataValue::Int32(13))?;
@@ -909,7 +935,11 @@ mod tests {
 
     #[test]
     fn test_non_average_on_histogram() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         builder.append(DataValue::Int32(14))?;
         builder.append(DataValue::Int32(13))?;
@@ -968,7 +998,11 @@ mod tests {
 
     #[test]
     fn parameterized_tuple_ranges_accumulate_prefix_selectivity() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
         for value in 0..100 {
             builder.append(DataValue::Tuple(vec![DataValue::Int32(value); 4]))?;
         }
@@ -1233,7 +1267,11 @@ mod tests {
 
     #[test]
     fn parameterized_range_count_uses_shape_and_ndv() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
         for value in 0..1_000 {
             builder.append(DataValue::Int32(value % 100))?;
         }
@@ -1276,7 +1314,11 @@ mod tests {
 
     #[test]
     fn test_collect_count() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         builder.append(DataValue::Int32(14))?;
         builder.append(DataValue::Int32(13))?;
@@ -1430,7 +1472,11 @@ mod tests {
 
     #[test]
     fn test_builder_uses_hll_for_distinct_values() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for _ in 0..50 {
             builder.append(DataValue::Int32(1))?;
@@ -1449,7 +1495,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_uses_cm_sketch_when_error_is_small() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for _ in 0..70 {
             builder.append(DataValue::Int32(1))?;
@@ -1471,7 +1521,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_uses_top_n_when_value_is_cached() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for _ in 0..70 {
             builder.append(DataValue::Int32(1))?;
@@ -1493,7 +1547,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_falls_back_to_average_when_cm_error_is_large() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for value in 0..10_000 {
             builder.append(DataValue::Int32(value))?;
@@ -1517,7 +1575,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_uses_cm_sketch_for_clear_heavy_hitter() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for _ in 0..1_000 {
             builder.append(DataValue::Int32(7))?;
@@ -1544,7 +1606,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_falls_back_when_top_n_error_is_large() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for value in 0..10_000 {
             builder.append(DataValue::Int32(value))?;
@@ -1574,7 +1640,11 @@ mod tests {
 
     #[test]
     fn test_collect_count_ignores_tuple_prefix_endpoint_count() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for value in 0..15 {
             builder.append(DataValue::Tuple(vec![
@@ -1610,7 +1680,7 @@ mod tests {
         };
         let mut sketch = CountMinSketch::with_relative_error(
             super::ANALYZE_STATISTICS_CONFIDENCE,
-            ANALYZE_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
         )?;
 
         let real_key = DataValue::Tuple(vec![DataValue::Int32(8), DataValue::Int32(8)]);

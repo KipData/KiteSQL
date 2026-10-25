@@ -80,6 +80,7 @@ pub enum DatabaseError {
     DuplicateColumn(String),
     DuplicateSourceHash(String),
     DuplicateIndex(String),
+    DuplicateTableName(String),
     DuplicatePrimaryKey,
     DuplicateUniqueValue,
     FunctionNotFound {
@@ -96,6 +97,7 @@ pub enum DatabaseError {
         span: Option<SqlErrorSpan>,
     },
     InvalidIndex,
+    InvalidPlan(String),
     InvalidTable {
         name: String,
         span: Option<SqlErrorSpan>,
@@ -178,6 +180,9 @@ impl fmt::Display for DatabaseError {
                 write!(f, "table or view: `{value}` hash already exists")
             }
             Self::DuplicateIndex(value) => write!(f, "index: `{value}` already exists"),
+            Self::DuplicateTableName(value) => {
+                write!(f, "table name: `{value}` specified more than once")
+            }
             Self::DuplicatePrimaryKey => f.write_str("duplicate primary key"),
             Self::DuplicateUniqueValue => {
                 f.write_str("the column has been declared unique and the value already exists")
@@ -200,6 +205,7 @@ impl fmt::Display for DatabaseError {
                 write!(f, "invalid column: `{name}`{}", format_sql_error_loc(span))
             }
             Self::InvalidIndex => f.write_str("invalid index"),
+            Self::InvalidPlan(value) => write!(f, "invalid plan: {value}"),
             Self::InvalidTable { name, span } => {
                 write!(f, "invalid table: `{name}`{}", format_sql_error_loc(span))
             }
@@ -670,6 +676,14 @@ mod tests {
             (
                 DatabaseError::DuplicateIndex("idx".into()),
                 "index: `idx` already exists",
+            ),
+            (
+                DatabaseError::DuplicateTableName("t".into()),
+                "table name: `t` specified more than once",
+            ),
+            (
+                DatabaseError::InvalidPlan("join key".into()),
+                "invalid plan: join key",
             ),
             (
                 DatabaseError::Incomparable(LogicalType::Integer, LogicalType::Boolean),

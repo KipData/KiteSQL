@@ -594,6 +594,8 @@ pub(crate) mod tests {
                 table_name: "t1".into(),
                 index_metas: vec![IndexMetaRef::new(0)],
                 histogram_buckets: Some(1),
+                hll_precision: None,
+                statistics_relative_error: None,
             }),
             Operator::AddColumn(AddColumnOperator {
                 table_name: "t1".into(),
