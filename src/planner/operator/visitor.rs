@@ -394,6 +394,7 @@ pub fn walk_operator<'a, V: OperatorVisitor<'a>>(
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod tests {
     use super::*;
@@ -677,3 +678,4 @@ pub(crate) mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

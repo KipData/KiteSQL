@@ -76,6 +76,17 @@ select c1, sum(c0) from v1 group by c1
 1 1
 2 2
 
+# Writes must resolve a base table, not silently report success against a view.
+statement error table not found
+update v_alias set aa = 9;
+
+query I
+select aa from v_alias order by aa;
+----
+0
+1
+2
+
 statement ok
 drop view v_alias
 

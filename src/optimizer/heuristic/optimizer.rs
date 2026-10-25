@@ -617,6 +617,7 @@ impl ImplementationRuleIndex {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::{Binder, BinderContext};
@@ -755,6 +756,7 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP
 
 #[derive(Clone, Default)]
 pub struct HepOptimizerPipeline {

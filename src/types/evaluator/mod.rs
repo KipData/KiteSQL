@@ -14,6 +14,7 @@
 
 pub mod binary;
 pub mod boolean;
+pub mod bytes;
 pub mod cast;
 #[cfg(feature = "time")]
 pub mod date;
@@ -47,6 +48,7 @@ pub use self::unary::unary_create;
 use crate::errors::DatabaseError;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum BinaryEvaluatorParams {
@@ -67,7 +69,7 @@ impl BinaryEvaluatorRef {
 
     pub fn binary_eval(
         &self,
-        left: &DataValue,
+        left: Cow<'_, DataValue>,
         right: &DataValue,
     ) -> Result<DataValue, DatabaseError> {
         binary::eval_binary(self.pos, &self.params, left, right)
@@ -117,6 +119,9 @@ pub enum CastEvaluatorParams {
     },
     Tuple {
         evaluators: Vec<CastEvaluatorRef>,
+    },
+    Binary {
+        len: Option<u32>,
     },
 }
 

@@ -1,5 +1,7 @@
+// GRCOV_EXCL_START
 #[cfg(test)]
 use crate::planner::PlanArena;
+// GRCOV_EXCL_STOP
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -544,6 +546,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,6 +596,143 @@ mod tests {
     fn compares_every_scalar_expression_variant() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
+        let id = arena.alloc_scalar_query_ref(false);
+        let other = arena.alloc_scalar_query_ref(false);
+        assert_case(
+            &mut arena,
+            ScalarExpression::InitValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::InitValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::InitValue {
+                id: other,
+                ty: LogicalType::Integer,
+            },
+        );
+        assert_case(
+            &mut arena,
+            ScalarExpression::InitValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::InitValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::InitValue {
+                id,
+                ty: LogicalType::Bigint,
+            },
+        );
+        assert_case(
+            &mut arena,
+            ScalarExpression::OuterValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterValue {
+                id: other,
+                ty: LogicalType::Integer,
+            },
+        );
+        assert_case(
+            &mut arena,
+            ScalarExpression::OuterValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterValue {
+                id,
+                ty: LogicalType::Bigint,
+            },
+        );
+        assert_case(
+            &mut arena,
+            ScalarExpression::OuterParam {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterParam {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterParam {
+                id: other,
+                ty: LogicalType::Integer,
+            },
+        );
+        assert_case(
+            &mut arena,
+            ScalarExpression::OuterParam {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterParam {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterParam {
+                id,
+                ty: LogicalType::Bigint,
+            },
+        );
+        assert_case(
+            &mut arena,
+            ScalarExpression::InitValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::InitValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+        );
+        assert_case(
+            &mut arena,
+            ScalarExpression::InitValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::InitValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterParam {
+                id,
+                ty: LogicalType::Integer,
+            },
+        );
+        assert_case(
+            &mut arena,
+            ScalarExpression::OuterValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterValue {
+                id,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterParam {
+                id,
+                ty: LogicalType::Integer,
+            },
+        );
 
         let lhs_column = arena.alloc_column(ColumnCatalog::new(
             "c1".to_string(),
@@ -1042,3 +1182,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

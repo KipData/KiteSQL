@@ -80,6 +80,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a>
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -254,3 +255,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

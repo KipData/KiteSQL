@@ -176,6 +176,7 @@ impl ReferenceTables {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
@@ -270,3 +271,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

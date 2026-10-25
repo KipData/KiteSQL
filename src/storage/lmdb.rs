@@ -365,6 +365,7 @@ impl Transaction for LmdbTransaction<'_> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{LmdbConfig, LmdbStorage};
@@ -481,3 +482,4 @@ mod tests {
         kite_sql.ddl("create table t1 (a int primary key)").unwrap();
     }
 }
+// GRCOV_EXCL_STOP

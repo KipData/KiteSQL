@@ -1,5 +1,7 @@
+// GRCOV_EXCL_START
 #[cfg(test)]
 use crate::planner::PlanArena;
+// GRCOV_EXCL_STOP
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -924,6 +926,7 @@ where
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test_utils {
     use super::*;
@@ -1063,3 +1066,4 @@ mod test {
         assert_eq!(arena.nodes.items.as_ptr(), slot);
     }
 }
+// GRCOV_EXCL_STOP

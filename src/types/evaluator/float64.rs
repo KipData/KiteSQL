@@ -14,9 +14,9 @@
 
 use crate::errors::DatabaseError;
 #[cfg(feature = "decimal")]
-use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
+use crate::types::evaluator::cast::{cast_fail, to_char, to_varbinary, to_varchar};
 #[cfg(not(feature = "decimal"))]
-use crate::types::evaluator::cast::{to_char, to_varchar};
+use crate::types::evaluator::cast::{to_char, to_varbinary, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
 #[cfg(feature = "decimal")]
@@ -65,7 +65,7 @@ crate::define_cast_evaluator!(float64_to_float_cast_eval, DataValue::Float64(val
     Ok(DataValue::Float32(ordered_float::OrderedFloat(value.0 as f32)))
 });
 crate::define_cast_evaluator!(float64_to_double_cast_eval, DataValue::Float64(value) => {
-    Ok(DataValue::Float64(*value))
+    Ok(DataValue::Float64(value))
 });
 crate::define_cast_evaluator!(float64_to_tinyint_cast_eval, DataValue::Float64(value) => {
     Ok(DataValue::Int8(crate::float_to_int_cast!(value.into_inner(), i8, f64)?))
@@ -104,6 +104,10 @@ crate::define_cast_evaluator!(
         unit: CharLengthUnits
     },
     DataValue::Float64(value) => |this| to_varchar(value.to_string(), this.len, this.unit)
+);
+crate::define_cast_evaluator!(
+    float64_to_varbinary_cast_eval { len: Option<u32> },
+    DataValue::Float64(value) => |this| to_varbinary(value.to_string().into_bytes(), this.len)
 );
 #[cfg(feature = "decimal")]
 crate::define_cast_evaluator!(
@@ -289,47 +293,47 @@ mod test {
             DataValue::Null
         );
         assert_eq!(
-            float64_to_float_cast_eval(&value).unwrap(),
+            float64_to_float_cast_eval(value.clone()).unwrap(),
             DataValue::Float32(ordered_float::OrderedFloat(1.5))
         );
         assert_eq!(
-            float64_to_double_cast_eval(&value).unwrap(),
+            float64_to_double_cast_eval(value.clone()).unwrap(),
             DataValue::Float64(ordered_float::OrderedFloat(1.5))
         );
         assert_eq!(
-            float64_to_tinyint_cast_eval(&value).unwrap(),
+            float64_to_tinyint_cast_eval(value.clone()).unwrap(),
             DataValue::Int8(1)
         );
         assert_eq!(
-            float64_to_smallint_cast_eval(&value).unwrap(),
+            float64_to_smallint_cast_eval(value.clone()).unwrap(),
             DataValue::Int16(1)
         );
         assert_eq!(
-            float64_to_integer_cast_eval(&value).unwrap(),
+            float64_to_integer_cast_eval(value.clone()).unwrap(),
             DataValue::Int32(1)
         );
         assert_eq!(
-            float64_to_bigint_cast_eval(&value).unwrap(),
+            float64_to_bigint_cast_eval(value.clone()).unwrap(),
             DataValue::Int64(1)
         );
         assert_eq!(
-            float64_to_utinyint_cast_eval(&value).unwrap(),
+            float64_to_utinyint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt8(1)
         );
         assert_eq!(
-            float64_to_usmallint_cast_eval(&value).unwrap(),
+            float64_to_usmallint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt16(1)
         );
         assert_eq!(
-            float64_to_uinteger_cast_eval(&value).unwrap(),
+            float64_to_uinteger_cast_eval(value.clone()).unwrap(),
             DataValue::UInt32(1)
         );
         assert_eq!(
-            float64_to_ubigint_cast_eval(&value).unwrap(),
+            float64_to_ubigint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt64(1)
         );
         assert_eq!(
-            float64_to_char_cast_eval(3, CharLengthUnits::Characters, &value).unwrap(),
+            float64_to_char_cast_eval(3, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
                 value: "1.5".to_string(),
                 ty: Utf8Type::Fixed(3),
@@ -337,7 +341,8 @@ mod test {
             }
         );
         assert_eq!(
-            float64_to_varchar_cast_eval(Some(3), CharLengthUnits::Characters, &value).unwrap(),
+            float64_to_varchar_cast_eval(Some(3), CharLengthUnits::Characters, value.clone())
+                .unwrap(),
             DataValue::Utf8 {
                 value: "1.5".to_string(),
                 ty: Utf8Type::Variable(Some(3)),
@@ -346,7 +351,7 @@ mod test {
         );
         #[cfg(feature = "decimal")]
         assert_eq!(
-            float64_to_decimal_cast_eval(None, Some(1), &value).unwrap(),
+            float64_to_decimal_cast_eval(None, Some(1), value.clone()).unwrap(),
             DataValue::Decimal(Decimal::new(15, 1))
         );
         #[cfg(feature = "decimal")]
@@ -354,7 +359,7 @@ mod test {
             float64_to_decimal_cast_eval(
                 Some(4),
                 Some(2),
-                &DataValue::Float64(ordered_float::OrderedFloat(f64::NAN)),
+                DataValue::Float64(ordered_float::OrderedFloat(f64::NAN)),
             ),
             Err(DatabaseError::CastFail { .. })
         ));

@@ -355,6 +355,7 @@ impl<'a> NestedLoopJoin<'a> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
@@ -1256,3 +1257,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

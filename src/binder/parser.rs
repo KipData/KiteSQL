@@ -20,7 +20,7 @@ use super::{is_valid_identifier, Binder, CteBinding, QueryBindStep, SetOperatorK
 #[cfg(feature = "copy")]
 use crate::binder::copy::{ExtSource, FileFormat};
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-use crate::db::{BindSource, DBTransaction, Database, DatabaseIter, TransactionIter};
+use crate::db::{BindSource, DBTransaction, Database, DatabaseIter, State, TransactionIter};
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -28,7 +28,7 @@ use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::window::WindowFunctionKind;
 use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::iter_ext::Itertools;
-use crate::parser::parse_sql;
+use crate::parser::parse_sql_with_recursion_limit;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
@@ -42,14 +42,15 @@ use crate::storage::{Storage, Transaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
 pub(super) use sqlparser::ast::{
-    AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, BinaryOperator,
-    ColumnDef, ColumnOption, CreateView, DataType, DescribeAlias, Distinct, DuplicateTreatment,
-    Expr, FromTable, Function, FunctionArg, FunctionArgExpr, FunctionArguments, GroupByExpr, Ident,
-    IndexColumn, Join, JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart,
-    ObjectType, OrderByExpr, OrderByKind, Query, Select, SelectInto, SelectItem,
-    SelectItemQualifiedWildcardKind, SetExpr, SetOperator, SetQuantifier, Spanned, TableAlias,
-    TableConstraint, TableFactor, TableObject, TableWithJoins, TypedString, UnaryOperator, Value,
-    ValueWithSpan, WindowType,
+    AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, BinaryLength,
+    BinaryOperator, ColumnDef, ColumnOption, CreateIndex, CreateView, DataType, DescribeAlias,
+    Distinct, DuplicateTreatment, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
+    FunctionArguments, GroupByExpr, Ident, IndexColumn, IndexOption, IndexType, Join,
+    JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart, ObjectType, OrderByExpr,
+    OrderByKind, Query, Select, SelectInto, SelectItem, SelectItemQualifiedWildcardKind, SetExpr,
+    SetOperator, SetQuantifier, Spanned, SqliteOnConflict, TableAlias, TableConstraint,
+    TableFactor, TableObject, TableWithJoins, TypedString, UnaryOperator, Value, ValueWithSpan,
+    WindowType,
 };
 #[cfg(feature = "copy")]
 pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
@@ -137,19 +138,23 @@ pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
     }
 }
 
-/// Parses a single SQL statement into a reusable [`Statement`].
-pub(crate) fn parse_statement<T: AsRef<str>>(sql: T) -> Result<Statement, DatabaseError> {
-    let mut stmts = prepare_all(sql)?;
-    stmts.pop().ok_or(DatabaseError::EmptyStatement)
-}
-
-/// Parses one or more SQL statements into a vector of [`Statement`] values.
-pub fn prepare_all<T: AsRef<str>>(sql: T) -> Result<Vec<Statement>, DatabaseError> {
-    let stmts = parse_sql(sql)?;
-    if stmts.is_empty() {
-        return Err(DatabaseError::EmptyStatement);
+impl<S: Storage> State<S> {
+    pub(crate) fn prepare_all<T: AsRef<str>>(
+        &self,
+        sql: T,
+    ) -> Result<Vec<Statement>, DatabaseError> {
+        let stmts = parse_sql_with_recursion_limit(sql, self.parser_recursion_limit())?;
+        if stmts.is_empty() {
+            return Err(DatabaseError::EmptyStatement);
+        }
+        Ok(stmts)
     }
-    Ok(stmts)
+
+    pub(crate) fn parse_statement(&self, sql: &str) -> Result<Statement, DatabaseError> {
+        self.prepare_all(sql)?
+            .pop()
+            .ok_or(DatabaseError::EmptyStatement)
+    }
 }
 
 fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool, DatabaseError> {
@@ -160,9 +165,17 @@ fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool
 }
 
 impl<S: Storage> Database<S> {
+    /// Parses SQL statements using this database's configured parser recursion limit.
+    pub fn prepare_all<T: AsRef<str>>(&self, sql: T) -> Result<Vec<Statement>, DatabaseError> {
+        self.state.prepare_all(sql)
+    }
+
     pub fn ddl<T: AsRef<str>>(&mut self, sql: T) -> Result<(), DatabaseError> {
         let sql = sql.as_ref();
-        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        let statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
 
         for statement in &statements {
             if !matches!(command_type(statement)?, CommandType::DDL) {
@@ -186,7 +199,10 @@ impl<S: Storage> Database<S> {
         ) -> Result<R, DatabaseError>,
     {
         let sql = sql.as_ref();
-        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        let statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
         self.run_mut_statements(sql, statements, consume)
     }
 
@@ -228,7 +244,10 @@ impl<S: Storage> Database<S> {
     /// ```
     pub fn run<T: AsRef<str>>(&self, sql: T) -> Result<DatabaseIter<'_, S>, DatabaseError> {
         let sql = sql.as_ref();
-        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        let statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
         let has_catalog_mutation = statements
             .iter()
             .try_fold(false, |has_mutation, stmt| {
@@ -297,7 +316,10 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
         sql: T,
     ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
         let sql = sql.as_ref();
-        let mut statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        let mut statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
         for statement in &statements {
             if statement_mutates_catalog_or_statistics(statement)? {
                 return Err(DatabaseError::UnsupportedStmt(
@@ -381,8 +403,9 @@ where
                     object_type,
                     names,
                     if_exists,
+                    table,
                     ..
-                } => self.drop_object(*object_type, names.clone(), *if_exists)?,
+                } => self.drop_object(*object_type, names.clone(), *if_exists, table.clone())?,
                 Statement::Insert(insert) => self.insert(insert)?,
                 Statement::Update(update) => self.update(update)?,
                 Statement::Delete(delete) => self.delete(delete)?,
@@ -839,10 +862,26 @@ where
         Ok(())
     }
 
-    fn create_index(
-        self,
-        create: sqlparser::ast::CreateIndex,
-    ) -> Result<LogicalPlan, DatabaseError> {
+    fn create_index(self, create: CreateIndex) -> Result<LogicalPlan, DatabaseError> {
+        if create.concurrently
+            || !create.include.is_empty()
+            || create.nulls_distinct.is_some()
+            || !create.with.is_empty()
+            || create.predicate.is_some()
+            || !create.alter_options.is_empty()
+            || create
+                .using
+                .as_ref()
+                .is_some_and(|ty| !matches!(ty, IndexType::BTree))
+            || create
+                .index_options
+                .iter()
+                .any(|option| !matches!(option, IndexOption::Using(IndexType::BTree)))
+        {
+            return Err(DatabaseError::UnsupportedStmt(
+                "CREATE INDEX options".to_string(),
+            ));
+        }
         let table_name = sql_table_name(create.table_name)?;
         let index_name = create
             .name
@@ -854,6 +893,15 @@ where
         let mut columns = Vec::with_capacity(create.columns.len());
 
         for index_column in create.columns {
+            if index_column.operator_class.is_some()
+                || index_column.column.options.asc == Some(false)
+                || index_column.column.options.nulls_first.is_some()
+                || index_column.column.with_fill.is_some()
+            {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "CREATE INDEX column options".to_string(),
+                ));
+            }
             let expr = self
                 .binder
                 .bind_expr(&index_column.column.expr, self.arena)?;
@@ -908,10 +956,16 @@ where
         object_type: ObjectType,
         mut names: Vec<ObjectName>,
         if_exists: bool,
+        table: Option<ObjectName>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        if names.len() > 1 {
+        if names.len() != 1 {
             return Err(DatabaseError::UnsupportedStmt(
-                "only Drop a single `Table` or `View` is allowed".to_string(),
+                "only Drop a single `Table`, `View` or `Index` is allowed".to_string(),
+            ));
+        }
+        if table.is_some() && object_type != ObjectType::Index {
+            return Err(DatabaseError::UnsupportedStmt(
+                "DROP ON is only supported for INDEX".to_string(),
             ));
         }
 
@@ -923,12 +977,17 @@ where
                 .binder
                 .bind_drop_view(sql_table_name(names.remove(0))?, if_exists),
             ObjectType::Index => {
-                let (table_name, index_name) = sql_index_name(names.remove(0))?;
+                let name = names.remove(0);
+                let (table_name, index_name) = if let Some(table) = table {
+                    (sql_table_name(table)?, sql_object_name(name)?)
+                } else {
+                    sql_index_name(name)?
+                };
                 self.binder
                     .bind_drop_index(table_name, index_name, if_exists)
             }
             _ => Err(DatabaseError::UnsupportedStmt(
-                "only `Table` and `View` are allowed to be Dropped".to_string(),
+                "only `Table`, `View` and `Index` are allowed to be Dropped".to_string(),
             )),
         }
     }
@@ -965,9 +1024,13 @@ where
             table,
             columns,
             overwrite,
+            or,
+            replace_into,
             source,
             ..
         } = insert;
+        let is_overwrite =
+            *overwrite || *replace_into || matches!(or, Some(SqliteOnConflict::Replace));
         let table_name = match table {
             TableObject::TableName(table_name) => table_name.clone(),
             TableObject::TableFunction(_) => {
@@ -981,9 +1044,9 @@ where
             DatabaseError::UnsupportedStmt("insert without source is not supported".to_string())
         })?;
         if let SetExpr::Values(values) = source.body.as_ref() {
-            self.insert_values(table_name, columns, &values.rows, *overwrite, false)
+            self.insert_values(table_name, columns, &values.rows, is_overwrite, false)
         } else {
-            self.insert_query(table_name, columns, source, *overwrite)
+            self.insert_query(table_name, columns, source, is_overwrite)
         }
     }
 
@@ -1143,6 +1206,9 @@ where
         if let TableFactor::Table { name, .. } = &to.relation {
             let is_joined_update = !to.joins.is_empty();
             let table_name = sql_table_name(name.clone())?;
+            if self.binder.context.table(table_name.clone())?.is_none() {
+                return Err(DatabaseError::TableNotFound);
+            }
             self.binder.with_pk(table_name.clone());
 
             let mut plan = self.binder.bind_table_ref_sql(to, self.arena)?;
@@ -1643,6 +1709,24 @@ impl TryFrom<&Value> for DataValue {
                 }
             }
             Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone().into(),
+            Value::HexStringLiteral(hex) => {
+                if hex.len() % 2 != 0 {
+                    return Err(DatabaseError::InvalidValue(
+                        "hex literal must contain pairs of digits".to_string(),
+                    ));
+                }
+                let mut bytes = Vec::with_capacity(hex.len() / 2);
+                for pair in hex.as_bytes().chunks_exact(2) {
+                    let Some(high) = (pair[0] as char).to_digit(16) else {
+                        return Err(DatabaseError::InvalidValue("invalid hex digit".to_string()));
+                    };
+                    let Some(low) = (pair[1] as char).to_digit(16) else {
+                        return Err(DatabaseError::InvalidValue("invalid hex digit".to_string()));
+                    };
+                    bytes.push((high * 16 + low) as u8);
+                }
+                bytes.into()
+            }
             Value::Boolean(b) => (*b).into(),
             Value::Null => Self::Null,
             v => return Err(DatabaseError::UnsupportedStmt(format!("{v:?}"))),
@@ -1703,6 +1787,17 @@ impl TryFrom<DataType> for LogicalType {
                         .unwrap_or(CharLengthUnits::Characters),
                 ))
             }
+            DataType::Varbinary(length) => {
+                let len = match length {
+                    Some(BinaryLength::IntegerLength { length }) => Some(u32::try_from(length)?),
+                    None | Some(BinaryLength::Max) => None,
+                };
+                Ok(Self::Varbinary(len))
+            }
+            DataType::Blob(length) | DataType::Bytes(length) => {
+                Ok(Self::Varbinary(length.map(u32::try_from).transpose()?))
+            }
+            DataType::Bytea => Ok(Self::Varbinary(None)),
             DataType::String(_) | DataType::Text => {
                 Ok(Self::Varchar(None, CharLengthUnits::Characters))
             }
@@ -1893,10 +1988,9 @@ fn single_ident_from_object_name(name: &ObjectName) -> Result<Ident, DatabaseErr
 }
 
 fn sql_index_name(name: ObjectName) -> Result<(TableName, String), DatabaseError> {
-    let table_name = name.0.first().ok_or_else(|| {
-        attach_span_if_absent(DatabaseError::invalid_table(name.to_string()), &name)
-    })?;
-    let index_name = name.0.get(1).ok_or(DatabaseError::InvalidIndex)?;
+    let [table_name, index_name] = name.0.as_slice() else {
+        return Err(DatabaseError::InvalidIndex);
+    };
 
     Ok((
         lower_name_part(table_name)?.into(),
@@ -2577,6 +2671,14 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                     args.push(arena.alloc_expression(expr))
                 }
                 FunctionArgExpr::Wildcard => {
+                    if is_distinct {
+                        return Err(attach_span_if_absent(
+                            DatabaseError::UnsupportedStmt(
+                                "DISTINCT cannot be used with *".to_string(),
+                            ),
+                            func_span,
+                        ));
+                    }
                     args.push(arena.alloc_expression(Self::wildcard_expr()))
                 }
                 expr => {
@@ -3296,6 +3398,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -3303,6 +3406,7 @@ mod tests {
     use crate::binder::BinderContext;
     use crate::db::DataBaseBuilder;
     use crate::errors::SqlErrorSpan;
+    use crate::parser::parse_sql;
     use crate::storage::Storage;
     use sqlparser::tokenizer::Location;
 
@@ -3337,40 +3441,52 @@ mod tests {
 
     #[test]
     fn test_prepare_and_command_type_classification() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
         assert!(matches!(
-            prepare_all(""),
+            database.prepare_all(""),
             Err(DatabaseError::EmptyStatement)
         ));
         assert_eq!(
-            command_type(&parse_statement("select 1")?)?,
+            command_type(&database.prepare_all("select 1")?.pop().unwrap())?,
             CommandType::DQL
         );
         assert_eq!(
-            command_type(&parse_statement("create table t (id int primary key)")?)?,
+            command_type(
+                &database
+                    .prepare_all("create table t (id int primary key)")?
+                    .pop()
+                    .unwrap()
+            )?,
             CommandType::DDL
         );
         assert_eq!(
-            command_type(&parse_statement("analyze table t")?)?,
+            command_type(&database.prepare_all("analyze table t")?.pop().unwrap())?,
             CommandType::Analyze
         );
         assert_eq!(
-            command_type(&parse_statement("insert into t values (1)")?)?,
+            command_type(
+                &database
+                    .prepare_all("insert into t values (1)")?
+                    .pop()
+                    .unwrap()
+            )?,
             CommandType::DML
         );
         assert_eq!(
-            command_type(&parse_statement("update t set id = 1")?)?,
+            command_type(&database.prepare_all("update t set id = 1")?.pop().unwrap())?,
             CommandType::DML
         );
         assert_eq!(
-            command_type(&parse_statement("delete from t")?)?,
+            command_type(&database.prepare_all("delete from t")?.pop().unwrap())?,
             CommandType::DML
         );
         assert_eq!(
-            command_type(&parse_statement("truncate table t")?)?,
+            command_type(&database.prepare_all("truncate table t")?.pop().unwrap())?,
             CommandType::DML
         );
 
-        let err = command_type(&parse_statement("start transaction")?).unwrap_err();
+        let err =
+            command_type(&database.prepare_all("start transaction")?.pop().unwrap()).unwrap_err();
         assert_unsupported(err, "START TRANSACTION");
 
         Ok(())
@@ -3448,7 +3564,7 @@ mod tests {
             "only a single ALTER TABLE operation",
         );
 
-        let mut stmt = parse_statement("alter table t1 drop column c1")?;
+        let mut stmt = parse_sql("alter table t1 drop column c1")?.pop().unwrap();
         let Statement::AlterTable(alter) = &mut stmt else {
             unreachable!("expected alter table statement")
         };
@@ -3485,6 +3601,63 @@ mod tests {
             DatabaseError::InvalidColumn { .. }
         ));
 
+        Ok(())
+    }
+
+    #[test]
+    fn sql_type_binding_preserves_unsigned_widths_and_validates_precision(
+    ) -> Result<(), DatabaseError> {
+        use sqlparser::ast::{CharacterLength, ExactNumberInfo, TimezoneInfo};
+        for (sql, expected) in [
+            (DataType::TinyIntUnsigned(None), LogicalType::UTinyint),
+            (DataType::SmallIntUnsigned(None), LogicalType::USmallint),
+            (DataType::UnsignedInteger, LogicalType::UInteger),
+            (DataType::UInt64, LogicalType::UBigint),
+        ] {
+            assert_eq!(LogicalType::try_from(sql)?, expected);
+        }
+        for sql in [
+            DataType::Char(Some(CharacterLength::Max)),
+            DataType::Varchar(Some(CharacterLength::Max)),
+        ] {
+            assert!(matches!(
+                LogicalType::try_from(sql),
+                Err(DatabaseError::UnsupportedStmt(_))
+            ));
+        }
+        #[cfg(feature = "time")]
+        {
+            assert_eq!(
+                LogicalType::try_from(DataType::Time(Some(4), TimezoneInfo::None))?,
+                LogicalType::Time(Some(4))
+            );
+            assert_eq!(
+                LogicalType::try_from(DataType::Timestamp(Some(6), TimezoneInfo::WithTimeZone))?,
+                LogicalType::TimeStamp(Some(6), true)
+            );
+            for sql in [
+                DataType::Time(Some(5), TimezoneInfo::None),
+                DataType::Time(None, TimezoneInfo::WithTimeZone),
+                DataType::Timestamp(Some(2), TimezoneInfo::None),
+                DataType::Datetime(Some(3)),
+            ] {
+                assert!(matches!(
+                    LogicalType::try_from(sql),
+                    Err(DatabaseError::UnsupportedStmt(_))
+                ));
+            }
+        }
+        #[cfg(feature = "decimal")]
+        {
+            assert_eq!(
+                LogicalType::try_from(DataType::Numeric(ExactNumberInfo::Precision(12)))?,
+                LogicalType::Decimal(Some(12), None)
+            );
+            assert_eq!(
+                LogicalType::try_from(DataType::Dec(ExactNumberInfo::PrecisionAndScale(12, 3)))?,
+                LogicalType::Decimal(Some(12), Some(3))
+            );
+        }
         Ok(())
     }
 
@@ -3618,3 +3791,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

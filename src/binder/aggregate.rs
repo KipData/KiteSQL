@@ -273,8 +273,21 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
             return Ok(());
         }
 
-        HavingOrderByValidator::new(&self.context.group_by_exprs, &self.context.agg_calls)
-            .visit(expr, arena)
+        Self::validate_having_orderby_with_outputs(
+            expr,
+            &self.context.agg_calls,
+            &self.context.group_by_exprs,
+            arena,
+        )
+    }
+
+    pub(crate) fn validate_having_orderby_with_outputs(
+        expr: ExprRef,
+        agg_calls: &[ExprRef],
+        group_by_exprs: &[ExprRef],
+        arena: &PlanArena<'_>,
+    ) -> Result<(), DatabaseError> {
+        HavingOrderByValidator::new(group_by_exprs, agg_calls).visit(expr, arena)
     }
 }
 
@@ -405,6 +418,7 @@ impl ExprVisitorMut for AggregateOutputBinder<'_> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::AggregateOutputBinder;
@@ -576,3 +590,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

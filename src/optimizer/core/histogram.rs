@@ -213,28 +213,28 @@ impl BoundComparator {
 
     fn lt(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
         Ok(matches!(
-            self.lt.binary_eval(value, target)?,
+            self.lt.binary_eval(Cow::Borrowed(value), target)?,
             DataValue::Boolean(true)
         ))
     }
 
     fn lte(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
         Ok(matches!(
-            self.lte.binary_eval(value, target)?,
+            self.lte.binary_eval(Cow::Borrowed(value), target)?,
             DataValue::Boolean(true)
         ))
     }
 
     fn gt(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
         Ok(matches!(
-            self.gt.binary_eval(value, target)?,
+            self.gt.binary_eval(Cow::Borrowed(value), target)?,
             DataValue::Boolean(true)
         ))
     }
 
     fn gte(&self, value: &DataValue, target: &DataValue) -> Result<bool, DatabaseError> {
         Ok(matches!(
-            self.gte.binary_eval(value, target)?,
+            self.gte.binary_eval(Cow::Borrowed(value), target)?,
             DataValue::Boolean(true)
         ))
     }
@@ -687,6 +687,7 @@ impl HistogramMeta {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
@@ -1565,3 +1566,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

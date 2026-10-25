@@ -62,6 +62,7 @@ pub fn joins_nullable(join_type: &JoinType) -> (bool, bool) {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::RowBitmap;
@@ -117,3 +118,4 @@ mod tests {
         bitmap.insert(1);
     }
 }
+// GRCOV_EXCL_STOP

@@ -123,6 +123,7 @@ impl<K: Hash> HyperLogLog<K> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::HyperLogLog;
@@ -149,3 +150,4 @@ mod tests {
         assert!(error < 0.03, "estimate={estimate}, error={error}");
     }
 }
+// GRCOV_EXCL_STOP

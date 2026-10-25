@@ -106,6 +106,7 @@ impl KllSketchBuilder {
         })
     }
 
+    // GRCOV_EXCL_START
     #[cfg(test)]
     fn len(&self) -> usize {
         self.len
@@ -120,6 +121,7 @@ impl KllSketchBuilder {
     fn retained_len(&self) -> usize {
         self.levels.iter().map(Vec::len).sum()
     }
+    // GRCOV_EXCL_STOP
 
     fn update_bounds(&mut self, value: &DataValue) -> Result<(), DatabaseError> {
         if let Some(min_value) = &self.min_value {
@@ -344,6 +346,7 @@ fn compare_values(left: &DataValue, right: &DataValue) -> Ordering {
         .expect("KLL sketch values must be mutually comparable")
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::KllSketchBuilder;
@@ -449,3 +452,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

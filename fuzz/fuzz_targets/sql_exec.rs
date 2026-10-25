@@ -34,7 +34,7 @@
 #![no_main]
 
 use kite_sql::binder::{command_type, CommandType};
-use kite_sql::db::{prepare_all, DataBaseBuilder, Database, Statement};
+use kite_sql::db::{DataBaseBuilder, Database, Statement};
 use kite_sql::storage::lmdb::LmdbStorage;
 use kite_sql::types::value::DataValue;
 use libfuzzer_sys::fuzz_target;
@@ -135,7 +135,7 @@ fn strip_slt(script: &str) -> String {
 }
 
 fn run_one(db: &mut Database<LmdbStorage>, sql: &str) {
-    let Ok(statements) = prepare_all(sql) else {
+    let Ok(statements) = db.prepare_all(sql) else {
         return;
     };
     // `split(';')` leaves one statement per chunk except for `;` inside

@@ -74,10 +74,12 @@ impl TableCatalog {
         self.columns.get(id).map(|i| self.column_refs[*i])
     }
 
+    // GRCOV_EXCL_START
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn get_column_id_by_name(&self, name: &str) -> Option<&ColumnId> {
         self.column_idxs.get(name).map(|(id, _)| id)
     }
+    // GRCOV_EXCL_STOP
 
     pub(crate) fn get_column_by_name(&self, name: &str) -> Option<ColumnRef> {
         self.column_idxs
@@ -370,6 +372,7 @@ impl TableMeta {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -471,3 +474,4 @@ mod tests {
         }
     }
 }
+// GRCOV_EXCL_STOP

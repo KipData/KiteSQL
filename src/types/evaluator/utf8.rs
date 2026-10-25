@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::types::evaluator::cast::{to_char, to_varchar};
+use crate::types::evaluator::cast::{to_char, to_varbinary, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::value::Utf8Type;
 use crate::types::CharLengthUnits;
@@ -50,53 +50,58 @@ utf8_binary!(utf8_lt_binary_eval, |v1: &String, v2: &String| {
 });
 
 crate::define_cast_evaluator!(utf8_to_boolean_cast_eval, DataValue::Utf8 { value, .. } => {
-        Ok(DataValue::Boolean(bool::from_str(value)?))
+        Ok(DataValue::Boolean(bool::from_str(&value)?))
     }
 );
 crate::define_cast_evaluator!(utf8_to_tinyint_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::Int8(i8::from_str(value)?))
+    Ok(DataValue::Int8(i8::from_str(&value)?))
 });
 crate::define_cast_evaluator!(utf8_to_utinyint_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::UInt8(u8::from_str(value)?))
+    Ok(DataValue::UInt8(u8::from_str(&value)?))
 });
 crate::define_cast_evaluator!(utf8_to_smallint_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::Int16(i16::from_str(value)?))
+    Ok(DataValue::Int16(i16::from_str(&value)?))
 });
 crate::define_cast_evaluator!(utf8_to_usmallint_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::UInt16(u16::from_str(value)?))
+    Ok(DataValue::UInt16(u16::from_str(&value)?))
 });
 crate::define_cast_evaluator!(utf8_to_integer_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::Int32(i32::from_str(value)?))
+    Ok(DataValue::Int32(i32::from_str(&value)?))
 });
 crate::define_cast_evaluator!(utf8_to_uinteger_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::UInt32(u32::from_str(value)?))
+    Ok(DataValue::UInt32(u32::from_str(&value)?))
 });
 crate::define_cast_evaluator!(utf8_to_bigint_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::Int64(i64::from_str(value)?))
+    Ok(DataValue::Int64(i64::from_str(&value)?))
 });
 crate::define_cast_evaluator!(utf8_to_ubigint_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::UInt64(u64::from_str(value)?))
+    Ok(DataValue::UInt64(u64::from_str(&value)?))
 });
 crate::define_cast_evaluator!(utf8_to_float_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::Float32(OrderedFloat(f32::from_str(value)?)))
+    Ok(DataValue::Float32(OrderedFloat(f32::from_str(&value)?)))
 });
 crate::define_cast_evaluator!(utf8_to_double_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::Float64(OrderedFloat(f64::from_str(value)?)))
+    Ok(DataValue::Float64(OrderedFloat(f64::from_str(&value)?)))
 });
 crate::define_cast_evaluator!(
     utf8_to_char_cast_eval {
         len: u32,
         unit: CharLengthUnits
     },
-    DataValue::Utf8 { value, .. } => |this| to_char(value.clone(), this.len, this.unit)
+    DataValue::Utf8 { value, .. } => |this| to_char(value, this.len, this.unit)
 );
 crate::define_cast_evaluator!(
     utf8_to_varchar_cast_eval {
         len: Option<u32>,
         unit: CharLengthUnits
     },
-    DataValue::Utf8 { value, .. } => |this| to_varchar(value.clone(), this.len, this.unit)
+    DataValue::Utf8 { value, .. } => |this| to_varchar(value, this.len, this.unit)
 );
+crate::define_cast_evaluator!(
+    utf8_to_varbinary_cast_eval { len: Option<u32> },
+    DataValue::Utf8 { value, .. } => |this| to_varbinary(value.into_bytes(), this.len)
+);
+
 #[cfg(feature = "time")]
 mod chrono_cast {
     use super::DataValue;
@@ -106,14 +111,14 @@ mod chrono_cast {
 
     crate::define_cast_evaluator!(utf8_to_date_cast_eval, DataValue::Utf8 { value, .. } => {
         Ok(DataValue::Date32(
-            NaiveDate::parse_from_str(value, crate::types::value::DATE_FMT)?.num_days_from_ce(),
+            NaiveDate::parse_from_str(&value, crate::types::value::DATE_FMT)?.num_days_from_ce(),
         ))
     });
 
     crate::define_cast_evaluator!(utf8_to_datetime_cast_eval, DataValue::Utf8 { value, .. } => {
-        let value = NaiveDateTime::parse_from_str(value, crate::types::value::DATE_TIME_FMT)
+        let value = NaiveDateTime::parse_from_str(&value, crate::types::value::DATE_TIME_FMT)
             .or_else(|_| {
-                NaiveDate::parse_from_str(value, crate::types::value::DATE_FMT)
+                NaiveDate::parse_from_str(&value, crate::types::value::DATE_FMT)
                     .map(|date| date.and_hms_opt(0, 0, 0).unwrap())
             })?
             .and_utc()
@@ -135,11 +140,11 @@ mod chrono_cast {
             };
             let (value, nano) = match precision {
                 0 => (
-                    NaiveTime::parse_from_str(value, fmt)
+                    NaiveTime::parse_from_str(&value, fmt)
                         .map(|time| time.num_seconds_from_midnight())?,
                     0,
                 ),
-                _ => NaiveTime::parse_from_str(value, fmt)
+                _ => NaiveTime::parse_from_str(&value, fmt)
                     .map(|time| (time.num_seconds_from_midnight(), time.nanosecond()))?,
             };
 
@@ -161,15 +166,10 @@ mod chrono_cast {
                 (3 | 6 | 9, false) => crate::types::value::TIME_STAMP_FMT_WITHOUT_ZONE,
                 _ => crate::types::value::TIME_STAMP_FMT_WITH_ZONE,
             };
-            let complete_value = if this.zone {
-                if value.contains("+") {
-                    value.clone()
-                } else {
-                    format!("{value}+00:00")
-                }
-            } else {
-                value.clone()
-            };
+            let mut complete_value = value;
+            if this.zone && !complete_value.contains('+') {
+                complete_value.push_str("+00:00");
+            }
 
             if !this.zone {
                 let value = NaiveDateTime::parse_from_str(&complete_value, fmt)?.and_utc();
@@ -206,7 +206,7 @@ mod chrono_cast {
 pub use chrono_cast::*;
 #[cfg(feature = "decimal")]
 crate::define_cast_evaluator!(utf8_to_decimal_cast_eval, DataValue::Utf8 { value, .. } => {
-    Ok(DataValue::Decimal(Decimal::from_str(value)?))
+    Ok(DataValue::Decimal(Decimal::from_str(&value)?))
 });
 utf8_binary!(utf8_lt_eq_binary_eval, |v1: &String, v2: &String| {
     DataValue::Boolean(v1 <= v2)
@@ -217,16 +217,23 @@ utf8_binary!(utf8_eq_binary_eval, |v1: &String, v2: &String| {
 utf8_binary!(utf8_not_eq_binary_eval, |v1: &String, v2: &String| {
     DataValue::Boolean(v1 != v2)
 });
-utf8_binary!(
-    utf8_string_concat_binary_eval,
-    |v1: &String, v2: &String| {
-        DataValue::Utf8 {
-            value: v1.clone() + v2,
-            ty: Utf8Type::Variable(None),
-            unit: CharLengthUnits::Characters,
+pub fn utf8_string_concat_binary_eval(
+    left: DataValue,
+    right: &DataValue,
+) -> Result<DataValue, DatabaseError> {
+    Ok(match (left, right) {
+        (DataValue::Utf8 { mut value, .. }, DataValue::Utf8 { value: right, .. }) => {
+            value.push_str(right);
+            DataValue::Utf8 {
+                value,
+                ty: Utf8Type::Variable(None),
+                unit: CharLengthUnits::Characters,
+            }
         }
-    }
-);
+        (DataValue::Null, _) | (_, DataValue::Null) => DataValue::Null,
+        _ => unsafe { hint::unreachable_unchecked() },
+    })
+}
 pub fn utf8_like_binary_eval(
     escape_char: Option<char>,
     left: &DataValue,
@@ -348,7 +355,11 @@ fn next_char_at(input: &str, index: usize) -> Option<(char, usize)> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use super::*;
+    use crate::expression::BinaryOperator;
+    use crate::types::evaluator::binary_create;
+    use crate::types::LogicalType;
     use chrono::{Datelike, Timelike};
+    use std::borrow::Cow;
 
     fn utf8(value: &str) -> DataValue {
         DataValue::Utf8 {
@@ -364,6 +375,48 @@ mod test {
 
     #[test]
     fn test_utf8_binary_evaluators() {
+        let ty = LogicalType::Varchar(None, CharLengthUnits::Characters);
+        let concat = binary_create(Cow::Owned(ty.clone()), BinaryOperator::StringConcat).unwrap();
+        let mut text = String::with_capacity(32);
+        text.push_str("ab");
+        let buffer = text.as_ptr();
+        let result = concat
+            .binary_eval(Cow::Owned(DataValue::from(text)), &utf8("cd"))
+            .unwrap();
+        let result = concat.binary_eval(Cow::Owned(result), &utf8("中")).unwrap();
+        let DataValue::Utf8 { value, .. } = result else {
+            unreachable!()
+        };
+        assert_eq!(value, "abcd中");
+        assert_eq!(value.as_ptr(), buffer);
+
+        let left = utf8("ab");
+        assert_eq!(
+            concat
+                .binary_eval(Cow::Borrowed(&left), &utf8("cd"))
+                .unwrap(),
+            utf8("abcd")
+        );
+        assert_eq!(left.utf8(), Some("ab"));
+        assert_eq!(
+            concat
+                .binary_eval(Cow::Borrowed(&left), &DataValue::Null)
+                .unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            concat
+                .binary_eval(Cow::Owned(DataValue::Null), &left)
+                .unwrap(),
+            DataValue::Null
+        );
+        assert_eq!(
+            binary_create(Cow::Owned(ty), BinaryOperator::Eq)
+                .unwrap()
+                .binary_eval(Cow::Owned(left.clone()), &left)
+                .unwrap(),
+            DataValue::Boolean(true)
+        );
         assert_eq!(
             utf8_gt_binary_eval(&utf8("b"), &utf8("a")).unwrap(),
             DataValue::Boolean(true)
@@ -389,7 +442,7 @@ mod test {
             DataValue::Boolean(true)
         );
         assert_eq!(
-            utf8_string_concat_binary_eval(&utf8("ab"), &utf8("cd")).unwrap(),
+            utf8_string_concat_binary_eval(utf8("ab"), &utf8("cd")).unwrap(),
             utf8("abcd")
         );
         assert_eq!(
@@ -467,51 +520,51 @@ mod test {
     #[test]
     fn test_utf8_cast_evaluators() {
         assert_eq!(
-            utf8_to_boolean_cast_eval(&utf8("true")).unwrap(),
+            utf8_to_boolean_cast_eval(utf8("true")).unwrap(),
             DataValue::Boolean(true)
         );
         assert_eq!(
-            utf8_to_tinyint_cast_eval(&utf8("1")).unwrap(),
+            utf8_to_tinyint_cast_eval(utf8("1")).unwrap(),
             DataValue::Int8(1)
         );
         assert_eq!(
-            utf8_to_utinyint_cast_eval(&utf8("1")).unwrap(),
+            utf8_to_utinyint_cast_eval(utf8("1")).unwrap(),
             DataValue::UInt8(1)
         );
         assert_eq!(
-            utf8_to_smallint_cast_eval(&utf8("1")).unwrap(),
+            utf8_to_smallint_cast_eval(utf8("1")).unwrap(),
             DataValue::Int16(1)
         );
         assert_eq!(
-            utf8_to_usmallint_cast_eval(&utf8("1")).unwrap(),
+            utf8_to_usmallint_cast_eval(utf8("1")).unwrap(),
             DataValue::UInt16(1)
         );
         assert_eq!(
-            utf8_to_integer_cast_eval(&utf8("1")).unwrap(),
+            utf8_to_integer_cast_eval(utf8("1")).unwrap(),
             DataValue::Int32(1)
         );
         assert_eq!(
-            utf8_to_uinteger_cast_eval(&utf8("1")).unwrap(),
+            utf8_to_uinteger_cast_eval(utf8("1")).unwrap(),
             DataValue::UInt32(1)
         );
         assert_eq!(
-            utf8_to_bigint_cast_eval(&utf8("1")).unwrap(),
+            utf8_to_bigint_cast_eval(utf8("1")).unwrap(),
             DataValue::Int64(1)
         );
         assert_eq!(
-            utf8_to_ubigint_cast_eval(&utf8("1")).unwrap(),
+            utf8_to_ubigint_cast_eval(utf8("1")).unwrap(),
             DataValue::UInt64(1)
         );
         assert_eq!(
-            utf8_to_float_cast_eval(&utf8("1.5")).unwrap(),
+            utf8_to_float_cast_eval(utf8("1.5")).unwrap(),
             DataValue::Float32(OrderedFloat(1.5))
         );
         assert_eq!(
-            utf8_to_double_cast_eval(&utf8("1.5")).unwrap(),
+            utf8_to_double_cast_eval(utf8("1.5")).unwrap(),
             DataValue::Float64(OrderedFloat(1.5))
         );
         assert_eq!(
-            utf8_to_char_cast_eval(2, CharLengthUnits::Characters, &utf8("ab")).unwrap(),
+            utf8_to_char_cast_eval(2, CharLengthUnits::Characters, utf8("ab")).unwrap(),
             DataValue::Utf8 {
                 value: "ab".to_string(),
                 ty: Utf8Type::Fixed(2),
@@ -519,7 +572,7 @@ mod test {
             }
         );
         assert_eq!(
-            utf8_to_varchar_cast_eval(Some(2), CharLengthUnits::Characters, &utf8("ab")).unwrap(),
+            utf8_to_varchar_cast_eval(Some(2), CharLengthUnits::Characters, utf8("ab")).unwrap(),
             DataValue::Utf8 {
                 value: "ab".to_string(),
                 ty: Utf8Type::Variable(Some(2)),
@@ -527,7 +580,7 @@ mod test {
             }
         );
         assert_eq!(
-            utf8_to_date_cast_eval(&utf8("2024-01-02")).unwrap(),
+            utf8_to_date_cast_eval(utf8("2024-01-02")).unwrap(),
             DataValue::Date32(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -535,7 +588,7 @@ mod test {
             )
         );
         assert_eq!(
-            utf8_to_datetime_cast_eval(&utf8("2024-01-02 03:04:05")).unwrap(),
+            utf8_to_datetime_cast_eval(utf8("2024-01-02 03:04:05")).unwrap(),
             DataValue::Date64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -546,11 +599,11 @@ mod test {
             )
         );
         assert_eq!(
-            utf8_to_time_cast_eval(Some(0), &utf8("03:04:05")).unwrap(),
+            utf8_to_time_cast_eval(Some(0), utf8("03:04:05")).unwrap(),
             DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
         );
         assert_eq!(
-            utf8_to_time_cast_eval(Some(3), &utf8("03:04:05.123")).unwrap(),
+            utf8_to_time_cast_eval(Some(3), utf8("03:04:05.123")).unwrap(),
             {
                 let time = chrono::NaiveTime::parse_from_str(
                     "03:04:05.123",
@@ -564,7 +617,7 @@ mod test {
             }
         );
         assert_eq!(
-            utf8_to_timestamp_cast_eval(Some(3), false, &utf8("2024-01-02 03:04:05.123")).unwrap(),
+            utf8_to_timestamp_cast_eval(Some(3), false, utf8("2024-01-02 03:04:05.123")).unwrap(),
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -577,7 +630,7 @@ mod test {
             )
         );
         assert_eq!(
-            utf8_to_timestamp_cast_eval(Some(0), true, &utf8("2024-01-02 03:04:05+00:00")).unwrap(),
+            utf8_to_timestamp_cast_eval(Some(0), true, utf8("2024-01-02 03:04:05+00:00")).unwrap(),
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -590,7 +643,7 @@ mod test {
             )
         );
         assert_eq!(
-            utf8_to_timestamp_cast_eval(Some(0), true, &utf8("2024-01-02 03:04:05")).unwrap(),
+            utf8_to_timestamp_cast_eval(Some(0), true, utf8("2024-01-02 03:04:05")).unwrap(),
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -603,7 +656,7 @@ mod test {
             )
         );
         assert_eq!(
-            utf8_to_timestamp_cast_eval(Some(6), false, &utf8("2024-01-02 03:04:05.123456"))
+            utf8_to_timestamp_cast_eval(Some(6), false, utf8("2024-01-02 03:04:05.123456"))
                 .unwrap(),
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
@@ -617,12 +670,8 @@ mod test {
             )
         );
         assert_eq!(
-            utf8_to_timestamp_cast_eval(
-                Some(9),
-                true,
-                &utf8("2024-01-02 03:04:05.123456789+00:00")
-            )
-            .unwrap(),
+            utf8_to_timestamp_cast_eval(Some(9), true, utf8("2024-01-02 03:04:05.123456789+00:00"))
+                .unwrap(),
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -636,7 +685,7 @@ mod test {
             )
         );
         assert_eq!(
-            utf8_to_timestamp_cast_eval(Some(9), false, &utf8("2024-01-02 03:04:05.123456789"))
+            utf8_to_timestamp_cast_eval(Some(9), false, utf8("2024-01-02 03:04:05.123456789"))
                 .unwrap(),
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
@@ -651,17 +700,17 @@ mod test {
             )
         );
         assert_eq!(
-            utf8_to_decimal_cast_eval(&utf8("12.34")).unwrap(),
+            utf8_to_decimal_cast_eval(utf8("12.34")).unwrap(),
             DataValue::Decimal(Decimal::from_str("12.34").unwrap())
         );
 
         assert_panics(|| {
-            let _ = utf8_to_timestamp_cast_eval(Some(4), false, &utf8("2024-01-02 03:04:05.1234"))
+            let _ = utf8_to_timestamp_cast_eval(Some(4), false, utf8("2024-01-02 03:04:05.1234"))
                 .unwrap();
         });
         assert_panics(|| {
             let _ =
-                utf8_to_timestamp_cast_eval(Some(4), true, &utf8("2024-01-02 03:04:05.1234+00:00"))
+                utf8_to_timestamp_cast_eval(Some(4), true, utf8("2024-01-02 03:04:05.1234+00:00"))
                     .unwrap();
         });
     }

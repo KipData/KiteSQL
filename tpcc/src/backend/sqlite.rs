@@ -229,6 +229,7 @@ fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
         DataValue::UInt16(v) => Value::Integer(*v as i64),
         DataValue::UInt32(v) => Value::Integer(*v as i64),
         DataValue::UInt64(v) => Value::Integer(*v as i64),
+        DataValue::Binary { value, .. } => Value::Binary(value.clone()),
         DataValue::Utf8 { value, .. } => Value::String(value.clone()),
         DataValue::Date32(v) => Value::Integer(*v as i64),
         DataValue::Date64(v) => Value::String(

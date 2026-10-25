@@ -189,9 +189,10 @@ impl fmt::Display for AnalyzeOperator {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
-    use crate::db::{DataBaseBuilder, Database};
+    use crate::db::{CatalogKind, DataBaseBuilder, Database};
     use crate::errors::DatabaseError;
     use crate::execution::dml::analyze::DEFAULT_NUM_OF_BUCKETS;
     use crate::expression::range_detacher::Range;
@@ -261,7 +262,48 @@ mod test {
         assert_eq!(statistics_meta_p_index.index_id(), 2);
         assert_eq!(statistics_meta_p_index.histogram().values_len(), 101);
         assert_eq!(statistics_meta_p_index.histogram().buckets_len(), buckets);
+        let expected_frequency =
+            loader.collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?;
 
+        // Reload the stored parts instead of reusing ANALYZE's in-memory cache.
+        drop(kite_sql);
+        let mut reopened = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        reopened.load(CatalogKind::Table(table_name.clone()))?;
+        let loader = StatisticMetaLoader::new(reopened.state.meta_cache());
+        for index in 0..=2 {
+            let meta = loader.load(&table_name, index)?.unwrap();
+            assert_eq!(meta.index_id(), index);
+            assert_eq!(meta.histogram().values_len(), 101);
+            assert_eq!(meta.histogram().buckets_len(), buckets);
+        }
+        assert_eq!(
+            loader.collect_count(&table_name, 1, &Range::Eq(DataValue::Int32(7)))?,
+            expected_frequency
+        );
+        let mut iter = reopened.run("select a from t1 where b=7 order by a")?;
+        let mut rows = Vec::new();
+        while iter
+            .next_tuple(|_, row| rows.push(row.values[0].clone()))?
+            .is_some()
+        {}
+        iter.done()?;
+        assert_eq!(rows, [7, 27, 47, 67, 87].map(DataValue::Int32));
+
+        // A missing root must not publish partially reconstructed statistics.
+        let mut codec = TableCodec::default();
+        let mut tx = reopened.storage.transaction()?;
+        codec.with_statistics_meta(
+            "t1",
+            1,
+            None,
+            reopened.state.table_arena().borrow(),
+            |key, _| tx.remove(key),
+        )?;
+        tx.commit()?;
+        drop(reopened);
+        let mut reopened = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        assert!(matches!(reopened.load(CatalogKind::Table(table_name)),
+            Err(DatabaseError::InvalidValue(message)) if message == "statistics meta is incomplete"));
         Ok(())
     }
 
@@ -383,3 +425,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

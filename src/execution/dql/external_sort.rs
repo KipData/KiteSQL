@@ -279,6 +279,7 @@ fn merge_pass<'on_flush>(
     Ok(target)
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod test {
     use super::{finish_sort, sort_segment, Run, MERGE_FAN_IN};
@@ -507,3 +508,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

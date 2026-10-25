@@ -88,6 +88,10 @@ impl ReferenceSerialization for CastEvaluatorParams {
                 precision.encode(writer, is_direct, reference_tables, arena)?;
                 zone.encode(writer, is_direct, reference_tables, arena)
             }
+            CastEvaluatorParams::Binary { len } => {
+                7u8.encode(writer, is_direct, reference_tables, arena)?;
+                len.encode(writer, is_direct, reference_tables, arena)
+            }
             CastEvaluatorParams::Tuple { evaluators } => {
                 6u8.encode(writer, is_direct, reference_tables, arena)?;
                 evaluators.encode(writer, is_direct, reference_tables, arena)
@@ -133,6 +137,9 @@ impl ReferenceSerialization for CastEvaluatorParams {
                 5 => CastEvaluatorParams::Timestamp {
                     precision: Option::<u64>::decode(reader, context, reference_tables, arena)?,
                     zone: bool::decode(reader, context, reference_tables, arena)?,
+                },
+                7 => CastEvaluatorParams::Binary {
+                    len: Option::<u32>::decode(reader, context, reference_tables, arena)?,
                 },
                 6 => CastEvaluatorParams::Tuple {
                     evaluators: Vec::<CastEvaluatorRef>::decode(
@@ -228,6 +235,7 @@ impl ReferenceSerialization for CastEvaluatorRef {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -285,6 +293,8 @@ mod tests {
     fn cast_evaluator_params_serialization_roundtrips_all_variants() -> Result<(), DatabaseError> {
         roundtrip_cast_params(CastEvaluatorParams::Identity, 0)?;
         roundtrip_cast_params(CastEvaluatorParams::Unit, 1)?;
+        roundtrip_cast_params(CastEvaluatorParams::Binary { len: Some(8) }, 7)?;
+        roundtrip_cast_params(CastEvaluatorParams::Binary { len: None }, 7)?;
         roundtrip_cast_params(
             CastEvaluatorParams::String {
                 len: Some(12),
@@ -377,3 +387,4 @@ mod tests {
         ))
     }
 }
+// GRCOV_EXCL_STOP

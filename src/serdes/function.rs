@@ -93,6 +93,7 @@ impl ReferenceSerialization for ArcTableFunctionImpl {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -180,3 +181,4 @@ mod tests {
         assert!(err.to_string().contains("table function not found"));
     }
 }
+// GRCOV_EXCL_STOP

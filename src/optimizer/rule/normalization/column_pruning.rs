@@ -847,6 +847,7 @@ impl NormalizationRule for ColumnPruning {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::test::build_t1_table;
@@ -1117,3 +1118,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

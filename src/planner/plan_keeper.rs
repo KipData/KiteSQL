@@ -32,6 +32,7 @@ pub(crate) struct PlanKeeper<'p> {
 }
 
 impl<'p> PlanKeeper<'p> {
+    // GRCOV_EXCL_START
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn empty() -> Self {
         Self {
@@ -39,6 +40,7 @@ impl<'p> PlanKeeper<'p> {
             borrowed: None,
         }
     }
+    // GRCOV_EXCL_STOP
 
     pub(crate) fn new(input: PlanInput<'p>) -> Self {
         match input {

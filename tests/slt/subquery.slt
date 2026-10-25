@@ -1036,6 +1036,10 @@ select id from corr_rows where b=(select max(x.b) from corr_rows x where x.id<co
 statement error correlated scalar queries with outer aggregation are not supported yet
 select count(*),(select max(x.b) from corr_rows x where x.id<corr_rows.id) from corr_rows;
 
+# Even a legal grouped outer reference remains outside current scalar support.
+statement error correlated scalar queries with outer aggregation are not supported yet
+select b,(select count(*) from corr_rows x where x.b=corr_rows.b) from corr_rows group by b;
+
 statement ok
 create view corr_view as select id,(select count(*) from corr_rows x where x.b<corr_rows.b) as n from corr_rows;
 
@@ -1050,6 +1054,58 @@ select a.id,a.n+b.n from corr_view a join corr_view b on a.id=b.id order by a.id
 
 statement ok
 drop view corr_view;
+
+# SELECT quantified results preserve empty-set and three-valued logic.
+query TTTT
+select 20 in (select b from corr_rows),15 in (select b from corr_rows),20 not in (select b from corr_rows),null in (select b from corr_rows);
+----
+true NULL false NULL
+
+query TTTT
+select 20 in (select b from corr_rows where false),null in (select b from corr_rows where false),20 not in (select b from corr_rows where false),null not in (select b from corr_rows where false);
+----
+false false true true
+
+query TTTT
+select 20=any(select b from corr_rows),20<>all(select b from corr_rows),5<all(select b from corr_rows),5<all(select b from corr_rows where false);
+----
+true false NULL true
+
+query ITT
+select id,b in (select b from corr_rows where id=2) as matched,b not in (select b from corr_rows where id=3) as unmatched from corr_rows order by matched desc nulls last,id;
+----
+2 true true
+5 true true
+1 false true
+3 false false
+4 NULL NULL
+
+statement error correlated quantified subqueries in SELECT are not supported yet
+select b in (select x.b from corr_rows x where x.id<corr_rows.id) from corr_rows;
+
+# Numeric and string comparison operands share an unbounded string type.
+query TTTT
+select 'hello' in (select cast(b as bigint) from corr_rows where false),'hello' not in (select cast(b as bigint) from corr_rows where false),null in (select cast(b as bigint) from corr_rows where false),null not in (select cast(b as bigint) from corr_rows where false);
+----
+false true false true
+
+query TTTT
+select '20' in (select cast(b as bigint) from corr_rows),'hello' in (select cast(b as bigint) from corr_rows),'hello' not in (select cast(b as bigint) from corr_rows),20 in (select cast(b as varchar) from corr_rows);
+----
+true NULL NULL true
+
+query TTTT
+select '20'=cast(20 as bigint),cast(20 as bigint)='20','20' in (cast(20 as bigint),null),'hello' not in (cast(20 as bigint),null);
+----
+true true true NULL
+
+query T
+select cast(20 as bigint) between '10' and '30';
+----
+true
+
+statement error
+select '20' + cast(1 as bigint);
 
 statement ok
 drop table corr_lookup;

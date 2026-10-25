@@ -83,7 +83,7 @@ impl ExprVisitorMut for ConstantCalculator {
                     let evaluator = binary_create(Cow::Borrowed(&ty), *op)?;
                     let left_val = left_val.clone().cast(&ty)?;
                     let right_val = right_val.clone().cast(&ty)?;
-                    let value = evaluator.binary_eval(&left_val, &right_val)?;
+                    let value = evaluator.binary_eval(Cow::Owned(left_val), &right_val)?;
                     *expr = ScalarExpression::Constant(value);
                 }
             }
@@ -400,7 +400,7 @@ impl Simplify {
         let right = right.cast(ty).ok()?;
         binary_create(Cow::Borrowed(ty), op)
             .ok()?
-            .binary_eval(&left, &right)
+            .binary_eval(Cow::Owned(left), &right)
             .ok()
     }
 
@@ -545,11 +545,11 @@ impl ExprRef {
                     return None;
                 }
                 if let Some(evaluator) = evaluator {
-                    evaluator.binary_eval(&left, &right)
+                    evaluator.binary_eval(Cow::Owned(left), &right)
                 } else {
                     binary_create(Cow::Borrowed(ty), *op)
                         .ok()?
-                        .binary_eval(&left, &right)
+                        .binary_eval(Cow::Owned(left), &right)
                 }
                 .ok()
             }

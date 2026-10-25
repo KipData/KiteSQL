@@ -212,6 +212,7 @@ impl TableCodec {
                 | LogicalType::UBigint
                 | LogicalType::Char(..)
                 | LogicalType::Varchar(..)
+                | LogicalType::Varbinary(..)
                 | LogicalType::Date
                 | LogicalType::DateTime
                 | LogicalType::Time(..)
@@ -1058,6 +1059,7 @@ impl TableCodec {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::test::build_t1_table;
@@ -1866,3 +1868,4 @@ mod tests {
         assert_eq!(vec[2], &op("V0"));
     }
 }
+// GRCOV_EXCL_STOP

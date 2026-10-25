@@ -64,7 +64,7 @@ pub(crate) fn create_accumulator(
         (AggKind::Sum, true) => Box::new(DistinctSumAccumulator::new(ty)?),
         (AggKind::Min, _) => Box::new(MinMaxAccumulator::new(false)),
         (AggKind::Max, _) => Box::new(MinMaxAccumulator::new(true)),
-        (AggKind::Avg, _) => Box::new(AvgAccumulator::new()),
+        (AggKind::Avg, distinct) => Box::new(AvgAccumulator::new(distinct)),
     })
 }
 

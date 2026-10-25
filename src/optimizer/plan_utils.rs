@@ -116,6 +116,7 @@ fn take_childrens(plan: &mut LogicalPlan) -> Childrens {
     mem::replace(&mut *plan.childrens, Childrens::None)
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,3 +218,4 @@ mod tests {
         assert!(!wrap_child_with(&mut parent, 2, Operator::ShowView));
     }
 }
+// GRCOV_EXCL_STOP

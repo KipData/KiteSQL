@@ -1,0 +1,180 @@
+# Binary values preserve arbitrary bytes, including zero bytes and non-UTF8.
+statement ok
+create table binary_values (id int primary key, b varbinary(8) unique);
+
+statement ok
+insert into binary_values values (1,x''),(2,x'00'),(3,x'0000'),(4,x'00ff'),(5,x'80'),(6,x'ff'),(7,null);
+
+query IT
+select id,b from binary_values order by b;
+----
+1 X''
+2 X'00'
+3 X'0000'
+4 X'00FF'
+5 X'80'
+6 X'FF'
+7 NULL
+
+query I
+select id from binary_values where b=x'00ff';
+----
+4
+
+query I
+select id from binary_values where b>=x'00' and b<x'80' order by b;
+----
+2
+3
+4
+
+query TTTTTT
+select x'00'<x'0000',x'ff'>x'80',x'ab'=x'AB',x'00'<>x'01',x'00'<=x'00',x'01'>=x'00';
+----
+true true true true true true
+
+query TTTTT
+select x'00ff' in (select b from binary_values),x'01' in (select b from binary_values),x'01' not in (select b from binary_values),null=x'00',x'00' in (select b from binary_values where false);
+----
+true NULL NULL NULL false
+
+query TT
+select cast(x'00ff' as varbinary(2)),cast(null as blob);
+----
+X'00FF' NULL
+
+query T
+select distinct b from binary_values where b in (x'00',x'ff') order by b desc;
+----
+X'FF'
+X'00'
+
+query I
+select count(*) from binary_values a join binary_values b on a.b=b.b;
+----
+6
+
+statement error
+insert into binary_values values (8,x'00ff');
+
+statement error
+insert into binary_values values (8,x'000102030405060708');
+
+statement error
+select cast(x'0001' as varbinary(1));
+
+statement error
+select x'0';
+
+statement error
+select x'GG';
+
+statement error
+select x'00'+x'01';
+
+statement error
+select cast(x'00' as bigint);
+
+query I
+select count(*) from binary_values;
+----
+7
+
+statement ok
+update binary_values set b=x'fe' where id=6;
+
+query I
+select id from binary_values where b=x'fe';
+----
+6
+
+statement ok
+delete from binary_values where b=x'0000';
+
+query I
+select count(*) from binary_values where b=x'0000';
+----
+0
+
+statement ok
+create table binary_pk (b bytea primary key);
+
+statement ok
+insert into binary_pk values (x''),(x'00'),(x'0000'),(x'ff');
+
+query T
+select b from binary_pk where b>=x'00' order by b;
+----
+X'00'
+X'0000'
+X'FF'
+
+statement ok
+drop table binary_pk;
+
+# Scalar conversions use their text representation, not storage/index encoding.
+query TTTT
+select cast(123 as varbinary),cast(-12 as varbinary(3)),cast(true as varbinary),cast('中' as varbinary(3));
+----
+X'313233' X'2D3132' X'74727565' X'E4B8AD'
+
+query TTT
+select cast(cast('2024-01-02' as date) as varbinary),cast(cast('03:04:05' as time) as varbinary),cast(cast('1.25' as decimal(4,2)) as varbinary);
+----
+X'323032342D30312D3032' X'30333A30343A3035' X'312E3235'
+
+query TTTT
+select x'313233'=cast(123 as bigint),cast(123 as bigint)=x'313233',x'313233'='123','123'=x'313233';
+----
+true true true true
+
+query TTTT
+select x'313233' in (cast(123 as bigint),null),123 in (x'313233',null),x'30' not in (123,null),x'313233' between 100 and 200;
+----
+true true NULL true
+
+query TT
+select x'303132' in (select cast(id as bigint) from binary_values where false),x'303132' not in (select cast(id as bigint) from binary_values where false);
+----
+false true
+
+query TT
+select x'31' in (select cast(id as bigint) from binary_values),cast(1 as bigint) in (select cast(id as varbinary) from binary_values);
+----
+true true
+
+statement error
+select cast('中' as varbinary(2));
+
+statement error
+select cast(123 as varbinary(2));
+
+statement error
+select x'31'+1;
+
+statement ok
+create table binary_casts (id int primary key,b varbinary(4) unique);
+
+statement ok
+insert into binary_casts values (1,123),(2,'abc'),(3,null);
+
+query IT
+select id,b from binary_casts order by id;
+----
+1 X'313233'
+2 X'616263'
+3 NULL
+
+statement error
+insert into binary_casts values (4,'123');
+
+query I
+select id from binary_casts where b=x'313233';
+----
+1
+
+statement ok
+drop table binary_casts;
+
+statement ok
+drop table binary_values;

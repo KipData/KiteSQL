@@ -197,3 +197,75 @@ value2 Integer 4 false EMPTY 808
 
 statement ok
 drop table alter_users
+
+# Failed conversions must preserve both metadata and all original rows.
+statement ok
+create table alter_atomic(id int primary key, v bigint unique, label varchar(12));
+
+statement ok
+insert into alter_atomic values(1,10,'short'),(2,2147483648,'long-value');
+
+statement error cannot alter type of indexed column
+alter table alter_atomic alter column v type int;
+
+query TTTTTT
+describe alter_atomic;
+----
+id Integer 4 false PRIMARY NULL
+v Bigint 8 true UNIQUE NULL
+label Varchar(Some(12), CHARACTERS) variable true EMPTY NULL
+
+query IT
+select id,label from alter_atomic where v=2147483648;
+----
+2 long-value
+
+query II
+select id,v from alter_atomic order by id;
+----
+1 10
+2 2147483648
+
+statement ok
+drop index alter_atomic.uk_v_index;
+
+statement error try from int:
+alter table alter_atomic alter column v type int;
+
+query II
+select id,v from alter_atomic order by id;
+----
+1 10
+2 2147483648
+
+statement error too long
+alter table alter_atomic alter column label type varchar(5);
+
+query IT
+select id,label from alter_atomic order by id;
+----
+1 short
+2 long-value
+
+statement ok
+insert into alter_atomic values(3,30,'still-long');
+
+statement ok
+update alter_atomic set v=20 where id=2;
+
+statement ok
+alter table alter_atomic alter column v type int;
+
+query II
+select id,v from alter_atomic where v=20;
+----
+2 20
+
+statement ok
+create unique index alter_v on alter_atomic(v);
+
+statement error the column has been declared unique
+insert into alter_atomic values(4,20,'duplicate');
+
+statement ok
+drop table alter_atomic;

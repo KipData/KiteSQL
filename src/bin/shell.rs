@@ -419,6 +419,7 @@ Transaction commands:
         }
     }
 
+    // GRCOV_EXCL_START
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -557,6 +558,7 @@ Transaction commands:
             );
         }
     }
+    // GRCOV_EXCL_STOP
 }
 
 #[cfg(not(target_arch = "wasm32"))]

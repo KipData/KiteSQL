@@ -198,6 +198,7 @@ impl ColumnCatalog {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{ColumnCatalog, ColumnDesc};
@@ -233,6 +234,7 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP
 
 /// The descriptor of a column.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, ReferenceSerialization)]

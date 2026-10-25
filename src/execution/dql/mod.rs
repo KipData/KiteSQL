@@ -38,6 +38,7 @@ pub(crate) mod union;
 pub(crate) mod values;
 pub(crate) mod window;
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::iter_ext::Itertools;
@@ -49,3 +50,4 @@ pub(crate) mod test {
             .collect_vec()
     }
 }
+// GRCOV_EXCL_STOP

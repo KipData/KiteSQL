@@ -14,6 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::types::evaluator::boolean::*;
+use crate::types::evaluator::bytes::*;
 #[cfg(feature = "time")]
 use crate::types::evaluator::date::*;
 #[cfg(feature = "time")]
@@ -73,6 +74,7 @@ const CAST_TIMESTAMP: u16 = 17;
 #[cfg(feature = "decimal")]
 const CAST_DECIMAL: u16 = 18;
 const CAST_TUPLE: u16 = 19;
+const CAST_BINARY: u16 = 20;
 
 // Cast positions are serialized ABI. Type codes above must never be reordered
 // or reused; new cast families should append a new code and keep old positions.
@@ -101,6 +103,7 @@ fn cast_type_code(ty: &LogicalType) -> u16 {
         #[cfg(not(feature = "decimal"))]
         LogicalType::Decimal(_, _) => unreachable!("DECIMAL requires the `decimal` feature"),
         LogicalType::Tuple(_) => CAST_TUPLE,
+        LogicalType::Varbinary(_) => CAST_BINARY,
     }
 }
 
@@ -138,6 +141,12 @@ pub(crate) fn to_char(
         ty: Utf8Type::Fixed(len),
         unit,
     })
+}
+
+pub(crate) fn to_varbinary(value: Vec<u8>, len: Option<u32>) -> Result<DataValue, DatabaseError> {
+    let result = DataValue::Binary { value, len };
+    result.check_len(&LogicalType::Varbinary(len))?;
+    Ok(result)
 }
 
 pub(crate) fn to_varchar(
@@ -222,7 +231,7 @@ macro_rules! decimal_to_int_cast {
 macro_rules! define_cast_evaluator {
     ($name:ident, $pattern:pat => $body:block) => {
         pub fn $name(
-            value: &$crate::types::value::DataValue,
+            value: $crate::types::value::DataValue,
         ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
             match value {
                 $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
@@ -233,7 +242,7 @@ macro_rules! define_cast_evaluator {
     };
     ($name:ident, $pattern:pat => |$this:ident| $body:expr) => {
         pub fn $name(
-            value: &$crate::types::value::DataValue,
+            value: $crate::types::value::DataValue,
         ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
             match value {
                 $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
@@ -247,7 +256,7 @@ macro_rules! define_cast_evaluator {
     };
     ($name:ident, $pattern:pat => |$this:ident| $body:block) => {
         pub fn $name(
-            value: &$crate::types::value::DataValue,
+            value: $crate::types::value::DataValue,
         ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
             match value {
                 $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
@@ -262,7 +271,7 @@ macro_rules! define_cast_evaluator {
     ($name:ident { $($field:ident : $field_ty:ty),+ $(,)? }, $pattern:pat => |$this:ident| $body:expr) => {
         pub fn $name(
             $($field: $field_ty,)+
-            value: &$crate::types::value::DataValue,
+            value: $crate::types::value::DataValue,
         ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
             struct This {
                 $($field: $field_ty),+
@@ -278,7 +287,7 @@ macro_rules! define_cast_evaluator {
     ($name:ident { $($field:ident : $field_ty:ty),+ $(,)? }, $pattern:pat => $body:block) => {
         pub fn $name(
             $($field: $field_ty,)+
-            value: &$crate::types::value::DataValue,
+            value: $crate::types::value::DataValue,
         ) -> Result<$crate::types::value::DataValue, $crate::errors::DatabaseError> {
             match value {
                 $crate::types::value::DataValue::Null => Ok($crate::types::value::DataValue::Null),
@@ -294,37 +303,37 @@ macro_rules! define_integer_cast_evaluators {
     ($prefix:ident, $variant:ident, $src_ty:ty, $from_ty:expr) => {
         paste::paste! {
             $crate::define_cast_evaluator!([<$prefix:snake _to_boolean_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                $crate::numeric_to_boolean_cast!(*value, $from_ty)
+                $crate::numeric_to_boolean_cast!(value, $from_ty)
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_tinyint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::Int8(i8::try_from(*value)?))
+                Ok($crate::types::value::DataValue::Int8(i8::try_from(value)?))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_utinyint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::UInt8(u8::try_from(*value)?))
+                Ok($crate::types::value::DataValue::UInt8(u8::try_from(value)?))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_smallint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::Int16(i16::try_from(*value)?))
+                Ok($crate::types::value::DataValue::Int16(i16::try_from(value)?))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_usmallint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::UInt16(u16::try_from(*value)?))
+                Ok($crate::types::value::DataValue::UInt16(u16::try_from(value)?))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_integer_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::Int32(i32::try_from(*value)?))
+                Ok($crate::types::value::DataValue::Int32(i32::try_from(value)?))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_uinteger_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::UInt32(u32::try_from(*value)?))
+                Ok($crate::types::value::DataValue::UInt32(u32::try_from(value)?))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_bigint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::Int64(i64::try_from(*value)?))
+                Ok($crate::types::value::DataValue::Int64(i64::try_from(value)?))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_ubigint_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::UInt64(u64::try_from(*value)?))
+                Ok($crate::types::value::DataValue::UInt64(u64::try_from(value)?))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_float_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::Float32(ordered_float::OrderedFloat(*value as f32)))
+                Ok($crate::types::value::DataValue::Float32(ordered_float::OrderedFloat(value as f32)))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_double_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::Float64(ordered_float::OrderedFloat(*value as f64)))
+                Ok($crate::types::value::DataValue::Float64(ordered_float::OrderedFloat(value as f64)))
             });
             $crate::define_cast_evaluator!(
                 [<$prefix:snake _to_char_cast_eval>] {
@@ -344,13 +353,19 @@ macro_rules! define_integer_cast_evaluators {
                     $crate::types::evaluator::cast::to_varchar(value.to_string(), this.len, this.unit)
                 }
             );
+            $crate::define_cast_evaluator!(
+                [<$prefix:snake _to_varbinary_cast_eval>] { len: Option<u32> },
+                $crate::types::value::DataValue::$variant(value) => |this| {
+                    $crate::types::evaluator::cast::to_varbinary(value.to_string().into_bytes(), this.len)
+                }
+            );
             #[cfg(feature = "decimal")]
             $crate::define_cast_evaluator!(
                 [<$prefix:snake _to_decimal_cast_eval>] {
                     scale: Option<u8>
                 },
                 $crate::types::value::DataValue::$variant(value) => |this| {
-                    let mut decimal = rust_decimal::Decimal::from(*value);
+                    let mut decimal = rust_decimal::Decimal::from(value);
                     $crate::types::value::DataValue::decimal_round_i(&this.scale, &mut decimal);
                     Ok($crate::types::value::DataValue::Decimal(decimal))
                 }
@@ -364,7 +379,7 @@ macro_rules! define_float_cast_evaluators {
     ($prefix:ident, $variant:ident, $src_ty:ty, $from_ty:expr, $into_decimal:ident) => {
         paste::paste! {
             $crate::define_cast_evaluator!([<$prefix:snake _to_float_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
-                Ok($crate::types::value::DataValue::$variant(*value))
+                Ok($crate::types::value::DataValue::$variant(value))
             });
             $crate::define_cast_evaluator!([<$prefix:snake _to_double_cast_eval>], $crate::types::value::DataValue::$variant(value) => {
                 Ok($crate::types::value::DataValue::Float64(ordered_float::OrderedFloat(value.0 as f64)))
@@ -411,6 +426,12 @@ macro_rules! define_float_cast_evaluators {
                     $crate::types::evaluator::cast::to_varchar(value.to_string(), this.len, this.unit)
                 }
             );
+            $crate::define_cast_evaluator!(
+                [<$prefix:snake _to_varbinary_cast_eval>] { len: Option<u32> },
+                $crate::types::value::DataValue::$variant(value) => |this| {
+                    $crate::types::evaluator::cast::to_varbinary(value.to_string().into_bytes(), this.len)
+                }
+            );
             #[cfg(feature = "decimal")]
             $crate::define_cast_evaluator!(
                 [<$prefix:snake _to_decimal_cast_eval>] {
@@ -431,10 +452,6 @@ macro_rules! define_float_cast_evaluators {
         }
     };
 }
-pub fn identity_cast_eval(value: &DataValue) -> Result<DataValue, DatabaseError> {
-    Ok(value.clone())
-}
-
 macro_rules! cast_ref {
     ($from:expr, $to:expr) => {{
         Ok(CastEvaluatorRef::new(
@@ -551,7 +568,14 @@ pub fn cast_create(
     }
 
     match (from, to) {
+        (LogicalType::Tuple(_), LogicalType::Varbinary(_)) => {
+            Err(cast_fail(from.clone(), to.clone()))
+        }
         (LogicalType::SqlNull, _) => cast_ref!(from, to),
+        (_, LogicalType::Varbinary(len)) => Ok(CastEvaluatorRef::new(
+            cast_pos(from, to),
+            CastEvaluatorParams::Binary { len: *len },
+        )),
         (_, LogicalType::SqlNull) => cast_ref!(from, to),
         (LogicalType::Boolean, LogicalType::Tinyint) => {
             cast_ref!(from, to)
@@ -830,6 +854,13 @@ fn varchar_params(ty: &LogicalType) -> (Option<u32>, CharLengthUnits) {
     (*len, *unit)
 }
 
+fn binary_param(params: &CastEvaluatorParams) -> Option<u32> {
+    let CastEvaluatorParams::Binary { len } = params else {
+        unreachable!("cast evaluator must have binary parameters")
+    };
+    *len
+}
+
 fn string_param(params: &CastEvaluatorParams) -> (Option<u32>, CharLengthUnits) {
     let CastEvaluatorParams::String { len, unit } = params else {
         unreachable!("cast evaluator must have string parameters")
@@ -887,6 +918,7 @@ macro_rules! eval_integer_cast_by_pos {
                     let (len, unit) = string_param(params);
                     [<$prefix:snake _to_varchar_cast_eval>](len, unit, $value)
                 }
+                CAST_BINARY => [<$prefix:snake _to_varbinary_cast_eval>](binary_param(params), $value),
                 #[cfg(feature = "decimal")]
                 CAST_DECIMAL => {
                     let (_, scale) = decimal_param(params);
@@ -899,7 +931,7 @@ macro_rules! eval_integer_cast_by_pos {
 }
 
 impl CastEvaluatorRef {
-    pub fn eval(&self, value: &DataValue) -> Result<DataValue, DatabaseError> {
+    pub fn eval(&self, value: DataValue) -> Result<DataValue, DatabaseError> {
         let params = &self.params;
         let from_code = self.pos / CAST_TYPE_STRIDE;
         let to_code = self.pos % CAST_TYPE_STRIDE;
@@ -917,7 +949,7 @@ impl CastEvaluatorRef {
         }
 
         if matches!(params, CastEvaluatorParams::Identity) {
-            return run!(identity_cast_eval);
+            return Ok(value);
         }
         #[cfg(not(feature = "time"))]
         if is_chrono_type_code(from_code) || is_chrono_type_code(to_code) {
@@ -927,6 +959,41 @@ impl CastEvaluatorRef {
         }
 
         match (from_code, to_code) {
+            (CAST_BINARY, CAST_BINARY) => run!(bytes_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
+            (CAST_BOOLEAN, CAST_BINARY) => run!(boolean_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
+            (CAST_FLOAT, CAST_BINARY) => run!(float32_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
+            (CAST_DOUBLE, CAST_BINARY) => run!(float64_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
+            (CAST_CHAR | CAST_VARCHAR, CAST_BINARY) => run!(utf8_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
+            #[cfg(feature = "time")]
+            (CAST_DATE, CAST_BINARY) => run!(date32_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
+            #[cfg(feature = "time")]
+            (CAST_DATETIME, CAST_BINARY) => run!(date64_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
+            #[cfg(feature = "time")]
+            (CAST_TIME, CAST_BINARY) => run!(time32_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
+            #[cfg(feature = "time")]
+            (CAST_TIMESTAMP, CAST_BINARY) => run!(time64_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
+            #[cfg(feature = "decimal")]
+            (CAST_DECIMAL, CAST_BINARY) => run!(decimal_to_varbinary_cast_eval {
+                len: binary_param(params)
+            }),
             (CAST_SQL_NULL, _) => run!(null_cast_eval),
             (_, CAST_SQL_NULL) => run!(to_sql_null_cast_eval),
             (CAST_BOOLEAN, CAST_TINYINT) => run!(boolean_to_tinyint_cast_eval),
@@ -1183,7 +1250,7 @@ mod test {
                 (LogicalType::Integer, DataValue::Int32(-12)),
                 (LogicalType::Bigint, DataValue::Int64(-12)),
             ] {
-                assert_eq!(cast_eval(from.clone(), to, &value)?, expected);
+                assert_eq!(cast_eval(from.clone(), to, value.clone())?, expected);
             }
         }
         for (from, zero) in [
@@ -1191,11 +1258,11 @@ mod test {
             (LogicalType::Double, DataValue::Float64(OrderedFloat(-0.0))),
         ] {
             assert_eq!(
-                cast_eval(from.clone(), LogicalType::Integer, &zero)?,
+                cast_eval(from.clone(), LogicalType::Integer, zero.clone())?,
                 DataValue::Int32(0)
             );
             assert_eq!(
-                cast_eval(from, LogicalType::UInteger, &zero)?,
+                cast_eval(from, LogicalType::UInteger, zero.clone())?,
                 DataValue::UInt32(0)
             );
         }
@@ -1258,7 +1325,7 @@ mod test {
     fn cast_eval(
         from: LogicalType,
         to: LogicalType,
-        value: &DataValue,
+        value: DataValue,
     ) -> Result<DataValue, DatabaseError> {
         create(from, to)?.eval(value)
     }
@@ -1270,7 +1337,7 @@ mod test {
     fn assert_cast_ref_panics(pos: u16, params: CastEvaluatorParams, value: DataValue) {
         assert_panics(|| {
             let evaluator = CastEvaluatorRef::new(pos, params);
-            let _ = evaluator.eval(&value).unwrap();
+            let _ = evaluator.eval(value).unwrap();
         });
     }
 
@@ -1399,8 +1466,27 @@ mod test {
         ];
 
         for (to, expected) in cases {
-            assert_eq!(cast_eval(LogicalType::Boolean, to, &value)?, expected);
+            assert_eq!(
+                cast_eval(LogicalType::Boolean, to, value.clone())?,
+                expected
+            );
         }
+        assert_eq!(
+            cast_eval(
+                LogicalType::Boolean,
+                LogicalType::Varbinary(None),
+                value.clone()
+            )?,
+            DataValue::from(b"true".to_vec())
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Boolean,
+                LogicalType::Varbinary(None),
+                DataValue::Null
+            )?,
+            DataValue::Null
+        );
 
         Ok(())
     }
@@ -1441,7 +1527,7 @@ mod test {
             ),
         ];
         for (to, expected) in float_cases {
-            assert_eq!(cast_eval(LogicalType::Float, to, &float)?, expected);
+            assert_eq!(cast_eval(LogicalType::Float, to, float.clone())?, expected);
         }
 
         let double = DataValue::Float64(OrderedFloat(1.5));
@@ -1478,8 +1564,27 @@ mod test {
             ),
         ];
         for (to, expected) in double_cases {
-            assert_eq!(cast_eval(LogicalType::Double, to, &double)?, expected);
+            assert_eq!(
+                cast_eval(LogicalType::Double, to, double.clone())?,
+                expected
+            );
         }
+        assert_eq!(
+            cast_eval(
+                LogicalType::Float,
+                LogicalType::Varbinary(None),
+                float.clone()
+            )?,
+            DataValue::from(b"1.5".to_vec())
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Double,
+                LogicalType::Varbinary(None),
+                double.clone()
+            )?,
+            DataValue::from(b"1.5".to_vec())
+        );
 
         Ok(())
     }
@@ -1530,14 +1635,41 @@ mod test {
         ];
 
         for (from, value, expected) in cases {
-            assert_eq!(cast_eval(from, LogicalType::Double, &value)?, expected);
+            assert_eq!(
+                cast_eval(from.clone(), LogicalType::Varbinary(None), value.clone())?,
+                DataValue::from(value.to_string().into_bytes())
+            );
+            assert_eq!(
+                cast_eval(from, LogicalType::Double, value.clone())?,
+                expected
+            );
         }
+        assert_eq!(
+            cast_eval(
+                LogicalType::Bigint,
+                LogicalType::Varbinary(None),
+                DataValue::Int64(-123)
+            )?,
+            DataValue::from(b"-123".to_vec())
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::UBigint,
+                LogicalType::Varbinary(None),
+                DataValue::UInt64(u64::MAX)
+            )?,
+            DataValue::from(b"18446744073709551615".to_vec())
+        );
+        assert!(matches!(
+            DataValue::Int64(123).cast(&LogicalType::Varbinary(Some(2))),
+            Err(DatabaseError::TooLong)
+        ));
 
         assert_eq!(
             cast_eval(
                 LogicalType::Integer,
                 LogicalType::Char(1, CharLengthUnits::Characters),
-                &DataValue::Int32(9),
+                DataValue::Int32(9),
             )?,
             DataValue::Utf8 {
                 value: "9".to_string(),
@@ -1549,7 +1681,7 @@ mod test {
             cast_eval(
                 LogicalType::UInteger,
                 LogicalType::Varchar(Some(2), CharLengthUnits::Characters),
-                &DataValue::UInt32(10),
+                DataValue::UInt32(10),
             )?,
             DataValue::Utf8 {
                 value: "10".to_string(),
@@ -1562,7 +1694,7 @@ mod test {
             cast_eval(
                 LogicalType::Smallint,
                 LogicalType::Decimal(None, Some(1)),
-                &DataValue::Int16(12),
+                DataValue::Int16(12),
             )?,
             DataValue::Decimal(Decimal::new(120, 1))
         );
@@ -1572,11 +1704,48 @@ mod test {
 
     #[test]
     fn test_cast_create_dispatches_utf8_casts() -> Result<(), DatabaseError> {
+        let from = LogicalType::Varchar(None, CharLengthUnits::Characters);
+        for to in [
+            from.clone(),
+            LogicalType::Char(4, CharLengthUnits::Octets),
+            LogicalType::Varchar(Some(4), CharLengthUnits::Octets),
+            LogicalType::Varbinary(Some(4)),
+        ] {
+            let text = "中\0".to_string();
+            let buffer = text.as_ptr();
+            let result = create(from.clone(), to)?.eval(DataValue::from(text))?;
+            match result {
+                DataValue::Utf8 { value, .. } => {
+                    assert_eq!(value, "中\0");
+                    assert_eq!(value.as_ptr(), buffer);
+                }
+                DataValue::Binary { value, .. } => {
+                    assert_eq!(value, "中\0".as_bytes());
+                    assert_eq!(value.as_ptr(), buffer);
+                }
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            cast_eval(
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+                LogicalType::Varbinary(Some(4)),
+                utf8("中\0")
+            )?,
+            DataValue::Binary {
+                value: "中\0".as_bytes().to_vec(),
+                len: Some(4)
+            }
+        );
+        assert!(matches!(
+            utf8("中").cast(&LogicalType::Varbinary(Some(2))),
+            Err(DatabaseError::TooLong)
+        ));
         assert_eq!(
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Boolean,
-                &utf8("true")
+                utf8("true")
             )?,
             DataValue::Boolean(true)
         );
@@ -1584,7 +1753,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Integer,
-                &utf8("12")
+                utf8("12")
             )?,
             DataValue::Int32(12)
         );
@@ -1592,7 +1761,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Tinyint,
-                &utf8("12")
+                utf8("12")
             )?,
             DataValue::Int8(12)
         );
@@ -1600,7 +1769,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::UTinyint,
-                &utf8("12")
+                utf8("12")
             )?,
             DataValue::UInt8(12)
         );
@@ -1608,7 +1777,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Smallint,
-                &utf8("12")
+                utf8("12")
             )?,
             DataValue::Int16(12)
         );
@@ -1616,7 +1785,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::USmallint,
-                &utf8("12")
+                utf8("12")
             )?,
             DataValue::UInt16(12)
         );
@@ -1624,7 +1793,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::UInteger,
-                &utf8("12")
+                utf8("12")
             )?,
             DataValue::UInt32(12)
         );
@@ -1632,7 +1801,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Bigint,
-                &utf8("12")
+                utf8("12")
             )?,
             DataValue::Int64(12)
         );
@@ -1640,7 +1809,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::UBigint,
-                &utf8("12")
+                utf8("12")
             )?,
             DataValue::UInt64(12)
         );
@@ -1648,7 +1817,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Float,
-                &utf8("1.5")
+                utf8("1.5")
             )?,
             DataValue::Float32(OrderedFloat(1.5))
         );
@@ -1656,7 +1825,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Double,
-                &utf8("1.5")
+                utf8("1.5")
             )?,
             DataValue::Float64(OrderedFloat(1.5))
         );
@@ -1664,7 +1833,7 @@ mod test {
             cast_eval(
                 LogicalType::Char(2, CharLengthUnits::Characters),
                 LogicalType::Varchar(Some(2), CharLengthUnits::Characters),
-                &DataValue::Utf8 {
+                DataValue::Utf8 {
                     value: "ab".to_string(),
                     ty: Utf8Type::Fixed(2),
                     unit: CharLengthUnits::Characters,
@@ -1680,7 +1849,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Char(2, CharLengthUnits::Characters),
-                &utf8("ab"),
+                utf8("ab"),
             )?,
             DataValue::Utf8 {
                 value: "ab".to_string(),
@@ -1692,7 +1861,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Date,
-                &utf8("2024-01-02")
+                utf8("2024-01-02")
             )?,
             DataValue::Date32(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
@@ -1704,7 +1873,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::DateTime,
-                &utf8("2024-01-02 03:04:05"),
+                utf8("2024-01-02 03:04:05"),
             )?,
             DataValue::Date64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
@@ -1719,7 +1888,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Time(Some(0)),
-                &utf8("03:04:05"),
+                utf8("03:04:05"),
             )?,
             DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
         );
@@ -1727,7 +1896,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::TimeStamp(Some(0), true),
-                &utf8("2024-01-02 03:04:05+00:00"),
+                utf8("2024-01-02 03:04:05+00:00"),
             )?,
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
@@ -1746,7 +1915,7 @@ mod test {
             cast_eval(
                 LogicalType::Varchar(None, CharLengthUnits::Characters),
                 LogicalType::Decimal(None, None),
-                &utf8("12.34"),
+                utf8("12.34"),
             )?,
             DataValue::Decimal(Decimal::new(1234, 2))
         );
@@ -1765,7 +1934,7 @@ mod test {
             cast_eval(
                 LogicalType::Date,
                 LogicalType::Char(10, CharLengthUnits::Characters),
-                &date,
+                date.clone(),
             )?,
             DataValue::Utf8 {
                 value: "2024-01-02".to_string(),
@@ -1777,7 +1946,7 @@ mod test {
             cast_eval(
                 LogicalType::Date,
                 LogicalType::Varchar(Some(10), CharLengthUnits::Characters),
-                &date,
+                date.clone(),
             )?,
             DataValue::Utf8 {
                 value: "2024-01-02".to_string(),
@@ -1786,7 +1955,7 @@ mod test {
             }
         );
         assert!(matches!(
-            cast_eval(LogicalType::Date, LogicalType::DateTime, &date)?,
+            cast_eval(LogicalType::Date, LogicalType::DateTime, date.clone())?,
             DataValue::Date64(_)
         ));
 
@@ -1799,14 +1968,14 @@ mod test {
                 .timestamp(),
         );
         assert_eq!(
-            cast_eval(LogicalType::DateTime, LogicalType::Date, &datetime)?,
+            cast_eval(LogicalType::DateTime, LogicalType::Date, datetime.clone())?,
             date
         );
         assert_eq!(
             cast_eval(
                 LogicalType::DateTime,
                 LogicalType::Char(19, CharLengthUnits::Characters),
-                &datetime,
+                datetime.clone(),
             )?,
             DataValue::Utf8 {
                 value: "2024-01-02 03:04:05".to_string(),
@@ -1818,7 +1987,7 @@ mod test {
             cast_eval(
                 LogicalType::DateTime,
                 LogicalType::Varchar(Some(19), CharLengthUnits::Characters),
-                &datetime,
+                datetime.clone(),
             )?,
             DataValue::Utf8 {
                 value: "2024-01-02 03:04:05".to_string(),
@@ -1827,14 +1996,18 @@ mod test {
             }
         );
         assert!(matches!(
-            cast_eval(LogicalType::DateTime, LogicalType::Time(Some(0)), &datetime)?,
+            cast_eval(
+                LogicalType::DateTime,
+                LogicalType::Time(Some(0)),
+                datetime.clone()
+            )?,
             DataValue::Time32(_, 0)
         ));
         assert!(matches!(
             cast_eval(
                 LogicalType::DateTime,
                 LogicalType::TimeStamp(Some(0), false),
-                &datetime,
+                datetime.clone(),
             )?,
             DataValue::Time64(_, 0, false)
         ));
@@ -1853,7 +2026,7 @@ mod test {
             cast_eval(
                 LogicalType::TimeStamp(Some(3), false),
                 LogicalType::Date,
-                &timestamp
+                timestamp.clone()
             )?,
             date
         );
@@ -1861,10 +2034,42 @@ mod test {
             cast_eval(
                 LogicalType::TimeStamp(Some(3), false),
                 LogicalType::Time(Some(3)),
-                &timestamp,
+                timestamp.clone(),
             )?,
             DataValue::Time32(_, 3)
         ));
+        assert_eq!(
+            cast_eval(
+                LogicalType::Date,
+                LogicalType::Varbinary(None),
+                date.clone()
+            )?,
+            DataValue::from(b"2024-01-02".to_vec())
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::DateTime,
+                LogicalType::Varbinary(None),
+                datetime.clone()
+            )?,
+            DataValue::from(b"2024-01-02 03:04:05".to_vec())
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::TimeStamp(Some(3), false),
+                LogicalType::Varbinary(None),
+                timestamp.clone()
+            )?,
+            DataValue::from(b"2024-01-02 03:04:05.123".to_vec())
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Time(Some(0)),
+                LogicalType::Varbinary(None),
+                DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
+            )?,
+            DataValue::from(b"03:04:05".to_vec())
+        );
         let DataValue::Time64(timestamp_value, ..) = &timestamp else {
             unreachable!("timestamp fixture must be Time64")
         };
@@ -1872,7 +2077,7 @@ mod test {
             cast_eval(
                 LogicalType::TimeStamp(Some(3), false),
                 LogicalType::TimeStamp(Some(3), true),
-                &timestamp,
+                timestamp.clone(),
             )?,
             DataValue::Time64(*timestamp_value, 3, true)
         );
@@ -1880,7 +2085,7 @@ mod test {
             cast_eval(
                 LogicalType::Time(Some(0)),
                 LogicalType::Char(8, CharLengthUnits::Characters),
-                &DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0),
+                DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0),
             )?,
             DataValue::Utf8 {
                 value: "03:04:05".to_string(),
@@ -1892,7 +2097,7 @@ mod test {
             cast_eval(
                 LogicalType::Time(Some(0)),
                 LogicalType::Varchar(Some(8), CharLengthUnits::Characters),
-                &DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0),
+                DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0),
             )?,
             DataValue::Utf8 {
                 value: "03:04:05".to_string(),
@@ -1904,7 +2109,7 @@ mod test {
             cast_eval(
                 LogicalType::TimeStamp(Some(3), false),
                 LogicalType::Char(23, CharLengthUnits::Characters),
-                &timestamp,
+                timestamp.clone(),
             )?,
             DataValue::Utf8 {
                 value: "2024-01-02 03:04:05.123".to_string(),
@@ -1916,7 +2121,7 @@ mod test {
             cast_eval(
                 LogicalType::TimeStamp(Some(3), false),
                 LogicalType::Varchar(Some(23), CharLengthUnits::Characters),
-                &timestamp,
+                timestamp.clone(),
             )?,
             DataValue::Utf8 {
                 value: "2024-01-02 03:04:05.123".to_string(),
@@ -1931,6 +2136,40 @@ mod test {
     #[test]
     fn test_cast_create_dispatches_tuple_and_rejects_unsupported_casts() -> Result<(), DatabaseError>
     {
+        assert!(create(
+            LogicalType::Tuple(vec![LogicalType::Integer]),
+            LogicalType::Varbinary(None)
+        )
+        .is_err());
+        assert!(create(LogicalType::Varbinary(None), LogicalType::Bigint).is_err());
+        let bytes = vec![0, 255];
+        let buffer = bytes.as_ptr();
+        let binary = create(
+            LogicalType::Varbinary(None),
+            LogicalType::Varbinary(Some(2)),
+        )?
+        .eval(DataValue::from(bytes))?;
+        assert_eq!(binary.binary().unwrap().as_ptr(), buffer);
+        assert_eq!(
+            binary.clone().cast(&LogicalType::Varbinary(Some(2)))?,
+            DataValue::Binary {
+                value: vec![0, 255],
+                len: Some(2)
+            }
+        );
+        assert_eq!(
+            cast_eval(
+                LogicalType::Varbinary(None),
+                LogicalType::Varbinary(Some(2)),
+                DataValue::Null
+            )?,
+            DataValue::Null
+        );
+        assert!(matches!(
+            binary.cast(&LogicalType::Varbinary(Some(1))),
+            Err(DatabaseError::TooLong)
+        ));
+
         let tuple = DataValue::Tuple(vec![DataValue::Int32(1), utf8("2")]);
         assert_eq!(
             cast_eval(
@@ -1939,7 +2178,7 @@ mod test {
                     LogicalType::Varchar(None, CharLengthUnits::Characters),
                 ]),
                 LogicalType::Tuple(vec![LogicalType::Bigint, LogicalType::Integer]),
-                &tuple,
+                tuple.clone(),
             )?,
             DataValue::Tuple(vec![DataValue::Int64(1), DataValue::Int32(2)])
         );
@@ -1956,7 +2195,7 @@ mod test {
             Err(DatabaseError::CastFail { .. })
         ));
         assert_eq!(
-            create(LogicalType::Integer, LogicalType::Integer)?.eval(&DataValue::Int32(1))?,
+            create(LogicalType::Integer, LogicalType::Integer)?.eval(DataValue::Int32(1))?,
             DataValue::Int32(1)
         );
 
@@ -1970,7 +2209,7 @@ mod test {
             cast_eval(
                 LogicalType::Float,
                 LogicalType::Decimal(Some(4), Some(2)),
-                &DataValue::Float32(OrderedFloat(f32::NAN)),
+                DataValue::Float32(OrderedFloat(f32::NAN)),
             ),
             Err(DatabaseError::CastFail { .. })
         ));
@@ -1978,7 +2217,7 @@ mod test {
             cast_eval(
                 LogicalType::Double,
                 LogicalType::Decimal(Some(4), Some(2)),
-                &DataValue::Float64(OrderedFloat(f64::NAN)),
+                DataValue::Float64(OrderedFloat(f64::NAN)),
             ),
             Err(DatabaseError::CastFail { .. })
         ));
@@ -1987,6 +2226,14 @@ mod test {
     #[cfg(feature = "decimal")]
     #[test]
     fn test_cast_create_dispatches_decimal_casts() -> Result<(), DatabaseError> {
+        assert_eq!(
+            cast_eval(
+                LogicalType::Decimal(None, Some(2)),
+                LogicalType::Varbinary(None),
+                DataValue::Decimal(Decimal::new(125, 2))
+            )?,
+            DataValue::from(b"1.25".to_vec())
+        );
         let value = DataValue::Decimal(Decimal::new(125, 1));
         let cases = vec![
             (LogicalType::Float, DataValue::Float32(OrderedFloat(12.5))),
@@ -2023,7 +2270,7 @@ mod test {
 
         for (to, expected) in cases {
             assert_eq!(
-                cast_eval(LogicalType::Decimal(None, None), to, &value)?,
+                cast_eval(LogicalType::Decimal(None, None), to, value.clone())?,
                 expected
             );
         }

@@ -15,6 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::BinaryOperator;
 use crate::types::evaluator::boolean::*;
+use crate::types::evaluator::bytes::*;
 #[cfg(feature = "time")]
 use crate::types::evaluator::date::*;
 #[cfg(feature = "time")]
@@ -133,6 +134,7 @@ const BINARY_BOOLEAN_BASE: u16 = BINARY_TIME64_BASE + TIMESTAMP_OPS_LEN;
 const BINARY_UTF8_BASE: u16 = BINARY_BOOLEAN_BASE + BOOLEAN_OPS_LEN;
 const BINARY_SQL_NULL: u16 = BINARY_UTF8_BASE + UTF8_OPS_LEN;
 const BINARY_TUPLE_BASE: u16 = BINARY_SQL_NULL + SQL_NULL_OPS_LEN;
+const BINARY_BYTES_BASE: u16 = BINARY_TUPLE_BASE + TUPLE_LT_EQ_OFFSET + 1;
 
 // Evaluator positions are serialized ABI. Do not reorder or reuse existing
 // positions; only append new positions at the end of the current layout.
@@ -181,6 +183,21 @@ pub fn binary_create(
 ) -> Result<BinaryEvaluatorRef, DatabaseError> {
     let ty = ty.as_ref();
     match ty {
+        LogicalType::Varbinary(_) => match op {
+            BinaryOperator::Eq => unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_EQ_OFFSET)),
+            BinaryOperator::NotEq => {
+                unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_NOT_EQ_OFFSET))
+            }
+            BinaryOperator::Gt => unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_GT_OFFSET)),
+            BinaryOperator::GtEq => {
+                unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_GT_EQ_OFFSET))
+            }
+            BinaryOperator::Lt => unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_LT_OFFSET)),
+            BinaryOperator::LtEq => {
+                unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_LT_EQ_OFFSET))
+            }
+            _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
+        },
         LogicalType::Tinyint => numeric_binary_ref(BINARY_INT8_BASE, ty, op),
         LogicalType::Smallint => numeric_binary_ref(BINARY_INT16_BASE, ty, op),
         LogicalType::Integer => numeric_binary_ref(BINARY_INT32_BASE, ty, op),
@@ -338,9 +355,13 @@ macro_rules! eval_numeric_binary {
 pub(crate) fn eval_binary(
     pos: u16,
     params: &BinaryEvaluatorParams,
-    left: &crate::types::value::DataValue,
+    left: Cow<'_, crate::types::value::DataValue>,
     right: &crate::types::value::DataValue,
 ) -> Result<crate::types::value::DataValue, DatabaseError> {
+    if pos == binary_pos(BINARY_UTF8_BASE, UTF8_STRING_CONCAT_OFFSET) {
+        return utf8_string_concat_binary_eval(left.into_owned(), right);
+    }
+    let left = left.as_ref();
     match pos {
         BINARY_INT8_BASE..BINARY_INT16_BASE => {
             eval_numeric_binary!(pos, BINARY_INT8_BASE, Int8, left, right)
@@ -478,9 +499,6 @@ pub(crate) fn eval_binary(
         x if x == binary_pos(BINARY_UTF8_BASE, UTF8_NOT_EQ_OFFSET) => {
             utf8_not_eq_binary_eval(left, right)
         }
-        x if x == binary_pos(BINARY_UTF8_BASE, UTF8_STRING_CONCAT_OFFSET) => {
-            utf8_string_concat_binary_eval(left, right)
-        }
         x if x == binary_pos(BINARY_UTF8_BASE, UTF8_LIKE_OFFSET) => {
             let BinaryEvaluatorParams::Like { escape_char } = params else {
                 unreachable!()
@@ -511,6 +529,24 @@ pub(crate) fn eval_binary(
         }
         x if x == binary_pos(BINARY_TUPLE_BASE, TUPLE_LT_EQ_OFFSET) => {
             tuple_lt_eq_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_EQ_OFFSET) => {
+            bytes_eq_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_NOT_EQ_OFFSET) => {
+            bytes_not_eq_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_GT_OFFSET) => {
+            bytes_gt_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_GT_EQ_OFFSET) => {
+            bytes_gt_eq_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_LT_OFFSET) => {
+            bytes_lt_binary_eval(left, right)
+        }
+        x if x == binary_pos(BINARY_BYTES_BASE, TUPLE_LT_EQ_OFFSET) => {
+            bytes_lt_eq_binary_eval(left, right)
         }
         _ => unreachable!("unknown binary evaluator position {pos}"),
     }
@@ -690,7 +726,7 @@ mod test {
         left: &DataValue,
         right: &DataValue,
     ) -> Result<DataValue, DatabaseError> {
-        create(ty, op)?.binary_eval(left, right)
+        create(ty, op)?.binary_eval(Cow::Borrowed(left), right)
     }
 
     fn assert_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
@@ -700,7 +736,7 @@ mod test {
     fn assert_binary_ref_panics(pos: u16, params: BinaryEvaluatorParams, value: &DataValue) {
         assert_panics(|| {
             let evaluator = BinaryEvaluatorRef::new(pos, params);
-            let _ = evaluator.binary_eval(value, value).unwrap();
+            let _ = evaluator.binary_eval(Cow::Borrowed(value), value).unwrap();
         });
     }
 
@@ -733,21 +769,29 @@ mod test {
                 let divide = binary_create(Cow::Owned($ty), BinaryOperator::Divide)?;
                 for (left, right, expected) in [(5, 2, 2), (-5, 2, -2), (5, -2, -2), (-5, -2, 2)] {
                     assert_eq!(
-                        divide
-                            .binary_eval(&DataValue::$variant(left), &DataValue::$variant(right))?,
+                        divide.binary_eval(
+                            Cow::Borrowed(&DataValue::$variant(left)),
+                            &DataValue::$variant(right)
+                        )?,
                         DataValue::$variant(expected)
                     );
                 }
                 assert!(matches!(
-                    divide.binary_eval(&DataValue::$variant(<$int>::MIN), &DataValue::$variant(-1)),
+                    divide.binary_eval(
+                        Cow::Borrowed(&DataValue::$variant(<$int>::MIN)),
+                        &DataValue::$variant(-1)
+                    ),
                     Err(DatabaseError::OverFlow)
                 ));
                 assert!(matches!(
-                    divide.binary_eval(&DataValue::$variant(1), &DataValue::$variant(0)),
+                    divide.binary_eval(
+                        Cow::Borrowed(&DataValue::$variant(1)),
+                        &DataValue::$variant(0)
+                    ),
                     Err(DatabaseError::InvalidValue(_))
                 ));
                 assert_eq!(
-                    divide.binary_eval(&DataValue::Null, &DataValue::$variant(0))?,
+                    divide.binary_eval(Cow::Borrowed(&DataValue::Null), &DataValue::$variant(0))?,
                     DataValue::Null
                 );
             }};
@@ -783,9 +827,9 @@ mod test {
             ),
         ] {
             let divide = binary_create(Cow::Owned(ty), BinaryOperator::Divide)?;
-            assert_eq!(divide.binary_eval(&left, &right)?, expected);
+            assert_eq!(divide.binary_eval(Cow::Borrowed(&left), &right)?, expected);
             assert_eq!(
-                divide.binary_eval(&left, &DataValue::Null)?,
+                divide.binary_eval(Cow::Borrowed(&left), &DataValue::Null)?,
                 DataValue::Null
             );
         }
@@ -986,7 +1030,7 @@ mod test {
         assert_panics(|| {
             let evaluator = BinaryEvaluatorRef::new(u16::MAX, BinaryEvaluatorParams::Unit);
             let _ = evaluator
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))
+                .binary_eval(Cow::Borrowed(&DataValue::Int32(1)), &DataValue::Int32(1))
                 .unwrap();
         });
     }

@@ -20,10 +20,10 @@ use crate::types::evaluator::DataValue;
 pub fn null_binary_eval(_: &DataValue, _: &DataValue) -> Result<DataValue, DatabaseError> {
     Ok(DataValue::Null)
 }
-pub fn to_sql_null_cast_eval(_value: &DataValue) -> Result<DataValue, DatabaseError> {
+pub fn to_sql_null_cast_eval(_value: DataValue) -> Result<DataValue, DatabaseError> {
     Ok(DataValue::Null)
 }
-pub fn null_cast_eval(_value: &DataValue) -> Result<DataValue, DatabaseError> {
+pub fn null_cast_eval(_value: DataValue) -> Result<DataValue, DatabaseError> {
     Ok(DataValue::Null)
 }
 
@@ -35,10 +35,10 @@ mod test {
     #[test]
     fn test_null_cast_evaluators() {
         assert_eq!(
-            to_sql_null_cast_eval(&DataValue::Int32(1)).unwrap(),
+            to_sql_null_cast_eval(DataValue::Int32(1)).unwrap(),
             DataValue::Null
         );
-        assert_eq!(null_cast_eval(&DataValue::Null).unwrap(), DataValue::Null);
+        assert_eq!(null_cast_eval(DataValue::Null).unwrap(), DataValue::Null);
     }
 }
 // GRCOV_EXCL_STOP

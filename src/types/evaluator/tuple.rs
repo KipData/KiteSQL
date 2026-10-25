@@ -102,14 +102,14 @@ tuple_order_binary!(tuple_lt_eq_binary_eval, is_le);
 
 pub(crate) fn eval_tuple_cast(
     element_evaluators: &[CastEvaluatorRef],
-    value: &DataValue,
+    value: DataValue,
 ) -> Result<DataValue, DatabaseError> {
     match value {
         DataValue::Null => Ok(DataValue::Null),
         DataValue::Tuple(values) => {
             let mut casted = Vec::with_capacity(values.len());
 
-            for (value, evaluator) in values.iter().zip(element_evaluators.iter()) {
+            for (value, evaluator) in values.into_iter().zip(element_evaluators.iter()) {
                 casted.push(evaluator.eval(value)?);
             }
 
@@ -207,7 +207,7 @@ mod test {
 
         assert_eq!(
             evaluator
-                .eval(&DataValue::Tuple(vec![
+                .eval(DataValue::Tuple(vec![
                     DataValue::Int32(1),
                     DataValue::Utf8 {
                         value: "2".to_string(),
@@ -218,7 +218,7 @@ mod test {
                 .unwrap(),
             DataValue::Tuple(vec![DataValue::Int64(1), DataValue::Int32(2)])
         );
-        assert_eq!(evaluator.eval(&DataValue::Null).unwrap(), DataValue::Null);
+        assert_eq!(evaluator.eval(DataValue::Null).unwrap(), DataValue::Null);
     }
 }
 // GRCOV_EXCL_STOP

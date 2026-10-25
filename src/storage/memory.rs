@@ -211,6 +211,7 @@ impl Transaction for MemoryTransaction {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, target_arch = "wasm32", feature = "wasm"))]
 mod wasm_tests {
     use super::*;
@@ -521,3 +522,4 @@ mod native_tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

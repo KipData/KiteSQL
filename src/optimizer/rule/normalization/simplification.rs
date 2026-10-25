@@ -103,6 +103,7 @@ impl NormalizationRule for SimplifyFilter {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::binder::test::build_t1_table;
@@ -687,3 +688,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

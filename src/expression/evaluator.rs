@@ -1,5 +1,7 @@
+// GRCOV_EXCL_START
 #[cfg(test)]
 use crate::planner::PlanArena;
+// GRCOV_EXCL_STOP
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -82,7 +84,7 @@ impl ScalarExpression {
             } => {
                 let value = arena.expression(*expr).eval(arena, tuple)?;
                 if let Some(evaluator) = evaluator {
-                    evaluator.eval(&value).map(Cow::Owned)
+                    evaluator.eval(value.into_owned()).map(Cow::Owned)
                 } else {
                     Ok(value)
                 }
@@ -107,7 +109,7 @@ impl ScalarExpression {
                 evaluator
                     .as_ref()
                     .ok_or(DatabaseError::EvaluatorNotFound)?
-                    .binary_eval(&left, &right)
+                    .binary_eval(left, &right)
                     .map(Cow::Owned)
             }
             ScalarExpression::IsNull { expr, negated } => {
@@ -132,7 +134,7 @@ impl ScalarExpression {
                 let mut saw_null = false;
                 for arg in args {
                     let arg_value = arena.expression(*arg).eval(arena, tuple)?;
-                    match eq.binary_eval(&value, &arg_value)? {
+                    match eq.binary_eval(Cow::Borrowed(&value), &arg_value)? {
                         DataValue::Boolean(true) => {
                             return Ok(Cow::Owned(DataValue::Boolean(!negated)))
                         }
@@ -177,11 +179,11 @@ impl ScalarExpression {
                 let ge = left_evaluator
                     .as_ref()
                     .ok_or(DatabaseError::EvaluatorNotFound)?
-                    .binary_eval(&value, &left)?;
+                    .binary_eval(Cow::Borrowed(&value), &left)?;
                 let le = right_evaluator
                     .as_ref()
                     .ok_or(DatabaseError::EvaluatorNotFound)?
-                    .binary_eval(&value, &right)?;
+                    .binary_eval(Cow::Borrowed(&value), &right)?;
                 let is_between = match (ge, le) {
                     (DataValue::Boolean(false), _) | (_, DataValue::Boolean(false)) => false,
                     (DataValue::Boolean(true), DataValue::Boolean(true)) => true,
@@ -352,7 +354,7 @@ impl ScalarExpression {
                         when_value = cast_cow(when_value, &ty)?;
                         let evaluator = binary_create(Cow::Owned(ty), BinaryOperator::Eq)?;
                         evaluator
-                            .binary_eval(operand_value, &when_value)?
+                            .binary_eval(Cow::Borrowed(operand_value), &when_value)?
                             .is_true()?
                     } else {
                         when_value.is_true()?
@@ -413,6 +415,7 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
     trimmed.to_string()
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,3 +664,4 @@ mod tests {
         assert_eq!(trim_string("hello", "", None), "hello");
     }
 }
+// GRCOV_EXCL_STOP

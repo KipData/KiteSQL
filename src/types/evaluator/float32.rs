@@ -125,47 +125,47 @@ mod test {
         let value = DataValue::Float32(OrderedFloat(1.5));
 
         assert_eq!(
-            float32_to_float_cast_eval(&value).unwrap(),
+            float32_to_float_cast_eval(value.clone()).unwrap(),
             DataValue::Float32(OrderedFloat(1.5))
         );
         assert_eq!(
-            float32_to_double_cast_eval(&value).unwrap(),
+            float32_to_double_cast_eval(value.clone()).unwrap(),
             DataValue::Float64(OrderedFloat(1.5))
         );
         assert_eq!(
-            float32_to_tinyint_cast_eval(&value).unwrap(),
+            float32_to_tinyint_cast_eval(value.clone()).unwrap(),
             DataValue::Int8(1)
         );
         assert_eq!(
-            float32_to_smallint_cast_eval(&value).unwrap(),
+            float32_to_smallint_cast_eval(value.clone()).unwrap(),
             DataValue::Int16(1)
         );
         assert_eq!(
-            float32_to_integer_cast_eval(&value).unwrap(),
+            float32_to_integer_cast_eval(value.clone()).unwrap(),
             DataValue::Int32(1)
         );
         assert_eq!(
-            float32_to_bigint_cast_eval(&value).unwrap(),
+            float32_to_bigint_cast_eval(value.clone()).unwrap(),
             DataValue::Int64(1)
         );
         assert_eq!(
-            float32_to_utinyint_cast_eval(&value).unwrap(),
+            float32_to_utinyint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt8(1)
         );
         assert_eq!(
-            float32_to_usmallint_cast_eval(&value).unwrap(),
+            float32_to_usmallint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt16(1)
         );
         assert_eq!(
-            float32_to_uinteger_cast_eval(&value).unwrap(),
+            float32_to_uinteger_cast_eval(value.clone()).unwrap(),
             DataValue::UInt32(1)
         );
         assert_eq!(
-            float32_to_ubigint_cast_eval(&value).unwrap(),
+            float32_to_ubigint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt64(1)
         );
         assert_eq!(
-            float32_to_char_cast_eval(3, CharLengthUnits::Characters, &value).unwrap(),
+            float32_to_char_cast_eval(3, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
                 value: "1.5".to_string(),
                 ty: Utf8Type::Fixed(3),
@@ -173,7 +173,8 @@ mod test {
             }
         );
         assert_eq!(
-            float32_to_varchar_cast_eval(Some(3), CharLengthUnits::Characters, &value).unwrap(),
+            float32_to_varchar_cast_eval(Some(3), CharLengthUnits::Characters, value.clone())
+                .unwrap(),
             DataValue::Utf8 {
                 value: "1.5".to_string(),
                 ty: Utf8Type::Variable(Some(3)),
@@ -182,7 +183,7 @@ mod test {
         );
         #[cfg(feature = "decimal")]
         assert_eq!(
-            float32_to_decimal_cast_eval(None, Some(1), &value).unwrap(),
+            float32_to_decimal_cast_eval(None, Some(1), value.clone()).unwrap(),
             DataValue::Decimal(Decimal::new(15, 1))
         );
     }

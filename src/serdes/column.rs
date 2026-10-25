@@ -128,6 +128,7 @@ impl ReferenceSerialization for ColumnRelation {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::catalog::{
@@ -336,3 +337,4 @@ pub(crate) mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

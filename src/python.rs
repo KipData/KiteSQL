@@ -25,7 +25,7 @@ use crate::types::tuple::{SchemaView, Tuple};
 use crate::types::value::DataValue;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyModule};
+use pyo3::types::{PyBytes, PyDict, PyList, PyModule};
 
 fn to_py_err(err: impl ToString) -> PyErr {
     PyRuntimeError::new_err(err.to_string())
@@ -51,6 +51,7 @@ fn data_value_to_py(py: Python<'_>, value: &DataValue) -> PyResult<PyObject> {
         DataValue::UInt16(value) => value.into_py(py),
         DataValue::UInt32(value) => value.into_py(py),
         DataValue::UInt64(value) => value.into_py(py),
+        DataValue::Binary { value, .. } => PyBytes::new(py, value).into_any().unbind(),
         DataValue::Utf8 { value, .. } => value.clone().into_py(py),
         DataValue::Date32(_)
         | DataValue::Date64(_)
@@ -353,6 +354,7 @@ fn kite_sql(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::kite_sql;
@@ -449,6 +451,12 @@ stream.finish()
 assert streamed == [[0, 0], [1, 11]]
 
 db.ddl("drop table my_struct")
+db.ddl("create table binary_rows (id int primary key, b varbinary(4))")
+db.execute("insert into binary_rows values (1,x'00ff'),(2,x''),(3,null)")
+assert [row["values"] for row in db.run("select b from binary_rows order by id").rows()] == [
+    [b'\x00\xff'], [b''], [None],
+]
+db.ddl("drop table binary_rows")
 "#
                 ),
             )?;
@@ -582,3 +590,4 @@ except ValueError as exc:
         })
     }
 }
+// GRCOV_EXCL_STOP
