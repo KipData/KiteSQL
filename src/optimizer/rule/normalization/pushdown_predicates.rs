@@ -83,9 +83,15 @@ fn classify_join_filters(
     let mut right_filter = None;
     let mut common_filter = None;
     split_conjunctive_predicates(predicate, arena, &mut |expr, arena| {
-        if expr.all_referenced_columns(arena, |_, column| left_columns.contains(column))? {
+        let (mut left, mut right) = (true, true);
+        expr.all_referenced_columns(arena, |_, column| {
+            left = left && left_columns.contains(column);
+            right = right && right_columns.contains(column);
+            left || right
+        })?;
+        if left {
             append_filter(&mut left_filter, expr, arena);
-        } else if expr.all_referenced_columns(arena, |_, column| right_columns.contains(column))? {
+        } else if right {
             append_filter(&mut right_filter, expr, arena);
         } else {
             append_filter(&mut common_filter, expr, arena);
@@ -645,6 +651,64 @@ mod tests {
             evaluator: None,
             ty: LogicalType::Boolean,
         })
+    }
+
+    #[test]
+    fn single_pass_filter_classification_preserves_reference_semantics() -> Result<(), DatabaseError>
+    {
+        use crate::expression::AliasType;
+        use crate::planner::operator::values::ValuesOperator;
+
+        let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let table: TableName = "classification".to_string().into();
+        let left_column = build_test_column(&mut arena, &table, 1, "left")?;
+        let right_column = build_test_column(&mut arena, &table, 2, "right")?;
+        let unknown_column = build_test_column(&mut arena, &table, 3, "unknown")?;
+        let left = cmp_predicate(&mut arena, BinaryOperator::Eq, left_column, 0, 1);
+        let right = cmp_predicate(&mut arena, BinaryOperator::Eq, right_column, 1, 1);
+        let unknown = cmp_predicate(&mut arena, BinaryOperator::Eq, unknown_column, 2, 1);
+        let common = arena.alloc_expression(ScalarExpression::Binary {
+            op: BinaryOperator::Or,
+            left_expr: left,
+            right_expr: right,
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        });
+        let constant = arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+        let alias = arena.alloc_expression(ScalarExpression::Alias {
+            expr: right,
+            alias: AliasType::Expr(left),
+        });
+        for right_columns in [vec![right_column], vec![left_column, right_column]] {
+            let mut children = Childrens::Twins {
+                left: Box::new(LogicalPlan::new(
+                    Operator::Values(ValuesOperator::new(Vec::new(), 0, vec![left_column])),
+                    Childrens::None,
+                )),
+                right: Box::new(LogicalPlan::new(
+                    Operator::Values(ValuesOperator::new(Vec::new(), 0, right_columns.clone())),
+                    Childrens::None,
+                )),
+            };
+            for expr in [left, right, unknown, common, constant, alias] {
+                let expected =
+                    if expr.all_referenced_columns(&arena, |_, column| *column == left_column)? {
+                        (Some(expr), None, None, 1)
+                    } else if expr.all_referenced_columns(&arena, |_, column| {
+                        right_columns.contains(column)
+                    })? {
+                        (None, Some(expr), None, 1)
+                    } else {
+                        (None, None, Some(expr), 1)
+                    };
+                assert_eq!(
+                    super::classify_join_filters(expr, &mut children, &mut arena)?,
+                    expected
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

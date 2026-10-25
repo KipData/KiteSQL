@@ -31,7 +31,7 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     ) -> Result<LogicalPlan, DatabaseError> {
         let source = self
             .context
-            .source_and_bind(table_name.clone(), None, None, false)?
+            .source_and_bind(table_name.clone(), None, None, false, arena)?
             .ok_or(DatabaseError::SourceNotFound)?;
         match source {
             Source::Table(table) => {

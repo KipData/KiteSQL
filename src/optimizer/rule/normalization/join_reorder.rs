@@ -143,13 +143,15 @@ fn project_join_output(
     plan
 }
 
-// Prefer equijoins, then fewer rows, then the original input order.
+// Prefer equijoins, then less intermediate/build data, then the original input order.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct JoinCandidate {
     cross_join: bool,
+    work: u128,
     rows: usize,
     left: usize,
     right: usize,
+    swapped: bool,
 }
 
 fn column_ndv<K: Borrow<(ExprRef, ExprRef)>>(
@@ -613,7 +615,7 @@ impl NormalizationRule for GreedyJoinReorder {
         {
             return Ok(false);
         }
-        let (input_count, cross_join) = region_shape(plan);
+        let (input_count, _) = region_shape(plan);
         if input_count > u64::BITS as usize {
             return Ok(false);
         }
@@ -621,12 +623,8 @@ impl NormalizationRule for GreedyJoinReorder {
         let mut schemas = Vec::new();
         let mut keys = JoinKeys::default();
         let estimated = inspect(plan, &mut schemas, &mut keys, arena, loader)?.is_some();
-        // Without row estimates the greedy order degrades to the heuristic
-        // "equijoins first, then input order", which only helps by deferring
-        // Cartesian products already present in the region.
-        if input_count < 3 || (!estimated && !cross_join) {
-            return Ok(false);
-        }
+        // Unknown row counts remain unknown; only column widths break their ties.
+        // Two-input regions also need to choose the smaller hash build side.
         // Each original column keeps its input bit and position within its current join.
         let mut positions = Vec::with_capacity(original_schema.len());
         for (input, schema) in schemas.iter().enumerate() {
@@ -676,15 +674,26 @@ impl NormalizationRule for GreedyJoinReorder {
                     row_cache.insert(cache_key, rows);
                     rows
                 };
-                // Edge order differs from input order: equal rows must reach the tie-breaker.
-                if best.is_some_and(|previous| product > previous.rows) {
-                    return Ok(());
-                }
+                let left_width = left.output_schema(arena).len() as u128;
+                let right_width = right.output_schema(arena).len() as u128;
+                let left_size = if estimated { *left_rows as u128 } else { 1 } * left_width;
+                let right_size = if estimated { *right_rows as u128 } else { 1 } * right_width;
+                // HashJoin builds on the left. Count intermediate values and saved build values,
+                // not just output rows; use widths alone when cardinalities are unavailable.
+                let work = (if estimated { product as u128 } else { 1 })
+                    .saturating_mul(left_width + right_width)
+                    .saturating_add(if connected {
+                        left_size.min(right_size)
+                    } else {
+                        0
+                    });
                 let candidate = JoinCandidate {
                     cross_join: !connected,
+                    work,
                     rows: product,
                     left: i,
                     right: j,
+                    swapped: connected && right_size < left_size,
                 };
                 if best.is_none_or(|previous| candidate < previous) {
                     best = Some(candidate);
@@ -719,13 +728,19 @@ impl NormalizationRule for GreedyJoinReorder {
                 rows: product,
                 left: i,
                 right: j,
+                swapped,
                 ..
             }) = best
             else {
                 return Ok(false);
             };
-            let (mut right, _, right_mask) = inputs.remove(j);
-            let (mut left, _, left_mask) = inputs.remove(i);
+            let mut right = inputs.remove(j);
+            let mut left = inputs.remove(i);
+            if swapped {
+                swap(&mut left, &mut right);
+            }
+            let (mut left, _, left_mask) = left;
+            let (mut right, _, right_mask) = right;
             let left_schema = left.output_schema(arena);
             let right_schema = right.output_schema(arena);
             for (input, position) in &mut positions {

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -39,46 +38,6 @@ macro_rules! try_default {
 }
 
 impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> {
-    fn find_column_in_schema<'schema>(
-        schema_ref: impl IntoIterator<Item = &'schema ColumnRef>,
-        arena: &PlanArena,
-        column_name: &str,
-    ) -> Option<(usize, ColumnRef)> {
-        schema_ref
-            .into_iter()
-            .enumerate()
-            .find(|(_, column)| arena.column(**column).name() == column_name)
-            .map(|(position, column)| (position, *column))
-    }
-
-    fn find_column_in_scope(
-        context: &BinderContext<'a, T>,
-        arena: &PlanArena,
-        column_name: &str,
-    ) -> Result<Option<ScalarExpression>, DatabaseError> {
-        let mut position_offset = 0;
-        let mut found = None;
-
-        for bound_source in &context.bind_table {
-            let source = &bound_source.source;
-
-            if let Some((position, column)) =
-                Self::find_column_in_schema(source.schema().iter(), arena, column_name)
-            {
-                if found.is_some() {
-                    return Err(DatabaseError::AmbiguousColumn(column_name.to_string()));
-                }
-                found = Some(ScalarExpression::column_expr(
-                    column,
-                    position_offset + position,
-                ));
-            }
-
-            position_offset += source.schema_len();
-        }
-
-        Ok(found)
-    }
     pub(crate) fn bind_temp_table(
         &mut self,
         expr: ScalarExpression,
@@ -369,7 +328,7 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             {
                 let input = match self.context.using.get(column_name) {
                     Some(column) => Some(column.visible_expr(arena)?),
-                    None => Self::find_column_in_scope(&self.context, arena, column_name)?,
+                    None => self.context.resolve_column(column_name, None, arena)?,
                 };
                 if let Some(input) = input {
                     return Ok(input);
@@ -395,24 +354,20 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
         }
         if let Some(table) = table_name.or(bind_table_name) {
             let mut is_outer = false;
-            let (source, position_offset) =
-                match Self::resolve_source_columns_in_scope(&self.context, table) {
-                    Ok(source) => source,
-                    Err(err) => {
-                        if let Some(parent) = self.parent {
-                            self.context.mark_join_outer_ref();
-                            is_outer = true;
-                            Self::resolve_source_columns_in_scope(parent, table).map_err(|_| err)?
-                        } else {
-                            return Err(err);
-                        }
+            let expr = match self.context.resolve_column(column_name, Some(table), arena) {
+                Ok(expr) => expr,
+                Err(err @ DatabaseError::InvalidTable { .. }) => {
+                    if let Some(parent) = self.parent {
+                        self.context.mark_join_outer_ref();
+                        is_outer = true;
+                        parent.resolve_column(column_name, Some(table), arena)?
+                    } else {
+                        return Err(err);
                     }
-                };
-            let (position, column) =
-                Self::find_column_in_schema(source.schema().iter(), arena, column_name)
-                    .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
-
-            let expr = ScalarExpression::column_expr(column, position_offset + position);
+                }
+                Err(err) => return Err(err),
+            }
+            .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
             if is_outer && self.context.capture_scalar_outer {
                 return self.capture_scalar_outer(expr, arena);
             }
@@ -423,7 +378,7 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
                 |context: &BinderContext<'a, T>| -> Result<Option<ScalarExpression>, DatabaseError> {
                     match context.using.get(column_name) {
                         Some(using_column) => using_column.visible_expr(arena).map(Some),
-                        None => Self::find_column_in_scope(context, arena, column_name),
+                        None => context.resolve_column(column_name, None, arena),
                     }
                 };
             let mut got_column = find_visible_column(&self.context)?;

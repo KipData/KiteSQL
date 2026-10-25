@@ -40,26 +40,28 @@ impl JoinProbeState for InnerJoinState {
         };
 
         while probe_state.index < build_state.tuples.len() {
-            let (_, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
+            let (_, build_tuple) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
-
             if let Some(filter_expr) = filter_expr {
-                let full_values =
-                    SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
+                let full_values = SplitTupleRef::new(build_tuple, &probe_state.probe_tuple);
                 if !filter(&full_values, filter_expr, plan_arena)? {
                     continue;
                 }
             }
-            let full_values = Vec::from_iter(
-                values
-                    .iter()
-                    .chain(probe_state.probe_tuple.values.iter())
-                    .cloned(),
-            );
-            return Ok(Some(Tuple::new(
-                pk.as_ref().or(probe_state.probe_tuple.pk.as_ref()).cloned(),
-                full_values,
-            )));
+            let probe = &mut probe_state.probe_tuple;
+            let mut values = Vec::with_capacity(build_tuple.values.len() + probe.values.len());
+            values.extend_from_slice(&build_tuple.values);
+            let mut pk = build_tuple.pk.clone();
+            if probe_state.index == build_state.tuples.len() {
+                // No future match can read this probe row, so move its values and pk.
+                probe_state.finished = true;
+                values.append(&mut probe.values);
+                pk = pk.or(probe.pk.take());
+            } else {
+                values.extend_from_slice(&probe.values);
+                pk = pk.or_else(|| probe.pk.clone());
+            }
+            return Ok(Some(Tuple::new(pk, values)));
         }
 
         probe_state.finished = true;

@@ -30,7 +30,7 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     ) -> Result<LogicalPlan, DatabaseError> {
         let table = self
             .context
-            .source_and_bind(table_name.clone(), None, None, true)?
+            .source_and_bind(table_name.clone(), None, None, true, arena)?
             .and_then(|source| {
                 if let Source::Table(table) = source {
                     Some(table)

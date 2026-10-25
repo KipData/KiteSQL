@@ -2062,7 +2062,7 @@ where
                 bind_orm_source(&mut right_binder, source, Some(join_type), self.arena)?;
             (right_plan, right_binder.context)
         };
-        self.binder.extend(right_context);
+        self.binder.extend(right_context, self.arena);
         let on = with_query_bind_step!(self.binder, QueryBindStep::From, {
             let mut scope = self.expr_scope();
             let handle = scope.handle();
@@ -2699,7 +2699,7 @@ where
     let table_name: TableName = M::table_name().into();
     let source = binder
         .context
-        .source_and_bind(table_name.clone(), None, None, false)?
+        .source_and_bind(table_name.clone(), None, None, false, arena)?
         .ok_or(DatabaseError::TableNotFound)?;
     let params = params.into_iter().collect::<BTreeMap<_, _>>();
     let mut schema_ref = Vec::with_capacity(M::fields().len());

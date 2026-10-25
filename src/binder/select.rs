@@ -237,6 +237,11 @@ pub(crate) struct TableAliasInput {
     pub(crate) columns: Vec<String>,
 }
 
+pub(crate) enum AliasPurpose {
+    Source,
+    Output,
+}
+
 pub(crate) enum JoinConstraintInput {
     On(ExprRef),
     Using(Vec<String>),
@@ -275,7 +280,7 @@ where
         join_type: JoinType,
         constraint: JoinConstraintInput,
     ) -> Result<Self, DatabaseError> {
-        self.binder.extend(right_context);
+        self.binder.extend(right_context, self.arena);
         self.plan = self
             .binder
             .bind_join_plans(self.plan, right_plan, join_type, constraint, self.arena)?;
@@ -889,18 +894,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
     pub(crate) fn resolve_source_columns_in_scope<'context>(
         context: &'context BinderContext<'a, T>,
         table_name: &str,
+        arena: &PlanArena,
     ) -> Result<(&'context Source<'a>, usize), DatabaseError> {
-        let mut position_offset = 0;
-
-        for bound_source in &context.bind_table {
-            if bound_source.matches_name(table_name) {
-                return Ok((&bound_source.source, position_offset));
-            }
-
-            position_offset += bound_source.source.schema_len();
-        }
-
-        Err(DatabaseError::invalid_table(table_name))
+        context
+            .name_binding(table_name, None, arena)
+            .map(|binding| (&context.bind_table[binding.source].source, binding.position))
+            .ok_or_else(|| DatabaseError::invalid_table(table_name))
     }
 
     fn localize_join_condition_from_join_scope(
@@ -1116,6 +1115,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         alias_column: &[String],
         table_alias: TableName,
         table_name: TableName,
+        purpose: AliasPurpose,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let input_schema = plan.output_schema(arena);
@@ -1123,6 +1123,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         if !alias_column.is_empty() && alias_column.len() != input_schema_len {
             return Err(DatabaseError::MisMatch("alias", "columns"));
         }
+        let reused_source = match purpose {
+            AliasPurpose::Source => self
+                .context
+                .name_binding(&table_alias, None, arena)
+                .filter(|binding| binding.source < self.context.source_scope_start)
+                .map(|binding| binding.source),
+            AliasPurpose::Output => None,
+        };
         let mut alias_exprs = Vec::with_capacity(input_schema_len);
 
         for (position, column) in input_schema.iter().copied().enumerate() {
@@ -1131,20 +1139,22 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             } else {
                 alias_column[position].clone()
             };
-            let (mut alias_column, column_id, is_temp) = {
+            let alias_column = if let Some(source) = reused_source {
+                self.context.bind_table[source].source.schema()[position]
+            } else {
                 let source_column = arena.column(column);
-                (
-                    source_column.clone(),
+                let mut alias_column = source_column.clone();
+                alias_column.set_name(alias.clone());
+                alias_column.set_ref_table(
+                    table_alias.clone(),
                     source_column.id().unwrap_or_default(),
                     matches!(
                         &source_column.summary().relation,
                         ColumnRelation::Table { is_temp: true, .. }
                     ),
-                )
+                );
+                arena.alloc_column(alias_column)
             };
-            alias_column.set_name(alias.clone());
-            alias_column.set_ref_table(table_alias.clone(), column_id, is_temp);
-            let alias_column = arena.alloc_column(alias_column);
 
             let expr = arena.alloc_expression(ScalarExpression::column_expr(column, position));
             let alias_expr =
@@ -1206,7 +1216,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         let table_alias = alias.as_ref().map(|alias| alias.name.clone());
         self.context
             .ensure_unique_source_name(table_alias.as_ref().unwrap_or(&table_name))?;
-
         if let Some(plan_ref) = self.context.cte(&table_name).map(|cte| cte.plan_ref) {
             let mut plan = arena.plan(plan_ref).clone();
             OperatorExprVisitorMut::new(&mut ExprCloner, arena).visit_plan(&mut plan)?;
@@ -1216,6 +1225,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                     &alias.columns,
                     alias.name.clone(),
                     table_name.clone(),
+                    AliasPurpose::Source,
                     arena,
                 )?;
             }
@@ -1225,6 +1235,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 table_alias,
                 join_type,
                 Source::Schema(output_schema),
+                arena,
             );
             return Ok(plan);
         }
@@ -1232,9 +1243,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         let with_pk = self.is_scan_with_pk(&table_name);
         let source = self
             .context
-            .source_and_bind(table_name.clone(), table_alias.as_ref(), join_type, false)?
+            .source(&table_name)?
             .ok_or(DatabaseError::SourceNotFound)?;
-        let mut plan = match source {
+        let mut plan = match &source {
             Source::Table(table) => {
                 TableScanOperator::build(table_name.clone(), table, with_pk, arena)?
             }
@@ -1250,22 +1261,21 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             }
         };
 
-        if let Some(alias) = alias {
+        let source = if let Some(alias) = alias {
             plan = self.bind_alias(
                 plan,
                 &alias.columns,
-                alias.name.clone(),
+                alias.name,
                 table_name.clone(),
+                AliasPurpose::Source,
                 arena,
             )?;
-            let output_schema = plan.output_schema(arena).clone();
-            self.context.add_bound_source(
-                table_name,
-                Some(alias.name),
-                join_type,
-                Source::Schema(output_schema),
-            );
-        }
+            Source::Schema(plan.output_schema(arena).clone())
+        } else {
+            source
+        };
+        self.context
+            .add_bound_source(table_name, table_alias, join_type, source, arena);
         Ok(plan)
     }
 
@@ -1285,6 +1295,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 &alias.columns,
                 alias.name.clone(),
                 source_name.clone(),
+                AliasPurpose::Source,
                 arena,
             )?;
             let output_schema = plan.output_schema(arena).clone();
@@ -1293,6 +1304,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 Some(alias.name),
                 joint_type,
                 Source::Schema(output_schema),
+                arena,
             );
         } else {
             let passthrough_source = {
@@ -1322,6 +1334,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 None,
                 joint_type,
                 Source::Schema(output_schema),
+                arena,
             );
         }
 
@@ -1354,12 +1367,19 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         if let Some(alias) = alias {
             table_alias = Some(alias.name.clone());
 
-            plan = self.bind_alias(plan, &alias.columns, alias.name, table_name.clone(), arena)?;
+            plan = self.bind_alias(
+                plan,
+                &alias.columns,
+                alias.name,
+                table_name.clone(),
+                AliasPurpose::Source,
+                arena,
+            )?;
         }
 
         let source = Source::Schema(plan.output_schema(arena).clone());
         self.context
-            .add_bound_source(table_name, table_alias, joint_type, source);
+            .add_bound_source(table_name, table_alias, joint_type, source, arena);
         Ok(plan)
     }
 
@@ -1378,7 +1398,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         is_qualified_wildcard: bool,
     ) -> Result<(), DatabaseError> {
         let (source, position_offset) =
-            Self::resolve_source_columns_in_scope(context, table_name.as_ref())?;
+            Self::resolve_source_columns_in_scope(context, table_name.as_ref(), arena)?;
 
         let fn_not_on_using = |column: &ColumnRef, arena: &PlanArena<'_>| {
             let column_catalog = arena.column(*column);

@@ -422,6 +422,57 @@ select cast(-2147483649.0 as int);
 statement ok
 drop table alias_input;
 
+# Name lookup order is independent of FROM layout and wildcard expansion.
+statement ok
+create table scope_a(id int primary key, v int);
+
+statement ok
+create table scope_b(id int primary key, w int);
+
+statement ok
+create table scope_c(id int primary key, v int, z int);
+
+statement ok
+insert into scope_a values(1,10);
+
+statement ok
+insert into scope_b values(2,10);
+
+statement ok
+insert into scope_c values(1,20,30);
+
+query IIII
+select * from scope_a a join scope_b b on v=b.w;
+----
+1 10 2 10
+
+query IIII
+select b.*,a.* from scope_a a join scope_b b on v=b.w;
+----
+2 10 1 10
+
+query III
+select a.v,w,z from scope_a a join scope_b b on v=b.w join scope_c c on a.id=c.id;
+----
+10 10 30
+
+statement error is ambiguous
+select v from scope_a a join scope_b b on v=b.w join scope_c c on a.id=c.id;
+
+query III
+select w,(select w+z from scope_c where scope_c.id=a.id),(select v from scope_c where scope_c.id=a.id) from scope_a a join scope_b b on v=b.w;
+----
+10 40 20
+
+statement ok
+drop table scope_a;
+
+statement ok
+drop table scope_b;
+
+statement ok
+drop table scope_c;
+
 # Native point-list predicates cross the 5/6 expansion boundary. Repeat them
 # before and after index creation so range elimination agrees with full scans.
 statement ok

@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use super::select::{
-    BindPlanAggregated, BindPlanComplete, BindPlanDistinct, BindPlanFiltered, BindPlanFrom,
-    BindPlanProjected, BindPlanSelectList, BindPlanStart, JoinConstraintInput, TableAliasInput,
+    AliasPurpose, BindPlanAggregated, BindPlanComplete, BindPlanDistinct, BindPlanFiltered,
+    BindPlanFrom, BindPlanProjected, BindPlanSelectList, BindPlanStart, JoinConstraintInput,
+    TableAliasInput,
 };
 use super::{is_valid_identifier, Binder, CteBinding, QueryBindStep, SetOperatorKind};
 #[cfg(feature = "copy")]
@@ -1062,7 +1063,7 @@ where
         let source = self
             .binder
             .context
-            .source_and_bind(table_name.clone(), None, None, false)?
+            .source_and_bind(table_name.clone(), None, None, false, self.arena)?
             .ok_or(DatabaseError::TableNotFound)?;
         let values_len = expr_rows[0].len();
 
@@ -1216,6 +1217,7 @@ where
                 Binder::<'a, 'b, T, A>::resolve_source_columns_in_scope(
                     &self.binder.context,
                     &table_name,
+                    self.arena,
                 )?;
             let target_schema = target_source.schema().to_vec();
 
@@ -2162,7 +2164,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             let right = binder.bind_single_table_ref_sql(relation, Some(join_type), arena)?;
             (right, binder.context)
         };
-        self.extend(context)?;
+        self.extend(context, arena)?;
 
         let constraint = match joint_condition {
             Some(constraint) => self.bind_join_constraint_sql(constraint, arena)?,
@@ -3108,7 +3110,14 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         let mut binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
         let plan = binder.bind_query(&cte.query, arena)?;
         let source_name = arena.temp_table();
-        binder.bind_alias(plan, &alias.columns, alias.name.clone(), source_name, arena)
+        binder.bind_alias(
+            plan,
+            &alias.columns,
+            alias.name.clone(),
+            source_name,
+            AliasPurpose::Output,
+            arena,
+        )
     }
 
     fn add_cte_plan(
@@ -3170,6 +3179,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             &alias.columns,
             alias.name.clone(),
             source_name,
+            AliasPurpose::Output,
             arena,
         )?;
         let schema = anchor.output_schema(arena).clone();
