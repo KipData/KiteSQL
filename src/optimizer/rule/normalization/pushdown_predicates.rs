@@ -23,7 +23,7 @@ use crate::planner::operator::join::extract_join_keys;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
-use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef, IndexType};
+use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::ops::Bound;
@@ -338,16 +338,11 @@ impl NormalizationRule for PushPredicateIntoScan {
             else {
                 return Err(DatabaseError::InvalidIndex);
             };
-            let index_type = arena.index(*meta).ty;
-            let detached = match index_type {
-                IndexType::PrimaryKey { is_multiple: false }
-                | IndexType::Unique
-                | IndexType::Normal => {
-                    RangeDetacher::for_index(*meta, 0, arena).detach(filter_op.predicate)?
-                }
-                IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
-                    Self::composite_range(filter_op, *meta, ignore_prefix_len, arena)?
-                }
+            // Uniqueness does not determine key width: UNIQUE indexes can be composite too.
+            let detached = if arena.index(*meta).column_ids.len() > 1 {
+                Self::composite_range(filter_op, *meta, ignore_prefix_len, arena)?
+            } else {
+                RangeDetacher::for_index(*meta, 0, arena).detach(filter_op.predicate)?
             };
             let Some(detached) = detached else {
                 *lookup = None;
@@ -687,6 +682,99 @@ mod tests {
             unreachable!("Should be a filter operator")
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_unique_composite_index_uses_tuple_ranges() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let table_name: TableName = "mock_table".to_string().into();
+        let c1 = build_test_column(&mut arena, &table_name, 1, "c1")?;
+        let c2 = build_test_column(&mut arena, &table_name, 2, "c2")?;
+        let meta = arena.alloc_index(IndexMeta {
+            id: 0,
+            column_ids: vec![1, 2],
+            table_name: table_name.clone(),
+            pk_ty: LogicalType::Integer,
+            value_ty: LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]),
+            name: "unique_c1_c2".to_string(),
+            ty: IndexType::Unique,
+        });
+        let first_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 2);
+        let second_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c2, 1, 3);
+        let full_eq = and_predicate(&mut arena, first_eq, second_eq);
+        let first_range = cmp_predicate(&mut arena, BinaryOperator::GtEq, c1, 0, 2);
+        for (predicate, expected, prefix_len) in [
+            (
+                first_range,
+                Range::Scope {
+                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                    max: Bound::Unbounded,
+                },
+                0,
+            ),
+            (
+                first_eq,
+                Range::Scope {
+                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                    max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                },
+                1,
+            ),
+            (
+                full_eq,
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(2),
+                    DataValue::Int32(3),
+                ])),
+                2,
+            ),
+        ] {
+            let scan = LogicalPlan::new(
+                Operator::TableScan(TableScanOperator {
+                    table_name: table_name.clone(),
+                    columns: vec![c1, c2],
+                    limit: (None, None),
+                    index_infos: vec![IndexInfo {
+                        meta,
+                        sort_option: SortOption::OrderBy {
+                            fields: vec![],
+                            ignore_prefix_len: 0,
+                        },
+                        lookup: None,
+                        residual_predicate: None,
+                        covered_deserializers: None,
+                        cover_mapping: None,
+                        sort_elimination_hint: None,
+                        stream_aggregate_hint: None,
+                    }],
+                    with_pk: false,
+                }),
+                Childrens::None,
+            );
+            let plan = apply_pipeline(
+                FilterOperator::build(predicate, scan, false),
+                HepOptimizerPipeline::builder().before_batch(
+                    "unique_composite_range".to_string(),
+                    HepBatchStrategy::fix_point_topdown(1),
+                    vec![NormalizationRuleImpl::PushPredicateIntoScan],
+                ),
+                &mut arena,
+            )?;
+            let scan = plan.childrens.pop_only();
+            let Operator::TableScan(op) = scan.operator else {
+                unreachable!()
+            };
+            assert_eq!(
+                op.index_infos[0].lookup,
+                Some(IndexLookup::Static(expected))
+            );
+            assert_eq!(op.index_infos[0].residual_predicate, None);
+            assert!(matches!(op.index_infos[0].sort_option,
+                SortOption::OrderBy { ignore_prefix_len, .. } if ignore_prefix_len == prefix_len));
+            assert_eq!(arena.index(meta).ty, IndexType::Unique);
+        }
         Ok(())
     }
 

@@ -85,6 +85,110 @@ select * from t;
 ----
 0 0 0 0
 
+# Multi-column UNIQUE keys must use tuple ranges after ANALYZE, including
+# first-column ranges and partial/full equality prefixes.
+statement ok
+insert into t select cast(number+1 as int), cast(number+1 as int),
+cast((number+1)%5 as int), cast(number+1 as int) from table(numbers(100));
+
+statement ok
+analyze table t;
+
+query I
+select v3 from t where v2=2 and v3<=7 order by v3;
+----
+2
+7
+
+query I
+select v3 from t where v2>=4 and v3<=14 order by v3;
+----
+4
+9
+14
+
+query I
+select v3 from t where v2=2 order by v3 limit 3;
+----
+2
+7
+12
+
+query I
+select v3 from t where v2=2 and v3=7;
+----
+7
+
+# Fetching a non-indexed column must use the same prefix bounds as covered reads.
+query I
+select id from t where v2=2 and v3<=7 order by id;
+----
+2
+7
+
+query I
+select id from t where v2>=4 and v3<=14 order by id;
+----
+4
+9
+14
+
+query I
+select id from t where v2>2 and v3<=4 order by id;
+----
+3
+4
+
+query I
+select id from t where v2<=2 and v3<=7 order by id;
+----
+0
+1
+2
+5
+6
+7
+
+query I
+select id from t where v2 in (2,4) and v3<=7 order by id;
+----
+2
+4
+7
+
+query I
+select id from t where v2=2 and v3=7;
+----
+7
+
+# A missing equality key must not terminate the remaining index ranges.
+query I
+select id from t where id in (-1,2,7,101) order by id;
+----
+2
+7
+
+query I
+select id from t where id in (-1,2,7,101) order by id limit 1 offset 1;
+----
+7
+
+query I
+select id from t where id=-1 or id>=99 order by id;
+----
+99
+100
+
+query I
+select id from t where v2=2 and v3 in (-1,2,3,7) order by id;
+----
+2
+7
+
+query I
+select id from t where v2=2 and v3 in (3,4) order by id;
+----
+
 statement ok
 drop index t.index_1
 

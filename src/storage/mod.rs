@@ -1694,7 +1694,7 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
         table_codec: &mut TableCodec,
         params: &IndexImplParams<T>,
         value: &DataValue,
-        _: bool,
+        is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         let index = Index::new(
@@ -1704,8 +1704,13 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
         );
 
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
-            out.clear();
-            out.extend_from_slice(key);
+            if index.values.len() < params.index_meta().column_ids.len() {
+                // A partial UNIQUE key bounds a prefix, not one exact index entry.
+                encode_bound_key(out, key, is_upper);
+            } else {
+                out.clear();
+                out.extend_from_slice(key);
+            }
             Ok(())
         })
     }
@@ -2147,7 +2152,7 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                                     self.bounds.consume_limit();
                                     return Ok(true);
                                 }
-                                IndexResult::Miss => return Ok(false),
+                                IndexResult::Miss => continue,
                                 IndexResult::Scope(iter) => {
                                     self.state = IndexIterState::Range(iter);
                                 }
