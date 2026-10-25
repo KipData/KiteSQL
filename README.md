@@ -131,14 +131,13 @@ print(list(db.run("select * from demo")))
 ## TPC-C
 `make tpcc` runs the benchmark (`--backend rocksdb|lmdb`); `make tpcc-dual` cross-checks every statement against SQLite.
 
-720-second single-thread run on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), every backend pinned to the same P-core. Latencies are p90 in µs, including commit.
+720-second single-thread run on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), every backend pinned to the same P-core and run without fsync on commit. Latencies are p90 in µs, including commit.
 
 | Backend | TpmC | New-Order | Payment | Order-Status | Delivery | Stock-Level |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 159616 | 315 | 81 | 44 | 435 | 332 |
-| KiteSQL RocksDB | 48035 | 459 | 258 | 200 | 11055 | 704 |
-| SQLite balanced | 67102 | 283 | 67 | 48 | 338 | 473 |
-| SQLite practical | 67153 | 336 | 66 | 41 | 427 | 339 |
+| KiteSQL LMDB | 165956 | 303 | 75 | 43 | 436 | 318 |
+| KiteSQL RocksDB | 50739 | 392 | 188 | 198 | 11743 | 812 |
+| SQLite (WAL, `synchronous=OFF`) | 191484 | 274 | 41 | 33 | 343 | 268 |
 
 👉 [Details and how to reproduce](tpcc/README.md)
 
