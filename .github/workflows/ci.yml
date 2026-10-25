@@ -60,6 +60,19 @@ jobs:
 
       - name: Run sqllogictest suite
         run: make test-slt
+  # 3.1
+  sqlite-slt:
+    name: SQLite sqllogictest corpus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run SQLite sqllogictest corpus
+        run: make test-slt-sqlite
   # 4
   coverage:
     name: Rust coverage
