@@ -152,14 +152,9 @@ pub(crate) fn extract_join_keys(
     right_schema: &Schema,
     arena: &mut PlanArena,
 ) -> Result<(), DatabaseError> {
-    let fn_contains = |schema: &Schema, column: ColumnRef| {
-        let summary = arena.column(column).summary();
-        schema
-            .iter()
-            .any(|candidate| arena.column(*candidate).summary() == summary)
-    };
+    // ON keys keep the refs their inputs output, so refs identify the side.
     let fn_or_contains =
-        |column: ColumnRef| fn_contains(left_schema, column) || fn_contains(right_schema, column);
+        |column: ColumnRef| left_schema.contains(&column) || right_schema.contains(&column);
 
     let expr = expr.unpack_alias(arena);
     match arena.expression(expr) {
@@ -181,12 +176,9 @@ pub(crate) fn extract_join_keys(
                             ScalarExpression::ColumnRef { column: r, .. },
                         ) => {
                             // reorder left and right joins keys to pattern: (left, right)
-                            let key = if fn_contains(left_schema, *l)
-                                && fn_contains(right_schema, *r)
-                            {
+                            let key = if left_schema.contains(l) && right_schema.contains(r) {
                                 Some((*left_expr, *right_expr))
-                            } else if fn_contains(left_schema, *r) && fn_contains(right_schema, *l)
-                            {
+                            } else if left_schema.contains(r) && right_schema.contains(l) {
                                 Some((*right_expr, *left_expr))
                             } else {
                                 if fn_or_contains(*l) || fn_or_contains(*r) {

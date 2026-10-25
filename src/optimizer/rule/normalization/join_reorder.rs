@@ -33,6 +33,7 @@ use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
 use crate::types::tuple::Schema;
 use std::borrow::Borrow;
 use std::mem::swap;
+use std::ops::Range;
 
 pub(crate) struct GreedyJoinReorder;
 
@@ -467,26 +468,40 @@ fn key_in_schema(expr: ExprRef, schema: &Schema, arena: &PlanArena) -> Result<bo
     })
 }
 
-/// Join keys between original inputs, each `(left bit, right bit, left key, right key)`.
+/// Join keys between original inputs, each edge stored once per endpoint as
+/// `(endpoint bit, other bit, endpoint key, other key)`. Sorted by endpoint bit, so an input's
+/// edges are contiguous; equal endpoints keep insertion order.
 #[derive(Default)]
 struct JoinKeys(Vec<(u64, u64, ExprRef, ExprRef)>);
 
 impl JoinKeys {
     fn insert(&mut self, left: u64, right: u64, (l, r): (ExprRef, ExprRef)) {
-        self.0.push((left, right, l, r));
+        for entry in [(left, right, l, r), (right, left, r, l)] {
+            let at = self.0.partition_point(|e| e.0 <= entry.0);
+            self.0.insert(at, entry);
+        }
     }
 
-    /// Keys between the joined inputs `current` and the input `leaf`, oriented from `current`.
+    fn range(&self, leaf: u64) -> Range<usize> {
+        let start = self.0.partition_point(|e| e.0 < leaf);
+        let len = self.0[start..].iter().take_while(|e| e.0 == leaf).count();
+        start..start + len
+    }
+
     fn get(&self, current: u64, leaf: u64) -> impl Iterator<Item = (ExprRef, ExprRef)> + '_ {
-        self.0.iter().filter_map(move |&(left, right, l, r)| {
-            if left & current != 0 && right == leaf {
-                Some((l, r))
-            } else if right & current != 0 && left == leaf {
-                Some((r, l))
-            } else {
-                None
-            }
-        })
+        self.0[self.range(leaf)]
+            .iter()
+            .filter(move |e| e.1 & current != 0)
+            .map(|&(_, _, leaf_key, other_key)| (other_key, leaf_key))
+    }
+
+    fn take(&mut self, current: u64, leaf: u64) -> Vec<(ExprRef, ExprRef)> {
+        let range = self.range(leaf);
+        self.0
+            .drain(range)
+            .filter(|e| e.1 & current != 0)
+            .map(|(_, _, leaf_key, other_key)| (other_key, leaf_key))
+            .collect()
     }
 }
 
@@ -497,12 +512,13 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for BindPosition<'_> {
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut A,
+        _: &mut A,
     ) -> Result<(), DatabaseError> {
+        // Join keys keep the refs their inputs output.
         *position = self
             .0
             .iter()
-            .position(|candidate| arena.same_column(*candidate, *column))
+            .position(|candidate| candidate == column)
             .ok_or(DatabaseError::SourceNotFound)?;
         Ok(())
     }
@@ -673,8 +689,7 @@ impl NormalizationRule for GreedyJoinReorder {
                 probe,
             ) = best.unwrap();
             let (leaf, _, leaf_mask) = leaves.remove(k);
-            // Used keys need no removal: both ends are now in `current`, so no later leaf matches.
-            let mut on: Vec<_> = keys.get(current_mask, leaf_mask).collect();
+            let mut on = keys.take(current_mask, leaf_mask);
             let (mut left, mut right, right_mask) = if swapped {
                 for (c, l) in &mut on {
                     swap(c, l);

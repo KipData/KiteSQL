@@ -893,13 +893,13 @@ impl<'a> PlanArena<'a> {
         column: ColumnRef,
         nullable: bool,
     ) -> Option<ColumnRef> {
+        // A join can only make a column nullable; it never removes existing NULLs.
         let source = self.column(column);
-        if source.nullable() == nullable {
+        if !nullable || source.nullable() {
             return None;
         }
-        // FIXME
         let mut joined = source.clone();
-        joined.set_nullable(nullable);
+        joined.set_nullable(true);
         joined.set_in_join(true);
         Some(self.alloc_column(joined))
     }
