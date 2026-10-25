@@ -45,7 +45,7 @@ mod join_reorder;
 mod materialize_mark_apply;
 mod min_max_top_k;
 use guard_mark_apply::GuardMarkApply;
-use join_reorder::GreedyJoinReorder;
+use join_reorder::{GreedyJoinReorder, OrientNestedLoopJoin};
 use materialize_mark_apply::MaterializeMarkApply;
 mod parameterized_index;
 mod pushdown_limit;
@@ -87,6 +87,7 @@ pub enum NormalizationRuleImpl {
     ParameterizeInnerJoin,
     EliminateIndexFilter,
     GreedyJoinReorder,
+    OrientNestedLoopJoin,
     MaterializeMarkApply,
     GuardMarkApply,
 }
@@ -196,7 +197,8 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::MinMaxToTopK => NormalizationRuleRootTag::Aggregate,
             NormalizationRuleImpl::EliminateIndexFilter => NormalizationRuleRootTag::Filter,
             NormalizationRuleImpl::ParameterizeInnerJoin
-            | NormalizationRuleImpl::GreedyJoinReorder => NormalizationRuleRootTag::Join,
+            | NormalizationRuleImpl::GreedyJoinReorder
+            | NormalizationRuleImpl::OrientNestedLoopJoin => NormalizationRuleRootTag::Join,
             NormalizationRuleImpl::ParameterizeMarkApply
             | NormalizationRuleImpl::MaterializeMarkApply => NormalizationRuleRootTag::MarkApply,
         }
@@ -212,6 +214,7 @@ impl NormalizationRule for NormalizationRuleImpl {
         match self {
             NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, arena),
             NormalizationRuleImpl::GreedyJoinReorder => GreedyJoinReorder.apply(plan, arena),
+            NormalizationRuleImpl::OrientNestedLoopJoin => OrientNestedLoopJoin.apply(plan, arena),
             NormalizationRuleImpl::GuardMarkApply => GuardMarkApply.apply(plan, arena),
             NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, arena),
             NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(plan, arena),

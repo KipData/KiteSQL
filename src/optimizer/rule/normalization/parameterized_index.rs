@@ -739,7 +739,10 @@ mod inner_join_tests {
         assert!(scan.index_infos[0].lookup.is_none());
         scan.index_infos.push(single);
         // Prefer a usable scalar index even though UNIQUE normally ranks higher.
-        assert_eq!(pick_parameterized_index_position(scan, &column, &arena), Some(1));
+        assert_eq!(
+            pick_parameterized_index_position(scan, &column, &arena),
+            Some(1)
+        );
         assert!(parameterize_right_subtree(&mut right, &column, &mut arena));
         let PlanImpl::IndexScan(index) = &right.physical_option.as_ref().unwrap().plan else {
             unreachable!()

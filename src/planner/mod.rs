@@ -197,6 +197,14 @@ impl LogicalPlan {
         }
     }
 
+    pub(crate) fn has_materialization(&self) -> bool {
+        self.physical_option
+            .as_ref()
+            .is_some_and(PhysicalOption::materializes)
+            || matches!(&self.operator, Operator::MarkApply(op) if op.materialize)
+            || self.childrens.iter().any(Self::has_materialization)
+    }
+
     pub fn referenced_table(&self) -> Vec<TableName> {
         fn collect_table(plan: &LogicalPlan, results: &mut Vec<TableName>) {
             if let Operator::TableScan(op) = &plan.operator {

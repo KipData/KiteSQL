@@ -261,7 +261,7 @@ pub struct BinderContext<'a, T: Transaction> {
     using: HashMap<String, UsingColumn>,
     has_join_outer_ref: bool,
     // subquery
-    sub_queries: HashMap<QueryBindStep, Vec<SubQueryType>>,
+    sub_queries: Vec<SubQueryType>,
     scalar_queries: Vec<BoundScalarQuery>,
     capture_scalar_outer: bool,
     scalar_outer_bindings: Vec<(ScalarQueryRef, ExprRef)>,
@@ -430,14 +430,7 @@ impl<'a, T: Transaction> BinderContext<'a, T> {
     }
 
     pub fn sub_query(&mut self, sub_query: SubQueryType) {
-        self.sub_queries
-            .entry(self.bind_step)
-            .or_default()
-            .push(sub_query)
-    }
-
-    pub fn sub_queries_at_now(&mut self) -> Option<Vec<SubQueryType>> {
-        self.sub_queries.remove(&self.bind_step)
+        self.sub_queries.push(sub_query);
     }
 
     pub fn mark_join_outer_ref(&mut self) {

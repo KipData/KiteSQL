@@ -467,6 +467,11 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             vec![NormalizationRuleImpl::MaterializeMarkApply],
         )
         .after_batch(
+            "Orient Nested Loop Join".to_string(),
+            HepBatchStrategy::fix_point_bottomup(1),
+            vec![NormalizationRuleImpl::OrientNestedLoopJoin],
+        )
+        .after_batch(
             "Expression Remapper".to_string(),
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::EvaluatorBind],

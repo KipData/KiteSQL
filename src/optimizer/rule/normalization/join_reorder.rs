@@ -22,8 +22,86 @@ use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::types::tuple::Schema;
+use std::mem::swap;
 
 pub(crate) struct GreedyJoinReorder;
+pub(crate) struct OrientNestedLoopJoin;
+
+impl NormalizationRule for OrientNestedLoopJoin {
+    fn apply(&self, plan: &mut LogicalPlan, arena: &mut PlanArena) -> Result<bool, DatabaseError> {
+        let (
+            Operator::Join(JoinOperator {
+                join_type: JoinType::Cross,
+                on: JoinCondition::None,
+                limit_pushed: false,
+                ..
+            }),
+            Childrens::Twins { left, right },
+            Some(PhysicalOption {
+                plan: PlanImpl::NestLoopJoin,
+                ..
+            }),
+        ) = (
+            &plan.operator,
+            plan.childrens.as_ref(),
+            plan.physical_option.as_ref(),
+        )
+        else {
+            return Ok(false);
+        };
+        if left.has_materialization() || !right.has_materialization() {
+            return Ok(false);
+        }
+        let original_schema = plan.output_schema(arena).clone();
+        for (index, column) in original_schema.iter().enumerate() {
+            if original_schema[index + 1..]
+                .iter()
+                .any(|other| arena.same_column(*column, *other))
+            {
+                return Ok(false);
+            }
+        }
+        let mut join = plan.take();
+        let Childrens::Twins { left, right } = join.childrens.as_mut() else {
+            unreachable!()
+        };
+        swap(left, right);
+        join.reset_output_schema_cache();
+        *plan = restore_join_output(join, original_schema, arena);
+        Ok(true)
+    }
+}
+
+fn restore_join_output(
+    mut join: LogicalPlan,
+    original_schema: Schema,
+    arena: &mut PlanArena,
+) -> LogicalPlan {
+    let schema = join.output_schema(arena);
+    if &original_schema == schema {
+        return join;
+    }
+    let exprs = original_schema
+        .iter()
+        .map(|column| {
+            let position = schema
+                .iter()
+                .position(|candidate| arena.same_column(*candidate, *column))
+                .unwrap();
+            arena.alloc_expression(ScalarExpression::column_expr(*column, position))
+        })
+        .collect();
+    let mut plan = LogicalPlan::new(
+        Operator::Project(ProjectOperator { exprs }),
+        Childrens::Only(Box::new(join)),
+    );
+    plan.physical_option = Some(PhysicalOption::new(
+        PlanImpl::Project,
+        SortOption::Follow,
+        RowCountOption::Follow,
+    ));
+    plan
+}
 
 // Prefer equijoins, then fewer rows, then the original input order.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -268,31 +346,8 @@ impl NormalizationRule for GreedyJoinReorder {
             inputs.insert(i, (join, product));
         }
         // SAFETY: At this point, there should be exactly one plan left in the inputs vector, which is the final join result.
-        let (mut join, _) = inputs.pop().unwrap();
-        let schema = join.output_schema(arena);
-        if &original_schema == schema {
-            *plan = join;
-            return Ok(true);
-        }
-        let exprs = original_schema
-            .iter()
-            .map(|column| {
-                let position = schema
-                    .iter()
-                    .position(|candidate| arena.same_column(*candidate, *column))
-                    .unwrap();
-                arena.alloc_expression(ScalarExpression::column_expr(*column, position))
-            })
-            .collect();
-        *plan = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs }),
-            Childrens::Only(Box::new(join)),
-        );
-        plan.physical_option = Some(PhysicalOption::new(
-            PlanImpl::Project,
-            SortOption::Follow,
-            RowCountOption::Follow,
-        ));
+        let (join, _) = inputs.pop().unwrap();
+        *plan = restore_join_output(join, original_schema, arena);
         Ok(true)
     }
 }
@@ -331,6 +386,120 @@ mod tests {
             RowCountOption::Estimated(rows),
         ));
         (plan, key)
+    }
+
+    fn materialized_right(arena: &mut PlanArena) -> LogicalPlan {
+        let (b, b_key) = input("b", 10, arena);
+        let (c, c_key) = input("c", 20, arena);
+        let mut join = JoinOperator::build(
+            b,
+            c,
+            JoinCondition::On {
+                on: vec![(b_key, c_key)],
+                filter: None,
+            },
+            JoinType::Inner,
+            false,
+        );
+        join.physical_option = Some(PhysicalOption::new(
+            PlanImpl::HashJoin,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let schema = join.output_schema(arena);
+        let exprs = schema
+            .iter()
+            .enumerate()
+            .map(|(position, column)| {
+                arena.alloc_expression(ScalarExpression::column_expr(*column, position))
+            })
+            .collect();
+        let mut project = LogicalPlan::new(
+            Operator::Project(ProjectOperator { exprs }),
+            Childrens::Only(Box::new(join)),
+        );
+        project.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Project,
+            SortOption::Follow,
+            RowCountOption::Follow,
+        ));
+        project
+    }
+
+    #[test]
+    fn nested_loop_moves_materialization_left_and_restores_positions() -> Result<(), DatabaseError>
+    {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let (left, _) = input("a", 100, &mut arena);
+        let right = materialized_right(&mut arena);
+        assert!(!left.has_materialization());
+        assert!(right.has_materialization());
+        let mut plan =
+            JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::NestLoopJoin,
+            SortOption::None,
+            RowCountOption::Estimated(20000),
+        ));
+        let schema = plan.output_schema(&mut arena).clone();
+        assert!(OrientNestedLoopJoin.apply(&mut plan, &mut arena)?);
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        assert_eq!(plan.estimated_rows(), Some(20000));
+        let Operator::Project(project) = &plan.operator else {
+            unreachable!()
+        };
+        for (expr, position) in project.exprs.iter().zip([2, 0, 1]) {
+            assert!(matches!(
+                arena.expression(*expr),
+                ScalarExpression::ColumnRef { position: actual, .. } if *actual == position
+            ));
+        }
+        let join = plan.childrens.only();
+        let (left, right) = join.childrens.twins();
+        assert_eq!(left.referenced_table(), vec!["b".into(), "c".into()]);
+        assert_eq!(right.referenced_table(), vec!["a".into()]);
+        let mut join = join.clone();
+        assert!(!OrientNestedLoopJoin.apply(&mut join, &mut arena)?);
+        Ok(())
+    }
+
+    #[test]
+    fn nested_loop_orientation_keeps_equal_work_and_semantic_boundaries(
+    ) -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        for (left_materialized, right_materialized, join_type, limit_pushed) in [
+            (false, false, JoinType::Cross, false),
+            (true, false, JoinType::Cross, false),
+            (true, true, JoinType::Cross, false),
+            (false, true, JoinType::LeftOuter, false),
+            (false, true, JoinType::Cross, true),
+        ] {
+            let left = if left_materialized {
+                materialized_right(&mut arena)
+            } else {
+                input("a", 100, &mut arena).0
+            };
+            let right = if right_materialized {
+                materialized_right(&mut arena)
+            } else {
+                input("d", 100, &mut arena).0
+            };
+            let mut plan = JoinOperator::build(left, right, JoinCondition::None, join_type, false);
+            if let Operator::Join(join) = &mut plan.operator {
+                join.limit_pushed = limit_pushed;
+            }
+            plan.physical_option = Some(PhysicalOption::new(
+                PlanImpl::NestLoopJoin,
+                SortOption::None,
+                RowCountOption::Unknown,
+            ));
+            let original = plan.clone();
+            assert!(!OrientNestedLoopJoin.apply(&mut plan, &mut arena)?);
+            assert_eq!(plan, original);
+        }
+        Ok(())
     }
 
     fn three_inputs(arena: &mut PlanArena) -> LogicalPlan {

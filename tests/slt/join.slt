@@ -624,6 +624,24 @@ select a.v,b.v,c.v from greedy_a a join greedy_b b on a.k=b.k join greedy_c c on
 10 100 1100
 20 200 2000
 
+# A materializing derived input can drive a CrossJoin without changing output slots.
+query III rowsort
+select a.v,h.bv,h.cv from greedy_a a cross join (select b.v as bv,c.v as cv from greedy_b b join greedy_c c on b.k=c.k) h where a.id<=2
+----
+10 100 1000
+10 100 1100
+10 200 2000
+20 100 1000
+20 100 1100
+20 200 2000
+
+query III
+select a.v,h.bv,h.cv from greedy_a a cross join (select b.v as bv,c.v as cv from greedy_b b join greedy_c c on b.k=c.k) h where a.id<=2 order by a.v desc,h.cv desc limit 3
+----
+20 200 2000
+20 100 1100
+20 100 1000
+
 # The smallest inputs b and c have no direct key; apply both keys when a joins.
 query III rowsort
 select a.v,b.v,c.v from greedy_a a join greedy_b b on a.k=b.k join greedy_c c on a.k=c.k

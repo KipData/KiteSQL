@@ -48,24 +48,24 @@ use crate::storage::Transaction;
 use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
 
-struct RightSidePositionGlobalizer<'a> {
-    right_schema: &'a Schema,
-    left_len: usize,
+struct InputPositionBinder<'a> {
+    schema: &'a Schema,
+    offset: usize,
 }
 
-impl ExprVisitorMut for RightSidePositionGlobalizer<'_> {
+impl ExprVisitorMut for InputPositionBinder<'_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
         arena: &mut (dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
-        if self
-            .right_schema
+        if let Some(index) = self
+            .schema
             .iter()
-            .any(|right| arena.same_column(*right, *column))
+            .position(|input| arena.same_column(*input, *column))
         {
-            *position += self.left_len;
+            *position = self.offset + index;
         }
         Ok(())
     }
@@ -75,25 +75,6 @@ struct AppendedRightOutput {
     column: ColumnRef,
     child_position: usize,
     output_position: usize,
-}
-
-struct MarkerPositionGlobalizer<'a> {
-    output_column: &'a ColumnRef,
-    left_len: usize,
-}
-
-impl ExprVisitorMut for MarkerPositionGlobalizer<'_> {
-    fn visit_column_ref(
-        &mut self,
-        column: &mut ColumnRef,
-        position: &mut usize,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
-        if arena.same_column(*column, *self.output_column) {
-            *position = self.left_len;
-        }
-        Ok(())
-    }
 }
 
 struct ProjectionOutputBinder<'a> {
@@ -1481,8 +1462,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             ));
         }
 
-        if self.context.sub_queries.contains_key(&QueryBindStep::Where) {
-            children = self.bind_mark_queries(children, std::iter::once(&mut predicate), arena)?;
+        let pending = self.context.sub_queries.len();
+        children = self.bind_mark_queries(children, std::iter::once(&mut predicate), arena)?;
+        if self.context.sub_queries.len() < pending {
             let passthrough_exprs = children
                 .output_schema(arena)
                 .iter()
@@ -1506,9 +1488,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         exprs: impl Iterator<Item = &'c mut ExprRef>,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let mut output_positions = Vec::new();
-        if let Some(sub_queries) = self.context.sub_queries_at_now() {
-            for sub_query in sub_queries {
+        for expr in exprs {
+            while let Some(index) = self.next_mark_query(*expr, arena)? {
+                let sub_query = self.context.sub_queries.remove(index);
                 match sub_query {
                     SubQueryType::ExistsSubQuery {
                         plan,
@@ -1516,7 +1498,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                         output_column,
                     } => {
                         let left_schema = children.output_schema(arena).clone();
-                        output_positions.push((output_column, left_schema.len()));
                         let (plan, predicates) = Self::prepare_mark_apply(
                             left_schema.as_ref(),
                             plan,
@@ -1546,14 +1527,25 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                                 arena,
                             );
                         }
+                        if self.context.is_step(&QueryBindStep::Where) {
+                            if let ScalarExpression::Binary { left_expr, .. } =
+                                &quantified_predicate
+                            {
+                                if left_expr.has_agg_call(arena)? {
+                                    return Err(DatabaseError::AggMiss(
+                                        "aggregate functions are not allowed in WHERE".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        let predicate = arena.alloc_expression(quantified_predicate);
                         let left_schema = children.output_schema(arena).clone();
-                        output_positions.push((output_column, left_schema.len()));
                         let (plan, predicates) = Self::prepare_mark_apply(
                             left_schema.as_ref(),
                             plan,
                             correlated,
                             true,
-                            vec![arena.alloc_expression(quantified_predicate)],
+                            vec![predicate],
                             arena,
                         )?;
                         children = MarkApplyOperator::build_quantified(
@@ -1566,17 +1558,43 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                     }
                 }
             }
-        }
-        for expr in exprs {
-            for (output_column, left_len) in &output_positions {
-                MarkerPositionGlobalizer {
-                    output_column,
-                    left_len: *left_len,
-                }
-                .visit(expr, arena)?;
+            InputPositionBinder {
+                schema: children.output_schema(arena),
+                offset: 0,
             }
+            .visit(expr, arena)?;
         }
         Ok(children)
+    }
+
+    fn next_mark_query(
+        &self,
+        expr: ExprRef,
+        arena: &PlanArena,
+    ) -> Result<Option<usize>, DatabaseError> {
+        let mut next = None;
+        expr.any_referenced_column(arena, |arena, column| {
+            next = self.context.sub_queries.iter().position(|query| {
+                let output = match query {
+                    SubQueryType::ExistsSubQuery { output_column, .. }
+                    | SubQueryType::QuantifiedSubQuery { output_column, .. } => *output_column,
+                };
+                arena.same_column(output, *column)
+            });
+            next.is_some()
+        })?;
+        if let Some(index) = next {
+            if let SubQueryType::QuantifiedSubQuery {
+                predicate: ScalarExpression::Binary { left_expr, .. },
+                ..
+            } = &self.context.sub_queries[index]
+            {
+                if let Some(dependency) = self.next_mark_query(*left_expr, arena)? {
+                    return Ok(Some(dependency));
+                }
+            }
+        }
+        Ok(next)
     }
 
     fn ensure_mark_apply_right_outputs(
@@ -1662,9 +1680,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         }
         let right_schema = plan.output_schema(arena);
         for expr in &mut apply_predicates {
-            RightSidePositionGlobalizer {
-                right_schema,
-                left_len,
+            InputPositionBinder {
+                schema: left_schema,
+                offset: 0,
+            }
+            .visit(expr, arena)?;
+            InputPositionBinder {
+                schema: right_schema,
+                offset: left_len,
             }
             .visit(expr, arena)?;
         }
@@ -2154,7 +2177,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::{ProjectionOutputBinder, RightSidePositionGlobalizer};
+    use super::{InputPositionBinder, ProjectionOutputBinder};
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
@@ -2208,8 +2231,7 @@ mod tests {
     }
 
     #[test]
-    fn test_right_side_position_globalizer_only_shifts_right_columns() -> Result<(), DatabaseError>
-    {
+    fn test_input_position_binder_only_binds_available_columns() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let left_column = arena.alloc_column(ColumnCatalog::new(
@@ -2223,7 +2245,7 @@ mod tests {
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         ));
         let right_schema = vec![right_column];
-        let left_expr = arena.alloc_expression(ScalarExpression::column_expr(left_column, 0));
+        let left_expr = arena.alloc_expression(ScalarExpression::column_expr(left_column, 7));
         let right_expr = arena.alloc_expression(ScalarExpression::column_expr(right_column, 0));
         let mut expr = arena.alloc_expression(ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Eq,
@@ -2233,9 +2255,23 @@ mod tests {
             ty: LogicalType::Boolean,
         });
 
-        RightSidePositionGlobalizer {
-            right_schema: &right_schema,
-            left_len: 2,
+        InputPositionBinder {
+            schema: &right_schema,
+            offset: 2,
+        }
+        .visit(&mut expr, &mut arena)?;
+        InputPositionBinder {
+            schema: &right_schema,
+            offset: 2,
+        }
+        .visit(&mut expr, &mut arena)?;
+        assert!(matches!(
+            arena.expression(left_expr),
+            ScalarExpression::ColumnRef { position: 7, .. }
+        ));
+        InputPositionBinder {
+            schema: &vec![left_column],
+            offset: 0,
         }
         .visit(&mut expr, &mut arena)?;
 
@@ -2361,6 +2397,54 @@ mod tests {
         let plan = table_states.plan("select * from t1 where c1 in (select c3 from t2)")?;
         assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_mark_alias_is_produced_before_where() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+        let mut arena = PlanArena::new(&tables.table_arena);
+        let mut plan = tables.plan_with_arena(
+            "select c1,c2 in (select c3 from t2) as matched from t1 where matched",
+            &mut arena,
+        )?;
+        let marker = *find_mark_apply(&plan).unwrap().output_column();
+        let Operator::Project(project) = &plan.operator else {
+            unreachable!()
+        };
+        let selected = project.exprs[1].unpack_alias(&arena);
+        assert!(
+            matches!(arena.expression(selected), ScalarExpression::ColumnRef { column, position: 2 }
+            if arena.same_column(*column, marker))
+        );
+        let mut input = &mut plan;
+        let mut marks = 0;
+        let mut filters = 0;
+        loop {
+            match (&input.operator, input.childrens.as_mut()) {
+                (Operator::Filter(filter), Childrens::Only(child)) => {
+                    let schema = child.output_schema(&mut arena);
+                    assert!(arena.same_column(schema[2], marker));
+                    let referenced = filter.predicate.unpack_alias(&arena);
+                    assert!(
+                        matches!(arena.expression(referenced), ScalarExpression::ColumnRef { column, position: 2 }
+                        if arena.same_column(*column, marker))
+                    );
+                    filters += 1;
+                    input = child;
+                }
+                (Operator::MarkApply(op), Childrens::Twins { left, .. }) => {
+                    assert!(arena.same_column(*op.output_column(), marker));
+                    marks += 1;
+                    input = left;
+                }
+                (_, Childrens::Only(child)) => input = child,
+                (_, Childrens::None) => break,
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(marks, 1);
+        assert_eq!(filters, 1);
         Ok(())
     }
 

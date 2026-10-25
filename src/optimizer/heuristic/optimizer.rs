@@ -266,25 +266,6 @@ impl<'a> HepOptimizer<'a> {
         {
             let LogicalPlan {
                 operator,
-                physical_option,
-                ..
-            } = plan;
-            if let Some(option) = implementation_index.direct_physical_option(operator) {
-                *physical_option = Some(option);
-            } else {
-                let mut best_physical_option: BestPhysicalOption = None;
-                for rule in implementation_index.for_matching_operator(operator) {
-                    rule.update_best_option(operator, arena, loader, &mut best_physical_option)?;
-                }
-                if let Some((option, _)) = best_physical_option {
-                    *physical_option = Some(option);
-                }
-            }
-        }
-
-        {
-            let LogicalPlan {
-                operator,
                 childrens,
                 ..
             } = plan;
@@ -323,6 +304,25 @@ impl<'a> HepOptimizer<'a> {
                     },
                 )
             })?;
+        }
+
+        {
+            let LogicalPlan {
+                operator,
+                physical_option,
+                ..
+            } = plan;
+            if let Some(option) = implementation_index.direct_physical_option(operator) {
+                *physical_option = Some(option);
+            } else {
+                let mut best_physical_option: BestPhysicalOption = None;
+                for rule in implementation_index.for_matching_operator(operator) {
+                    rule.update_best_option(operator, arena, loader, &mut best_physical_option)?;
+                }
+                if let Some((option, _)) = best_physical_option {
+                    *physical_option = Some(option);
+                }
+            }
         }
 
         apply_annotated_post_rules(plan, arena)?;

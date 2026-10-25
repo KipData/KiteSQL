@@ -1175,6 +1175,36 @@ select id,b in (select x.b from corr_rows x where x.id=1) as matched from corr_r
 3 false
 5 false
 
+# Mark definitions are attached at their first consumer, not their SELECT declaration.
+query ITT
+select id,b in (select x.b from corr_rows x where x.id=1) as first_match,b in (select x.b from corr_rows x where x.id=2) as second_match from corr_rows where second_match or first_match order by id;
+----
+1 true false
+2 false true
+5 false true
+
+query IT
+select id,b not in (select x.b from corr_rows x where x.id=1) as unmatched from corr_rows where unmatched order by id;
+----
+2 true
+3 true
+5 true
+
+query IT
+select id,b=all(select x.b from corr_rows x where x.id=1) as matched from corr_rows where matched is null or matched order by id;
+----
+1 true
+4 NULL
+
+# The outer marker consumes an earlier SELECT marker; neither is produced twice.
+query ITT
+select id,b in (select x.b from corr_rows x where x.id=1) as first_match,first_match in (select true) as second_match from corr_rows where second_match order by id;
+----
+1 true true
+
+statement error aggregate functions are not allowed in WHERE
+select count(*) in (select x.id from corr_rows x) as matched from corr_rows where matched;
+
 statement ok
 create table guard_bad_cast(id int primary key, txt varchar);
 

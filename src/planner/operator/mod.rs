@@ -182,6 +182,18 @@ impl PhysicalOption {
     pub fn sort_option(&self) -> &SortOption {
         &self.sort_option
     }
+
+    pub(crate) fn materializes(&self) -> bool {
+        matches!(
+            self.plan,
+            PlanImpl::SimpleAggregate
+                | PlanImpl::HashAggregate
+                | PlanImpl::HashJoin
+                | PlanImpl::Sort
+                | PlanImpl::TopK
+                | PlanImpl::Window
+        )
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
