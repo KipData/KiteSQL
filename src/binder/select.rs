@@ -647,6 +647,15 @@ where
             &[QueryBindStep::Project, QueryBindStep::Sort],
             self.arena,
         )?;
+        self.binder.context.step(QueryBindStep::Project);
+        let marker_consumers = self.select_list.iter_mut().chain(
+            self.orderby
+                .iter_mut()
+                .flat_map(|fields| fields.iter_mut().map(|field| &mut field.expr)),
+        );
+        self.plan = self
+            .binder
+            .bind_mark_queries(self.plan, marker_consumers, self.arena)?;
         self.plan = self.binder.bind_window(
             self.plan,
             &mut self.select_list,
@@ -1434,7 +1443,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
     pub(crate) fn bind_where_expr(
         &mut self,
         mut children: LogicalPlan,
-        predicate: ExprRef,
+        mut predicate: ExprRef,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         children = self.bind_scalar_queries(children, &[QueryBindStep::Where], arena)?;
@@ -1445,6 +1454,32 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             ));
         }
 
+        if self.context.sub_queries.contains_key(&QueryBindStep::Where) {
+            children = self.bind_mark_queries(children, std::iter::once(&mut predicate), arena)?;
+            let passthrough_exprs = children
+                .output_schema(arena)
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(position, column)| {
+                    arena.alloc_expression(ScalarExpression::column_expr(column, position))
+                })
+                .collect();
+            return Ok(Self::build_project_plan(
+                FilterOperator::build(predicate, children, false),
+                passthrough_exprs,
+            ));
+        }
+        Ok(FilterOperator::build(predicate, children, false))
+    }
+
+    fn bind_mark_queries<'c>(
+        &mut self,
+        mut children: LogicalPlan,
+        exprs: impl Iterator<Item = &'c mut ExprRef>,
+        arena: &mut PlanArena,
+    ) -> Result<LogicalPlan, DatabaseError> {
+        let mut output_positions = Vec::new();
         if let Some(sub_queries) = self.context.sub_queries_at_now() {
             for sub_query in sub_queries {
                 match sub_query {
@@ -1454,9 +1489,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                         output_column,
                     } => {
                         let left_schema = children.output_schema(arena).clone();
+                        output_positions.push((output_column, left_schema.len()));
                         let (plan, predicates) = Self::prepare_mark_apply(
-                            predicate,
-                            &output_column,
                             left_schema.as_ref(),
                             plan,
                             correlated,
@@ -1486,9 +1520,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                             );
                         }
                         let left_schema = children.output_schema(arena).clone();
+                        output_positions.push((output_column, left_schema.len()));
                         let (plan, predicates) = Self::prepare_mark_apply(
-                            predicate,
-                            &output_column,
                             left_schema.as_ref(),
                             plan,
                             correlated,
@@ -1506,26 +1539,17 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                     }
                 }
             }
-            {
-                let passthrough_exprs = children
-                    .output_schema(arena)
-                    .iter()
-                    .cloned()
-                    .enumerate()
-                    .map(|(position, column)| {
-                        arena.alloc_expression(ScalarExpression::column_expr(column, position))
-                    })
-                    .collect();
-                let filter = FilterOperator::build(predicate, children, false);
-                return Ok(LogicalPlan::new(
-                    Operator::Project(ProjectOperator {
-                        exprs: passthrough_exprs,
-                    }),
-                    Childrens::Only(Box::new(filter)),
-                ));
+        }
+        for expr in exprs {
+            for (output_column, left_len) in &output_positions {
+                MarkerPositionGlobalizer {
+                    output_column,
+                    left_len: *left_len,
+                }
+                .visit(expr, arena)?;
             }
         }
-        Ok(FilterOperator::build(predicate, children, false))
+        Ok(children)
     }
 
     fn ensure_mark_apply_right_outputs(
@@ -1582,10 +1606,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         Ok(Vec::new())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn prepare_mark_apply(
-        mut predicate: ExprRef,
-        output_column: &ColumnRef,
         left_schema: &Schema,
         plan: LogicalPlan,
         correlated: bool,
@@ -1594,12 +1615,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         arena: &mut PlanArena,
     ) -> Result<(LogicalPlan, Vec<ExprRef>), DatabaseError> {
         let left_len = left_schema.len();
-        MarkerPositionGlobalizer {
-            output_column,
-            left_len,
-        }
-        .visit(&mut predicate, arena)?;
-
         let (mut plan, correlated_filters) = if correlated {
             Self::prepare_correlated_subquery_plan(plan, left_schema, preserve_projection, arena)?
         } else {

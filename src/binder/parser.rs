@@ -1143,6 +1143,9 @@ where
         if let TableFactor::Table { name, .. } = &to.relation {
             let is_joined_update = !to.joins.is_empty();
             let table_name = sql_table_name(name.clone())?;
+            if self.binder.context.table(table_name.clone())?.is_none() {
+                return Err(DatabaseError::TableNotFound);
+            }
             self.binder.with_pk(table_name.clone());
 
             let mut plan = self.binder.bind_table_ref_sql(to, self.arena)?;

@@ -302,9 +302,17 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
         let (sub_query, column, correlated) =
             self.bind_subquery_plan_with_output(Some(&left_ty), arena, build)?;
 
-        if !self.context.is_step(&QueryBindStep::Where) {
+        if !matches!(
+            self.context.step_now(),
+            QueryBindStep::Where | QueryBindStep::Project
+        ) {
             return Err(DatabaseError::UnsupportedStmt(
-                "quantified subqueries can only appear in `WHERE`".to_string(),
+                "quantified subqueries require WHERE or SELECT list".into(),
+            ));
+        }
+        if correlated && self.context.is_step(&QueryBindStep::Project) {
+            return Err(DatabaseError::UnsupportedStmt(
+                "correlated quantified subqueries in SELECT are not supported yet".into(),
             ));
         }
 
