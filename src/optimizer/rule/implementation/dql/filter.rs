@@ -578,7 +578,7 @@ mod tests {
             .instantiate(plan)
             .find_best(Some(&loader), &mut arena)?;
         assert_eq!(plan.estimated_rows(), Some(10));
-        assert_eq!(plan.estimated_startup_work()?, Some(0));
+        assert_eq!(plan.estimated_startup_work(&mut arena)?, Some(0));
         Ok(())
     }
 }

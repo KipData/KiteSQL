@@ -229,26 +229,34 @@ fn rows_work(rows: usize, width: usize) -> usize {
     rows * (CPU_ROW_WORK + width * CPU_OPERATOR_WORK)
 }
 
-enum JoinImpl { Hash { build: Side }, NestLoop { outer: Side }, IndexProbe { inner: Side, lookup_work: usize } }
-struct InputCost { rows: usize, width: usize, work: usize, rescan_work: usize, startup_work: usize }
+enum JoinImpl { Hash, NestLoop { full: bool }, IndexProbe { lookup_work: usize } }
+struct InputCost { rows: usize, width: usize, work: usize }
 impl JoinImpl {
-    fn work(&self, left: &InputCost, right: &InputCost, out_rows: usize, out_width: usize) -> usize;
+    fn work(self, left: &InputCost, right: &InputCost, out_rows: usize, out_width: usize) -> usize;
 }
 ```
 
 ```
-Hash       = build.work + probe.work + build.rows × OP + probe.rows × OP + rows_work(out)
-IndexProbe = outer.work + outer.rows × lookup_work + rows_work(out)      // 内侧不全量读
-NestLoop   = outer.work + inner.work + (outer.rows − 1) × inner.rescan_work
-           + outer.rows × inner.rows × OP + rows_work(out)
-           (+ inner.rescan_work，仅 Full join)
+Hash       = build.work                           // build 侧完整读一遍
+           + probe.work                           // probe 侧完整读一遍
+           + rows_work(build)                     // build 侧整行存入哈希表
+           + probe.rows × OP                      // probe 侧每行查一次哈希表
+           + rows_work(out)                       // 输出满足条件的行
+IndexProbe = outer.work                           // 外侧完整读一遍
+           + outer.rows × lookup_work             // 每个外侧行，去内侧索引 seek 一次；内侧不全量读
+           + rows_work(out)                       // 输出满足条件的行
+NestLoop   = outer.work                           // 外侧完整读一遍
+           + outer.rows × (inner.work             // 每个外侧行，内侧从头重跑一遍
+                           + inner.rows × OP)     // 每个外侧行，和内侧每一行比较一次
+           + rows_work(out)                       // 输出满足条件的行
+           (+ inner.work，仅 Full join：最后再扫一遍内侧输出未匹配行)
 ```
 
 - 代价函数只接收统计量，不依赖 `&LogicalPlan`，因为 Greedy 评估的是尚未构造的 join。
   Greedy 与 `calculate_work` 共用它。
-- `calculate_work`、`calculate_startup_work`、scan impl rule 都改用 `rows_work`；
-  scan 的 ×2 和排序 bonus 规则不变。
-- `rescan_work` 先预留，默认等于 `work`（例外见 6.2）。
+- `calculate_work`、`calculate_startup_work` 改用 `rows_work`；
+  scan impl rule 不变（同一 scan 的候选列数相同，换单位不影响排序）。
+- `rescan_work` 暂不引入，视为等于 `work`（例外见 6.2）。
 
 ### 4.3 单次 probe 代价 `lookup_work`
 

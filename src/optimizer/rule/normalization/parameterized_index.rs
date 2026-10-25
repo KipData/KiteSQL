@@ -990,7 +990,7 @@ mod inner_join_tests {
                 right.physical_option.as_ref().unwrap().row_count,
                 RowCountOption::Unknown
             );
-            assert_eq!(plan.estimated_startup_work()?, Some(0));
+            assert_eq!(plan.estimated_startup_work(&mut arena)?, Some(0));
         }
         Ok(())
     }
@@ -1296,7 +1296,7 @@ mod inner_join_tests {
             plan.physical_option.as_ref().unwrap().row_count,
             RowCountOption::Follow
         );
-        assert_eq!(plan.estimated_startup_work()?, Some(0));
+        assert_eq!(plan.estimated_startup_work(&mut arena)?, Some(0));
         assert_eq!(plan.output_schema(&mut arena), &schema);
         let Operator::Filter(filter) = &plan.operator else {
             panic!("join filter must remain above projection")

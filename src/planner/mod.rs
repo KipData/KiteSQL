@@ -26,7 +26,7 @@ use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
-use crate::planner::operator::{Operator, PhysicalOption, RowCountOption};
+use crate::planner::operator::{input_cost, InputCost, Operator, PhysicalOption, RowCountOption};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -153,10 +153,20 @@ impl<'a> Iterator for ChildrensIter<'a> {
     }
 }
 
-struct StartupWorkVisitor;
+struct StartupWorkVisitor<'r, A> {
+    arena: &'r mut A,
+}
 
-impl<'a> OperatorVisitorMut<'a> for StartupWorkVisitor {
+impl<'a, A: MetaArena> OperatorVisitorMut<'a> for StartupWorkVisitor<'_, A> {
     fn visit_plan(&mut self, plan: &'a mut LogicalPlan) -> Result<(), DatabaseError> {
+        if plan
+            .physical_option
+            .as_ref()
+            .is_none_or(|option| option.startup_work.is_some())
+        {
+            return Ok(());
+        }
+        let width = plan.output_schema(self.arena).len();
         let LogicalPlan {
             operator,
             childrens,
@@ -166,10 +176,8 @@ impl<'a> OperatorVisitorMut<'a> for StartupWorkVisitor {
         let Some(option) = physical_option.as_mut() else {
             return Ok(());
         };
-        if option.startup_work.is_some() {
-            return Ok(());
-        }
         OperatorVisitorMut::<'_>::visit_children(self, childrens)?;
+        option.width = Some(width);
         option.calculate_startup_work(operator, childrens);
         Ok(())
     }
@@ -245,19 +253,23 @@ impl LogicalPlan {
 
     // Pass-local memoization for NLJ orientation. New physical options start
     // empty; orientation preserves child rows/startup, so their cache is reusable.
-    pub(crate) fn estimated_startup_work(&mut self) -> Result<Option<usize>, DatabaseError> {
-        StartupWorkVisitor.visit_plan(self)?;
+    pub(crate) fn estimated_startup_work<A: MetaArena>(
+        &mut self,
+        arena: &mut A,
+    ) -> Result<Option<usize>, DatabaseError> {
+        StartupWorkVisitor { arena }.visit_plan(self)?;
         Ok(self
             .physical_option
             .as_ref()
             .and_then(|option| option.startup_work.flatten()))
     }
 
-    pub(crate) fn estimated_work(&mut self) -> Result<Option<usize>, DatabaseError> {
-        self.estimated_startup_work()?;
-        Ok(self.physical_option.as_ref().and_then(|option| {
-            option.calculate_work(&self.operator, &self.childrens, self.estimated_rows())
-        }))
+    pub(crate) fn estimated_cost<A: MetaArena>(
+        &mut self,
+        arena: &mut A,
+    ) -> Result<Option<InputCost>, DatabaseError> {
+        self.estimated_startup_work(arena)?;
+        Ok(input_cost(self))
     }
 
     pub(crate) fn clear_startup_work(&mut self) {
@@ -709,12 +721,12 @@ mod tests {
             SortOption::None,
             RowCountOption::Follow,
         ));
-        assert_eq!(sort.estimated_startup_work()?, None);
+        assert_eq!(sort.estimated_startup_work(&mut arena)?, None);
         assert_eq!(
             sort.physical_option.as_ref().unwrap().startup_work,
             Some(None)
         );
-        assert_eq!(sort.estimated_startup_work()?, None);
+        assert_eq!(sort.estimated_startup_work(&mut arena)?, None);
         assert_eq!(
             sort.physical_option.as_ref().unwrap().startup_work,
             Some(None)
@@ -737,10 +749,11 @@ mod tests {
             SortOption::None,
             RowCountOption::Follow,
         ));
-        assert_eq!(sort.estimated_startup_work()?, Some(192));
+        // 16 one-column rows (5 each) + 64 comparisons * 2 operator units.
+        assert_eq!(sort.estimated_startup_work(&mut arena)?, Some(208));
         assert_eq!(
             sort.physical_option.as_ref().unwrap().startup_work,
-            Some(Some(192))
+            Some(Some(208))
         );
         let Childrens::Only(scan) = sort.childrens.as_mut() else {
             unreachable!()
@@ -751,7 +764,7 @@ mod tests {
         );
         // A cached parent does not walk its children again in this round.
         scan.clear_startup_work();
-        assert_eq!(sort.estimated_startup_work()?, Some(192));
+        assert_eq!(sort.estimated_startup_work(&mut arena)?, Some(208));
         let Childrens::Only(scan) = sort.childrens.as_mut() else {
             unreachable!()
         };
@@ -785,8 +798,11 @@ mod tests {
                 },
             ));
             assert_eq!(filter.estimated_rows(), Some(output_rows));
-            assert_eq!(filter.estimated_startup_work()?, Some(0));
-            assert_eq!(filter.estimated_work()?, Some(392));
+            assert_eq!(filter.estimated_startup_work(&mut arena)?, Some(0));
+            assert_eq!(
+                filter.estimated_cost(&mut arena)?.map(|cost| cost.work),
+                Some(392)
+            );
             let mut project = LogicalPlan::new(
                 Operator::Project(ProjectOperator::new(vec![])),
                 Childrens::Only(Box::new(filter)),
@@ -796,8 +812,11 @@ mod tests {
                 SortOption::Follow,
                 RowCountOption::Follow,
             ));
-            assert_eq!(project.estimated_startup_work()?, Some(0));
-            assert_eq!(project.estimated_work()?, Some(392));
+            assert_eq!(project.estimated_startup_work(&mut arena)?, Some(0));
+            assert_eq!(
+                project.estimated_cost(&mut arena)?.map(|cost| cost.work),
+                Some(392)
+            );
         }
         Ok(())
     }
@@ -840,9 +859,13 @@ mod tests {
             SortOption::None,
             RowCountOption::Follow,
         ));
-        // 392 input work + 24 comparisons * 2 operator units, then 8 output rows.
-        assert_eq!(sort.estimated_startup_work()?, Some(440));
-        assert_eq!(sort.estimated_work()?, Some(472));
+        // 98 one-column input rows (5 each) + 24 comparisons * 2 operator units,
+        // then 8 output rows.
+        assert_eq!(sort.estimated_startup_work(&mut arena)?, Some(538));
+        assert_eq!(
+            sort.estimated_cost(&mut arena)?.map(|cost| cost.work),
+            Some(578)
+        );
         let mut unknown = table_scan("unknown", vec![]);
         unknown.physical_option = Some(PhysicalOption::new(
             PlanImpl::SeqScan,
@@ -855,8 +878,11 @@ mod tests {
             SortOption::Follow,
             RowCountOption::Estimated { rows: 8, ndv: None },
         ));
-        assert_eq!(filter.estimated_startup_work()?, Some(0));
-        assert_eq!(filter.estimated_work()?, None);
+        assert_eq!(filter.estimated_startup_work(&mut arena)?, Some(0));
+        assert_eq!(
+            filter.estimated_cost(&mut arena)?.map(|cost| cost.work),
+            None
+        );
         Ok(())
     }
 

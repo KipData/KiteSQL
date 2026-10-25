@@ -85,6 +85,7 @@ impl ReferenceSerialization for PhysicalOption {
             sort_option: SortOption::decode(reader, context, reference_tables, arena)?,
             row_count: RowCountOption::decode(reader, context, reference_tables, arena)?,
             startup_work: None,
+            width: None,
         })
     }
 }
