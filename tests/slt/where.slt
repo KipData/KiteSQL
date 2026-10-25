@@ -421,3 +421,362 @@ select cast(-2147483649.0 as int);
 
 statement ok
 drop table alias_input;
+
+# Native point-list predicates cross the 5/6 expansion boundary. Repeat them
+# before and after index creation so range elimination agrees with full scans.
+statement ok
+create table native_in_points(id int primary key, v int null, payload int);
+
+statement ok
+insert into native_in_points values
+(1,NULL,10),(2,-1,20),(3,1,30),(4,1,40),(5,2,50),(6,3,60),
+(7,4,70),(8,5,80),(9,6,90),(10,7,100),(11,8,110),(12,9,120),
+(13,NULL,130),(14,NULL,140),(15,NULL,150),(16,NULL,160),
+(17,NULL,170),(18,NULL,180),(19,NULL,190),(20,NULL,200),
+(21,NULL,210),(22,NULL,220),(23,NULL,230),(24,NULL,240),
+(25,NULL,250),(26,NULL,260),(27,NULL,270),(28,NULL,280),
+(29,NULL,290),(30,NULL,300),(31,NULL,310),(32,NULL,320);
+
+statement ok
+insert into native_in_points values
+(33,10,330),(34,11,340),(35,12,350),(36,13,360),(37,14,370),
+(38,15,380),(39,16,390),(40,17,400),(41,18,410),(42,19,420),
+(43,20,430),(44,21,440),(45,22,450),(46,23,460),(47,24,470),
+(48,25,480),(49,26,490),(50,27,500),(51,28,510),(52,29,520),
+(53,30,530),(54,31,540),(55,32,550),(56,33,560),(57,34,570),
+(58,35,580),(59,36,590),(60,37,600),(61,38,610),(62,39,620),
+(63,40,630),(64,41,640),(65,42,650),(66,43,660),(67,44,670),
+(68,45,680),(69,46,690),(70,47,700),(71,48,710),(72,49,720),
+(73,50,730),(74,51,740),(75,52,750),(76,53,760),(77,54,770),
+(78,55,780),(79,56,790),(80,57,800),(81,58,810),(82,59,820),
+(83,60,830),(84,61,840),(85,62,850),(86,63,860),(87,64,870),
+(88,65,880),(89,66,890),(90,67,900),(91,68,910),(92,69,920),
+(93,70,930),(94,71,940),(95,72,950),(96,73,960),(97,74,970),
+(98,75,980),(99,76,990),(100,77,1000),(101,78,1010),(102,79,1020),
+(103,80,1030),(104,81,1040),(105,82,1050),(106,83,1060),(107,84,1070),
+(108,85,1080),(109,86,1090),(110,87,1100),(111,88,1110),(112,89,1120),
+(113,90,1130),(114,91,1140),(115,92,1150),(116,93,1160),(117,94,1170),
+(118,95,1180),(119,96,1190),(120,97,1200),(121,98,1210),(122,99,1220),
+(123,100,1230),(124,101,1240),(125,102,1250),(126,103,1260),(127,104,1270),
+(128,105,1280),(129,106,1290),(130,107,1300),(131,108,1310),(132,109,1320);
+
+statement ok
+analyze table native_in_points;
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5);
+----
+3
+4
+5
+6
+7
+8
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6);
+----
+3
+4
+5
+6
+7
+8
+9
+
+query I rowsort
+select id from native_in_points where v not in (1,2,3,4,5,6) and v < 10;
+----
+10
+11
+12
+2
+
+query I rowsort
+select id from native_in_points where v in (9,NULL,1,1,1,2);
+----
+12
+3
+4
+5
+
+query I rowsort
+select id from native_in_points where v not in (1,2,3,4,5,NULL);
+----
+
+query I rowsort
+select id from native_in_points where v in (NULL,NULL,NULL,NULL,NULL,NULL);
+----
+
+query I rowsort
+select id from native_in_points where v not in (NULL,NULL,NULL,NULL,NULL,NULL);
+----
+
+query I rowsort
+select id from native_in_points where v in (-999,-998,-997,6,1,6);
+----
+3
+4
+9
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6) and v > 3;
+----
+7
+8
+9
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6) and payload > 50;
+----
+6
+7
+8
+9
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6) or payload = 10;
+----
+1
+3
+4
+5
+6
+7
+8
+9
+
+query I
+select count(*) from native_in_points where v not in (1,2,3,4,5,6);
+----
+104
+
+query I rowsort
+select id from native_in_points where v not in (1,2,3,4,5,6) limit 2 offset 1;
+----
+10
+11
+
+statement ok
+create index native_in_v on native_in_points(v);
+
+statement ok
+analyze table native_in_points;
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5);
+----
+3
+4
+5
+6
+7
+8
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6);
+----
+3
+4
+5
+6
+7
+8
+9
+
+query I rowsort
+select id from native_in_points where v not in (1,2,3,4,5,6) and v < 10;
+----
+10
+11
+12
+2
+
+query I rowsort
+select id from native_in_points where v in (9,NULL,1,1,1,2);
+----
+12
+3
+4
+5
+
+query I rowsort
+select id from native_in_points where v not in (1,2,3,4,5,NULL);
+----
+
+query I rowsort
+select id from native_in_points where v in (NULL,NULL,NULL,NULL,NULL,NULL);
+----
+
+query I rowsort
+select id from native_in_points where v not in (NULL,NULL,NULL,NULL,NULL,NULL);
+----
+
+query I rowsort
+select id from native_in_points where v in (-999,-998,-997,6,1,6);
+----
+3
+4
+9
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6) and v > 3;
+----
+7
+8
+9
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6) and payload > 50;
+----
+6
+7
+8
+9
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6) or payload = 10;
+----
+1
+3
+4
+5
+6
+7
+8
+9
+
+query I
+select count(*) from native_in_points where v not in (1,2,3,4,5,6);
+----
+104
+
+query I rowsort
+select id from native_in_points where v not in (1,2,3,4,5,6) limit 2 offset 1;
+----
+10
+11
+
+statement ok
+drop index native_in_v on native_in_points;
+
+statement ok
+create unique index native_in_prefix on native_in_points(v,payload);
+
+statement ok
+analyze table native_in_points;
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5);
+----
+3
+4
+5
+6
+7
+8
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6);
+----
+3
+4
+5
+6
+7
+8
+9
+
+query I rowsort
+select id from native_in_points where v not in (1,2,3,4,5,6) and v < 10;
+----
+10
+11
+12
+2
+
+query I rowsort
+select id from native_in_points where v in (9,NULL,1,1,1,2);
+----
+12
+3
+4
+5
+
+query I rowsort
+select id from native_in_points where v not in (1,2,3,4,5,NULL);
+----
+
+query I rowsort
+select id from native_in_points where v in (NULL,NULL,NULL,NULL,NULL,NULL);
+----
+
+query I rowsort
+select id from native_in_points where v not in (NULL,NULL,NULL,NULL,NULL,NULL);
+----
+
+query I rowsort
+select id from native_in_points where v in (-999,-998,-997,6,1,6);
+----
+3
+4
+9
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6) and v > 3;
+----
+7
+8
+9
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6) and payload > 50;
+----
+6
+7
+8
+9
+
+query I rowsort
+select id from native_in_points where v in (1,2,3,4,5,6) or payload = 10;
+----
+1
+3
+4
+5
+6
+7
+8
+9
+
+query I
+select count(*) from native_in_points where v not in (1,2,3,4,5,6);
+----
+104
+
+query I rowsort
+select id from native_in_points where v not in (1,2,3,4,5,6) limit 2 offset 1;
+----
+10
+11
+
+query IIIIII rowsort
+select id, v in (1,2,3,4,5), v in (1,2,3,4,5,6),
+ v not in (1,2,3,4,5,6), v in (9,NULL,1,1,1,2), v not in (9,NULL,1,1,1,2)
+from native_in_points where id <= 12;
+----
+1 NULL NULL NULL NULL NULL
+10 false false true NULL NULL
+11 false false true NULL NULL
+12 false false true true false
+2 false false true NULL NULL
+3 true true false true false
+4 true true false true false
+5 true true false true false
+6 true true false NULL NULL
+7 true true false NULL NULL
+8 true true false NULL NULL
+9 false true false NULL NULL
+
+statement ok
+drop table native_in_points;

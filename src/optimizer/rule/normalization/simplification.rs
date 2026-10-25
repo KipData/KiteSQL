@@ -114,12 +114,14 @@ mod test {
 
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::{Range, RangeDetacher};
+    use crate::expression::simplify::Simplify;
+    use crate::expression::visitor_mut::ExprVisitorMut;
     use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::Operator;
-    use crate::planner::{LogicalPlan, PlanArena};
+    use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
     use crate::types::value::DataValue;
     use crate::types::{ColumnId, LogicalType};
     use std::collections::Bound;
@@ -238,10 +240,6 @@ mod test {
 
     #[test]
     fn test_constant_is_null_elimination() -> Result<(), DatabaseError> {
-        use crate::expression::simplify::Simplify;
-        use crate::expression::visitor_mut::ExprVisitorMut;
-        use crate::planner::TableArenaCell;
-
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         for (value, negated, expected) in [
@@ -655,6 +653,64 @@ mod test {
             })
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn constant_in_expansion_uses_original_list_length() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        for (list, kept) in [
+            ("1,2,3,4,5", false),
+            ("1,2,3,4,5,6", true),
+            ("1,1,1,1,1,NULL", true),
+            ("NULL,NULL,NULL,NULL,NULL,NULL", true),
+        ] {
+            for negated in ["", "not "] {
+                let mut arena = PlanArena::new(&table_state.table_arena);
+                let plan = table_state.plan_with_arena(
+                    &format!("select * from t1 where c1 {negated}in ({list})"),
+                    &mut arena,
+                )?;
+                let Operator::Filter(filter) = plan.childrens.pop_only().operator else {
+                    unreachable!();
+                };
+                let mut predicate = filter.predicate;
+                Simplify.visit(&mut predicate, &mut arena)?;
+                assert_eq!(
+                    matches!(arena.expression(predicate), ScalarExpression::In { .. }),
+                    kept,
+                    "{negated}IN ({list})"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_large_in_keeps_pairwise_expansion() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        for predicate in [
+            "c1 in (1,2,3,4,5,2147483648)",
+            "c1 in (1,2,3,4,5,c1)",
+            "(c1 + 1) in (1,2,3,4,5,6)",
+            "cast(c1 as double) in (1.0,2.0,3.0,4.0,5.0,6.0)",
+        ] {
+            let mut arena = PlanArena::new(&table_state.table_arena);
+            let plan = table_state
+                .plan_with_arena(&format!("select * from t1 where {predicate}"), &mut arena)?;
+            let Operator::Filter(filter) = plan.childrens.pop_only().operator else {
+                unreachable!();
+            };
+            let mut expression = filter.predicate;
+            Simplify.visit(&mut expression, &mut arena)?;
+            assert!(
+                matches!(
+                    arena.expression(expression),
+                    ScalarExpression::Binary { .. }
+                ),
+                "{predicate}"
+            );
+        }
         Ok(())
     }
 

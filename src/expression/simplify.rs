@@ -107,6 +107,8 @@ impl ExprVisitorMut for ConstantCalculator {
     }
 }
 
+const IN_EXPANSION_LIMIT: usize = 5;
+
 #[derive(Debug, Default)]
 pub struct Simplify;
 
@@ -197,6 +199,13 @@ impl ExprVisitorMut for Simplify {
             } => {
                 if args.is_empty() {
                     return Ok(false);
+                }
+                // Keep point lists compact without changing pairwise coercion or
+                // repeated evaluation of non-column operands in the old rewrite.
+                if args.len() > IN_EXPANSION_LIMIT
+                    && arg_expr.constant_in_column(args, arena).is_some()
+                {
+                    return Ok(true);
                 }
 
                 let (op_1, op_2) = if *negated {
@@ -502,6 +511,37 @@ impl Simplify {
 }
 
 impl ExprRef {
+    pub(crate) fn constant_in_column<A: MetaArena + ?Sized>(
+        mut self,
+        args: &[ExprRef],
+        arena: &A,
+    ) -> Option<ColumnRef> {
+        while let ScalarExpression::Alias { expr, .. } = arena.expression(self) {
+            self = *expr;
+        }
+        let ScalarExpression::ColumnRef { column, .. } = arena.expression(self) else {
+            return None;
+        };
+        let ty = arena.column(*column).datatype();
+        // Floating key order need not agree with SQL equality for NaNs/zeros.
+        if args.is_empty()
+            || matches!(
+                ty,
+                LogicalType::Tuple(_) | LogicalType::Float | LogicalType::Double
+            )
+        {
+            return None;
+        }
+        args.iter()
+            .all(|arg| match arena.expression(*arg) {
+                ScalarExpression::Constant(value) if !value.has_parameter() => {
+                    value.is_null() || value.logical_type() == *ty
+                }
+                _ => false,
+            })
+            .then_some(*column)
+    }
+
     pub(crate) fn unpack_val<A: MetaArena + ?Sized>(self, arena: &A) -> Option<DataValue> {
         match arena.expression(self) {
             ScalarExpression::Constant(val) => Some(val.clone()),
