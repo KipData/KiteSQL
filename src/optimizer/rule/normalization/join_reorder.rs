@@ -950,7 +950,8 @@ mod tests {
             panic!("expected a projection restoring A, B, C output order");
         };
         assert_eq!(project.exprs.len(), 6);
-        for (expr, position) in project.exprs.iter().zip([0, 1, 5, 2, 3, 4]) {
+        // C (smaller) builds against A, so the join emits C, A, B.
+        for (expr, position) in project.exprs.iter().zip([3, 4, 5, 0, 1, 2]) {
             assert!(matches!(
                 arena.expression(*expr),
                 ScalarExpression::ColumnRef { position: actual, .. } if *actual == position
@@ -1115,12 +1116,13 @@ mod tests {
 
     #[test]
     fn malformed_regions_are_planning_errors() {
-        // (outer join key, expected message)
+        // (outer join key, expected message). Each side of a key is only searched in its own
+        // input range, so a left column used on the right is reported as not produced.
         let cases: [(
             fn(ExprRef, ExprRef, &mut PlanArena) -> (ExprRef, ExprRef),
             &str,
         ); 2] = [
-            (|a, _, _| (a, a), "compares columns of the same join input"),
+            (|a, _, _| (a, a), "is not produced by any join input"),
             (
                 |_, c, arena| (input("z", 1, arena).1, c),
                 "is not produced by any join input",
@@ -1806,9 +1808,11 @@ mod tests {
             SortOption::None,
             RowCountOption::Unknown,
         ));
-        assert!(!GreedyJoinReorder.apply(&mut join, &mut arena, None)?);
+        // The two-input region is rebuilt so the smaller right input becomes the build side.
+        assert!(GreedyJoinReorder.apply(&mut join, &mut arena, None)?);
+        let join = join.childrens.only();
         assert_eq!(join.estimated_rows(), Some(2000));
-        assert_eq!(index_statistics(&join), None);
+        assert_eq!(index_statistics(join), None);
         Ok(())
     }
 
@@ -1850,8 +1854,8 @@ mod tests {
             RowCountOption::Unknown,
         ));
         assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
-        let (lr, _) = plan.childrens.twins();
-        assert_eq!(lr.referenced_table(), vec!["l".into(), "r".into()]);
+        let (_, lr) = plan.childrens.only().childrens.twins();
+        assert_eq!(lr.referenced_table(), vec!["r".into(), "l".into()]);
         assert_eq!(lr.estimated_rows(), Some(2000));
         assert_eq!(index_statistics(lr), None);
         assert_eq!(plan.estimated_rows(), Some(40000));
@@ -2266,11 +2270,12 @@ mod tests {
         assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
         assert_eq!(plan.output_schema(&mut arena), &schema);
         assert_eq!(plan.estimated_rows(), Some(200000));
-        let (left, right) = plan.childrens.twins();
-        assert_eq!(left.referenced_table(), vec!["a".into()]);
-        assert_eq!(right.referenced_table(), vec!["b".into(), "c".into()]);
-        assert_eq!(right.estimated_rows(), Some(200));
-        let Operator::Join(op) = &right.operator else {
+        // BC (200 rows) is merged first and builds against A (1000 rows).
+        let (bc, a) = plan.childrens.only().childrens.twins();
+        assert_eq!(a.referenced_table(), vec!["a".into()]);
+        assert_eq!(bc.referenced_table(), vec!["b".into(), "c".into()]);
+        assert_eq!(bc.estimated_rows(), Some(200));
+        let Operator::Join(op) = &bc.operator else {
             unreachable!()
         };
         let JoinCondition::On { on, .. } = &op.on else {
@@ -2328,14 +2333,15 @@ mod tests {
         let schema = plan.output_schema(&mut arena).clone();
         assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
         assert_eq!(plan.output_schema(&mut arena), &schema);
-        // AD (mask 9) precedes BC (mask 6) in inputs, despite their reverse tree order.
+        // E ties between AD and BC; AD (mask 9) precedes BC (mask 6) in inputs, despite their
+        // reverse tree order, so E joins AD. BC then builds against the larger ADE.
         let join = plan.childrens.only();
-        let (left, right) = join.childrens.twins();
+        let (bc, ade) = join.childrens.twins();
         assert_eq!(
-            left.referenced_table(),
+            ade.referenced_table(),
             vec!["a".into(), "d".into(), "e".into()]
         );
-        assert_eq!(right.referenced_table(), vec!["b".into(), "c".into()]);
+        assert_eq!(bc.referenced_table(), vec!["b".into(), "c".into()]);
         Ok(())
     }
 
@@ -2420,11 +2426,13 @@ mod tests {
         let schema = plan.output_schema(&mut arena).clone();
         assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
         assert_eq!(plan.output_schema(&mut arena), &schema);
-        let (left, right) = plan.childrens.twins();
-        assert_eq!(left.referenced_table(), vec!["a".into(), "b".into()]);
-        assert_eq!(right.referenced_table(), vec!["c".into()]);
-        assert_eq!(left.estimated_rows(), Some(10000));
-        for join in [&plan, left] {
+        // AB is merged first despite its larger product; C then builds against it.
+        let join = plan.childrens.only();
+        let (c, ab) = join.childrens.twins();
+        assert_eq!(ab.referenced_table(), vec!["a".into(), "b".into()]);
+        assert_eq!(c.referenced_table(), vec!["c".into()]);
+        assert_eq!(ab.estimated_rows(), Some(10000));
+        for join in [join, ab] {
             let Operator::Join(op) = &join.operator else {
                 unreachable!()
             };
@@ -2463,11 +2471,12 @@ mod tests {
         let schema = plan.output_schema(&mut arena).clone();
         assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
         assert_eq!(plan.output_schema(&mut arena), &schema);
-        let (left, right) = plan.childrens.twins();
-        assert_eq!(left.referenced_table(), vec!["a".into()]);
-        assert_eq!(right.referenced_table(), vec!["b".into(), "c".into()]);
-        assert_eq!(right.estimated_rows(), Some(200));
-        for join in [&plan, right] {
+        let join = plan.childrens.only();
+        let (bc, a) = join.childrens.twins();
+        assert_eq!(a.referenced_table(), vec!["a".into()]);
+        assert_eq!(bc.referenced_table(), vec!["b".into(), "c".into()]);
+        assert_eq!(bc.estimated_rows(), Some(200));
+        for join in [join, bc] {
             let Operator::Join(op) = &join.operator else {
                 unreachable!()
             };
@@ -2512,10 +2521,10 @@ mod tests {
         let (left, right) = join.childrens.twins();
         assert_eq!(
             left.referenced_table(),
-            vec!["a".into(), "b".into(), "c".into()]
+            vec!["b".into(), "c".into(), "a".into()]
         );
         assert_eq!(right.referenced_table(), vec!["d".into()]);
-        let (_, bc) = left.childrens.twins();
+        let (bc, _) = left.childrens.twins();
         assert_eq!(bc.referenced_table(), vec!["b".into(), "c".into()]);
         assert_eq!(bc.estimated_rows(), Some(200));
         Ok(())
@@ -2565,7 +2574,8 @@ mod tests {
             ));
             let (abc, d) = cross.childrens.twins();
             assert_eq!(d.referenced_table(), vec!["d".into()]);
-            let (ab, c) = abc.childrens.twins();
+            // Without estimates, the narrower C becomes the build side of AB.
+            let (c, ab) = abc.childrens.twins();
             assert_eq!(c.referenced_table(), vec!["c".into()]);
             let (a, b) = ab.childrens.twins();
             assert_eq!(a.referenced_table(), vec!["a".into()]);
@@ -2624,8 +2634,9 @@ mod tests {
         assert!(GreedyJoinReorder.apply(join, &mut arena, None)?);
         assert_eq!(plan.operator, original_parent);
         assert_eq!(plan.output_schema(&mut arena), &schema);
-        let (_, right) = plan.childrens.only().childrens.twins();
-        let (_, filter) = right.childrens.twins();
+        // Greedy restores the region's output order with its own Project below the parent.
+        let (bc, _) = plan.childrens.only().childrens.only().childrens.twins();
+        let (_, filter) = bc.childrens.twins();
         assert!(matches!(filter.operator, Operator::Filter(_)));
         assert_eq!(filter.childrens.only().referenced_table(), vec!["c".into()]);
         assert_eq!(filter.estimated_rows(), Some(20));
@@ -2633,16 +2644,23 @@ mod tests {
     }
 
     #[test]
-    fn unknown_inputs_and_outer_joins_keep_original_order() -> Result<(), DatabaseError> {
+    fn unknown_inputs_are_rebuilt_but_outer_joins_keep_original_order() -> Result<(), DatabaseError>
+    {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let mut plan = three_inputs(&mut arena);
         if let Childrens::Twins { right, .. } = plan.childrens.as_mut() {
             right.physical_option.as_mut().unwrap().row_count = RowCountOption::Unknown;
         }
-        let original = plan.clone();
-        assert!(!GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
-        assert_eq!(plan, original);
+        let mut outer = plan.clone();
+        // Unknown inputs are still rebuilt by connectivity and width, without row estimates.
+        assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
+        let (c, ab) = plan.childrens.only().childrens.twins();
+        assert_eq!(c.referenced_table(), vec!["c".into()]);
+        assert_eq!(ab.referenced_table(), vec!["a".into(), "b".into()]);
+        assert_eq!(plan.row_count_option(), None);
+
+        let mut plan = outer.take();
         if let Operator::Join(op) = &mut plan.operator {
             op.join_type = JoinType::LeftOuter;
         }
