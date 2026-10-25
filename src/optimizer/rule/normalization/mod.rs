@@ -41,8 +41,10 @@ mod combine_operators;
 mod compilation_in_advance;
 mod elimination;
 mod join_reorder;
+mod materialize_mark_apply;
 mod min_max_top_k;
 use join_reorder::GreedyJoinReorder;
+use materialize_mark_apply::MaterializeMarkApply;
 mod parameterized_index;
 mod pushdown_limit;
 mod pushdown_predicates;
@@ -83,6 +85,7 @@ pub enum NormalizationRuleImpl {
     ParameterizeInnerJoin,
     EliminateIndexFilter,
     GreedyJoinReorder,
+    MaterializeMarkApply,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -189,7 +192,8 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::EliminateIndexFilter => NormalizationRuleRootTag::Filter,
             NormalizationRuleImpl::ParameterizeInnerJoin
             | NormalizationRuleImpl::GreedyJoinReorder => NormalizationRuleRootTag::Join,
-            NormalizationRuleImpl::ParameterizeMarkApply => NormalizationRuleRootTag::MarkApply,
+            NormalizationRuleImpl::ParameterizeMarkApply
+            | NormalizationRuleImpl::MaterializeMarkApply => NormalizationRuleRootTag::MarkApply,
         }
     }
 }
@@ -232,6 +236,7 @@ impl NormalizationRule for NormalizationRuleImpl {
             NormalizationRuleImpl::ParameterizeMarkApply => {
                 ParameterizeMarkApply.apply(plan, arena)
             }
+            NormalizationRuleImpl::MaterializeMarkApply => MaterializeMarkApply.apply(plan, arena),
         }
     }
 }

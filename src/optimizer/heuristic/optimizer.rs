@@ -25,6 +25,7 @@ use crate::optimizer::rule::normalization::{
     apply_annotated_post_rules, apply_scan_order_hint, constant_calculation_current,
     evaluator_bind_current, NormalizationRuleImpl, OrderHintKind, ScanOrderHint, WholeTreePassKind,
 };
+use crate::planner::operator::mark_apply::MarkApplyKind;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
@@ -524,11 +525,16 @@ impl ImplementationRuleIndex {
             Operator::Limit(_) if self.contains(ImplementationRuleImpl::Limit) => Some(
                 PhysicalOption::new(PlanImpl::Limit, SortOption::Follow, RowCountOption::Unknown),
             ),
-            Operator::MarkApply(_) if self.contains(ImplementationRuleImpl::MarkApply) => {
+            Operator::MarkApply(op) if self.contains(ImplementationRuleImpl::MarkApply) => {
+                let rows = if matches!(op.kind, MarkApplyKind::InnerJoin) {
+                    RowCountOption::Unknown
+                } else {
+                    RowCountOption::Follow
+                };
                 Some(PhysicalOption::new(
                     PlanImpl::MarkApply,
                     SortOption::Follow,
-                    RowCountOption::Unknown,
+                    rows,
                 ))
             }
             Operator::Project(_) if self.contains(ImplementationRuleImpl::Projection) => {
@@ -682,6 +688,7 @@ impl ImplementationRuleIndex {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::binder::{Binder, BinderContext};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::DataBaseBuilder;
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
@@ -695,6 +702,7 @@ mod tests {
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::limit::LimitOperator;
+    use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator};
     use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::sort::SortField;
     use crate::planner::operator::{
@@ -704,6 +712,7 @@ mod tests {
     use crate::storage::{Storage, Transaction};
     use crate::types::index::IndexLookup;
     use crate::types::value::DataValue;
+    use crate::types::LogicalType;
     use std::ops::Bound;
     use tempfile::TempDir;
 
@@ -718,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_fast_path_follows_input_row_count() {
+    fn row_preserving_fast_paths_follow_input_row_count() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let mut plan = filter_chain(1, &mut arena);
@@ -737,6 +746,28 @@ mod tests {
             RowCountOption::Follow
         );
         assert_eq!(plan.estimated_rows(), Some(12));
+
+        let marker = arena.alloc_column(ColumnCatalog::new(
+            "mark".to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
+        ));
+        let right = LogicalPlan::new(Operator::Dummy, Childrens::None);
+        let mut plan = MarkApplyOperator::build_exists(plan, right, marker, vec![]);
+        let implementations = ImplementationRuleIndex::new(vec![ImplementationRuleImpl::MarkApply]);
+        plan.physical_option = implementations.direct_physical_option(&plan.operator);
+        assert_eq!(plan.estimated_rows(), Some(12));
+        let Operator::MarkApply(op) = &mut plan.operator else {
+            unreachable!()
+        };
+        op.kind = MarkApplyKind::InnerJoin;
+        plan.physical_option = implementations.direct_physical_option(&plan.operator);
+        assert_eq!(
+            plan.physical_option.as_ref().unwrap().row_count,
+            RowCountOption::Unknown
+        );
+        assert_eq!(plan.estimated_rows(), None);
+        Ok(())
     }
 
     #[test]

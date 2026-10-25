@@ -457,6 +457,11 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             vec![NormalizationRuleImpl::EliminateIndexFilter],
         )
         .after_batch(
+            "Materialize Mark Apply".to_string(),
+            HepBatchStrategy::fix_point_bottomup(1),
+            vec![NormalizationRuleImpl::MaterializeMarkApply],
+        )
+        .after_batch(
             "Expression Remapper".to_string(),
             HepBatchStrategy::once_topdown(),
             vec![NormalizationRuleImpl::EvaluatorBind],
@@ -475,6 +480,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             ImplementationRuleImpl::HashJoin,
             ImplementationRuleImpl::Limit,
             ImplementationRuleImpl::Projection,
+            ImplementationRuleImpl::MarkApply,
             ImplementationRuleImpl::ScalarSubquery,
             ImplementationRuleImpl::SeqScan,
             ImplementationRuleImpl::IndexScan,

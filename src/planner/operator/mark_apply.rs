@@ -38,6 +38,7 @@ pub struct MarkApplyOperator {
     pub predicates: Vec<ExprRef>,
     output_column: Option<ColumnRef>,
     pub parameterized_probe: Option<ExprRef>,
+    pub(crate) materialize: bool,
 }
 
 impl MarkApplyOperator {
@@ -47,6 +48,7 @@ impl MarkApplyOperator {
             predicates,
             output_column: Some(output_column),
             parameterized_probe: None,
+            materialize: false,
         }
     }
 
@@ -79,6 +81,7 @@ impl MarkApplyOperator {
             predicates,
             output_column: Some(output_column),
             parameterized_probe: None,
+            materialize: false,
         }
     }
 
@@ -137,6 +140,7 @@ impl MarkApplyOperator {
             predicates,
             output_column: None,
             parameterized_probe: Some(probe),
+            materialize: false,
         }
     }
 

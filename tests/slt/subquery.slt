@@ -1080,6 +1080,25 @@ select id,b in (select b from corr_rows where id=2) as matched,b not in (select 
 3 false false
 4 NULL NULL
 
+# Each row compares its own value with the same cached, nested RHS.
+query ITTT
+select id,b in (select b from corr_rows where b in (select b from corr_rows where id=2)),b<any(select b from corr_rows where b is not null),b<all(select b from corr_rows where b is not null) from corr_rows order by id;
+----
+1 false true false
+2 true true false
+3 false false false
+4 NULL NULL NULL
+5 true true false
+
+query ITT
+select id,b in (select b from corr_rows where false),b<>all(select b from corr_rows where false) from corr_rows order by id;
+----
+1 false true
+2 false true
+3 false true
+4 false true
+5 false true
+
 statement error correlated quantified subqueries in SELECT are not supported yet
 select b in (select x.b from corr_rows x where x.id<corr_rows.id) from corr_rows;
 

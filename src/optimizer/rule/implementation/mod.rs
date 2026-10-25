@@ -323,6 +323,7 @@ mod tests {
         ImplementationRuleImpl, ImplementationRuleRootTag,
     };
     use crate::planner::operator::function_scan::FunctionScanOperator;
+    use crate::planner::operator::mark_apply::MarkApplyKind;
     use crate::planner::operator::top_k::TopKOperator;
     use crate::planner::operator::{
         Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
@@ -436,11 +437,21 @@ mod tests {
             |op| matches!(op, Operator::Limit(_)),
             PlanImpl::Limit,
         )?;
-        assert_sql_rule(
+        with_operator_from_sql(
             "select * from t1 where exists(select * from t2)",
-            ImplementationRuleImpl::MarkApply,
             |op| matches!(op, Operator::MarkApply(_)),
-            PlanImpl::MarkApply,
+            |mut operator, arena| {
+                let option = best_option(ImplementationRuleImpl::MarkApply, &operator, arena)?;
+                assert_eq!(option.plan, PlanImpl::MarkApply);
+                assert_eq!(option.row_count, RowCountOption::Follow);
+                let Operator::MarkApply(op) = &mut operator else {
+                    unreachable!()
+                };
+                op.kind = MarkApplyKind::InnerJoin;
+                let option = best_option(ImplementationRuleImpl::MarkApply, &operator, arena)?;
+                assert_eq!(option.row_count, RowCountOption::Unknown);
+                Ok(())
+            },
         )?;
         assert_sql_rule(
             "select c1 from t1",
