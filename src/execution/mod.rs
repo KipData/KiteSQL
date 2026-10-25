@@ -83,7 +83,7 @@ use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
-use crate::types::tuple::{Input, Tuple, TupleImpl};
+use crate::types::tuple::{ConcatPool, Input, Tuple, TupleId, TupleImpl};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecutionContext<'a> {
@@ -144,6 +144,14 @@ pub(crate) enum ExecStatus {
 pub(crate) struct ExecResult {
     pub(crate) tuple: TupleImpl,
     pub(crate) status: Option<ExecStatus>,
+    concat_pool: ConcatPool,
+}
+
+impl ExecResult {
+    #[inline]
+    pub(crate) fn output_mut(&mut self) -> &mut Tuple {
+        self.concat_pool.retain_leftmost(&mut self.tuple)
+    }
 }
 
 /// Resolves either an arena-backed expression or a direct scalar expression.
@@ -775,7 +783,22 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
 
     #[inline]
     pub(crate) fn output_tuple_mut(&mut self) -> &mut Tuple {
-        self.result.tuple.output_mut()
+        self.result.output_mut()
+    }
+
+    #[inline]
+    pub(crate) fn concat(
+        &mut self,
+        left: TupleImpl,
+        right: TupleImpl,
+        pk: Option<TupleId>,
+    ) -> TupleImpl {
+        self.result.concat_pool.concat(left, right, pk)
+    }
+
+    #[inline]
+    pub(crate) fn release(&mut self, tuple: TupleImpl) {
+        self.result.concat_pool.release(tuple);
     }
 
     pub(crate) fn take_tuple(&mut self) -> TupleImpl {
@@ -812,7 +835,10 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         }
 
         let pk = self.result.tuple.take_pk();
-        let tuple = self.result.tuple.retain_rightmost();
+        let tuple = self
+            .result
+            .concat_pool
+            .retain_rightmost(&mut self.result.tuple);
         tuple.values.rotate_left(base);
         tuple.values.truncate(exprs.len());
         tuple.pk = pk;

@@ -144,7 +144,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
         };
 
         let state = arena.local_state(plan_arena);
-        if iter.next_tuple_into(state.table_codec, state.result.tuple.output_mut())? {
+        if iter.next_tuple_into(state.table_codec, state.result.output_mut())? {
             arena.resume();
         } else {
             arena.finish();

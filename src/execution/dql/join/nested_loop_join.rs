@@ -26,7 +26,7 @@ use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
 use crate::storage::Transaction;
 use crate::types::bitset::BitSet;
-use crate::types::tuple::{SplitTupleRef, Tuple, TupleImpl, TupleLike};
+use crate::types::tuple::{SplitTupleRef, TupleImpl, TupleLike};
 use crate::types::value::DataValue;
 
 /// Equivalent condition
@@ -230,12 +230,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                         active_left.has_matched = true;
                         // A matched pair is always one output row, even when
                         // neither side projects a column (e.g. `count(*)`).
-                        let joined = Self::emit_tuple(
-                            active_left.left_tuple.clone(),
-                            arena.take_tuple(),
-                            self.ty,
-                        );
-                        *arena.result_mut() = joined;
+                        Self::emit_tuple(&active_left.left_tuple, arena.result_mut(), self.ty);
                         if matches!(self.ty, JoinType::Full) {
                             if let Some(bits) = right_bitmap.as_mut() {
                                 bits.insert(idx);
@@ -270,12 +265,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                         JoinType::LeftOuter | JoinType::RightOuter | JoinType::Full
                             if !active_left.has_matched =>
                         {
-                            let nulls = Tuple::new(None, vec![DataValue::Null; right_schema_len]);
-                            *arena.result_mut() = Self::emit_tuple(
-                                std::mem::take(&mut active_left.left_tuple),
-                                nulls.into(),
-                                self.ty,
-                            );
+                            let mut row = std::mem::take(&mut active_left.left_tuple);
+                            let nulls = std::iter::repeat_n(DataValue::Null, right_schema_len);
+                            if matches!(self.ty, JoinType::RightOuter) {
+                                row.prepend(nulls);
+                            } else {
+                                row.extend(nulls);
+                            }
+                            *arena.result_mut() = row;
                             true
                         }
                         _ => false,
@@ -303,11 +300,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                         };
 
                         if is_unmatched {
-                            let mut right = arena.take_tuple();
-                            let pk = right.take_pk();
-                            let nulls =
-                                Tuple::new(None, vec![DataValue::Null; self.eq_cond.left_len]);
-                            *arena.result_mut() = TupleImpl::concat(nulls.into(), right, pk);
+                            arena.result_mut().prepend(std::iter::repeat_n(
+                                DataValue::Null,
+                                self.eq_cond.left_len,
+                            ));
                             self.state = NestedLoopJoinState::EmitRightUnmatched {
                                 right_input,
                                 right_bitmap,
@@ -347,14 +343,16 @@ impl NestedLoopJoin {
     /// `left`: retained outer tuple (logical right for RightOuter).
     /// `right`: current inner tuple (logical left for RightOuter).
     /// `ty`: the type of join
-    fn emit_tuple(mut left: TupleImpl, mut right: TupleImpl, ty: JoinType) -> TupleImpl {
-        if matches!(ty, JoinType::RightOuter) {
-            let pk = right.take_pk().or_else(|| left.pk().cloned());
-            TupleImpl::concat(right, left, pk)
+    fn emit_tuple(left: &TupleImpl, right: &mut TupleImpl, ty: JoinType) {
+        let values = left.iter().cloned();
+        let pk = if matches!(ty, JoinType::RightOuter) {
+            right.extend(values);
+            right.take_pk().or_else(|| left.pk().cloned())
         } else {
-            let pk = left.take_pk().or_else(|| right.take_pk());
-            TupleImpl::concat(left, right, pk)
-        }
+            right.prepend(values);
+            left.pk().cloned().or_else(|| right.take_pk())
+        };
+        right.set_pk(pk);
     }
 }
 

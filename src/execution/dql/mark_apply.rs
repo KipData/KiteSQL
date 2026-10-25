@@ -220,9 +220,11 @@ impl<'a> MarkApply<'a> {
             {
                 let mut right = arena.take_tuple();
                 let pk = left.take_pk().or_else(|| right.take_pk());
-                arena.produce(TupleImpl::concat(left, right, pk));
+                let joined = arena.concat(left, right, pk);
+                arena.produce(joined);
                 return Ok(());
             }
+            arena.release(left);
         }
         arena.finish();
         Ok(())

@@ -83,7 +83,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
             }
         };
 
-        if iter.next_tuple_into(state.table_codec, state.result.tuple.output_mut())? {
+        if iter.next_tuple_into(state.table_codec, state.result.output_mut())? {
             arena.resume();
         } else {
             arena.finish();

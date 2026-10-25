@@ -13,13 +13,12 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::join::hash::{
-    filter, join_rows, null_left_row, JoinProbeState, ProbeState,
-};
+use crate::execution::dql::join::hash::{filter, join_rows, JoinProbeState, ProbeState};
 use crate::execution::dql::join::hash_join::BuildState;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::tuple::{SplitTupleRef, TupleImpl};
+use crate::types::value::DataValue;
 
 pub(crate) struct RightJoinState {
     pub(crate) left_schema_len: usize,
@@ -40,10 +39,10 @@ impl JoinProbeState for RightJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(null_left_row(
-                self.left_schema_len,
-                &mut probe_state.probe_tuple,
-            )));
+            probe_state
+                .probe_tuple
+                .prepend(std::iter::repeat_n(DataValue::Null, self.left_schema_len));
+            return Ok(Some(std::mem::take(&mut probe_state.probe_tuple)));
         }
 
         let Some(build_state) = build_state else {
@@ -53,10 +52,10 @@ impl JoinProbeState for RightJoinState {
             }
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(null_left_row(
-                self.left_schema_len,
-                &mut probe_state.probe_tuple,
-            )));
+            probe_state
+                .probe_tuple
+                .prepend(std::iter::repeat_n(DataValue::Null, self.left_schema_len));
+            return Ok(Some(std::mem::take(&mut probe_state.probe_tuple)));
         };
 
         while probe_state.index < build_state.tuples.len() {
@@ -80,10 +79,10 @@ impl JoinProbeState for RightJoinState {
         if !probe_state.produced && !probe_state.emitted_unmatched {
             probe_state.emitted_unmatched = true;
             probe_state.finished = true;
-            return Ok(Some(null_left_row(
-                self.left_schema_len,
-                &mut probe_state.probe_tuple,
-            )));
+            probe_state
+                .probe_tuple
+                .prepend(std::iter::repeat_n(DataValue::Null, self.left_schema_len));
+            return Ok(Some(std::mem::take(&mut probe_state.probe_tuple)));
         }
 
         probe_state.finished = true;

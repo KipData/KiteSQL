@@ -21,6 +21,8 @@ use crate::types::value::DataValue;
 use std::borrow::Borrow;
 use std::borrow::Cow;
 use std::io::Cursor;
+use std::mem::MaybeUninit;
+use std::ptr;
 
 const BITS_MAX_INDEX: usize = 8;
 
@@ -242,6 +244,82 @@ impl ConcatTuple {
     }
 }
 
+#[allow(clippy::vec_box)]
+#[derive(Debug, Default)]
+pub(crate) struct ConcatPool(Vec<Box<MaybeUninit<ConcatTuple>>>);
+
+impl ConcatPool {
+    const CAPACITY: usize = 64;
+
+    pub(crate) fn concat(
+        &mut self,
+        left: TupleImpl,
+        right: TupleImpl,
+        pk: Option<TupleId>,
+    ) -> TupleImpl {
+        let concat = ConcatTuple {
+            pk,
+            left_len: left.len(),
+            left,
+            right,
+        };
+        TupleImpl::Concat(match self.0.pop() {
+            Some(slot) => Box::write(slot, concat),
+            None => Box::new(concat),
+        })
+    }
+
+    pub(crate) fn retain_leftmost<'a>(&mut self, tuple: &'a mut TupleImpl) -> &'a mut Tuple {
+        self.retain(tuple, true)
+    }
+
+    pub(crate) fn retain_rightmost<'a>(&mut self, tuple: &'a mut TupleImpl) -> &'a mut Tuple {
+        self.retain(tuple, false)
+    }
+
+    fn retain<'a>(&mut self, tuple: &'a mut TupleImpl, keep_left: bool) -> &'a mut Tuple {
+        loop {
+            match tuple {
+                TupleImpl::Tuple(tuple) => return tuple,
+                TupleImpl::Concat(_) => *tuple = self.split(std::mem::take(tuple), keep_left),
+            }
+        }
+    }
+
+    fn split(&mut self, tuple: TupleImpl, keep_left: bool) -> TupleImpl {
+        match tuple {
+            TupleImpl::Tuple(tuple) => TupleImpl::Tuple(tuple),
+            TupleImpl::Concat(boxed) => {
+                let ConcatTuple { left, right, .. } = self.recycle(boxed);
+                let (keep, discard) = if keep_left {
+                    (left, right)
+                } else {
+                    (right, left)
+                };
+                self.release(discard);
+                keep
+            }
+        }
+    }
+
+    pub(crate) fn release(&mut self, tuple: TupleImpl) {
+        if let TupleImpl::Concat(boxed) = tuple {
+            let ConcatTuple { left, right, .. } = self.recycle(boxed);
+            self.release(left);
+            self.release(right);
+        }
+    }
+
+    fn recycle(&mut self, boxed: Box<ConcatTuple>) -> ConcatTuple {
+        let raw = Box::into_raw(boxed);
+        let (concat, slot) = unsafe { (ptr::read(raw), Box::from_raw(raw.cast())) };
+        if self.0.len() < Self::CAPACITY {
+            self.0.push(slot);
+        }
+        concat
+    }
+}
+
 impl Default for TupleImpl {
     fn default() -> Self {
         TupleImpl::Tuple(Tuple::default())
@@ -330,6 +408,23 @@ impl TupleImpl {
                         &mut concat.right
                     };
                 }
+            }
+        }
+    }
+
+    pub fn prepend(&mut self, values: impl IntoIterator<Item = DataValue>) {
+        match self {
+            TupleImpl::Tuple(tuple) => {
+                let len = tuple.values.len();
+                tuple.values.extend(values);
+                let count = tuple.values.len() - len;
+                tuple.values.rotate_right(count);
+            }
+            TupleImpl::Concat(_) => {
+                let pk = self.take_pk();
+                let rest = std::mem::take(self);
+                let head = Tuple::new(None, values.into_iter().collect());
+                *self = TupleImpl::concat(head.into(), rest, pk);
             }
         }
     }
@@ -456,14 +551,11 @@ impl TupleImpl {
             }
         }
     }
+}
 
-    pub(crate) fn retain_rightmost(&mut self) -> &mut Tuple {
-        loop {
-            match self {
-                TupleImpl::Tuple(tuple) => return tuple,
-                TupleImpl::Concat(concat) => *self = std::mem::take(&mut concat.right),
-            }
-        }
+impl Extend<DataValue> for TupleImpl {
+    fn extend<I: IntoIterator<Item = DataValue>>(&mut self, values: I) {
+        self.rightmost_mut().values.extend(values);
     }
 }
 
@@ -1252,6 +1344,38 @@ mod tests {
         assert!(output.values.capacity() >= 4);
         assert_eq!(output.values.len(), 4);
         assert!(matches!(tuple, TupleImpl::Tuple(_)));
+    }
+
+    #[test]
+    fn concat_pool_recycles_and_reuses_boxes() {
+        use super::{ConcatPool, TupleImpl};
+
+        let mut pool = ConcatPool::default();
+        let inner = pool.concat(ints(None, &[0]), ints(None, &[1]), None);
+        let mut tuple = pool.concat(inner, ints(None, &[2, 3]), Some(DataValue::Int32(9)));
+        assert_eq!(tuple, [0, 1, 2, 3].map(DataValue::Int32));
+
+        assert_eq!(
+            pool.retain_rightmost(&mut tuple).values,
+            [2, 3].map(DataValue::Int32)
+        );
+        assert_eq!(pool.0.len(), 2);
+
+        let inner = pool.concat(ints(None, &[4]), ints(None, &[5]), None);
+        let mut tuple = pool.concat(ints(None, &[6]), inner, None);
+        assert!(pool.0.is_empty());
+        assert_eq!(tuple, [6, 4, 5].map(DataValue::Int32));
+
+        assert_eq!(
+            pool.retain_leftmost(&mut tuple).values,
+            [6].map(DataValue::Int32)
+        );
+        assert!(matches!(tuple, TupleImpl::Tuple(_)));
+        assert_eq!(pool.0.len(), 2);
+
+        let dropped = pool.concat(ints(None, &[7]), ints(None, &[8]), None);
+        drop(dropped);
+        assert_eq!(pool.0.len(), 1);
     }
 }
 // GRCOV_EXCL_STOP

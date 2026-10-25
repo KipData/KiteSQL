@@ -33,9 +33,12 @@ FUZZ_PASS_EXIT_sql_exec = 70
 # sql_gen: bounded generated queries, so crashes, timeouts and OOMs all fail.
 FUZZ_ARGS_sql_gen = -max_len=4096
 FUZZ_PASS_EXIT_sql_gen = 0
+MIRI_TOOLCHAIN ?= nightly-2026-10-04
+MIRI_FEATURES ?= spill,decimal,lmdb
+MIRI_TESTS ?= types::tuple:: execution::test::
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
-.PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz
+.PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz miri
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -102,6 +105,9 @@ fuzz:
 	if [ $$status -ne 0 ] && [ $$status -ne $(FUZZ_PASS_EXIT_$(FUZZ_TARGET)) ]; then \
 		echo "fuzz: $(FUZZ_TARGET) failed (exit $$status), see fuzz/artifacts/$(FUZZ_TARGET)/"; exit $$status; \
 	fi
+
+miri:
+	$(CARGO) +$(MIRI_TOOLCHAIN) miri test --lib --features '$(MIRI_FEATURES)' -- $(MIRI_TESTS)
 
 ## Run formatting (check mode) across the workspace.
 fmt:
