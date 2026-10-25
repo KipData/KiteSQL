@@ -105,17 +105,21 @@ create table ss(id int primary key, v varchar);
 statement ok
 insert into ss values (1, '10'), (2, 'x');
 
-statement error
-select sum(v) from ss;
+# Text is summed by its numeric prefix (0 without one), as in SQLite.
+query RRRRR
+select sum(v), sum(distinct v), avg(v), sum('a'), total(v) from ss;
+----
+10.0 10.0 5.0 0.0 10.0
 
-statement error
-select sum(distinct v) from ss;
+query RT
+select total(v), group_concat(v) from ss where id > 2;
+----
+0.0 NULL
 
-statement error
-select avg(v) from ss;
-
-statement error
-select sum('a') from ss;
+query TT
+select group_concat(v), group_concat(distinct id % 2) from ss;
+----
+10,x 1,0
 
 statement ok
 drop table ss;

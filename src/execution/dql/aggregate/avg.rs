@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::aggregate::sum::SumAccumulator;
+use crate::execution::dql::aggregate::sum::{text_as_number, SumAccumulator};
 use crate::execution::dql::aggregate::Accumulator;
 use crate::expression::BinaryOperator;
 use crate::types::evaluator::binary_create;
@@ -48,13 +48,14 @@ impl Accumulator for AvgAccumulator {
                     return Ok(());
                 }
             }
+            let value = text_as_number(value);
             let acc = if let Some(ref mut inner) = self.inner {
                 inner
             } else {
                 self.inner
                     .get_or_insert(SumAccumulator::new(Cow::Owned(value.logical_type()))?)
             };
-            acc.update_value(value)?;
+            acc.update_value(&value)?;
             self.count += 1;
             self.result = DataValue::Null;
         }

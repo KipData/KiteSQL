@@ -21,6 +21,10 @@ pub enum AggKind {
     Min,
     Sum,
     Count,
+    /// SQLite `total()`: a float sum that is 0.0, not NULL, over no rows.
+    Total,
+    /// SQLite `group_concat()`: non-NULL values joined with `,`.
+    GroupConcat,
 }
 
 impl AggKind {
@@ -31,6 +35,8 @@ impl AggKind {
             "min" => Some(Self::Min),
             "sum" => Some(Self::Sum),
             "count" => Some(Self::Count),
+            "total" => Some(Self::Total),
+            "group_concat" => Some(Self::GroupConcat),
             _ => None,
         }
     }
@@ -42,6 +48,8 @@ impl AggKind {
             Self::Min => "min",
             Self::Sum => "sum",
             Self::Count => "count",
+            Self::Total => "total",
+            Self::GroupConcat => "group_concat",
         }
     }
 
@@ -52,6 +60,8 @@ impl AggKind {
             AggKind::Min => false,
             AggKind::Sum => true,
             AggKind::Count => true,
+            AggKind::Total => true,
+            AggKind::GroupConcat => true,
         }
     }
 }

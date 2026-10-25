@@ -514,7 +514,13 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
                 if args.len() != 1 {
                     return Err(DatabaseError::MisMatch("number of sum() parameters", "1"));
                 }
-                args[0].return_type(arena).into_owned()
+                let ty = args[0].return_type(arena).into_owned();
+                // Text is summed by its numeric prefix, as in SQLite.
+                if matches!(ty, LogicalType::Varchar(..) | LogicalType::Char(..)) {
+                    LogicalType::Double
+                } else {
+                    ty
+                }
             }
             AggKind::Min => {
                 if args.len() != 1 {
@@ -533,6 +539,21 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
                     return Err(DatabaseError::MisMatch("number of avg() parameters", "1"));
                 }
                 LogicalType::Double
+            }
+            AggKind::Total => {
+                if args.len() != 1 {
+                    return Err(DatabaseError::MisMatch("number of total() parameters", "1"));
+                }
+                LogicalType::Double
+            }
+            AggKind::GroupConcat => {
+                if args.len() != 1 {
+                    return Err(DatabaseError::MisMatch(
+                        "number of group_concat() parameters",
+                        "1",
+                    ));
+                }
+                LogicalType::Varchar(None, CharLengthUnits::Characters)
             }
         };
         Ok(ScalarExpression::AggCall {
