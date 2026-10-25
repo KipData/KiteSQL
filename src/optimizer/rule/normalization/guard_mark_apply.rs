@@ -53,9 +53,6 @@ impl NormalizationRule for GuardMarkApply {
             if matches!(op.kind, MarkApplyKind::InnerJoin) {
                 break;
             }
-            if op.guard.is_some() {
-                return Ok(false);
-            }
             markers.push(*op.output_column());
             input = left;
         }
@@ -72,58 +69,91 @@ impl NormalizationRule for GuardMarkApply {
                 return Ok(false);
             }
         }
-        let mut visitor = GuardVisitor {
-            markers: &markers,
-            guard: None,
-        };
-        visitor.visit(filter_op.predicate, arena)?;
-        let Some((guard, negated)) = visitor.guard else {
-            return Ok(false);
-        };
-        let schema = mark.output_schema(arena);
-        if !guard.all_referenced_columns(arena, |arena, column| {
-            !markers
-                .iter()
-                .any(|marker| arena.same_column(*marker, *column))
-                && schema
+        // Do not skip values consumed by another apply, even if Filter does not need them.
+        let mut consumed = Vec::new();
+        let mut columns = Vec::new();
+        let mut input = mark.as_ref();
+        for (index, _) in markers.iter().enumerate() {
+            columns.clear();
+            let (Operator::MarkApply(op), Childrens::Twins { left, right }) =
+                (&input.operator, input.childrens.as_ref())
+            else {
+                unreachable!()
+            };
+            for expr in op.predicates.iter().chain(op.parameterized_probe.iter()) {
+                expr.all_referenced_columns(arena, |_, column| {
+                    columns.push(*column);
+                    true
+                })?;
+            }
+            right.visit_column_refs(arena, &mut |column| columns.push(*column))?;
+            for marker in &markers[index + 1..] {
+                if columns
                     .iter()
-                    .any(|candidate| arena.same_column(*candidate, *column))
-        })? {
-            return Ok(false);
+                    .any(|column| arena.same_column(*column, *marker))
+                {
+                    consumed.push(*marker);
+                }
+            }
+            input = left;
         }
+        let mut changed = false;
+        let mut guards = Vec::new();
         let mut input = mark.as_mut();
-        for _ in &markers {
+        for (index, marker) in markers.iter().enumerate() {
             let (Operator::MarkApply(op), Childrens::Twins { left, .. }) =
                 (&mut input.operator, input.childrens.as_mut())
             else {
                 unreachable!()
             };
-            // Share the logical predicate; isolate mutable expression positions.
-            let guard = guard.clone_expression(arena)?;
-            op.guard = Some(if negated {
-                arena.alloc_expression(ScalarExpression::Unary {
-                    op: UnaryOperator::Not,
-                    expr: guard,
-                    evaluator: None,
-                    ty: LogicalType::Boolean,
-                })
-            } else {
-                guard
-            });
+            if op.guard.is_none()
+                && !consumed
+                    .iter()
+                    .any(|column| arena.same_column(*column, *marker))
+            {
+                // Top-down plan order is the reverse of execution order.
+                let unavailable = &markers[..=index];
+                guards.clear();
+                let mut visitor = GuardVisitor {
+                    marker: *marker,
+                    guards: &mut guards,
+                };
+                visitor.visit(filter_op.predicate, arena)?;
+                let mut guard = None;
+                for &(sibling, when_true) in &guards {
+                    let skip = decisive_condition(sibling, when_true, unavailable, arena)?;
+                    let needed = skip.map(|expr| negate(expr, arena));
+                    guard = combine_conditions(BinaryOperator::And, guard, needed, true, arena);
+                }
+                if let Some(guard) = guard {
+                    let schema = left.output_schema(arena);
+                    if guard.all_referenced_columns(arena, |arena, column| {
+                        !unavailable
+                            .iter()
+                            .any(|marker| arena.same_column(*marker, *column))
+                            && schema
+                                .iter()
+                                .any(|candidate| arena.same_column(*candidate, *column))
+                    })? {
+                        op.guard = Some(guard.clone_expression(arena)?);
+                        changed = true;
+                    }
+                }
+            }
             input = left;
         }
-        Ok(true)
+        Ok(changed)
     }
 }
 
 struct GuardVisitor<'a> {
-    markers: &'a [ColumnRef],
-    guard: Option<(ExprRef, bool)>,
+    marker: ColumnRef,
+    guards: &'a mut Vec<(ExprRef, bool)>,
 }
 
 impl ExprVisitor<PlanArena<'_>> for GuardVisitor<'_> {
     fn visit_expression_ref(&mut self, _: ExprRef, _: &PlanArena) -> Result<bool, DatabaseError> {
-        Ok(self.guard.is_none())
+        Ok(true)
     }
 
     fn visit_expression(
@@ -169,31 +199,119 @@ impl ExprVisitor<PlanArena<'_>> for GuardVisitor<'_> {
         arena: &PlanArena,
     ) -> Result<(), DatabaseError> {
         let left_marker = left.any_referenced_column(arena, |arena, column| {
-            self.markers
-                .iter()
-                .any(|marker| arena.same_column(*column, *marker))
+            arena.same_column(*column, self.marker)
         })?;
         let right_marker = right.any_referenced_column(arena, |arena, column| {
-            self.markers
-                .iter()
-                .any(|marker| arena.same_column(*column, *marker))
+            arena.same_column(*column, self.marker)
         })?;
         let (branch, sibling) = match (left_marker, right_marker) {
             (true, false) => (left, right),
             (false, true) => (right, left),
+            // Repeated occurrences can only use conditions collected above this node.
             _ => return Ok(()),
         };
+        self.guards
+            .push((sibling, matches!(op, BinaryOperator::Or)));
+        self.visit(branch, arena)
+    }
+}
+
+// Return only sufficient TRUE/FALSE conditions; unavailable marks and NULL are not evidence.
+fn decisive_condition(
+    expr: ExprRef,
+    when_true: bool,
+    unavailable: &[ColumnRef],
+    arena: &mut PlanArena,
+) -> Result<Option<ExprRef>, DatabaseError> {
+    if !expr.any_referenced_column(arena, |arena, column| {
+        unavailable
+            .iter()
+            .any(|marker| arena.same_column(*column, *marker))
+    })? {
         let mut visitor = SimpleGuardVisitor {
             valid: true,
             context: GuardContext::Predicate,
         };
-        visitor.visit(sibling, arena)?;
+        visitor.visit(expr, arena)?;
         if visitor.valid {
-            self.guard = Some((sibling, matches!(op, BinaryOperator::Or)));
-            return Ok(());
+            return Ok(Some(if when_true { expr } else { negate(expr, arena) }));
         }
-        self.visit(branch, arena)
     }
+    match arena.expression(strip_alias(expr, arena)).clone() {
+        ScalarExpression::Binary {
+            op: op @ (BinaryOperator::And | BinaryOperator::Or),
+            left_expr,
+            right_expr,
+            ..
+        } => {
+            let left = decisive_condition(left_expr, when_true, unavailable, arena)?;
+            let right = decisive_condition(right_expr, when_true, unavailable, arena)?;
+            let either = matches!(op, BinaryOperator::Or) == when_true;
+            Ok(combine_conditions(
+                if either {
+                    BinaryOperator::Or
+                } else {
+                    BinaryOperator::And
+                },
+                left,
+                right,
+                either,
+                arena,
+            ))
+        }
+        ScalarExpression::Unary {
+            op: UnaryOperator::Not,
+            expr,
+            ..
+        } => decisive_condition(expr, !when_true, unavailable, arena),
+        ScalarExpression::TypeCast {
+            expr,
+            ty: LogicalType::Boolean,
+            ..
+        } if *expr.return_type(arena) == LogicalType::Boolean => {
+            decisive_condition(expr, when_true, unavailable, arena)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn combine_conditions(
+    op: BinaryOperator,
+    left: Option<ExprRef>,
+    right: Option<ExprRef>,
+    allow_one: bool,
+    arena: &mut PlanArena,
+) -> Option<ExprRef> {
+    match (left, right) {
+        (Some(left_expr), Some(right_expr)) => {
+            Some(arena.alloc_expression(ScalarExpression::Binary {
+                op,
+                left_expr,
+                right_expr,
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            }))
+        }
+        (Some(expr), None) | (None, Some(expr)) if allow_one => Some(expr),
+        _ => None,
+    }
+}
+
+fn negate(expr: ExprRef, arena: &mut PlanArena) -> ExprRef {
+    if let ScalarExpression::Unary {
+        op: UnaryOperator::Not,
+        expr,
+        ..
+    } = arena.expression(expr)
+    {
+        return *expr;
+    }
+    arena.alloc_expression(ScalarExpression::Unary {
+        op: UnaryOperator::Not,
+        expr,
+        evaluator: None,
+        ty: LogicalType::Boolean,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -248,7 +366,9 @@ impl ExprVisitor<PlanArena<'_>> for SimpleGuardVisitor {
                 }
                 | ScalarExpression::Binary {
                     op:
-                        BinaryOperator::Eq
+                        BinaryOperator::And
+                        | BinaryOperator::Or
+                        | BinaryOperator::Eq
                         | BinaryOperator::NotEq
                         | BinaryOperator::Gt
                         | BinaryOperator::GtEq
@@ -292,7 +412,7 @@ impl ExprVisitor<PlanArena<'_>> for SimpleGuardVisitor {
 
     fn visit_binary(
         &mut self,
-        _: &BinaryOperator,
+        op: &BinaryOperator,
         left: ExprRef,
         right: ExprRef,
         _: Option<&BinaryEvaluatorRef>,
@@ -300,7 +420,11 @@ impl ExprVisitor<PlanArena<'_>> for SimpleGuardVisitor {
         arena: &PlanArena,
     ) -> Result<(), DatabaseError> {
         let previous = self.context;
-        self.context = GuardContext::NumericOperand;
+        self.context = if matches!(op, BinaryOperator::And | BinaryOperator::Or) {
+            GuardContext::Predicate
+        } else {
+            GuardContext::NumericOperand
+        };
         self.visit(left, arena)?;
         self.visit(right, arena)?;
         self.context = previous;
@@ -399,7 +523,7 @@ mod tests {
                 unreachable!()
             };
             let lower = mark.take();
-            **mark = MarkApplyOperator::build_exists(lower, right, column, vec![self.marker]);
+            **mark = MarkApplyOperator::build_exists(lower, right, column, vec![]);
             let markers = arena.alloc_expression(ScalarExpression::Binary {
                 op: if matches!(op, BinaryOperator::And) {
                     BinaryOperator::Or
@@ -448,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_segment_guard_preserves_all_marker_combinations() -> Result<(), DatabaseError> {
+    fn independent_guards_preserve_all_marker_combinations() -> Result<(), DatabaseError> {
         for op in [BinaryOperator::And, BinaryOperator::Or] {
             let tables = TableArenaCell::default();
             let mut arena = PlanArena::new(&tables);
@@ -478,17 +602,8 @@ mod tests {
                 DataValue::Null,
             ] {
                 let input = Tuple::new(None, vec![flag.clone()]);
-                let guard = arena
-                    .expression(upper)
-                    .eval(&arena, Some(&input))?
-                    .into_owned();
-                assert_eq!(
-                    guard,
-                    arena
-                        .expression(lower)
-                        .eval(&arena, Some(&input))?
-                        .into_owned()
-                );
+                let skip_lower = *arena.expression(lower).eval(&arena, Some(&input))?
+                    == DataValue::Boolean(false);
                 for a in [
                     DataValue::Boolean(false),
                     DataValue::Boolean(true),
@@ -500,11 +615,26 @@ mod tests {
                         DataValue::Null,
                     ] {
                         let original = Tuple::new(None, vec![flag.clone(), a.clone(), b.clone()]);
-                        let guarded = if guard == DataValue::Boolean(false) {
-                            Tuple::new(None, vec![flag.clone(), DataValue::Null, DataValue::Null])
+                        let a_out = if skip_lower {
+                            DataValue::Null
                         } else {
-                            original.clone()
+                            a.clone()
                         };
+                        let input = Tuple::new(None, vec![flag.clone(), a_out.clone()]);
+                        let skip_upper = *arena.expression(upper).eval(&arena, Some(&input))?
+                            == DataValue::Boolean(false);
+                        let guarded = Tuple::new(
+                            None,
+                            vec![
+                                flag.clone(),
+                                a_out,
+                                if skip_upper {
+                                    DataValue::Null
+                                } else {
+                                    b.clone()
+                                },
+                            ],
+                        );
                         assert_eq!(
                             arena
                                 .expression(predicate)
@@ -524,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn segment_requires_common_protection_and_hidden_markers() -> Result<(), DatabaseError> {
+    fn independent_protection_keeps_projected_markers_unguarded() -> Result<(), DatabaseError> {
         for escaped in [0, 1, 2] {
             let tables = TableArenaCell::default();
             let mut arena = PlanArena::new(&tables);
@@ -561,8 +691,11 @@ mod tests {
                     .exprs
                     .push(if escaped == 1 { fixture.marker } else { upper });
             }
-            assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
-            assert!(fixture.mark().guard.is_none());
+            assert_eq!(
+                GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?,
+                escaped == 0
+            );
+            assert_eq!(fixture.mark().guard.is_some(), escaped == 0);
             let Childrens::Only(filter) = fixture.plan.childrens.as_mut() else {
                 unreachable!()
             };
@@ -575,7 +708,7 @@ mod tests {
             let Operator::MarkApply(lower) = &left.operator else {
                 unreachable!()
             };
-            assert!(lower.guard.is_none());
+            assert_eq!(lower.guard.is_some(), escaped == 0);
         }
         Ok(())
     }
@@ -670,6 +803,98 @@ mod tests {
         op.predicate = predicate;
         assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
         assert!(fixture.mark().guard.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn three_mark_guards_preserve_all_729_truth_combinations() -> Result<(), DatabaseError> {
+        use crate::expression::visitor_mut::ExprVisitorMut;
+        use crate::expression::BindEvaluator;
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let mut columns = Vec::new();
+        let mut exprs = Vec::new();
+        for (position, name) in ["q2", "p2", "q3", "m1", "m2", "m3"].iter().enumerate() {
+            let column = arena.alloc_column(ColumnCatalog::new(
+                (*name).into(),
+                true,
+                ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
+            ));
+            columns.push(column);
+            exprs.push(arena.alloc_expression(ScalarExpression::column_expr(column, position)));
+        }
+        let binary = |op, left_expr, right_expr, arena: &mut PlanArena| {
+            arena.alloc_expression(ScalarExpression::Binary {
+                op,
+                left_expr,
+                right_expr,
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            })
+        };
+        let p2_or_m2 = binary(BinaryOperator::Or, exprs[1], exprs[4], &mut arena);
+        let b2 = binary(BinaryOperator::And, exprs[0], p2_or_m2, &mut arena);
+        let b3 = binary(BinaryOperator::And, exprs[2], exprs[5], &mut arena);
+        let first = binary(BinaryOperator::Or, exprs[3], b2, &mut arena);
+        let mut predicate = binary(BinaryOperator::Or, first, b3, &mut arena);
+        let mut guards = Vec::new();
+        let mut conditions = Vec::new();
+        for index in 3..6 {
+            conditions.clear();
+            let mut visitor = GuardVisitor {
+                marker: columns[index],
+                guards: &mut conditions,
+            };
+            visitor.visit(predicate, &arena)?;
+            let mut guard = None;
+            for &(sibling, when_true) in &conditions {
+                let skip = decisive_condition(sibling, when_true, &columns[index..], &mut arena)?;
+                let needed = skip.map(|expr| negate(expr, &mut arena));
+                guard = combine_conditions(BinaryOperator::And, guard, needed, true, &mut arena);
+            }
+            let mut guard = guard.unwrap();
+            BindEvaluator.visit(&mut guard, &mut arena)?;
+            guards.push(guard);
+        }
+        BindEvaluator.visit(&mut predicate, &mut arena)?;
+        let values = [
+            DataValue::Boolean(false),
+            DataValue::Boolean(true),
+            DataValue::Null,
+        ];
+        let mut skipped = [0; 3];
+        for combination in 0..729 {
+            let mut digits = combination;
+            let original = Tuple::new(
+                None,
+                (0..6)
+                    .map(|_| {
+                        let value = values[digits % 3].clone();
+                        digits /= 3;
+                        value
+                    })
+                    .collect(),
+            );
+            let mut guarded = Tuple::new(None, original.values[..3].to_vec());
+            for index in 0..3 {
+                let skip = *arena
+                    .expression(guards[index])
+                    .eval(&arena, Some(&guarded))?
+                    == DataValue::Boolean(false);
+                skipped[index] += usize::from(skip);
+                guarded.values.push(if skip {
+                    DataValue::Null
+                } else {
+                    original.values[index + 3].clone()
+                });
+            }
+            assert_eq!(
+                arena.expression(predicate).eval(&arena, Some(&original))?,
+                arena.expression(predicate).eval(&arena, Some(&guarded))?,
+                "combination {combination}"
+            );
+        }
+        assert!(skipped[1] > 0 && skipped[2] > 0);
         Ok(())
     }
 

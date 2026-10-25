@@ -292,18 +292,24 @@ fn constant_keys(expr: ExprRef, keys: &mut Vec<(ExprRef, ExprRef)>, arena: &Plan
 
 fn parameterize(
     plan: &mut LogicalPlan,
-    mut keys: Vec<(ExprRef, ExprRef)>,
+    keys: &mut Vec<(ExprRef, ExprRef)>,
+    join_key_count: usize,
     arena: &PlanArena<'_>,
 ) -> Option<Vec<ExprRef>> {
     match (&mut plan.operator, plan.childrens.as_mut()) {
         (Operator::Filter(filter), Childrens::Only(child)) => {
-            constant_keys(filter.predicate, &mut keys, arena);
-            parameterize(child, keys, arena)
+            let key_count = keys.len();
+            constant_keys(filter.predicate, keys, arena);
+            let probe = parameterize(child, keys, join_key_count, arena);
+            // Keep filter keys local to this traversal, including failed attempts.
+            keys.truncate(key_count);
+            probe
         }
         (Operator::TableScan(scan), _) if scan.limit == (None, None) => {
             'indexes: for info in &mut scan.index_infos {
                 let meta = arena.index(info.meta);
                 let mut probe = Vec::with_capacity(meta.column_ids.len());
+                let mut uses_join_key = false;
                 'columns: for id in &meta.column_ids {
                     let Some(candidate) = scan
                         .columns
@@ -312,7 +318,7 @@ fn parameterize(
                     else {
                         continue 'indexes;
                     };
-                    for &(value, column) in &keys {
+                    for (position, &(value, column)) in keys.iter().enumerate() {
                         let ScalarExpression::ColumnRef { column, .. } =
                             arena.expression(column.unpack_alias(arena))
                         else {
@@ -323,9 +329,15 @@ fn parameterize(
                                 == arena.column(*candidate).datatype()
                         {
                             probe.push(value);
+                            uses_join_key |= position < join_key_count;
                             continue 'columns;
                         }
                     }
+                    continue 'indexes;
+                }
+                // Constants appended by filters may complete a composite key,
+                // but must not trigger a per-outer-row probe on their own.
+                if !uses_join_key {
                     continue 'indexes;
                 }
                 info.lookup = Some(IndexLookup::Probe);
@@ -368,13 +380,16 @@ impl NormalizationRule for ParameterizeInnerJoin {
             return Ok(false);
         }
         let mut keys = on.clone();
-        let (project, probe_keys) = if let Some(probe) = parameterize(right, keys.clone(), arena) {
+        // Filter traversal only appends constants after these outer-dependent keys.
+        let join_key_count = keys.len();
+        let right_probe = parameterize(right, &mut keys, join_key_count, arena);
+        let (project, probe_keys) = if let Some(probe) = right_probe {
             (None, probe)
         } else {
             for (l, r) in &mut keys {
                 std::mem::swap(l, r);
             }
-            let Some(probe) = parameterize(left, keys.clone(), arena) else {
+            let Some(probe) = parameterize(left, &mut keys, join_key_count, arena) else {
                 return Ok(false);
             };
             let left_schema = left.output_schema(arena);
@@ -1024,6 +1039,115 @@ mod inner_join_tests {
     }
 
     #[test]
+    fn constant_only_probe_leaves_static_scan_and_join_unchanged() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let left = scan(&mut arena, "outer", &[LogicalType::Integer], &[]);
+        let mut right = scan(
+            &mut arena,
+            "inner",
+            &[LogicalType::Integer, LogicalType::Integer],
+            &[&[1]],
+        );
+        let l = column(&left, 0, &mut arena);
+        let r = column(&right, 0, &mut arena);
+        let static_key = column(&right, 1, &mut arena);
+        let constant = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(782)));
+        let predicate = binary(&mut arena, BinaryOperator::Eq, static_key, constant);
+        let Operator::TableScan(scan) = &mut right.operator else {
+            unreachable!()
+        };
+        let info = &mut scan.index_infos[0];
+        info.lookup = Some(IndexLookup::Static(Range::Eq(DataValue::Int32(782))));
+        info.residual_predicate = Some(predicate);
+        right.physical_option = Some(PhysicalOption::new(
+            PlanImpl::IndexScan(Box::new(info.clone())),
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        // Keep the join-key boundary intact across multiple filter layers.
+        let passthrough = arena.alloc_expression(ScalarExpression::from(true));
+        let right = FilterOperator::build(passthrough, right, false);
+        let right = FilterOperator::build(predicate, right, false);
+        let mut plan = join(left, right, vec![(l, r)], None);
+        let before = plan.clone();
+
+        assert!(!ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?);
+        assert_eq!(plan, before);
+        assert_eq!((position(l, &arena), position(r, &arena)), (0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn constant_only_index_does_not_block_outer_key_probe() -> Result<(), DatabaseError> {
+        for swap in [false, true] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let left_indexes: &[&[usize]] = if swap { &[&[0]] } else { &[] };
+            let right_indexes: &[&[usize]] = if swap { &[&[1]] } else { &[&[1], &[0]] };
+            let left = scan(&mut arena, "outer", &[LogicalType::Integer], left_indexes);
+            let right = scan(
+                &mut arena,
+                "inner",
+                &[LogicalType::Integer, LogicalType::Integer],
+                right_indexes,
+            );
+            let l = column(&left, 0, &mut arena);
+            let r = column(&right, 0, &mut arena);
+            let static_key = column(&right, 1, &mut arena);
+            let constant =
+                arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(782)));
+            let predicate = binary(&mut arena, BinaryOperator::Eq, constant, static_key);
+            let right = FilterOperator::build(predicate, right, false);
+            let original_right = right.clone();
+            let mut plan = join(left, right, vec![(l, r)], None);
+            let schema = plan.output_schema(&mut arena).clone();
+
+            assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?);
+            assert_eq!(plan.output_schema(&mut arena), &schema);
+            let apply_plan = if swap {
+                let Childrens::Only(child) = plan.childrens.as_ref() else {
+                    panic!("expected output-restoring projection")
+                };
+                child.as_ref()
+            } else {
+                &plan
+            };
+            let Operator::MarkApply(apply) = &apply_plan.operator else {
+                panic!("expected inner join apply")
+            };
+            assert_eq!(apply.kind, MarkApplyKind::InnerJoin);
+            assert_eq!(apply.predicates().len(), 1);
+            assert_eq!(
+                apply.parameterized_probe().copied(),
+                Some(if swap { r } else { l })
+            );
+            let Childrens::Twins { left, right } = apply_plan.childrens.as_ref() else {
+                unreachable!()
+            };
+            let scan = if swap {
+                assert_eq!(left.as_ref(), &original_right);
+                right.as_ref()
+            } else {
+                let Operator::Filter(filter) = &right.operator else {
+                    panic!("static filter must survive")
+                };
+                assert_eq!(filter.predicate, predicate);
+                let Childrens::Only(child) = right.childrens.as_ref() else {
+                    unreachable!()
+                };
+                child.as_ref()
+            };
+            let PlanImpl::IndexScan(info) = &scan.physical_option.as_ref().unwrap().plan else {
+                panic!("expected index scan")
+            };
+            assert_eq!(arena.index(info.meta).column_ids, vec![0]);
+            assert_eq!(info.lookup, Some(IndexLookup::Probe));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn composite_probe_uses_index_order_and_preserves_static_filter() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
@@ -1033,12 +1157,12 @@ mod inner_join_tests {
             &[const { LogicalType::Integer }; 2],
             &[],
         );
-        // First index cannot be probed. Second requires constant + two join keys.
+        // Skip the constant-only and unmatched indexes; the last uses both key sources.
         let mut right = scan(
             &mut arena,
             "inner",
             &[const { LogicalType::Integer }; 4],
-            &[&[3], &[0, 2, 1]],
+            &[&[0], &[3], &[0, 2, 1]],
         );
         let l0 = column(&left, 0, &mut arena);
         let l1 = column(&left, 1, &mut arena);
@@ -1053,7 +1177,7 @@ mod inner_join_tests {
         let Operator::TableScan(scan) = &mut right.operator else {
             unreachable!()
         };
-        let info = &mut scan.index_infos[1];
+        let info = &mut scan.index_infos[2];
         info.lookup = Some(IndexLookup::Static(Range::Eq(DataValue::Int32(7))));
         info.residual_predicate = Some(residual);
         let index = info.meta;
@@ -1070,6 +1194,7 @@ mod inner_join_tests {
             panic!("expected apply without projection")
         };
         assert_eq!(apply.kind, MarkApplyKind::InnerJoin);
+        assert_eq!(apply.predicates().len(), 2);
         assert_eq!(
             arena.expression(*apply.parameterized_probe().unwrap()),
             &ScalarExpression::Tuple(vec![constant, l1, l0])

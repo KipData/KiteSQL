@@ -14,6 +14,7 @@
 
 use super::NormalizationRule;
 use crate::errors::DatabaseError;
+use crate::expression::ScalarExpression;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator};
 use crate::planner::operator::Operator;
@@ -22,11 +23,16 @@ use crate::planner::{Childrens, LogicalPlan, PlanArena};
 pub(crate) struct MaterializeMarkApply;
 
 impl MaterializeMarkApply {
-    fn can_materialize(op: &MarkApplyOperator) -> bool {
+    fn can_materialize(op: &MarkApplyOperator, arena: &PlanArena) -> bool {
         // The first predicate compares values; additional predicates bind outer rows.
+        // The binder builds that comparison as `outer_operand op subquery_output`,
+        // so the RHS keys can be cached by evaluating its right side alone.
         matches!(op.kind, MarkApplyKind::Quantified(_))
             && op.parameterized_probe().is_none()
-            && op.predicates().len() == 1
+            && matches!(
+                op.predicates(),
+                [predicate] if matches!(arena.expression(*predicate), ScalarExpression::Binary { .. })
+            )
     }
 }
 
@@ -34,7 +40,7 @@ impl NormalizationRule for MaterializeMarkApply {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        _: &mut PlanArena,
+        arena: &mut PlanArena,
         _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (Operator::MarkApply(op), Childrens::Twins { left, right }) =
@@ -42,7 +48,7 @@ impl NormalizationRule for MaterializeMarkApply {
         else {
             return Ok(false);
         };
-        if op.materialize || !Self::can_materialize(op) {
+        if op.materialize || !Self::can_materialize(op, arena) {
             return Ok(false);
         }
         let (Some(left_rows), Some(right_rows)) = (left.estimated_rows(), right.estimated_rows())
@@ -64,7 +70,7 @@ impl NormalizationRule for MaterializeMarkApply {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
-    use crate::expression::ScalarExpression;
+    use crate::expression::BinaryOperator;
     use crate::planner::operator::mark_apply::MarkApplyQuantifier;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::{PhysicalOption, PlanImpl, RowCountOption, SortOption};
@@ -87,17 +93,33 @@ mod tests {
             true,
             ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
         ));
+        let right_key = arena.alloc_column(ColumnCatalog::new(
+            "right_key".to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        ));
         let value = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(2)));
         let left = LogicalPlan::new(
             Operator::Values(ValuesOperator::new(vec![value; 8], 8, vec![key])),
             Childrens::None,
         );
         let right = LogicalPlan::new(
-            Operator::Values(ValuesOperator::new(vec![value; 2], 2, vec![key])),
+            Operator::Values(ValuesOperator::new(vec![value; 2], 2, vec![right_key])),
             Childrens::None,
         );
-        let predicate =
-            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+        let left_ref = arena.alloc_expression(ScalarExpression::column_expr(key, 0));
+        let right_ref = arena.alloc_expression(ScalarExpression::column_expr(right_key, 1));
+        let compare = |arena: &mut PlanArena, left_expr, right_expr| {
+            arena.alloc_expression(ScalarExpression::Binary {
+                op: BinaryOperator::Eq,
+                left_expr,
+                right_expr,
+                evaluator: None,
+                ty: LogicalType::Boolean,
+            })
+        };
+        let predicate = compare(&mut arena, left_ref, right_ref);
+        let constant = arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
         let op =
             MarkApplyOperator::new_quantified(MarkApplyQuantifier::Any, marker, vec![predicate]);
         let mut plan = LogicalPlan::new(
@@ -160,6 +182,16 @@ mod tests {
             unreachable!()
         };
         op.predicates.pop();
+        // Only a binary comparison exposes the RHS side whose keys are cached.
+        let Operator::MarkApply(op) = &mut plan.operator else {
+            unreachable!()
+        };
+        op.predicates[0] = constant;
+        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena, None)?);
+        let Operator::MarkApply(op) = &mut plan.operator else {
+            unreachable!()
+        };
+        op.predicates[0] = predicate;
         let Childrens::Twins { right, .. } = plan.childrens.as_mut() else {
             unreachable!()
         };

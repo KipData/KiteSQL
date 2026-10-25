@@ -13,17 +13,22 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::execution::runs::{Runs, RunsBuilder, RunsCursor};
 #[cfg(feature = "spill")]
-use crate::execution::spill::SpillVec;
+use crate::execution::spill::runs::SpillRuns;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
+use crate::expression::{BinaryOperator, ScalarExpression, TypeCast};
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, MetaArena};
 use crate::storage::Transaction;
+use crate::types::evaluator::BinaryEvaluatorRef;
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
+use std::borrow::Cow;
+use std::cmp::Ordering;
 
 #[derive(PartialEq, Eq)]
 enum QuantifiedPredicateOutcome {
@@ -34,22 +39,30 @@ enum QuantifiedPredicateOutcome {
 }
 
 #[cfg(feature = "spill")]
-type MaterializedRows = SpillVec<'static, Tuple>;
+type KeysBuilder = SpillRuns;
 #[cfg(not(feature = "spill"))]
-type MaterializedRows = Vec<Tuple>;
+type KeysBuilder = crate::execution::runs::SortedVec;
 
+// The binder coerces both comparison sides to one type, so non-NULL keys of
+// one apply share a variant and are totally ordered.
+fn compare_keys(left: &DataValue, right: &DataValue) -> Ordering {
+    left.partial_cmp(right).unwrap_or(Ordering::Equal)
+}
+
+/// Sorted non-NULL RHS comparison keys; NULL keys only decide UNKNOWN results.
+struct MaterializedKeys {
+    runs: <KeysBuilder as RunsBuilder>::Runs,
+    is_empty: bool,
+    has_null: bool,
+    // Spilled reads size their buffer to one key when the key type is fixed-width.
+    fixed_width: Option<usize>,
+}
+
+// TODO: range ANY/ALL only need the RHS extrema rather than every key.
 enum RightInput {
-    Streaming {
-        root: ExecId,
-    },
-    Materialize {
-        root: ExecId,
-    },
-    Materializing {
-        root: ExecId,
-        rows: MaterializedRows,
-    },
-    Materialized(MaterializedRows),
+    Streaming { root: ExecId },
+    Materialize { root: ExecId },
+    Materialized(MaterializedKeys),
 }
 
 impl RightInput {
@@ -60,7 +73,7 @@ impl RightInput {
         probe: Option<RuntimeIndexProbe>,
     ) -> Result<ExecId, DatabaseError> {
         let (Self::Streaming { root } | Self::Materialize { root }) = self else {
-            unreachable!("materialized input replays its rows")
+            unreachable!("materialized input looks up its keys")
         };
         if let Some(probe) = probe {
             arena.push_runtime_probe(probe);
@@ -70,74 +83,20 @@ impl RightInput {
     }
 
     // Return the first terminal predicate result, or None after exhausting the RHS.
-    // The caller supplies Mark semantics; this enum owns resetting and replay.
     fn scan<'a, T: Transaction + 'a, A: MetaArena + 'a>(
-        self,
+        &self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
         probe: Option<RuntimeIndexProbe>,
         mut evaluate: impl FnMut(&Tuple, &ExecMetaArena<A>) -> Result<Option<DataValue>, DatabaseError>,
-    ) -> Result<(Self, Option<DataValue>), DatabaseError> {
-        match self {
-            input @ Self::Streaming { .. } => {
-                let root = input.reset(arena, plan_arena, probe)?;
-                while arena.next_tuple(root, plan_arena)? {
-                    if let Some(value) = evaluate(arena.result_tuple(), plan_arena)? {
-                        return Ok((input, Some(value)));
-                    }
-                }
-                Ok((input, None))
-            }
-            input @ Self::Materialize { .. } => {
-                let root = input.reset(arena, plan_arena, None)?;
-                Self::Materializing {
-                    root,
-                    rows: MaterializedRows::new(),
-                }
-                .scan(arena, plan_arena, None, evaluate)
-            }
-            Self::Materializing { root, mut rows } => {
-                if let Some(value) = Self::replay(&rows, plan_arena, &mut evaluate)? {
-                    return Ok((Self::Materializing { root, rows }, Some(value)));
-                }
-                while arena.next_tuple(root, plan_arena)? {
-                    let right = arena.materialize_tuple();
-                    let result = evaluate(&right, plan_arena)?;
-                    #[cfg(feature = "spill")]
-                    let _ = rows.push(right)?;
-                    #[cfg(not(feature = "spill"))]
-                    rows.push(right);
-                    // A terminal result pauses the executor; cached rows remain a prefix.
-                    if result.is_some() {
-                        return Ok((Self::Materializing { root, rows }, result));
-                    }
-                }
-                // Only EOF makes the prefix complete; move its cache into the final state.
-                Ok((Self::Materialized(rows), None))
-            }
-            Self::Materialized(rows) => {
-                let result = Self::replay(&rows, plan_arena, &mut evaluate)?;
-                Ok((Self::Materialized(rows), result))
-            }
-        }
-    }
-
-    fn replay<A: MetaArena>(
-        rows: &MaterializedRows,
-        plan_arena: &ExecMetaArena<A>,
-        mut evaluate: impl FnMut(&Tuple, &ExecMetaArena<A>) -> Result<Option<DataValue>, DatabaseError>,
     ) -> Result<Option<DataValue>, DatabaseError> {
-        #[cfg(feature = "spill")]
-        return rows.replay(|right| evaluate(right, plan_arena));
-        #[cfg(not(feature = "spill"))]
-        {
-            for right in rows {
-                if let Some(value) = evaluate(right, plan_arena)? {
-                    return Ok(Some(value));
-                }
+        let root = self.reset(arena, plan_arena, probe)?;
+        while arena.next_tuple(root, plan_arena)? {
+            if let Some(value) = evaluate(arena.result_tuple(), plan_arena)? {
+                return Ok(Some(value));
             }
-            Ok(None)
         }
+        Ok(None)
     }
 }
 
@@ -185,15 +144,19 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.join_input = None;
-        self.right_input = Some(if self.op.materialize {
-            RightInput::Materialize {
-                root: self.right_root,
-            }
-        } else {
-            RightInput::Streaming {
-                root: self.right_root,
-            }
-        });
+        // Materialization already makes the RHS reusable across left rows.
+        // Keep both complete caches and paused prefixes; only reset the left input.
+        if !self.op.materialize || self.right_input.is_none() {
+            self.right_input = Some(if self.op.materialize {
+                RightInput::Materialize {
+                    root: self.right_root,
+                }
+            } else {
+                RightInput::Streaming {
+                    root: self.right_root,
+                }
+            });
+        }
         arena.reset(self.left_input, plan_arena)
     }
 
@@ -212,6 +175,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
             return Ok(());
         }
         if !arena.next_tuple(self.left_input, plan_arena)? {
+            // Return the temporarily owned cache so reset can reuse it after EOF.
+            if self.op.materialize {
+                self.right_input = Some(input);
+            }
             arena.finish();
             return Ok(());
         }
@@ -302,80 +269,200 @@ impl<'a> MarkApply<'a> {
 
     fn mark_value<T: Transaction + 'a, A: MetaArena + 'a>(
         &self,
-        input: RightInput,
+        mut input: RightInput,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
         left_tuple: &Tuple,
     ) -> Result<(RightInput, DataValue), DatabaseError> {
         let probe = self.parameterized_probe_value(left_tuple, plan_arena)?;
-        match self.op.kind {
+        let value = match self.op.kind {
             MarkApplyKind::InnerJoin => unreachable!("inner join streams tuples"),
             MarkApplyKind::Exists => {
                 let predicates = self.op.predicates();
                 let runtime_probe = self.runtime_probe_for(probe);
-                let (input, value) =
-                    input.scan(arena, plan_arena, runtime_probe, |right, meta| {
+                input
+                    .scan(arena, plan_arena, runtime_probe, |right, meta| {
                         Ok(
                             Self::predicates_matched(predicates, left_tuple, right, meta)?
                                 .then_some(DataValue::Boolean(true)),
                         )
-                    })?;
-                Ok((input, value.unwrap_or(DataValue::Boolean(false))))
+                    })?
+                    .unwrap_or(DataValue::Boolean(false))
             }
             MarkApplyKind::Quantified(quantifier) => {
-                if matches!(quantifier, MarkApplyQuantifier::Any) {
-                    if let Some(probe_value) = probe {
-                        if !probe_value.is_null() {
-                            let (input, value) = self.scan_quantified_right_input(
-                                input,
-                                arena,
-                                plan_arena,
-                                Some(probe_value),
-                                quantifier,
-                                left_tuple,
-                            )?;
-                            if value == DataValue::Boolean(true) {
-                                return Ok((input, value));
-                            }
-                            let (input, value) = self.scan_quantified_right_input(
-                                input,
+                if let RightInput::Materialize { root } = input {
+                    input = RightInput::Materialized(
+                        self.materialize_keys(root, arena, plan_arena, left_tuple)?,
+                    );
+                }
+                match (&input, probe) {
+                    (RightInput::Materialized(keys), _) => {
+                        self.lookup_keys(keys, quantifier, plan_arena, left_tuple)?
+                    }
+                    (_, Some(probe_value))
+                        if matches!(quantifier, MarkApplyQuantifier::Any)
+                            && !probe_value.is_null() =>
+                    {
+                        let value = self.scan_quantified_right_input(
+                            &input,
+                            arena,
+                            plan_arena,
+                            Some(probe_value),
+                            quantifier,
+                            left_tuple,
+                        )?;
+                        if value == DataValue::Boolean(true) {
+                            value
+                        } else if self
+                            .scan_quantified_right_input(
+                                &input,
                                 arena,
                                 plan_arena,
                                 Some(DataValue::Null),
                                 quantifier,
                                 left_tuple,
-                            )?;
-                            return Ok((
-                                input,
-                                if value.is_null() {
-                                    DataValue::Null
-                                } else {
-                                    DataValue::Boolean(false)
-                                },
-                            ));
+                            )?
+                            .is_null()
+                        {
+                            DataValue::Null
+                        } else {
+                            DataValue::Boolean(false)
                         }
                     }
+                    _ => self.scan_quantified_right_input(
+                        &input, arena, plan_arena, None, quantifier, left_tuple,
+                    )?,
                 }
-                self.scan_quantified_right_input(
-                    input, arena, plan_arena, None, quantifier, left_tuple,
-                )
+            }
+        };
+        Ok((input, value))
+    }
+
+    /// Splits the single materializable predicate into `left_expr op right_expr`.
+    fn quantified_comparison<'p>(
+        predicates: &[ExprRef],
+        plan_arena: &'p (dyn MetaArena + '_),
+    ) -> Result<(BinaryOperator, ExprRef, ExprRef, &'p BinaryEvaluatorRef), DatabaseError> {
+        let [predicate] = predicates else {
+            return Err(DatabaseError::InvalidType);
+        };
+        let ScalarExpression::Binary {
+            op,
+            left_expr,
+            right_expr,
+            evaluator,
+            ..
+        } = plan_arena.expression(*predicate)
+        else {
+            return Err(DatabaseError::InvalidType);
+        };
+        let evaluator = evaluator.as_ref().ok_or(DatabaseError::EvaluatorNotFound)?;
+        Ok((*op, *left_expr, *right_expr, evaluator))
+    }
+
+    /// Reads the whole RHS once, keeping only its comparison keys.
+    fn materialize_keys<T: Transaction + 'a, A: MetaArena + 'a>(
+        &self,
+        root: ExecId,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+        left_tuple: &Tuple,
+    ) -> Result<MaterializedKeys, DatabaseError> {
+        let (_, _, right_expr, _) = Self::quantified_comparison(self.op.predicates(), plan_arena)?;
+        arena.reset(root, plan_arena)?;
+        let mut builder = KeysBuilder::new(compare_keys);
+        let (mut is_empty, mut has_null) = (true, false);
+        while arena.next_tuple(root, plan_arena)? {
+            // RHS positions follow the outer row, so evaluate against the joined layout.
+            let values = SplitTupleRef::new(left_tuple, arena.result_tuple());
+            let key = plan_arena
+                .expression(right_expr)
+                .eval(plan_arena, Some(&values))?
+                .into_owned();
+            is_empty = false;
+            if key.is_null() {
+                has_null = true;
+            } else {
+                builder.push(key)?;
             }
         }
+        Ok(MaterializedKeys {
+            runs: builder.finish()?,
+            is_empty,
+            has_null,
+            fixed_width: plan_arena
+                .expression(right_expr)
+                .return_type(plan_arena)
+                .fixed_encoded_len(),
+        })
+    }
+
+    fn lookup_keys(
+        &self,
+        keys: &MaterializedKeys,
+        quantifier: MarkApplyQuantifier,
+        plan_arena: &(dyn MetaArena + '_),
+        left_tuple: &Tuple,
+    ) -> Result<DataValue, DatabaseError> {
+        let any = matches!(quantifier, MarkApplyQuantifier::Any);
+        if keys.is_empty {
+            return Ok(DataValue::Boolean(!any));
+        }
+        let (op, left_expr, _, evaluator) =
+            Self::quantified_comparison(self.op.predicates(), plan_arena)?;
+        let probe = plan_arena
+            .expression(left_expr)
+            .eval(plan_arena, Some(left_tuple))?;
+        let mut cursor = keys.runs.cursor(keys.fixed_width)?;
+        let mut saw_null = false;
+        // `= ANY` / `<> ALL` reduce to membership. Tuple probes compare NULL
+        // fields three-valued, which membership cannot express.
+        if matches!(
+            (op, quantifier),
+            (BinaryOperator::Eq, MarkApplyQuantifier::Any)
+                | (BinaryOperator::NotEq, MarkApplyQuantifier::All)
+        ) && !matches!(probe.as_ref(), DataValue::Tuple(_))
+        {
+            if probe.is_null() {
+                return Ok(DataValue::Null);
+            }
+            if cursor.contains_by(|key| Ok(compare_keys(key, &probe)))? {
+                return Ok(DataValue::Boolean(any));
+            }
+        } else if let Some(value) = cursor.visit_all(|key| {
+            match evaluator.binary_eval(Cow::Borrowed(probe.as_ref()), key)? {
+                DataValue::Boolean(value) if value == any => Ok(Some(value)),
+                DataValue::Boolean(_) => Ok(None),
+                DataValue::Null => {
+                    saw_null = true;
+                    Ok(None)
+                }
+                _ => Err(DatabaseError::InvalidType),
+            }
+        })? {
+            return Ok(DataValue::Boolean(value));
+        }
+        // No decisive key: a NULL key or comparison makes the result UNKNOWN.
+        Ok(if keys.has_null || saw_null {
+            DataValue::Null
+        } else {
+            DataValue::Boolean(!any)
+        })
     }
 
     fn scan_quantified_right_input<T: Transaction + 'a, A: MetaArena + 'a>(
         &self,
-        input: RightInput,
+        input: &RightInput,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
         probe: Option<DataValue>,
         quantifier: MarkApplyQuantifier,
         left_tuple: &Tuple,
-    ) -> Result<(RightInput, DataValue), DatabaseError> {
+    ) -> Result<DataValue, DatabaseError> {
         let mut saw_null = false;
         let predicates = self.op.predicates();
         let runtime_probe = self.runtime_probe_for(probe);
-        let (input, value) = input.scan(arena, plan_arena, runtime_probe, |right, meta| {
+        let value = input.scan(arena, plan_arena, runtime_probe, |right, meta| {
             match Self::quantified_predicate_outcome(predicates, left_tuple, right, meta)? {
                 QuantifiedPredicateOutcome::True
                     if matches!(quantifier, MarkApplyQuantifier::Any) =>
@@ -392,16 +479,11 @@ impl<'a> MarkApply<'a> {
             }
             Ok(None)
         })?;
-        Ok((
-            input,
-            value.unwrap_or_else(|| {
-                if saw_null {
-                    DataValue::Null
-                } else {
-                    DataValue::Boolean(matches!(quantifier, MarkApplyQuantifier::All))
-                }
-            }),
-        ))
+        Ok(value.unwrap_or(if saw_null {
+            DataValue::Null
+        } else {
+            DataValue::Boolean(matches!(quantifier, MarkApplyQuantifier::All))
+        }))
     }
 
     fn predicates_matched(
@@ -1115,7 +1197,7 @@ mod tests {
                             Some(RightInput::Streaming { .. } | RightInput::Materialize { .. })
                         ));
                         exec.next_tuple(&mut arena, &mut meta)?;
-                        assert!(exec.right_input.is_none());
+                        assert_eq!(exec.right_input.is_none(), !op.materialize);
                     } else {
                         assert!(matches!(result, Err(DatabaseError::ParseInt(_))));
                     }
@@ -1126,7 +1208,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_skips_preserve_paused_and_completed_rhs() -> Result<(), DatabaseError> {
+    fn guard_skips_preserve_materialized_rhs() -> Result<(), DatabaseError> {
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
@@ -1199,26 +1281,12 @@ mod tests {
                             exec.right_input,
                             Some(RightInput::Materialize { .. })
                         ));
-                    } else if index < 4 {
-                        let Some(RightInput::Materializing { rows, .. }) = &exec.right_input else {
-                            panic!("guard must retain the paused RHS")
-                        };
-                        #[cfg(feature = "spill")]
-                        {
-                            let mut cached = 0;
-                            rows.replay::<()>(|_| {
-                                cached += 1;
-                                Ok(None)
-                            })?;
-                            assert_eq!(cached, if index < 3 { 1 } else { 2 });
-                        }
-                        #[cfg(not(feature = "spill"))]
-                        assert_eq!(rows.len(), if index < 3 { 1 } else { 2 });
                     } else {
-                        assert!(matches!(
-                            exec.right_input,
-                            Some(RightInput::Materialized(_))
-                        ));
+                        // The first unguarded row materializes every RHS key at once.
+                        let Some(RightInput::Materialized(keys)) = &exec.right_input else {
+                            panic!("guard must retain the materialized RHS")
+                        };
+                        assert!(!keys.is_empty && keys.has_null);
                     }
                 } else {
                     assert!(matches!(
@@ -1228,13 +1296,13 @@ mod tests {
                 }
             }
             exec.next_tuple(&mut arena, &mut meta)?;
-            assert!(exec.right_input.is_none());
+            assert_eq!(exec.right_input.is_none(), !materialize);
         }
         Ok(())
     }
 
     #[test]
-    fn quantified_apply_materializes_once_and_replays_after_short_circuit(
+    fn quantified_apply_materializes_once_and_reuses_keys_after_short_circuit(
     ) -> Result<(), DatabaseError> {
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -1274,15 +1342,12 @@ mod tests {
                 join_input: None,
             };
             let mut meta = ExecMetaArena::new(meta);
-            for (index, value) in [
+            for value in [
                 DataValue::Int32(2),
                 DataValue::Int32(1),
                 DataValue::Null,
                 DataValue::Int32(2),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            ] {
                 let expected = match (quantifier, &value) {
                     (MarkApplyQuantifier::Any, DataValue::Int32(2)) => DataValue::Boolean(true),
                     (MarkApplyQuantifier::All, DataValue::Int32(1)) => DataValue::Boolean(false),
@@ -1293,28 +1358,42 @@ mod tests {
                 let (input, value) = exec.mark_value(input, &mut arena, &mut meta, &tuple)?;
                 exec.right_input = Some(input);
                 assert_eq!(value, expected);
-                if index == 0 && matches!(quantifier, MarkApplyQuantifier::Any) {
-                    let Some(RightInput::Materializing { rows, .. }) = &exec.right_input else {
-                        panic!("first match must pause the RHS")
-                    };
-                    #[cfg(feature = "spill")]
-                    {
-                        let mut cached = 0;
-                        rows.replay::<()>(|_| {
-                            cached += 1;
-                            Ok(None)
-                        })?;
-                        assert_eq!(cached, 1);
-                    }
-                    #[cfg(not(feature = "spill"))]
-                    assert_eq!(rows.len(), 1);
-                } else {
-                    assert!(matches!(
-                        exec.right_input,
-                        Some(RightInput::Materialized(_))
-                    ));
-                }
+                // A short-circuited match still caches every RHS key.
+                let Some(RightInput::Materialized(keys)) = &exec.right_input else {
+                    panic!("the first lookup must materialize the RHS")
+                };
+                assert!(!keys.is_empty && keys.has_null);
+                exec.reset(&mut arena, &mut meta)?;
+                assert!(matches!(
+                    exec.right_input,
+                    Some(RightInput::Materialized(_))
+                ));
             }
+            // Exhausting the left must not discard the RHS cache either.
+            while arena.next_tuple(exec.left_input, &mut meta)? {}
+            exec.next_tuple(&mut arena, &mut meta)?;
+            assert!(matches!(
+                exec.right_input,
+                Some(RightInput::Materialized(_))
+            ));
+            exec.reset(&mut arena, &mut meta)?;
+            exec.next_tuple(&mut arena, &mut meta)?;
+            assert_eq!(
+                arena.result_tuple().values,
+                vec![
+                    DataValue::Int32(2),
+                    if matches!(quantifier, MarkApplyQuantifier::Any) {
+                        DataValue::Boolean(true)
+                    } else {
+                        DataValue::Null
+                    },
+                ]
+            );
+            assert!(matches!(
+                exec.right_input,
+                Some(RightInput::Materialized(_))
+            ));
+
             // An empty RHS completes immediately, including for a NULL left value.
             let cache = arena.context();
             exec.right_root = build_read(&mut arena, &mut meta, &empty, cache, &transaction);
@@ -1337,6 +1416,19 @@ mod tests {
                 exec.right_input,
                 Some(RightInput::Materialized(_))
             ));
+            exec.reset(&mut arena, &mut meta)?;
+            assert!(matches!(
+                exec.right_input,
+                Some(RightInput::Materialized(_))
+            ));
+            exec.next_tuple(&mut arena, &mut meta)?;
+            assert_eq!(
+                arena.result_tuple().values.last(),
+                Some(&DataValue::Boolean(matches!(
+                    quantifier,
+                    MarkApplyQuantifier::All
+                )))
+            );
         }
         Ok(())
     }

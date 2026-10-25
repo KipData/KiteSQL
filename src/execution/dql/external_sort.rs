@@ -100,7 +100,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
             // pass. By default R <= 1,024 and B is about 1 MiB; one oversized row makes this a
             // soft bound.
             let sort_fields = self.sort_fields;
-            let mut rows = SpillVec::new().on_flush(move |rows| sort_segment(sort_fields, rows));
+            let mut rows = SpillVec::new().on_flush(move |_, rows| sort_segment(sort_fields, rows));
             let mut runs = Vec::new();
             while arena.next_tuple(self.input, plan_arena)? {
                 let tuple = arena.materialize_tuple();
@@ -163,7 +163,7 @@ struct RunCursor<'source> {
 
 impl<'source> RunCursor<'source> {
     fn new(source: &'source SpillReader<SortRow>, run: &Run) -> Result<Self, DatabaseError> {
-        let mut reader = source.open_segment_reader()?;
+        let mut reader = source.open_segment_reader(None)?;
         reader.reset(run.first_segment)?;
         let mut cursor = Self {
             remaining_segments: run.segment_count - 1,
@@ -324,7 +324,7 @@ mod test {
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let mut rows = SpillVec::new()
             .limit(4, usize::MAX)
-            .on_flush(|rows| sort_segment(&sort_fields, rows));
+            .on_flush(|_, rows| sort_segment(&sort_fields, rows));
         for value in [DataValue::Int32(2), DataValue::Null, DataValue::Int32(1)] {
             let _ = rows.push(SortRow::new(
                 &sort_fields,
@@ -375,7 +375,7 @@ mod test {
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let mut rows = SpillVec::new()
             .limit(2, usize::MAX)
-            .on_flush(|rows| sort_segment(&sort_fields, rows));
+            .on_flush(|_, rows| sort_segment(&sort_fields, rows));
         let mut runs = Vec::new();
         for (sequence, value) in values.into_iter().enumerate() {
             let tuple = Tuple::new(
@@ -470,7 +470,7 @@ mod test {
         ];
 
         let mut plan_arena = ExecMetaArena::new(plan_arena);
-        let mut rows = SpillVec::new().on_flush(|rows| sort_segment(&sort_fields, rows));
+        let mut rows = SpillVec::new().on_flush(|_, rows| sort_segment(&sort_fields, rows));
         let mut runs = Vec::new();
         for position in 0..ROW_COUNT {
             let sequence = (position * 7919) % ROW_COUNT;

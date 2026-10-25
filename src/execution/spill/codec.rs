@@ -65,6 +65,12 @@ impl SpillCodec for SortRow {
         })
     }
 
+    fn encoded_len(&self) -> Result<usize, DatabaseError> {
+        Ok(self.sort_values.encoded_len()?
+            + self.tuple.encoded_len()?
+            + self.outer_values.encoded_len()?)
+    }
+
     fn estimated_size(&self) -> usize {
         size_of::<Self>()
             .saturating_add(
@@ -93,6 +99,10 @@ impl<A: SpillCodec, B: SpillCodec> SpillCodec for (A, B) {
 
     fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError> {
         Ok((A::decode(reader)?, B::decode(reader)?))
+    }
+
+    fn encoded_len(&self) -> Result<usize, DatabaseError> {
+        Ok(self.0.encoded_len()? + self.1.encoded_len()?)
     }
 
     fn estimated_size(&self) -> usize {
@@ -133,6 +143,10 @@ impl SpillCodec for ScalarQueryRef {
         })
     }
 
+    fn encoded_len(&self) -> Result<usize, DatabaseError> {
+        Ok(17)
+    }
+
     fn estimated_size(&self) -> usize {
         size_of::<Self>()
     }
@@ -145,6 +159,48 @@ impl SpillCodec for DataValue {
 
     fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError> {
         Self::decode_reference_value(reader)
+    }
+
+    fn encoded_len(&self) -> Result<usize, DatabaseError> {
+        use crate::types::value::Utf8Type;
+        let payload = match self {
+            DataValue::Parameter { .. } => {
+                return Err(DatabaseError::InvalidValue(
+                    "unbound parameter cannot be serialized".into(),
+                ))
+            }
+            DataValue::Null => 0,
+            DataValue::Boolean(_) | DataValue::Int8(_) | DataValue::UInt8(_) => 1,
+            DataValue::Int16(_) | DataValue::UInt16(_) => 2,
+            DataValue::Float32(_)
+            | DataValue::Int32(_)
+            | DataValue::UInt32(_)
+            | DataValue::Date32(_) => 4,
+            DataValue::Float64(_)
+            | DataValue::Int64(_)
+            | DataValue::UInt64(_)
+            | DataValue::Date64(_) => 8,
+            DataValue::Time32(..) => 12,
+            DataValue::Time64(..) => 17,
+            #[cfg(feature = "decimal")]
+            DataValue::Decimal(_) => 16,
+            DataValue::Binary { value, len } => {
+                let _: u32 = value.len().try_into()?;
+                4 + value.len() + 1 + if len.is_some() { 4 } else { 0 }
+            }
+            DataValue::Utf8 { value, ty, .. } => {
+                let _: u32 = value.len().try_into()?;
+                4 + value.len()
+                    + 1
+                    + match ty {
+                        Utf8Type::Variable(None) => 2,
+                        Utf8Type::Variable(Some(_)) => 6,
+                        Utf8Type::Fixed(_) => 5,
+                    }
+            }
+            DataValue::Tuple(values) => values.encoded_len()?,
+        };
+        Ok(1 + payload) // Every DataValue starts with a one-byte variant tag.
     }
 
     fn estimated_size(&self) -> usize {
@@ -171,6 +227,14 @@ impl<T: SpillCodec> SpillCodec for Vec<T> {
             values.push(T::decode(reader)?);
         }
         Ok(values)
+    }
+
+    fn encoded_len(&self) -> Result<usize, DatabaseError> {
+        let _: u32 = self.len().try_into()?;
+        self.iter().try_fold(
+            size_of::<u32>(),
+            |len, value| Ok(len + value.encoded_len()?),
+        )
     }
 
     fn estimated_size(&self) -> usize {
@@ -210,6 +274,13 @@ impl<T: SpillCodec> SpillCodec for Option<T> {
         }
     }
 
+    fn encoded_len(&self) -> Result<usize, DatabaseError> {
+        Ok(1 + match self {
+            Some(value) => value.encoded_len()?,
+            None => 0,
+        })
+    }
+
     fn estimated_size(&self) -> usize {
         size_of::<Self>().saturating_add(
             self.as_ref()
@@ -230,6 +301,10 @@ impl SpillCodec for Tuple {
             Option::<DataValue>::decode(reader)?,
             Vec::<DataValue>::decode(reader)?,
         ))
+    }
+
+    fn encoded_len(&self) -> Result<usize, DatabaseError> {
+        Ok(self.pk.encoded_len()? + self.values.encoded_len()?)
     }
 
     fn estimated_size(&self) -> usize {
@@ -282,6 +357,7 @@ mod tests {
     fn round_trip<T: SpillCodec + PartialEq + Debug>(value: &T) -> Result<(), DatabaseError> {
         let mut bytes = Vec::new();
         value.encode(&mut bytes)?;
+        assert_eq!(value.encoded_len()?, bytes.len());
         let mut reader = bytes.as_slice();
         assert_eq!(&T::decode(&mut reader)?, value);
         assert!(reader.is_empty());
@@ -354,6 +430,12 @@ mod tests {
             .encode(&mut Vec::new()),
             Err(DatabaseError::InvalidValue(_))
         ));
+        assert!(DataValue::Tuple(vec![DataValue::Parameter {
+            id: 1,
+            ty: LogicalType::Integer
+        }])
+        .encoded_len()
+        .is_err());
         assert!(matches!(
             DataValue::decode(&mut &[255][..]),
             Err(DatabaseError::InvalidValue(_))
@@ -397,6 +479,7 @@ mod tests {
             };
             let mut bytes = Vec::new();
             row.encode(&mut bytes)?;
+            assert_eq!(row.encoded_len()?, bytes.len());
             let mut reader = bytes.as_slice();
             let decoded = SortRow::decode(&mut reader)?;
             assert!(reader.is_empty());
