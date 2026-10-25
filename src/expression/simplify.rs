@@ -203,7 +203,9 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for Simplify {
                 // Keep point lists compact without changing pairwise coercion or
                 // repeated evaluation of non-column operands in the old rewrite.
                 if args.len() > IN_EXPANSION_LIMIT
-                    && arg_expr.constant_in_column(args, arena).is_some()
+                    && arg_expr.in_point_column(arena).is_some_and(|(_, ty)| {
+                        args.iter().all(|arg| arg.in_point(ty, arena).is_some())
+                    })
                 {
                     return Ok(true);
                 }
@@ -511,11 +513,10 @@ impl Simplify {
 }
 
 impl ExprRef {
-    pub(crate) fn constant_in_column<A: MetaArena + ?Sized>(
+    pub(crate) fn in_point_column<A: MetaArena + ?Sized>(
         mut self,
-        args: &[ExprRef],
         arena: &A,
-    ) -> Option<ColumnRef> {
+    ) -> Option<(ColumnRef, &LogicalType)> {
         while let ScalarExpression::Alias { expr, .. } = arena.expression(self) {
             self = *expr;
         }
@@ -523,23 +524,26 @@ impl ExprRef {
             return None;
         };
         let ty = arena.column(*column).datatype();
-        // Floating key order need not agree with SQL equality for NaNs/zeros.
-        if args.is_empty()
-            || matches!(
-                ty,
-                LogicalType::Tuple(_) | LogicalType::Float | LogicalType::Double
-            )
-        {
-            return None;
+        (!matches!(
+            ty,
+            LogicalType::Tuple(_) | LogicalType::Float | LogicalType::Double
+        ))
+        .then_some((*column, ty))
+    }
+
+    pub(crate) fn in_point<'v, A: MetaArena + ?Sized>(
+        self,
+        ty: &LogicalType,
+        arena: &'v A,
+    ) -> Option<&'v DataValue> {
+        match arena.expression(self) {
+            ScalarExpression::Constant(value)
+                if !value.has_parameter() && (value.is_null() || value.logical_type() == *ty) =>
+            {
+                Some(value)
+            }
+            _ => None,
         }
-        args.iter()
-            .all(|arg| match arena.expression(*arg) {
-                ScalarExpression::Constant(value) if !value.has_parameter() => {
-                    value.is_null() || value.logical_type() == *ty
-                }
-                _ => false,
-            })
-            .then_some(*column)
     }
 
     pub(crate) fn unpack_val<A: MetaArena + ?Sized>(self, arena: &A) -> Option<DataValue> {

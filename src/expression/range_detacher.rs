@@ -523,7 +523,10 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 args,
                 ..
             } => {
-                let Some(column) = expr.constant_in_column(&args, self.arena) else {
+                let Some((column, ty)) = expr
+                    .in_point_column(self.arena)
+                    .filter(|_| !args.is_empty())
+                else {
                     return Ok(None);
                 };
                 if !self.matches_column(column) {
@@ -531,8 +534,8 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 }
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
-                    let ScalarExpression::Constant(value) = self.arena.expression(arg) else {
-                        unreachable!();
+                    let Some(value) = arg.in_point(ty, self.arena) else {
+                        return Ok(None);
                     };
                     if value.is_null() {
                         // NOT IN with NULL cannot be true in a Filter; positive
@@ -548,7 +551,7 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                 if negated {
                     return Ok(None);
                 }
-                // constant_in_column guarantees comparable values in one domain.
+                // `in_point` keeps every value in the column's type, so they are comparable.
                 values.sort_unstable_by(|left, right| left.partial_cmp(right).unwrap());
                 values.dedup();
                 let range = match values.len() {
