@@ -365,12 +365,12 @@ struct UpdateExprTargetRemapper<'a> {
     target_schema: &'a [ColumnRef],
 }
 
-impl ExprVisitorMut for UpdateExprTargetRemapper<'_> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for UpdateExprTargetRemapper<'_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
         let Some(target_position) = self
             .target_schema

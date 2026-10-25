@@ -432,9 +432,9 @@ pub enum PlanImpl {
 }
 
 impl Explain for ColumnRef {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         let column = arena.column(*self);
@@ -447,9 +447,9 @@ impl Explain for ColumnRef {
 }
 
 impl Explain for IndexMetaRef {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         f.write_str(&arena.index(*self).name)
@@ -461,7 +461,7 @@ macro_rules! impl_display_explain {
         $(
             $(#[$meta])*
             impl Explain for $ty {
-                fn fmt(&self, _arena: &(dyn MetaArena + '_), f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                fn fmt<A: MetaArena + ?Sized>(&self, _arena: &A, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     std::fmt::Display::fmt(self, f)
                 }
             }
@@ -490,9 +490,9 @@ impl_display_explain!(
 );
 
 impl Explain for Operator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         match self {
@@ -818,9 +818,9 @@ impl Operator {
 }
 
 impl Explain for PlanImpl {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         match self {
@@ -864,9 +864,9 @@ impl Explain for PlanImpl {
 }
 
 impl Explain for SortOption {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         match self {
@@ -885,9 +885,9 @@ impl Explain for SortOption {
 }
 
 impl Explain for PhysicalOption {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         write!(

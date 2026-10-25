@@ -52,7 +52,7 @@ impl ScalarQueryInitOperator {
 }
 
 impl Explain for ScalarQueryInitOperator {
-    fn fmt(&self, arena: &dyn MetaArena, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ScalarQueryInit {}", self.value.explain(arena))
     }
 }

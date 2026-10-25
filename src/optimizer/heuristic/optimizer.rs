@@ -167,7 +167,7 @@ impl<'a> HepOptimizer<'a> {
         loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         match pass.kind {
-            WholeTreePassKind::ColumnPruning => {
+            WholeTreePassKind::ColumnPruning | WholeTreePassKind::EliminateProject => {
                 let mut applied = false;
                 for rule in &pass.rules {
                     applied |= rule.apply(plan, arena, loader)?;

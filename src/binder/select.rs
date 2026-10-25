@@ -53,12 +53,12 @@ struct InputPositionBinder<'a> {
     offset: usize,
 }
 
-impl ExprVisitorMut for InputPositionBinder<'_> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for InputPositionBinder<'_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
         if let Some(index) = self
             .schema
@@ -86,7 +86,11 @@ impl<'a> ProjectionOutputBinder<'a> {
         Self { project_exprs }
     }
 
-    fn output_ref(&mut self, expr: ExprRef, arena: &mut dyn MetaArena) -> Option<ScalarExpression> {
+    fn output_ref<A: MetaArena + ?Sized>(
+        &mut self,
+        expr: ExprRef,
+        arena: &mut A,
+    ) -> Option<ScalarExpression> {
         self.project_exprs
             .iter()
             .position(|candidate| {
@@ -102,12 +106,8 @@ impl<'a> ProjectionOutputBinder<'a> {
     }
 }
 
-impl ExprVisitorMut for ProjectionOutputBinder<'_> {
-    fn visit(
-        &mut self,
-        expr: &mut ExprRef,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for ProjectionOutputBinder<'_> {
+    fn visit(&mut self, expr: &mut ExprRef, arena: &mut A) -> Result<(), DatabaseError> {
         if let Some(output_ref) = self.output_ref(*expr, arena) {
             *expr = arena.alloc_expression(output_ref);
             return Ok(());
@@ -931,12 +931,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             appended_outputs: &'a [AppendedRightOutput],
         }
 
-        impl ExprVisitorMut for AppendedRightOutputBinder<'_> {
+        impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for AppendedRightOutputBinder<'_> {
             fn visit_column_ref(
                 &mut self,
                 column: &mut ColumnRef,
                 position: &mut usize,
-                arena: &mut (dyn MetaArena + '_),
+                arena: &mut A,
             ) -> Result<(), DatabaseError> {
                 if let Some(output) = self.appended_outputs.iter().find(|output| {
                     *position == output.child_position && arena.same_column(*column, output.column)

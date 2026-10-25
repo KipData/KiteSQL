@@ -42,9 +42,9 @@ impl WindowOperator {
 }
 
 impl Explain for WindowOperator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         let (partition_by, order_by) = self.sort_fields.split_at(self.partition_by_len);

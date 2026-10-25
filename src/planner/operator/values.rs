@@ -41,7 +41,7 @@ impl ValuesOperator {
 }
 
 impl Explain for ValuesOperator {
-    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut Formatter) -> fmt::Result {
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut Formatter) -> fmt::Result {
         f.write_str("Values ")?;
         let width = self.schema_ref.len();
         for i in 0..self.row_count {

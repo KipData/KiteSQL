@@ -18,9 +18,7 @@ use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
-use crate::optimizer::rule::normalization::combine_operators::{
-    CollapseGroupByAgg, CollapseProject, CombineFilter,
-};
+use crate::optimizer::rule::normalization::combine_operators::{CollapseGroupByAgg, CombineFilter};
 use crate::optimizer::rule::normalization::compilation_in_advance::EvaluatorBind;
 use crate::planner::operator::Operator;
 use crate::planner::MetaArena;
@@ -57,8 +55,8 @@ mod simplification;
 mod top_k;
 pub(crate) use compilation_in_advance::evaluator_bind_current;
 pub(crate) use elimination::{
-    apply_annotated_post_rules, apply_scan_order_hint, EliminateIndexFilter, OrderHintKind,
-    ScanOrderHint,
+    apply_annotated_post_rules, apply_scan_order_hint, EliminateIndexFilter, EliminateProject,
+    OrderHintKind, ScanOrderHint,
 };
 pub(crate) use parameterized_index::{ParameterizeInnerJoin, ParameterizeMarkApply};
 pub(crate) use simplification::constant_calculation_current;
@@ -67,7 +65,7 @@ pub(crate) use simplification::constant_calculation_current;
 pub enum NormalizationRuleImpl {
     ColumnPruning,
     // Combine operators
-    CollapseProject,
+    EliminateProject,
     CollapseGroupByAgg,
     CombineFilter,
     // PushDown limit
@@ -99,6 +97,7 @@ pub enum NormalizationRuleImpl {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum WholeTreePassKind {
     ColumnPruning,
+    EliminateProject,
     ExpressionRewrite,
 }
 
@@ -173,6 +172,9 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::ColumnPruning => {
                 NormalizationPassKind::WholeTreePass(WholeTreePassKind::ColumnPruning)
             }
+            NormalizationRuleImpl::EliminateProject => {
+                NormalizationPassKind::WholeTreePass(WholeTreePassKind::EliminateProject)
+            }
             NormalizationRuleImpl::ConstantCalculation | NormalizationRuleImpl::EvaluatorBind => {
                 NormalizationPassKind::WholeTreePass(WholeTreePassKind::ExpressionRewrite)
             }
@@ -183,10 +185,11 @@ impl NormalizationRuleImpl {
     pub fn root_tag(&self) -> NormalizationRuleRootTag {
         match self {
             NormalizationRuleImpl::ColumnPruning => NormalizationRuleRootTag::Any,
-            NormalizationRuleImpl::CollapseProject
-            | NormalizationRuleImpl::GuardMarkApply
-            | NormalizationRuleImpl::ProjectMove => NormalizationRuleRootTag::Project,
+            NormalizationRuleImpl::EliminateProject => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::CollapseGroupByAgg => NormalizationRuleRootTag::Aggregate,
+            NormalizationRuleImpl::GuardMarkApply | NormalizationRuleImpl::ProjectMove => {
+                NormalizationRuleRootTag::Project
+            }
             NormalizationRuleImpl::CombineFilter => NormalizationRuleRootTag::Filter,
             NormalizationRuleImpl::LimitProjectTranspose
             | NormalizationRuleImpl::PushLimitThroughJoin
@@ -225,7 +228,7 @@ impl NormalizationRule for NormalizationRuleImpl {
                 OrientNestedLoopJoin.apply(plan, arena, loader)
             }
             NormalizationRuleImpl::GuardMarkApply => GuardMarkApply.apply(plan, arena, loader),
-            NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, arena, loader),
+            NormalizationRuleImpl::EliminateProject => EliminateProject.apply(plan, arena, loader),
             NormalizationRuleImpl::ProjectMove => ProjectMove.apply(plan, arena, loader),
             NormalizationRuleImpl::CollapseGroupByAgg => {
                 CollapseGroupByAgg.apply(plan, arena, loader)
@@ -272,7 +275,7 @@ impl NormalizationRule for NormalizationRuleImpl {
     }
 }
 
-pub(crate) fn strip_alias(expr: ExprRef, arena: &crate::planner::PlanArena<'_>) -> ExprRef {
+pub(crate) fn strip_alias<A: MetaArena + ?Sized>(expr: ExprRef, arena: &A) -> ExprRef {
     match arena.expression(expr) {
         ScalarExpression::Alias {
             expr,
@@ -318,11 +321,11 @@ impl<'positions, 'visited> PositionRemapper<'positions, 'visited> {
     }
 }
 
-impl ExprVisitorMut for PositionRemapper<'_, '_> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for PositionRemapper<'_, '_> {
     fn visit_expression_ref(
         &mut self,
         expr: &mut ExprRef,
-        _arena: &mut (dyn MetaArena + '_),
+        _arena: &mut A,
     ) -> Result<bool, DatabaseError> {
         Ok(self.visited.insert(*expr))
     }
@@ -331,7 +334,7 @@ impl ExprVisitorMut for PositionRemapper<'_, '_> {
         &mut self,
         _column: &mut crate::catalog::ColumnRef,
         position: &mut usize,
-        _arena: &mut (dyn MetaArena + '_),
+        _arena: &mut A,
     ) -> Result<(), DatabaseError> {
         remap_position(position, self.removed_positions);
         Ok(())
@@ -341,7 +344,7 @@ impl ExprVisitorMut for PositionRemapper<'_, '_> {
         &mut self,
         expr: &mut ExprRef,
         alias: &mut AliasType,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
         match alias {
             AliasType::Expr(alias_expr) => self.visit(alias_expr, arena),
@@ -350,20 +353,20 @@ impl ExprVisitorMut for PositionRemapper<'_, '_> {
     }
 }
 
-pub(crate) fn remap_expr_positions(
+pub(crate) fn remap_expr_positions<A: MetaArena + ?Sized>(
     mut expr: ExprRef,
     removed_positions: &[usize],
     visited: &mut HashSet<ExprRef>,
-    arena: &mut crate::planner::PlanArena<'_>,
+    arena: &mut A,
 ) -> Result<(), DatabaseError> {
     PositionRemapper::new(removed_positions, visited).visit(&mut expr, arena)
 }
 
-pub(crate) fn remap_exprs_positions<'a>(
+pub(crate) fn remap_exprs_positions<'a, A: MetaArena + ?Sized>(
     exprs: impl IntoIterator<Item = &'a mut ExprRef>,
     removed_positions: &[usize],
     visited: &mut HashSet<ExprRef>,
-    arena: &mut crate::planner::PlanArena<'_>,
+    arena: &mut A,
 ) -> Result<(), DatabaseError> {
     let mut remapper = PositionRemapper::new(removed_positions, visited);
     for expr in exprs {

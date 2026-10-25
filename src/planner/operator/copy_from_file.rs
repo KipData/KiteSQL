@@ -27,9 +27,9 @@ pub struct CopyFromFileOperator {
 }
 
 impl Explain for CopyFromFileOperator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         write!(f, "Copy {} -> {} [", self.source.path.display(), self.table)?;

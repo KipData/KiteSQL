@@ -13,210 +13,15 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
-use crate::optimizer::rule::normalization::strip_alias;
 use crate::planner::operator::filter::FilterOperator;
-use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::Operator;
-use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::LogicalType;
 use std::mem;
-
-fn is_passthrough_project(op: &ProjectOperator, arena: &PlanArena<'_>) -> bool {
-    op.exprs.iter().all(|expr| {
-        matches!(
-            arena.expression(strip_alias(*expr, arena)),
-            ScalarExpression::ColumnRef { .. }
-        )
-    })
-}
-
-fn passthrough_source_position(expr: ExprRef, arena: &PlanArena<'_>) -> Option<usize> {
-    match arena.expression(strip_alias(expr, arena)) {
-        ScalarExpression::ColumnRef { position, .. } => Some(*position),
-        _ => None,
-    }
-}
-
-fn collapse_match_expr(expr: ExprRef, arena: &PlanArena<'_>) -> ExprRef {
-    match arena.expression(expr) {
-        ScalarExpression::Alias { expr, .. } => *expr,
-        _ => expr,
-    }
-}
-
-fn rewrite_column_position(
-    mut expr: ExprRef,
-    new_position: usize,
-    arena: &mut PlanArena<'_>,
-) -> Result<(), DatabaseError> {
-    struct Rewriter(usize);
-    impl ExprVisitorMut for Rewriter {
-        fn visit_column_ref(
-            &mut self,
-            _column: &mut crate::catalog::ColumnRef,
-            position: &mut usize,
-            _arena: &mut (dyn MetaArena + '_),
-        ) -> Result<(), DatabaseError> {
-            *position = self.0;
-            Ok(())
-        }
-    }
-    Rewriter(new_position).visit(&mut expr, arena)
-}
-
-fn remap_passthrough_project_exprs(
-    parent_exprs: &mut [ExprRef],
-    child_exprs: &[ExprRef],
-    remapped_positions: &mut Vec<usize>,
-    arena: &mut PlanArena<'_>,
-) -> Result<bool, DatabaseError> {
-    remapped_positions.clear();
-
-    for parent_expr in parent_exprs.iter() {
-        let parent_match_expr = collapse_match_expr(*parent_expr, arena);
-        let Some(position) = child_exprs
-            .iter()
-            .find(|child_expr| parent_match_expr.eq_ignore_colref_pos(**child_expr, arena))
-            .and_then(|expr| passthrough_source_position(*expr, arena))
-        else {
-            return Ok(false);
-        };
-        remapped_positions.push(position);
-    }
-
-    for (parent_expr, position) in parent_exprs
-        .iter_mut()
-        .zip(remapped_positions.iter().copied())
-    {
-        rewrite_column_position(*parent_expr, position, arena)?;
-    }
-
-    Ok(true)
-}
-
-fn groupby_exprs_match(
-    parent_exprs: &[ExprRef],
-    child_exprs: &[ExprRef],
-    arena: &crate::planner::PlanArena,
-) -> bool {
-    parent_exprs.len() == child_exprs.len()
-        && parent_exprs
-            .iter()
-            .zip(child_exprs.iter())
-            .all(|(parent_expr, child_expr)| parent_expr.eq_ignore_colref_pos(*child_expr, arena))
-}
-
-/// Combine two adjacent project operators into one.
-pub struct CollapseProject;
-
-impl NormalizationRule for CollapseProject {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        arena: &mut PlanArena,
-        _loader: Option<&StatisticMetaLoader<'_>>,
-    ) -> Result<bool, DatabaseError> {
-        let Operator::Project(parent_op) = &mut plan.operator else {
-            return Ok(false);
-        };
-
-        let mut removed = false;
-        let mut remapped_positions = Vec::with_capacity(parent_op.exprs.len());
-        while let Childrens::Only(child) = plan.childrens.as_mut() {
-            match &child.operator {
-                Operator::Project(child_op)
-                    if is_passthrough_project(child_op, arena)
-                        && remap_passthrough_project_exprs(
-                            &mut parent_op.exprs,
-                            &child_op.exprs,
-                            &mut remapped_positions,
-                            arena,
-                        )? =>
-                {
-                    removed |= replace_with_only_child(child.as_mut());
-                }
-                _ => break,
-            }
-        }
-
-        Ok(removed)
-    }
-}
-
-// Removing a project must preserve every input slot; renaming is allowed.
-fn can_remove_project(
-    op: &ProjectOperator,
-    childrens: &mut Childrens,
-    arena: &mut PlanArena<'_>,
-) -> bool {
-    let Childrens::Only(input) = childrens else {
-        return false;
-    };
-    let schema = input.output_schema(arena);
-    if op.exprs.len() != schema.len() {
-        return false;
-    }
-    for (i, expr) in op.exprs.iter().enumerate() {
-        let mut source_expr = *expr;
-        while let ScalarExpression::Alias { expr, .. } = arena.expression(source_expr) {
-            source_expr = *expr;
-        }
-        let ScalarExpression::ColumnRef {
-            column: source_column,
-            ..
-        } = arena.expression(source_expr)
-        else {
-            return false;
-        };
-        let ScalarExpression::ColumnRef {
-            position: execution_position,
-            ..
-        } = arena.expression(strip_alias(*expr, arena))
-        else {
-            return false;
-        };
-        if *source_column != schema[i] || *execution_position != i {
-            return false;
-        }
-    }
-    true
-}
-
-struct ProjectionSubstitution<'a>(&'a [ExprRef]);
-
-impl ExprVisitorMut for ProjectionSubstitution<'_> {
-    fn visit(
-        &mut self,
-        expr: &mut ExprRef,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
-        if let ScalarExpression::ColumnRef { position, .. } = arena.expression(*expr) {
-            let Some(source) = self.0.get(*position) else {
-                return Err(DatabaseError::InvalidValue(
-                    "invalid projection slot".into(),
-                ));
-            };
-            *expr = source.clone_expression(arena)?;
-            return Ok(());
-        }
-        walk_mut_expr(self, expr, arena)
-    }
-
-    fn visit_alias(
-        &mut self,
-        expr: &mut ExprRef,
-        _: &mut crate::expression::AliasType,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
-        self.visit(expr, arena)
-    }
-}
 
 /// Combine two adjacent filter operators into one.
 pub struct CombineFilter;
@@ -235,7 +40,7 @@ impl NormalizationRule for CombineFilter {
                 return Ok(false);
             }
         };
-        let mut parent_filter = parent_filter;
+        let parent_filter = parent_filter;
 
         let cursor = match only_child_mut(plan) {
             Some(child) => child,
@@ -245,51 +50,44 @@ impl NormalizationRule for CombineFilter {
             }
         };
 
-        let mut changed = false;
-        loop {
-            match &mut cursor.operator {
-                Operator::Filter(child_op) => {
-                    let FilterOperator {
-                        predicate,
-                        having,
-                        is_optimized: _,
-                    } = parent_filter;
-                    let child_predicate = child_op.predicate;
-                    child_op.predicate = arena.alloc_expression(ScalarExpression::Binary {
-                        op: BinaryOperator::And,
-                        left_expr: predicate,
-                        right_expr: child_predicate,
-                        evaluator: None,
-                        ty: LogicalType::Boolean,
-                    });
-                    child_op.having = having || child_op.having;
-                    child_op.is_optimized = false;
+        match &mut cursor.operator {
+            Operator::Filter(child_op) => {
+                let FilterOperator {
+                    predicate,
+                    having,
+                    is_optimized: _,
+                } = parent_filter;
+                let child_predicate = child_op.predicate;
+                child_op.predicate = arena.alloc_expression(ScalarExpression::Binary {
+                    op: BinaryOperator::And,
+                    left_expr: predicate,
+                    right_expr: child_predicate,
+                    evaluator: None,
+                    ty: LogicalType::Boolean,
+                });
+                child_op.having = having || child_op.having;
+                child_op.is_optimized = false;
 
-                    return Ok(replace_with_only_child(plan));
-                }
-                Operator::Project(project_op) => {
-                    if !can_remove_project(project_op, &mut cursor.childrens, arena) {
-                        plan.operator = Operator::Filter(parent_filter);
-                        return Ok(changed);
-                    }
-                    let mut predicate = parent_filter.predicate.clone_expression(arena)?;
-                    ProjectionSubstitution(&project_op.exprs).visit(&mut predicate, arena)?;
-                    parent_filter.predicate = predicate;
-                    parent_filter.is_optimized = false;
-                    if replace_with_only_child(cursor) {
-                        changed = true;
-                        continue;
-                    }
-                    plan.operator = Operator::Filter(parent_filter);
-                    return Ok(false);
-                }
-                _ => {
-                    plan.operator = Operator::Filter(parent_filter);
-                    return Ok(changed);
-                }
+                return Ok(replace_with_only_child(plan));
+            }
+            _ => {
+                plan.operator = Operator::Filter(parent_filter);
+                return Ok(false);
             }
         }
     }
+}
+
+fn groupby_exprs_match(
+    parent_exprs: &[ExprRef],
+    child_exprs: &[ExprRef],
+    arena: &PlanArena<'_>,
+) -> bool {
+    parent_exprs.len() == child_exprs.len()
+        && parent_exprs
+            .iter()
+            .zip(child_exprs)
+            .all(|(parent, child)| parent.eq_ignore_colref_pos(*child, arena))
 }
 
 pub struct CollapseGroupByAgg;
@@ -341,121 +139,15 @@ mod tests {
     use crate::optimizer::core::rule::NormalizationRule;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
-    use crate::optimizer::rule::normalization::combine_operators::{
-        CollapseGroupByAgg, CollapseProject,
-    };
+    use crate::optimizer::rule::normalization::combine_operators::CollapseGroupByAgg;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::aggregate::AggregateOperator;
-    use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 
     fn column_expr(arena: &mut PlanArena, name: &str, position: usize) -> ExprRef {
         let column = arena.alloc_column(ColumnCatalog::new_dummy(name.to_string()));
         arena.alloc_expression(ScalarExpression::column_expr(column, position))
-    }
-
-    #[test]
-    fn test_collapse_project() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
-        let mut arena = PlanArena::new(&table_state.table_arena);
-        let plan =
-            table_state.plan_with_arena("select c1 from (select c1, c2 from t1) t", &mut arena)?;
-
-        let pipeline = HepOptimizerPipeline::builder()
-            .before_batch(
-                "test_collapse_project",
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::CollapseProject],
-            )
-            .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
-
-        if let Operator::Project(op) = &best_plan.operator {
-            assert_eq!(op.exprs.len(), 1);
-        } else {
-            unreachable!("Should be a project operator")
-        }
-
-        let alias_project = best_plan.childrens.pop_only();
-        assert!(
-            matches!(alias_project.operator, Operator::Project(_)),
-            "Derived-table alias projection should be preserved"
-        );
-        let scan_op = alias_project.childrens.pop_only();
-        assert!(matches!(scan_op.operator, Operator::TableScan(_)));
-        assert!(matches!(scan_op.childrens.as_ref(), Childrens::None));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_collapse_project_with_alias() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
-        let mut arena = PlanArena::new(&table_state.table_arena);
-        let plan = table_state
-            .plan_with_arena("select t.x from (select c1 as x from t1) t", &mut arena)?;
-        let original = plan.clone();
-        let original_child = original.childrens.pop_only();
-        assert!(matches!(original_child.operator, Operator::Project(_)));
-        let original_grandchild = original_child.childrens.pop_only();
-        assert!(matches!(original_grandchild.operator, Operator::Project(_)));
-
-        let pipeline = HepOptimizerPipeline::builder()
-            .before_batch(
-                "test_collapse_project_with_alias",
-                HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::CollapseProject],
-            )
-            .build();
-        let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
-        if let Operator::Project(op) = &best_plan.operator {
-            assert_eq!(op.exprs.len(), 1);
-        } else {
-            unreachable!("Should be a project operator");
-        }
-
-        let scan_op = best_plan.childrens.pop_only();
-        assert!(matches!(scan_op.operator, Operator::Project(_)));
-        let scan_child = scan_op.childrens.pop_only();
-        assert!(
-            !matches!(scan_child.operator, Operator::Project(_)),
-            "Child project should be collapsed"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_collapse_project_remaps_reordered_passthrough_positions() -> Result<(), DatabaseError> {
-        let table_arena = crate::planner::TableArenaCell::default();
-        let mut arena = PlanArena::new(&table_arena);
-        let child = LogicalPlan::new(
-            Operator::Project(ProjectOperator::new(vec![
-                column_expr(&mut arena, "c2", 1),
-                column_expr(&mut arena, "c1", 0),
-            ])),
-            Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
-        );
-        let mut plan = LogicalPlan::new(
-            Operator::Project(ProjectOperator::new(vec![column_expr(&mut arena, "c2", 0)])),
-            Childrens::Only(Box::new(child)),
-        );
-
-        assert!(CollapseProject.apply(&mut plan, &mut arena, None)?);
-
-        let Operator::Project(op) = &plan.operator else {
-            unreachable!("expected project");
-        };
-        let ScalarExpression::ColumnRef { position, .. } = arena.expression(op.exprs[0]) else {
-            unreachable!("expected column ref");
-        };
-        assert_eq!(*position, 1);
-        assert!(matches!(
-            plan.childrens.pop_only().operator,
-            Operator::Dummy
-        ));
-        Ok(())
     }
 
     #[test]

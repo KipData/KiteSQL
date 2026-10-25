@@ -254,18 +254,20 @@ pub trait OperatorVisitorMut<'a>: Sized {
     }
 }
 
-pub struct OperatorExprVisitorMut<'a, 'arena, V> {
+pub struct OperatorExprVisitorMut<'a, V, A: ?Sized> {
     visitor: &'a mut V,
-    arena: &'a mut (dyn MetaArena + 'arena),
+    arena: &'a mut A,
 }
 
-impl<'a, 'arena, V> OperatorExprVisitorMut<'a, 'arena, V> {
-    pub fn new(visitor: &'a mut V, arena: &'a mut (dyn MetaArena + 'arena)) -> Self {
+impl<'a, V, A: ?Sized> OperatorExprVisitorMut<'a, V, A> {
+    pub fn new(visitor: &'a mut V, arena: &'a mut A) -> Self {
         Self { visitor, arena }
     }
 }
 
-impl<'a, V: ExprVisitorMut> OperatorVisitorMut<'a> for OperatorExprVisitorMut<'_, '_, V> {
+impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
+    for OperatorExprVisitorMut<'_, V, A>
+{
     fn visit_values(&mut self, op: &'a mut ValuesOperator) -> Result<(), DatabaseError> {
         for expr in op.rows.iter_mut() {
             self.visitor.visit(expr, self.arena)?;
@@ -475,11 +477,11 @@ mod tests {
 
     struct IncrementConstants(usize);
 
-    impl ExprVisitorMut for IncrementConstants {
+    impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for IncrementConstants {
         fn visit_constant(
             &mut self,
             value: &mut DataValue,
-            _arena: &mut (dyn MetaArena + '_),
+            _arena: &mut A,
         ) -> Result<(), DatabaseError> {
             if let DataValue::Int32(value) = value {
                 *value += 1;

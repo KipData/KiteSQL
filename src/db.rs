@@ -532,7 +532,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .after_batch(
             "Collapse Project",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![NormalizationRuleImpl::CollapseProject],
+            vec![NormalizationRuleImpl::EliminateProject],
         )
         .after_batch(
             "Expression Remapper",
@@ -1680,7 +1680,7 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn late_project_collapse_keeps_computed_output_boundary() -> Result<(), DatabaseError> {
+    fn late_project_collapse_inlines_computed_output() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let (left, large) = literal_input("large", &[1, 2, 3, 4], 0, &mut arena)?;
@@ -1710,8 +1710,8 @@ pub(crate) mod test {
             unreachable!()
         };
         assert!(
-            matches!(child.operator, Operator::Project(_)),
-            "computed expressions are not substituted"
+            matches!(child.operator, Operator::Join(_)),
+            "computed expressions should be substituted into the output Project"
         );
         let Operator::Project(project) = &plan.operator else {
             unreachable!()
@@ -2177,7 +2177,10 @@ pub(crate) mod test {
         };
         assert_eq!(*left_position, 0);
         assert_eq!(*right_position, 0);
-        let (_, right_child) = join_plan.childrens.pop_twins();
+        let (_, mut right_child) = join_plan.childrens.pop_twins();
+        if matches!(right_child.operator, Operator::Project(_)) {
+            right_child = right_child.childrens.pop_only();
+        }
         let Operator::Filter(filter_op) = right_child.operator else {
             unreachable!("expected pushed-down filter on right child");
         };
@@ -2277,7 +2280,7 @@ pub(crate) mod test {
             let plan = row.values[0].utf8().unwrap();
             assert_eq!(
                 plan,
-                "Projection [l.a, l.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (l.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [(t1.a) as (l.a), (t1.b) as (l.b)] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => ($3, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
+                "Projection [l.a, l.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (l.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [(t1.a) as (t1.a), (t1.b) as (t1.b)] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => ($3, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
             );
         }
 

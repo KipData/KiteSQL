@@ -45,12 +45,12 @@ impl ScalarQueryRelocator {
     }
 }
 
-impl ExprVisitorMut for ScalarQueryRelocator {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for ScalarQueryRelocator {
     fn visit_outer_param(
         &mut self,
         reference: &mut ScalarQueryRef,
         _ty: &mut LogicalType,
-        _arena: &mut dyn MetaArena,
+        _arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.relocate(reference);
         Ok(())
@@ -60,7 +60,7 @@ impl ExprVisitorMut for ScalarQueryRelocator {
         &mut self,
         reference: &mut ScalarQueryRef,
         _ty: &mut LogicalType,
-        _arena: &mut dyn MetaArena,
+        _arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.relocate(reference);
         Ok(())
@@ -70,19 +70,19 @@ impl ExprVisitorMut for ScalarQueryRelocator {
         &mut self,
         reference: &mut ScalarQueryRef,
         _ty: &mut LogicalType,
-        _arena: &mut dyn MetaArena,
+        _arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.relocate(reference);
         Ok(())
     }
 }
 
-struct ScalarQueryPlanRelocator<'a> {
+struct ScalarQueryPlanRelocator<'a, A: ?Sized> {
     references: ScalarQueryRelocator,
-    arena: &'a mut dyn MetaArena,
+    arena: &'a mut A,
 }
 
-impl<'a> OperatorVisitorMut<'a> for ScalarQueryPlanRelocator<'_> {
+impl<'a, A: MetaArena + ?Sized> OperatorVisitorMut<'a> for ScalarQueryPlanRelocator<'_, A> {
     fn visit_operator(
         &mut self,
         operator: &'a mut Operator,

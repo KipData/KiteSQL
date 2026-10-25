@@ -29,9 +29,9 @@ pub struct CreateIndexOperator {
 }
 
 impl Explain for CreateIndexOperator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         write!(f, "Create Index On {} -> [", self.table_name)?;

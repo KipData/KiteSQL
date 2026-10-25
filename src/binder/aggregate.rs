@@ -360,10 +360,10 @@ impl<'a> AggregateOutputBinder<'a> {
         }
     }
 
-    fn output_ref(
+    fn output_ref<A: MetaArena + ?Sized>(
         &mut self,
         expr: ExprRef,
-        arena: &mut dyn MetaArena,
+        arena: &mut A,
     ) -> Result<Option<ScalarExpression>, DatabaseError> {
         let output_count = self.agg_calls.len() + self.group_by_exprs.len();
         self.agg_calls
@@ -395,12 +395,8 @@ impl<'a> AggregateOutputBinder<'a> {
     }
 }
 
-impl ExprVisitorMut for AggregateOutputBinder<'_> {
-    fn visit(
-        &mut self,
-        expr: &mut ExprRef,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for AggregateOutputBinder<'_> {
+    fn visit(&mut self, expr: &mut ExprRef, arena: &mut A) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias {
             alias: crate::expression::AliasType::Name(_),
             ..

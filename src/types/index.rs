@@ -162,7 +162,7 @@ impl IndexInfo {
 }
 
 impl Explain for IndexInfo {
-    fn fmt(&self, arena: &dyn MetaArena, f: &mut Formatter<'_>) -> fmt::Result {
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{} => ", self.meta.explain(arena))?;
         match &self.lookup {
             Some(IndexLookup::Static(range)) => write!(f, "{range}")?,

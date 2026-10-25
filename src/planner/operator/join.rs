@@ -91,13 +91,13 @@ impl JoinOperator {
 }
 
 impl Explain for JoinOperator {
-    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} Join{}", self.join_type, self.on.explain(arena))
     }
 }
 
 impl Explain for JoinCondition {
-    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             JoinCondition::On { on, filter } => {
                 if !on.is_empty() {

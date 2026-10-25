@@ -65,9 +65,9 @@ pub struct SortOperator {
 }
 
 impl Explain for SortOperator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         f.write_str("Sort By ")?;
@@ -76,9 +76,9 @@ impl Explain for SortOperator {
 }
 
 impl Explain for SortField {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         let direction = if self.asc { "Asc" } else { "Desc" };

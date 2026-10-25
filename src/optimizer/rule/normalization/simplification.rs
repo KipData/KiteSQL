@@ -20,14 +20,14 @@ use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::Operator;
 use crate::planner::PlanArena;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::{Childrens, LogicalPlan, MetaArena};
 
 #[derive(Copy, Clone)]
 pub struct ConstantCalculation;
 
-pub(crate) fn constant_calculation_current(
+pub(crate) fn constant_calculation_current<A: MetaArena + ?Sized>(
     plan: &mut LogicalPlan,
-    arena: &mut crate::planner::PlanArena,
+    arena: &mut A,
 ) -> Result<(), DatabaseError> {
     let mut calculator = ConstantCalculator::new(arena);
     OperatorExprVisitorMut::new(&mut calculator, arena).visit_operator(&mut plan.operator, None)

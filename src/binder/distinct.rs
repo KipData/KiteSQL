@@ -84,7 +84,11 @@ impl<'a> DistinctOutputBinder<'a> {
         Self { select_list }
     }
 
-    fn output_ref(&mut self, expr: ExprRef, arena: &mut dyn MetaArena) -> Option<ScalarExpression> {
+    fn output_ref<A: MetaArena + ?Sized>(
+        &mut self,
+        expr: ExprRef,
+        arena: &mut A,
+    ) -> Option<ScalarExpression> {
         self.select_list
             .iter()
             .position(|candidate| {
@@ -100,12 +104,8 @@ impl<'a> DistinctOutputBinder<'a> {
     }
 }
 
-impl ExprVisitorMut for DistinctOutputBinder<'_> {
-    fn visit(
-        &mut self,
-        expr: &mut ExprRef,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for DistinctOutputBinder<'_> {
+    fn visit(&mut self, expr: &mut ExprRef, arena: &mut A) -> Result<(), DatabaseError> {
         let is_named_alias = matches!(
             arena.expression(*expr),
             ScalarExpression::Alias {

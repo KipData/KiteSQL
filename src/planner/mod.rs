@@ -37,9 +37,9 @@ pub(crate) use plan_keeper::{PlanInput, PlanKeeper};
 pub use scalar_query_ref::ScalarQueryRef;
 
 pub(crate) trait Explain {
-    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 
-    fn explain<'a, 'p>(&'a self, arena: &'a (dyn MetaArena + 'p)) -> ExplainDisplay<'a, 'p, Self>
+    fn explain<'a, A: MetaArena + ?Sized>(&'a self, arena: &'a A) -> ExplainDisplay<'a, Self, A>
     where
         Self: Sized,
     {
@@ -47,21 +47,21 @@ pub(crate) trait Explain {
     }
 }
 
-pub(crate) struct ExplainDisplay<'a, 'p, T: ?Sized> {
+pub(crate) struct ExplainDisplay<'a, T: ?Sized, A: ?Sized> {
     value: &'a T,
-    arena: &'a (dyn MetaArena + 'p),
+    arena: &'a A,
 }
 
-impl<T: Explain + ?Sized> fmt::Display for ExplainDisplay<'_, '_, T> {
+impl<T: Explain + ?Sized, A: MetaArena + ?Sized> fmt::Display for ExplainDisplay<'_, T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.value.fmt(self.arena, f)
     }
 }
 
-pub(crate) fn fmt_explain_list<T: Explain>(
+pub(crate) fn fmt_explain_list<T: Explain, A: MetaArena + ?Sized>(
     values: &[T],
     separator: &str,
-    arena: &(dyn MetaArena + '_),
+    arena: &A,
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
     for (index, value) in values.iter().enumerate() {
@@ -195,9 +195,9 @@ impl LogicalPlan {
         }
     }
 
-    pub(crate) fn clone_plan(
+    pub(crate) fn clone_plan<A: MetaArena + ?Sized>(
         &self,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut plan = self.clone();
         OperatorExprVisitorMut::new(&mut ExprCloner, arena).visit_plan(&mut plan)?;
@@ -488,7 +488,7 @@ impl LogicalPlan {
 }
 
 impl Explain for LogicalPlan {
-    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.operator.fmt(arena, f)?;
 
         if let Some(physical_option) = &self.physical_option {

@@ -292,13 +292,13 @@ mod chrono_scalar_expression {
 
 pub struct BindEvaluator;
 
-impl ExprVisitorMut for BindEvaluator {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for BindEvaluator {
     fn visit_type_cast(
         &mut self,
         expr: &mut ExprRef,
         ty: &mut LogicalType,
         evaluator: &mut Option<CastEvaluatorRef>,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
         let from = expr.return_type(arena);
@@ -317,7 +317,7 @@ impl ExprVisitorMut for BindEvaluator {
         expr: &mut ExprRef,
         evaluator: &mut Option<UnaryEvaluatorRef>,
         _ty: &mut LogicalType,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
 
@@ -344,7 +344,7 @@ impl ExprVisitorMut for BindEvaluator {
         right_expr: &mut ExprRef,
         evaluator: &mut Option<BinaryEvaluatorRef>,
         _ty: &mut LogicalType,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.visit(left_expr, arena)?;
         self.visit(right_expr, arena)?;
@@ -366,7 +366,7 @@ impl ExprVisitorMut for BindEvaluator {
         expr: &mut ExprRef,
         args: &mut [ExprRef],
         evaluator: &mut Option<BinaryEvaluatorRef>,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
         let mut ty = expr.return_type(arena).into_owned();
@@ -391,7 +391,7 @@ impl ExprVisitorMut for BindEvaluator {
         right_expr: &mut ExprRef,
         left_evaluator: &mut Option<BinaryEvaluatorRef>,
         right_evaluator: &mut Option<BinaryEvaluatorRef>,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.visit(expr, arena)?;
         self.visit(left_expr, arena)?;
@@ -442,19 +442,19 @@ impl ExprVisitor<dyn MetaArena + '_> for HasCountStar {
 }
 
 pub trait TypeCast: Sized {
-    fn return_type<'a>(&'a self, arena: &'a (dyn MetaArena + '_)) -> Cow<'a, LogicalType>;
+    fn return_type<'a, A: MetaArena + ?Sized>(&'a self, arena: &'a A) -> Cow<'a, LogicalType>;
 
-    fn into_expr(
+    fn into_expr<A: MetaArena + ?Sized>(
         self,
         ty: LogicalType,
         evaluator: CastEvaluatorRef,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Self;
 
-    fn type_cast(
+    fn type_cast<A: MetaArena + ?Sized>(
         self,
         ty: Cow<'_, LogicalType>,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<Self, DatabaseError> {
         let from = self.return_type(arena);
         if from.as_ref() == ty.as_ref() {
@@ -466,7 +466,7 @@ pub trait TypeCast: Sized {
 }
 
 impl TypeCast for ScalarExpression {
-    fn return_type<'a>(&'a self, arena: &'a (dyn MetaArena + '_)) -> Cow<'a, LogicalType> {
+    fn return_type<'a, A: MetaArena + ?Sized>(&'a self, arena: &'a A) -> Cow<'a, LogicalType> {
         match self {
             ScalarExpression::Constant(value) => Cow::Owned(value.logical_type()),
             ScalarExpression::ColumnRef { column, .. } => {
@@ -509,11 +509,11 @@ impl TypeCast for ScalarExpression {
         }
     }
 
-    fn into_expr(
+    fn into_expr<A: MetaArena + ?Sized>(
         self,
         ty: LogicalType,
         evaluator: CastEvaluatorRef,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Self {
         ScalarExpression::TypeCast {
             expr: arena.alloc_expression(self),
@@ -524,15 +524,15 @@ impl TypeCast for ScalarExpression {
 }
 
 impl TypeCast for ExprRef {
-    fn return_type<'a>(&'a self, arena: &'a (dyn MetaArena + '_)) -> Cow<'a, LogicalType> {
+    fn return_type<'a, A: MetaArena + ?Sized>(&'a self, arena: &'a A) -> Cow<'a, LogicalType> {
         arena.expression(*self).return_type(arena)
     }
 
-    fn into_expr(
+    fn into_expr<A: MetaArena + ?Sized>(
         self,
         ty: LogicalType,
         evaluator: CastEvaluatorRef,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Self {
         arena.alloc_expression(ScalarExpression::TypeCast {
             expr: self,
@@ -549,10 +549,10 @@ impl ScalarExpression {
 }
 
 impl Explain for ExprRef {
-    fn fmt(&self, arena: &dyn MetaArena, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fn write_exprs(
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fn write_exprs<A: MetaArena + ?Sized>(
             exprs: &[ExprRef],
-            arena: &(dyn MetaArena + '_),
+            arena: &A,
             f: &mut fmt::Formatter<'_>,
         ) -> fmt::Result {
             for (index, expr) in exprs.iter().enumerate() {
@@ -804,13 +804,17 @@ impl ExprRef {
         SortField::from(self).nulls_last()
     }
 
-    pub(crate) fn eq_ignore_colref_pos(self, other: ExprRef, arena: &(dyn MetaArena + '_)) -> bool {
+    pub(crate) fn eq_ignore_colref_pos<A: MetaArena + ?Sized>(
+        self,
+        other: ExprRef,
+        arena: &A,
+    ) -> bool {
         eq_col::eq_ignore_colref_pos(self, other, arena)
     }
 
-    pub(crate) fn clone_expression(
+    pub(crate) fn clone_expression<A: MetaArena + ?Sized>(
         self,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<ExprRef, DatabaseError> {
         let mut cloned = self;
         crate::expression::visitor_mut::ExprCloner.visit(&mut cloned, arena)?;
@@ -980,11 +984,11 @@ impl ExprRef {
         Ok(checker.0)
     }
 
-    pub fn output_name(self, arena: &(dyn MetaArena + '_)) -> String {
+    pub fn output_name<A: MetaArena + ?Sized>(self, arena: &A) -> String {
         self.explain(arena).to_string()
     }
 
-    pub fn output_column_ref(self, arena: &mut (dyn MetaArena + '_)) -> ColumnRef {
+    pub fn output_column_ref<A: MetaArena + ?Sized>(self, arena: &mut A) -> ColumnRef {
         match arena.expression(self) {
             ScalarExpression::ColumnRef { column, .. } => *column,
             ScalarExpression::Alias {
