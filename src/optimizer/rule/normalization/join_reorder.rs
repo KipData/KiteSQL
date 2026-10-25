@@ -32,7 +32,6 @@ use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
 use crate::types::tuple::Schema;
 use std::borrow::Borrow;
-use std::collections::{btree_map::Entry, BTreeMap};
 use std::mem::swap;
 
 pub(crate) struct GreedyJoinReorder;
@@ -84,8 +83,7 @@ struct JoinCandidate {
     cross_join: bool,
     work: i128,
     rows: usize,
-    left: usize,
-    right: usize,
+    leaf: usize,
     swapped: bool,
     probe: bool,
 }
@@ -303,25 +301,13 @@ fn can_expand(plan: &LogicalPlan, forced: bool) -> bool {
                 (JoinType::Inner, JoinCondition::On { on, filter: None }) if !on.is_empty()))
 }
 
-// Counts a region's inputs and reports whether it already contains a Cartesian product.
-fn region_shape(plan: &LogicalPlan, forced: bool) -> (usize, bool) {
+// Counts a region's inputs.
+fn region_inputs(plan: &LogicalPlan, forced: bool) -> usize {
     if !can_expand(plan, forced) {
-        return (1, false);
+        return 1;
     }
     let (left, right) = plan.childrens.twins();
-    let (left_inputs, left_cross) = region_shape(left, forced);
-    let (right_inputs, right_cross) = region_shape(right, forced);
-    let cross = matches!(
-        &plan.operator,
-        Operator::Join(JoinOperator {
-            join_type: JoinType::Cross,
-            ..
-        })
-    );
-    (
-        left_inputs + right_inputs,
-        cross || left_cross || right_cross,
-    )
+    region_inputs(left, forced) + region_inputs(right, forced)
 }
 
 // Collects input schemas and join keys
@@ -425,17 +411,52 @@ fn inspect<'plan>(
     }
 }
 
-fn flatten(plan: LogicalPlan, inputs: &mut Vec<(LogicalPlan, usize, u64)>, forced: bool) {
+/// An input's cost, read once at its (default) rows when its estimate is incomplete.
+fn input_cost(
+    input: &mut LogicalPlan,
+    rows: usize,
+    arena: &mut PlanArena,
+) -> Result<InputCost, DatabaseError> {
+    Ok(match input.estimated_cost(arena)? {
+        Some(cost) => cost,
+        None => {
+            let width = input.output_schema(arena).len();
+            InputCost {
+                rows,
+                width,
+                work: rows_work(rows, width),
+            }
+        }
+    })
+}
+
+/// Collects a region's inputs with their costs; a leaf's cost never changes. `start` tracks
+/// the smallest input (cheapest to read on ties, earliest on full ties).
+fn flatten(
+    mut plan: LogicalPlan,
+    leaves: &mut Vec<(LogicalPlan, InputCost, u64)>,
+    start: &mut usize,
+    forced: bool,
+    arena: &mut PlanArena,
+) -> Result<(), DatabaseError> {
     if can_expand(&plan, forced) {
         let (left, right) = plan.childrens.pop_twins();
-        flatten(left, inputs, forced);
-        flatten(right, inputs, forced);
+        flatten(left, leaves, start, forced, arena)?;
+        flatten(right, leaves, start, forced, arena)?;
     } else {
         // Without statistics an input is assumed to have the default rows (RFC 0001 §3.9).
         let rows = plan.estimated_rows().unwrap_or(DEFAULT_TABLE_ROWS);
-        let mask = 1u64 << inputs.len();
-        inputs.push((plan, rows, mask));
+        let cost = input_cost(&mut plan, rows, arena)?;
+        if leaves
+            .get(*start)
+            .is_some_and(|(_, best, _)| (cost.rows, cost.work) < (best.rows, best.work))
+        {
+            *start = leaves.len();
+        }
+        let mask = 1u64 << leaves.len();
+        leaves.push((plan, cost, mask));
     }
+    Ok(())
 }
 
 fn key_in_schema(expr: ExprRef, schema: &Schema, arena: &PlanArena) -> Result<bool, DatabaseError> {
@@ -446,77 +467,26 @@ fn key_in_schema(expr: ExprRef, schema: &Schema, arena: &PlanArena) -> Result<bo
     })
 }
 
+/// Join keys between original inputs, each `(left bit, right bit, left key, right key)`.
 #[derive(Default)]
-struct JoinKeys {
-    links: BTreeMap<(u64, u64), usize>,
-    // Link IDs are indices here; consumed lists leave empty slots.
-    on_keys: Vec<Vec<(ExprRef, ExprRef)>>,
-}
+struct JoinKeys(Vec<(u64, u64, ExprRef, ExprRef)>);
 
 impl JoinKeys {
-    fn insert(&mut self, left: u64, right: u64, mut exprs: (ExprRef, ExprRef)) {
-        if left > right {
-            swap(&mut exprs.0, &mut exprs.1);
-        }
-        match self.links.entry((left, right)) {
-            Entry::Occupied(entry) => self.on_keys[*entry.get()].push(exprs),
-            Entry::Vacant(entry) => {
-                let id = self.on_keys.len();
-                self.on_keys.push(vec![exprs]);
-                entry.insert(id);
-                self.links.insert((right, left), id);
-            }
-        }
+    fn insert(&mut self, left: u64, right: u64, (l, r): (ExprRef, ExprRef)) {
+        self.0.push((left, right, l, r));
     }
 
-    // Both directions share one canonically oriented list; take aligns the selected ON.
-    fn get(&self, left: u64, right: u64) -> impl Iterator<Item = (ExprRef, ExprRef)> + '_ {
-        self.links
-            .get(&(left, right))
-            .into_iter()
-            .flat_map(|&id| self.on_keys[id].iter().copied())
-    }
-
-    fn take(&mut self, left: u64, right: u64) -> Vec<(ExprRef, ExprRef)> {
-        let Some(id) = self.links.remove(&(left, right)) else {
-            return Vec::new();
-        };
-        self.links.remove(&(right, left));
-        let mut on = std::mem::take(&mut self.on_keys[id]);
-        if left > right {
-            for (l, r) in &mut on {
-                swap(l, r);
+    /// Keys between the joined inputs `current` and the input `leaf`, oriented from `current`.
+    fn get(&self, current: u64, leaf: u64) -> impl Iterator<Item = (ExprRef, ExprRef)> + '_ {
+        self.0.iter().filter_map(move |&(left, right, l, r)| {
+            if left & current != 0 && right == leaf {
+                Some((l, r))
+            } else if right & current != 0 && left == leaf {
+                Some((r, l))
+            } else {
+                None
             }
-        }
-        on
-    }
-
-    fn rewrite(&mut self, left: u64, right: u64) {
-        // take has already consumed the internal edge; only external links remain.
-        debug_assert!(!self.links.contains_key(&(left, right)));
-        let merged = left | right;
-        for old in [left, right] {
-            loop {
-                let link = self
-                    .links
-                    .extract_if((old, 0)..=(old, u64::MAX), |_, _| true)
-                    .next();
-                let Some(((_, other), id)) = link else { break };
-                self.links.remove(&(other, old));
-                if (old > other) != (merged > other) {
-                    for (l, r) in &mut self.on_keys[id] {
-                        swap(l, r);
-                    }
-                }
-                if let Some(&existing) = self.links.get(&(merged, other)) {
-                    let mut extra = std::mem::take(&mut self.on_keys[id]);
-                    self.on_keys[existing].append(&mut extra);
-                } else {
-                    self.links.insert((merged, other), id);
-                    self.links.insert((other, merged), id);
-                }
-            }
-        }
+        })
     }
 }
 
@@ -563,7 +533,7 @@ impl NormalizationRule for GreedyJoinReorder {
         if !can_expand(plan, forced) {
             return Ok(false);
         }
-        let (input_count, _) = region_shape(plan, forced);
+        let input_count = region_inputs(plan, forced);
         if input_count > u64::BITS as usize {
             return Ok(false);
         }
@@ -578,53 +548,37 @@ impl NormalizationRule for GreedyJoinReorder {
         for (input, schema) in schemas.iter().enumerate() {
             positions.extend((0..schema.len()).map(|position| (1u64 << input, position)));
         }
-        let mut inputs = Vec::with_capacity(schemas.len());
-        flatten(plan.take(), &mut inputs, forced);
+        let mut leaves = Vec::with_capacity(schemas.len());
+        // Left-deep: start from the smallest input, then join one remaining leaf per step, so
+        // every leaf can still be probed (RFC 0001 §3.2).
+        let mut start = 0;
+        flatten(plan.take(), &mut leaves, &mut start, forced, arena)?;
         let mut probe_keys = Vec::new();
-        // Left-deep: start from the smallest input (cheapest to read on ties), then add one
-        // remaining input per step, so every input stays a leaf until it joins and can still be
-        // probed (RFC 0001 §3.2).
-        let mut current = 0;
-        let mut start = (usize::MAX, usize::MAX);
-        for (i, (input, rows, _)) in inputs.iter_mut().enumerate() {
-            let work = input
-                .estimated_cost(arena)?
-                .map_or(usize::MAX, |cost| cost.work);
-            if (*rows, work) < start {
-                (start, current) = ((*rows, work), i);
-            }
-        }
-        while inputs.len() > 1 {
-            let mut best: Option<JoinCandidate> = None;
-            // The index chosen for `best` when it probes, kept to build the probe without a re-search.
-            let mut best_probe: Option<ProbeIndex> = None;
+        let (mut current, mut current_cost, mut current_mask) = leaves.remove(start);
+        while !leaves.is_empty() {
+            let mut best: Option<(JoinCandidate, Option<ProbeIndex>)> = None;
             // A result of at most one row may take a Cartesian product before an equijoin.
-            let single = inputs[current].1 <= 1;
-            let mut evaluate = |inputs: &mut [(LogicalPlan, usize, u64)],
-                                i: usize,
-                                j: usize|
-             -> Result<(), DatabaseError> {
-                let (prefix, suffix) = inputs.split_at_mut(j);
-                let (left, left_rows, left_mask) = &mut prefix[i];
-                let (right, right_rows, right_mask) = &mut suffix[0];
-                let candidate_keys = || keys.get(*left_mask, *right_mask);
-                // Left-deep evaluates each pair once, so the estimate is not cached.
+            let single = current_cost.rows <= 1;
+            for (k, (leaf, leaf_cost, leaf_mask)) in leaves.iter_mut().enumerate() {
+                let leaf_cost = *leaf_cost;
+                // Keys run from `current` to `leaf`, matching the unswapped join sides.
+                let candidate_keys = || keys.get(current_mask, *leaf_mask);
                 let product = {
-                    let ndvs = column_ndv(left, right, candidate_keys(), loader, arena)?;
-                    let left_stats = index_statistics(left);
-                    let right_stats = index_statistics(right);
-                    let left_schema = left.output_schema(arena);
-                    let right_schema = right.output_schema(arena);
+                    let ndvs = column_ndv(&current, leaf, candidate_keys(), loader, arena)?;
+                    let current_stats = index_statistics(&current);
+                    let leaf_stats = index_statistics(leaf);
+                    let current_schema = current.output_schema(arena);
+                    let leaf_schema = leaf.output_schema(arena);
                     join_rows(
                         &JoinInputStatistics {
-                            rows: *left_rows,
-                            schema: left_schema,
-                            index: left_stats.map(|(index, ndv)| (arena.index(index), ndv)),
+                            rows: current_cost.rows,
+                            schema: current_schema,
+                            index: current_stats.map(|(index, ndv)| (arena.index(index), ndv)),
                         },
                         &JoinInputStatistics {
-                            rows: *right_rows,
-                            schema: right_schema,
-                            index: right_stats.map(|(index, ndv)| (arena.index(index), ndv)),
+                            rows: leaf_cost.rows,
+                            schema: leaf_schema,
+                            index: leaf_stats.map(|(index, ndv)| (arena.index(index), ndv)),
                         },
                         &candidate_keys,
                         ndvs,
@@ -633,26 +587,6 @@ impl NormalizationRule for GreedyJoinReorder {
                 };
                 let connected = candidate_keys().next().is_some();
                 let hash = connected && !forced;
-                // An input without a complete estimate is read once at its (default) rows.
-                let input_cost = |input: &mut LogicalPlan, rows: usize, arena: &mut PlanArena| {
-                    Ok::<_, DatabaseError>(match input.estimated_cost(arena)? {
-                        Some(cost) => cost,
-                        None => {
-                            let width = input.output_schema(arena).len();
-                            InputCost {
-                                rows,
-                                width,
-                                work: rows_work(rows, width),
-                            }
-                        }
-                    })
-                };
-                let (left_cost, right_cost) = (
-                    input_cost(left, *left_rows, arena)?,
-                    input_cost(right, *right_rows, arena)?,
-                );
-                let nest_loop_swapped = !hash && nest_loop_swap(&left_cost, &right_cost);
-                let out_rows = product;
                 // Every input is read once in any order, so only this step's work is compared.
                 // A probe never reads its inner input, so its step can be negative.
                 let step =
@@ -661,24 +595,28 @@ impl NormalizationRule for GreedyJoinReorder {
                             - outer.work as i128
                             - inner.work as i128
                     };
-                // (work, rows, swapped, probe index); the left input is the hash build side and the
-                // nested loop / probe outer side.
-                let shape = if hash {
-                    let keep = step(JoinImpl::Hash, &left_cost, &right_cost, out_rows);
-                    let swap = step(JoinImpl::Hash, &right_cost, &left_cost, out_rows);
+                // (work, rows, swapped, probe index). Unswapped, `current` is the hash build side
+                // and the nested loop / probe outer side.
+                let (work, rows, swapped, probe) = if hash {
+                    let keep = step(JoinImpl::Hash, &current_cost, &leaf_cost, product);
+                    let swap = step(JoinImpl::Hash, &leaf_cost, &current_cost, product);
                     let mut shape = (keep.min(swap), product, swap < keep, None);
+                    // Only a leaf can be probed: `leaf` always, `current` before its first join.
                     for swapped in [false, true] {
                         let (inner, outer_cost, inner_cost) = if swapped {
-                            (&*left, &right_cost, &left_cost)
+                            (&current, &leaf_cost, &current_cost)
                         } else {
-                            (&*right, &left_cost, &right_cost)
+                            (&*leaf, &current_cost, &leaf_cost)
                         };
-                        // Keys run from the outer value to the probed column.
-                        let flip = (*left_mask > *right_mask) != swapped;
+                        // Probe keys run from the outer value to the probed column.
                         probe_keys.clear();
-                        probe_keys.extend(
-                            candidate_keys().map(|(l, r)| if flip { (r, l) } else { (l, r) }),
-                        );
+                        probe_keys.extend(candidate_keys().map(|(c, l)| {
+                            if swapped {
+                                (l, c)
+                            } else {
+                                (c, l)
+                            }
+                        }));
                         let key_count = probe_keys.len();
                         let Some(index) =
                             probe_index(inner, &mut probe_keys, key_count, arena, loader)?
@@ -687,10 +625,9 @@ impl NormalizationRule for GreedyJoinReorder {
                         };
                         // A unique probe emits at most one row per outer row.
                         let rows = product.min(outer_cost.rows);
+                        let lookup_work = index.lookup_work;
                         let work = step(
-                            JoinImpl::IndexProbe {
-                                lookup_work: index.lookup_work,
-                            },
+                            JoinImpl::IndexProbe { lookup_work },
                             outer_cost,
                             inner_cost,
                             rows,
@@ -701,52 +638,51 @@ impl NormalizationRule for GreedyJoinReorder {
                     }
                     shape
                 } else {
-                    let (outer, inner) = if nest_loop_swapped {
-                        (&right_cost, &left_cost)
+                    let swapped = nest_loop_swap(&current_cost, &leaf_cost);
+                    let (outer, inner) = if swapped {
+                        (&leaf_cost, &current_cost)
                     } else {
-                        (&left_cost, &right_cost)
+                        (&current_cost, &leaf_cost)
                     };
-                    let work = step(JoinImpl::NestLoop { full: false }, outer, inner, out_rows);
-                    (work, product, nest_loop_swapped, None)
+                    let work = step(JoinImpl::NestLoop { full: false }, outer, inner, product);
+                    (work, product, swapped, None)
                 };
-                let (work, rows, swapped, probe) = shape;
                 let candidate = JoinCandidate {
                     cross_join: !connected && !single,
                     work,
                     rows,
-                    left: i,
-                    right: j,
+                    leaf: k,
                     swapped,
                     probe: probe.is_some(),
                 };
-                if best.is_none_or(|previous| candidate < previous) {
-                    best = Some(candidate);
-                    best_probe = probe;
-                }
-                Ok(())
-            };
-            for other in 0..inputs.len() {
-                if other != current {
-                    evaluate(&mut inputs, current.min(other), current.max(other))?;
+                if best
+                    .as_ref()
+                    .is_none_or(|(previous, _)| candidate < *previous)
+                {
+                    best = Some((candidate, probe));
                 }
             }
-            let Some(JoinCandidate {
-                rows: product,
-                left: i,
-                right: j,
-                swapped,
-                ..
-            }) = best
-            else {
-                return Ok(false);
+            // SAFETY: `leaves` is not empty, so the loop above chose a candidate.
+            let (
+                JoinCandidate {
+                    rows: product,
+                    leaf: k,
+                    swapped,
+                    ..
+                },
+                probe,
+            ) = best.unwrap();
+            let (leaf, _, leaf_mask) = leaves.remove(k);
+            // Used keys need no removal: both ends are now in `current`, so no later leaf matches.
+            let mut on: Vec<_> = keys.get(current_mask, leaf_mask).collect();
+            let (mut left, mut right, right_mask) = if swapped {
+                for (c, l) in &mut on {
+                    swap(c, l);
+                }
+                (leaf, current, current_mask)
+            } else {
+                (current, leaf, leaf_mask)
             };
-            let mut right = inputs.remove(j);
-            let mut left = inputs.remove(i);
-            if swapped {
-                swap(&mut left, &mut right);
-            }
-            let (mut left, _, left_mask) = left;
-            let (mut right, _, right_mask) = right;
             let left_schema = left.output_schema(arena);
             let right_schema = right.output_schema(arena);
             for (input, position) in &mut positions {
@@ -754,7 +690,6 @@ impl NormalizationRule for GreedyJoinReorder {
                     *position += left_schema.len();
                 }
             }
-            let mut on = keys.take(left_mask, right_mask);
             for (l, r) in &mut on {
                 *l = l.clone_expression(arena)?;
                 *r = r.clone_expression(arena)?;
@@ -769,7 +704,7 @@ impl NormalizationRule for GreedyJoinReorder {
             } else {
                 RowCountOption::Unknown
             };
-            let join = if let Some(mut index) = best_probe {
+            current = if let Some(mut index) = probe {
                 // Probe values were chosen before binding; they come from the outer (left) input.
                 for value in &mut index.probe {
                     *value = value.clone_expression(arena)?;
@@ -792,14 +727,11 @@ impl NormalizationRule for GreedyJoinReorder {
                 join.physical_option = Some(option);
                 join
             };
-            keys.rewrite(left_mask, right_mask);
-            inputs.insert(i, (join, product, left_mask | right_mask));
-            current = i;
+            current_cost = input_cost(&mut current, product, arena)?;
+            current_mask |= leaf_mask;
         }
-        // SAFETY: At this point, there should be exactly one plan left in the inputs vector, which is the final join result.
-        let (join, _, _) = inputs.pop().unwrap();
         *plan = project_join_output(
-            join,
+            current,
             original_schema,
             positions.iter().map(|(_, position)| *position),
             arena,

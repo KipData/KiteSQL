@@ -871,7 +871,7 @@ analyze table cp_c;
 query T
 explain select cp_a.id, cp_b.id from cp_a join cp_b on cp_a.c1 = cp_b.c1 where cp_a.c1 = 4;
 ----
-Projection [cp_a.id, cp_b.id] [Project => (Sort Option: Follow)] Inner Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [cp_a.id, cp_b.id] [Project => (Sort Option: Follow)] Inner Join On cp_b.c1 = cp_a.c1 [HashJoin => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)]
 
 query II
 select cp_a.id, cp_b.id from cp_a join cp_b on cp_a.c1 = cp_b.c1 where cp_a.c1 = 4;
@@ -881,7 +881,7 @@ select cp_a.id, cp_b.id from cp_a join cp_b on cp_a.c1 = cp_b.c1 where cp_a.c1 =
 query T
 explain select cp_a.id, cp_b.id from cp_a, cp_b where cp_a.c1 = cp_b.c1 and cp_a.c1 = 4;
 ----
-Projection [cp_a.id, cp_b.id] [Project => (Sort Option: Follow)] Inner Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [cp_a.id, cp_b.id] [Project => (Sort Option: Follow)] Inner Join On cp_b.c1 = cp_a.c1 [HashJoin => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)]
 
 query II
 select cp_a.id, cp_b.id from cp_a, cp_b where cp_a.c1 = cp_b.c1 and cp_a.c1 = 4;
@@ -892,7 +892,7 @@ select cp_a.id, cp_b.id from cp_a, cp_b where cp_a.c1 = cp_b.c1 and cp_a.c1 = 4;
 query T
 explain select cp_a.id, cp_b.id, cp_c.id from cp_a, cp_b, cp_c where cp_a.c1 = cp_b.c1 and cp_b.c1 = cp_c.c1 and cp_a.c1 = 4;
 ----
-Projection [cp_a.id, cp_b.id, cp_c.id] [Project => (Sort Option: Follow)] Inner Join On cp_c.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] TableScan cp_c -> [cp_c.id, cp_c.c1] [IndexScan By cp_c_c1 => 4 => (Sort Option: OrderBy: (cp_c.c1 Asc Nulls Last) ignore_prefix_len: 0)] Inner Join On cp_a.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [cp_a.id, cp_b.id, cp_c.id] [Project => (Sort Option: Follow)] Inner Join On cp_c.c1 = cp_b.c1 [HashJoin => (Sort Option: None)] TableScan cp_c -> [cp_c.id, cp_c.c1] [IndexScan By cp_c_c1 => 4 => (Sort Option: OrderBy: (cp_c.c1 Asc Nulls Last) ignore_prefix_len: 0)] Inner Join On cp_b.c1 = cp_a.c1 [HashJoin => (Sort Option: None)] TableScan cp_b -> [cp_b.id, cp_b.c1] [IndexScan By cp_b_c1 => 4 => (Sort Option: OrderBy: (cp_b.c1 Asc Nulls Last) ignore_prefix_len: 0)] Filter (cp_a.c1 = 4), Is Having: false [Filter => (Sort Option: Follow)] TableScan cp_a -> [cp_a.id, cp_a.c1] [SeqScan => (Sort Option: None)]
 
 query III
 select cp_a.id, cp_b.id, cp_c.id from cp_a, cp_b, cp_c where cp_a.c1 = cp_b.c1 and cp_b.c1 = cp_c.c1 and cp_a.c1 = 4;
