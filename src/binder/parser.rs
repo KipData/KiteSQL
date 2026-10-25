@@ -20,7 +20,7 @@ use super::{is_valid_identifier, Binder, CteBinding, QueryBindStep, SetOperatorK
 #[cfg(feature = "copy")]
 use crate::binder::copy::{ExtSource, FileFormat};
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-use crate::db::{BindSource, DBTransaction, Database, DatabaseIter, TransactionIter};
+use crate::db::{BindSource, DBTransaction, Database, DatabaseIter, State, TransactionIter};
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -28,7 +28,7 @@ use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::window::WindowFunctionKind;
 use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::iter_ext::Itertools;
-use crate::parser::parse_sql;
+use crate::parser::parse_sql_with_recursion_limit;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
@@ -137,19 +137,23 @@ pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
     }
 }
 
-/// Parses a single SQL statement into a reusable [`Statement`].
-pub(crate) fn parse_statement<T: AsRef<str>>(sql: T) -> Result<Statement, DatabaseError> {
-    let mut stmts = prepare_all(sql)?;
-    stmts.pop().ok_or(DatabaseError::EmptyStatement)
-}
-
-/// Parses one or more SQL statements into a vector of [`Statement`] values.
-pub fn prepare_all<T: AsRef<str>>(sql: T) -> Result<Vec<Statement>, DatabaseError> {
-    let stmts = parse_sql(sql)?;
-    if stmts.is_empty() {
-        return Err(DatabaseError::EmptyStatement);
+impl<S: Storage> State<S> {
+    pub(crate) fn prepare_all<T: AsRef<str>>(
+        &self,
+        sql: T,
+    ) -> Result<Vec<Statement>, DatabaseError> {
+        let stmts = parse_sql_with_recursion_limit(sql, self.parser_recursion_limit())?;
+        if stmts.is_empty() {
+            return Err(DatabaseError::EmptyStatement);
+        }
+        Ok(stmts)
     }
-    Ok(stmts)
+
+    pub(crate) fn parse_statement(&self, sql: &str) -> Result<Statement, DatabaseError> {
+        self.prepare_all(sql)?
+            .pop()
+            .ok_or(DatabaseError::EmptyStatement)
+    }
 }
 
 fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool, DatabaseError> {
@@ -160,9 +164,17 @@ fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool
 }
 
 impl<S: Storage> Database<S> {
+    /// Parses SQL statements using this database's configured parser recursion limit.
+    pub fn prepare_all<T: AsRef<str>>(&self, sql: T) -> Result<Vec<Statement>, DatabaseError> {
+        self.state.prepare_all(sql)
+    }
+
     pub fn ddl<T: AsRef<str>>(&mut self, sql: T) -> Result<(), DatabaseError> {
         let sql = sql.as_ref();
-        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        let statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
 
         for statement in &statements {
             if !matches!(command_type(statement)?, CommandType::DDL) {
@@ -186,7 +198,10 @@ impl<S: Storage> Database<S> {
         ) -> Result<R, DatabaseError>,
     {
         let sql = sql.as_ref();
-        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        let statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
         self.run_mut_statements(sql, statements, consume)
     }
 
@@ -228,7 +243,10 @@ impl<S: Storage> Database<S> {
     /// ```
     pub fn run<T: AsRef<str>>(&self, sql: T) -> Result<DatabaseIter<'_, S>, DatabaseError> {
         let sql = sql.as_ref();
-        let statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        let statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
         let has_catalog_mutation = statements
             .iter()
             .try_fold(false, |has_mutation, stmt| {
@@ -297,7 +315,10 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
         sql: T,
     ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
         let sql = sql.as_ref();
-        let mut statements = prepare_all(sql).map_err(|err| err.with_sql_context(sql))?;
+        let mut statements = self
+            .state
+            .prepare_all(sql)
+            .map_err(|err| err.with_sql_context(sql))?;
         for statement in &statements {
             if statement_mutates_catalog_or_statistics(statement)? {
                 return Err(DatabaseError::UnsupportedStmt(
@@ -3307,6 +3328,7 @@ mod tests {
     use crate::binder::BinderContext;
     use crate::db::DataBaseBuilder;
     use crate::errors::SqlErrorSpan;
+    use crate::parser::parse_sql;
     use crate::storage::Storage;
     use sqlparser::tokenizer::Location;
 
@@ -3341,40 +3363,52 @@ mod tests {
 
     #[test]
     fn test_prepare_and_command_type_classification() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory()?;
         assert!(matches!(
-            prepare_all(""),
+            database.prepare_all(""),
             Err(DatabaseError::EmptyStatement)
         ));
         assert_eq!(
-            command_type(&parse_statement("select 1")?)?,
+            command_type(&database.prepare_all("select 1")?.pop().unwrap())?,
             CommandType::DQL
         );
         assert_eq!(
-            command_type(&parse_statement("create table t (id int primary key)")?)?,
+            command_type(
+                &database
+                    .prepare_all("create table t (id int primary key)")?
+                    .pop()
+                    .unwrap()
+            )?,
             CommandType::DDL
         );
         assert_eq!(
-            command_type(&parse_statement("analyze table t")?)?,
+            command_type(&database.prepare_all("analyze table t")?.pop().unwrap())?,
             CommandType::Analyze
         );
         assert_eq!(
-            command_type(&parse_statement("insert into t values (1)")?)?,
+            command_type(
+                &database
+                    .prepare_all("insert into t values (1)")?
+                    .pop()
+                    .unwrap()
+            )?,
             CommandType::DML
         );
         assert_eq!(
-            command_type(&parse_statement("update t set id = 1")?)?,
+            command_type(&database.prepare_all("update t set id = 1")?.pop().unwrap())?,
             CommandType::DML
         );
         assert_eq!(
-            command_type(&parse_statement("delete from t")?)?,
+            command_type(&database.prepare_all("delete from t")?.pop().unwrap())?,
             CommandType::DML
         );
         assert_eq!(
-            command_type(&parse_statement("truncate table t")?)?,
+            command_type(&database.prepare_all("truncate table t")?.pop().unwrap())?,
             CommandType::DML
         );
 
-        let err = command_type(&parse_statement("start transaction")?).unwrap_err();
+        let err =
+            command_type(&database.prepare_all("start transaction")?.pop().unwrap()).unwrap_err();
         assert_unsupported(err, "START TRANSACTION");
 
         Ok(())
@@ -3452,7 +3486,7 @@ mod tests {
             "only a single ALTER TABLE operation",
         );
 
-        let mut stmt = parse_statement("alter table t1 drop column c1")?;
+        let mut stmt = parse_sql("alter table t1 drop column c1")?.pop().unwrap();
         let Statement::AlterTable(alter) = &mut stmt else {
             unreachable!("expected alter table statement")
         };

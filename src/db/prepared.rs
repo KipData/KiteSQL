@@ -53,7 +53,7 @@ impl<S: Storage> Database<S> {
         sql: &str,
         params: &[(usize, LogicalType)],
     ) -> Result<PreparedPlan<'_>, DatabaseError> {
-        let statement = crate::binder::parse_statement(sql)?;
+        let statement = self.state.parse_statement(sql)?;
         let transaction = self
             .storage
             .transaction_with_isolation(self.transaction_isolation)?;
@@ -85,7 +85,7 @@ impl<'db, S: Storage> DBTransaction<'db, S> {
         sql: &str,
         params: &[(usize, LogicalType)],
     ) -> Result<PreparedPlan<'db>, DatabaseError> {
-        let statement = crate::binder::parse_statement(sql)?;
+        let statement = self.state.parse_statement(sql)?;
         self.state.prepare_plan(&statement, params, &self.inner)
     }
 }

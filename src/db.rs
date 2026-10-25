@@ -15,7 +15,7 @@
 #[cfg(any(feature = "parser", feature = "orm"))]
 mod prepared;
 #[cfg(feature = "parser")]
-pub use crate::binder::{prepare_all, Statement};
+pub use crate::binder::Statement;
 use crate::binder::{Binder, BinderContext};
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
@@ -112,6 +112,7 @@ pub struct DataBaseBuilder {
     ))]
     path: PathBuf,
     histogram_buckets: Option<usize>,
+    parser_recursion_limit: Option<usize>,
     transaction_isolation: Option<TransactionIsolationLevel>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     storage_config: StorageConfig,
@@ -143,6 +144,7 @@ impl DataBaseBuilder {
             ))]
             path,
             histogram_buckets: None,
+            parser_recursion_limit: None,
             transaction_isolation: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
             storage_config: Default::default(),
@@ -154,6 +156,14 @@ impl DataBaseBuilder {
     /// Sets the default histogram bucket count used by `ANALYZE`.
     pub fn histogram_buckets(mut self, buckets: usize) -> Self {
         self.histogram_buckets = Some(buckets);
+        self
+    }
+
+    /// Sets the SQL parser recursion limit. Unset uses the parser's default limit.
+    /// Higher limits may require a larger thread stack for deeply nested SQL.
+    #[cfg(feature = "parser")]
+    pub fn parser_recursion_limit(mut self, limit: usize) -> Self {
+        self.parser_recursion_limit = Some(limit);
         self
     }
 
@@ -219,7 +229,12 @@ impl DataBaseBuilder {
 
     /// Builds a database using a custom storage implementation.
     pub fn build_with_storage<T: Storage>(self, storage: T) -> Result<Database<T>, DatabaseError> {
-        Self::_build::<T>(storage, self.histogram_buckets, self.transaction_isolation)
+        Self::_build::<T>(
+            storage,
+            self.histogram_buckets,
+            self.parser_recursion_limit,
+            self.transaction_isolation,
+        )
     }
 
     /// Builds a database for the current target platform.
@@ -227,7 +242,12 @@ impl DataBaseBuilder {
     pub fn build(self) -> Result<Database<MemoryStorage>, DatabaseError> {
         let storage = MemoryStorage::new();
 
-        Self::_build::<MemoryStorage>(storage, self.histogram_buckets, self.transaction_isolation)
+        Self::_build::<MemoryStorage>(
+            storage,
+            self.histogram_buckets,
+            self.parser_recursion_limit,
+            self.transaction_isolation,
+        )
     }
 
     /// Builds a RocksDB-backed database.
@@ -235,7 +255,12 @@ impl DataBaseBuilder {
     pub fn build_rocksdb(self) -> Result<Database<RocksStorage>, DatabaseError> {
         let storage = RocksStorage::with_config(self.path, self.storage_config)?;
 
-        Self::_build::<RocksStorage>(storage, self.histogram_buckets, self.transaction_isolation)
+        Self::_build::<RocksStorage>(
+            storage,
+            self.histogram_buckets,
+            self.parser_recursion_limit,
+            self.transaction_isolation,
+        )
     }
 
     /// Builds an in-memory database.
@@ -244,7 +269,12 @@ impl DataBaseBuilder {
     pub fn build_in_memory(self) -> Result<Database<MemoryStorage>, DatabaseError> {
         let storage = MemoryStorage::new();
 
-        Self::_build::<MemoryStorage>(storage, self.histogram_buckets, self.transaction_isolation)
+        Self::_build::<MemoryStorage>(
+            storage,
+            self.histogram_buckets,
+            self.parser_recursion_limit,
+            self.transaction_isolation,
+        )
     }
 
     /// Builds a LMDB-backed database.
@@ -252,7 +282,12 @@ impl DataBaseBuilder {
     pub fn build_lmdb(self) -> Result<Database<LmdbStorage>, DatabaseError> {
         let storage = LmdbStorage::with_config(self.path, self.lmdb_config)?;
 
-        Self::_build::<LmdbStorage>(storage, self.histogram_buckets, self.transaction_isolation)
+        Self::_build::<LmdbStorage>(
+            storage,
+            self.histogram_buckets,
+            self.parser_recursion_limit,
+            self.transaction_isolation,
+        )
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -264,6 +299,7 @@ impl DataBaseBuilder {
         Self::_build::<OptimisticRocksStorage>(
             storage,
             self.histogram_buckets,
+            self.parser_recursion_limit,
             self.transaction_isolation,
         )
     }
@@ -271,11 +307,17 @@ impl DataBaseBuilder {
     fn _build<T: Storage>(
         storage: T,
         histogram_buckets: Option<usize>,
+        parser_recursion_limit: Option<usize>,
         transaction_isolation: Option<TransactionIsolationLevel>,
     ) -> Result<Database<T>, DatabaseError> {
         if matches!(histogram_buckets, Some(0)) {
             return Err(DatabaseError::InvalidValue(
                 "histogram buckets must be >= 1".to_string(),
+            ));
+        }
+        if matches!(parser_recursion_limit, Some(0)) {
+            return Err(DatabaseError::InvalidValue(
+                "parser recursion limit must be >= 1".to_string(),
             ));
         }
         let transaction_isolation =
@@ -295,6 +337,7 @@ impl DataBaseBuilder {
             table_arena,
             optimizer_pipeline: optimizer_pipeline(),
             histogram_buckets,
+            parser_recursion_limit,
             _p: Default::default(),
         };
 
@@ -467,10 +510,17 @@ pub(crate) struct State<S> {
     table_arena: TableArenaCell,
     optimizer_pipeline: HepOptimizerPipeline,
     histogram_buckets: Option<usize>,
+    #[cfg_attr(not(feature = "parser"), allow(dead_code))]
+    parser_recursion_limit: Option<usize>,
     _p: PhantomData<S>,
 }
 
 impl<S: Storage> State<S> {
+    #[cfg(feature = "parser")]
+    pub(crate) fn parser_recursion_limit(&self) -> Option<usize> {
+        self.parser_recursion_limit
+    }
+
     fn scala_functions(&self) -> &ScalaFunctions {
         &self.scala_functions
     }
@@ -1569,7 +1619,7 @@ pub(crate) mod test {
         kite_sql.ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?;
         kite_sql.ddl("CREATE TABLE empty (e_id INT PRIMARY KEY, x INT)")?;
 
-        let stmt = crate::binder::parse_statement(
+        let stmt = kite_sql.state.parse_statement(
             "SELECT * FROM onecolumn AS a(aid, x) JOIN empty AS b(bid, y) ON a.x = b.y",
         )?;
         let transaction = kite_sql.storage.transaction()?;
@@ -1652,7 +1702,7 @@ pub(crate) mod test {
         kite_sql.ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?;
         kite_sql.ddl("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")?;
 
-        let stmt = crate::binder::parse_statement(
+        let stmt = kite_sql.state.parse_statement(
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
         )?;
         let transaction = kite_sql.storage.transaction()?;
@@ -1762,7 +1812,7 @@ pub(crate) mod test {
             )?
             .done()?;
 
-        let stmt = crate::binder::parse_statement(
+        let stmt = kite_sql.state.parse_statement(
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
         )?;
         let transaction = kite_sql.storage.transaction()?;
@@ -2268,6 +2318,73 @@ pub(crate) mod test {
             result,
             Err(DatabaseError::InvalidValue(message)) if message == "histogram buckets must be >= 1"
         ));
+    }
+
+    #[test]
+    fn parser_recursion_limit_applies_to_sql_frontends() -> Result<(), DatabaseError> {
+        let expression = format!("{}7{}", "(".repeat(8), ")".repeat(8));
+        let sql = format!("select {expression}");
+        let default = DataBaseBuilder::path(".").build_in_memory()?;
+        assert_eq!(read_single_i32(default.run(&sql)?)?, 7);
+        assert_eq!(default.prepare_all(&sql)?.len(), 1);
+
+        let mut db = DataBaseBuilder::path(".")
+            .parser_recursion_limit(256)
+            .build_in_memory()?;
+        assert_eq!(db.prepare_all(&sql)?.len(), 1);
+        assert_eq!(read_single_i32(db.run(&sql)?)?, 7);
+        db.ddl(format!("create view deep_view as {sql}"))?;
+        assert_eq!(read_single_i32(db.run("select * from deep_view")?)?, 7);
+        db.run_mut(&sql, |iter| {
+            assert_eq!(
+                iter.next_tuple(|_, row| row.values.clone())?,
+                Some(vec![DataValue::Int32(7)])
+            );
+            Ok(())
+        })?;
+        let prepared = db.prepare_sql(&sql, &[])?;
+        let mut iter = db.execute(&prepared, [])?;
+        assert_eq!(
+            iter.next_tuple(|_, row| row.values.clone())?,
+            Some(vec![DataValue::Int32(7)])
+        );
+        iter.done()?;
+        let mut tx = db.new_transaction()?;
+        let mut iter = tx.run(&sql)?;
+        assert_eq!(
+            iter.next_tuple(|_, row| row.values.clone())?,
+            Some(vec![DataValue::Int32(7)])
+        );
+        iter.done()?;
+        let prepared = tx.prepare_sql(&sql, &[])?;
+        let mut iter = tx.execute(&prepared, [])?;
+        assert_eq!(
+            iter.next_tuple(|_, row| row.values.clone())?,
+            Some(vec![DataValue::Int32(7)])
+        );
+        iter.done()?;
+        tx.commit()?;
+
+        let low = DataBaseBuilder::path(".")
+            .parser_recursion_limit(4)
+            .build_in_memory()?;
+        assert!(low.run("select 1").is_ok());
+        assert!(low
+            .prepare_all(&sql)
+            .unwrap_err()
+            .to_string()
+            .contains("recursion limit exceeded"));
+        assert!(low
+            .run(&sql)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("recursion limit exceeded"));
+        assert!(matches!(
+            DataBaseBuilder::path(".").parser_recursion_limit(0).build_in_memory(),
+            Err(DatabaseError::InvalidValue(message)) if message == "parser recursion limit must be >= 1"
+        ));
+        Ok(())
     }
 
     #[cfg(feature = "lmdb")]

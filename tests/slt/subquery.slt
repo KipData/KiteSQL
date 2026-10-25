@@ -1083,6 +1083,30 @@ select id,b in (select b from corr_rows where id=2) as matched,b not in (select 
 statement error correlated quantified subqueries in SELECT are not supported yet
 select b in (select x.b from corr_rows x where x.id<corr_rows.id) from corr_rows;
 
+# Numeric and string comparison operands share an unbounded string type.
+query TTTT
+select 'hello' in (select cast(b as bigint) from corr_rows where false),'hello' not in (select cast(b as bigint) from corr_rows where false),null in (select cast(b as bigint) from corr_rows where false),null not in (select cast(b as bigint) from corr_rows where false);
+----
+false true false true
+
+query TTTT
+select '20' in (select cast(b as bigint) from corr_rows),'hello' in (select cast(b as bigint) from corr_rows),'hello' not in (select cast(b as bigint) from corr_rows),20 in (select cast(b as varchar) from corr_rows);
+----
+true NULL NULL true
+
+query TTTT
+select '20'=cast(20 as bigint),cast(20 as bigint)='20','20' in (cast(20 as bigint),null),'hello' not in (cast(20 as bigint),null);
+----
+true true true NULL
+
+query T
+select cast(20 as bigint) between '10' and '30';
+----
+true
+
+statement error
+select '20' + cast(1 as bigint);
+
 statement ok
 drop table corr_lookup;
 

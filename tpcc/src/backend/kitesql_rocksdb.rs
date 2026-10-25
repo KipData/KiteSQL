@@ -18,9 +18,7 @@ use super::{
 };
 use crate::TpccError;
 use kite_sql::binder::{command_type, CommandType};
-use kite_sql::db::{
-    prepare_all, DBTransaction, DataBaseBuilder, Database, Statement, TransactionIter,
-};
+use kite_sql::db::{DBTransaction, DataBaseBuilder, Database, Statement, TransactionIter};
 use kite_sql::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
 use kite_sql::storage::{Storage, Transaction};
 use kite_sql::types::tuple::Tuple;
@@ -118,7 +116,7 @@ pub(crate) fn execute_kitesql_batch<S: Storage>(
     database: &mut Database<S>,
     sql: &str,
 ) -> Result<(), TpccError> {
-    let statements = prepare_all(sql)?;
+    let statements = database.prepare_all(sql)?;
     let all_ddl = statements.iter().try_fold(true, |all_ddl, statement| {
         Ok::<_, kite_sql::errors::DatabaseError>(
             all_ddl && matches!(command_type(statement)?, CommandType::DDL),

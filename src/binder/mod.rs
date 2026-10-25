@@ -52,9 +52,7 @@ mod update;
 mod window;
 
 #[cfg(feature = "parser")]
-pub(crate) use parser::parse_statement;
-#[cfg(feature = "parser")]
-pub use parser::{command_type, prepare_all, CommandType, Statement};
+pub use parser::{command_type, CommandType, Statement};
 #[cfg(feature = "orm")]
 pub use select::{BindPlanFrom, BindPlanSelectList};
 #[cfg(feature = "orm")]

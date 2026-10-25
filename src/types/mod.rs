@@ -258,6 +258,15 @@ impl LogicalType {
                 return Ok(Cow::Owned(LogicalType::DateTime));
             }
         }
+        if (left.is_numeric() && matches!(right, LogicalType::Char(..) | LogicalType::Varchar(..)))
+            || (right.is_numeric()
+                && matches!(left, LogicalType::Char(..) | LogicalType::Varchar(..)))
+        {
+            return Ok(Cow::Owned(LogicalType::Varchar(
+                None,
+                CharLengthUnits::Characters,
+            )));
+        }
         if let (LogicalType::Char(..), LogicalType::Varchar(..))
         | (LogicalType::Varchar(..), LogicalType::Char(..))
         | (LogicalType::Char(..), LogicalType::Char(..))
@@ -735,6 +744,23 @@ pub(crate) mod test {
             )?,
             Cow::Owned(LogicalType::Varchar(None, CharLengthUnits::Characters))
         );
+        for numeric in [
+            LogicalType::Integer,
+            LogicalType::Bigint,
+            LogicalType::Double,
+        ] {
+            for string in [
+                LogicalType::Char(2, CharLengthUnits::Characters),
+                LogicalType::Varchar(Some(8), CharLengthUnits::Octets),
+            ] {
+                for (left, right) in [(&numeric, &string), (&string, &numeric)] {
+                    assert_eq!(
+                        LogicalType::max_logical_type(left, right)?,
+                        Cow::Owned(LogicalType::Varchar(None, CharLengthUnits::Characters))
+                    );
+                }
+            }
+        }
         #[cfg(feature = "time")]
         {
             assert_eq!(
