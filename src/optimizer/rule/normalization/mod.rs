@@ -96,7 +96,6 @@ pub enum NormalizationRuleImpl {
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum WholeTreePassKind {
     ColumnPruning,
-    EliminateProject,
     ExpressionRewrite,
 }
 
@@ -170,9 +169,6 @@ impl NormalizationRuleImpl {
         match self {
             NormalizationRuleImpl::ColumnPruning => {
                 NormalizationPassKind::WholeTreePass(WholeTreePassKind::ColumnPruning)
-            }
-            NormalizationRuleImpl::EliminateProject => {
-                NormalizationPassKind::WholeTreePass(WholeTreePassKind::EliminateProject)
             }
             NormalizationRuleImpl::ConstantCalculation | NormalizationRuleImpl::EvaluatorBind => {
                 NormalizationPassKind::WholeTreePass(WholeTreePassKind::ExpressionRewrite)

@@ -17,7 +17,9 @@ use crate::expression::simplify::{ConstantCalculator, Simplify};
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
+use crate::planner::operator::visitor_mut::{
+    ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
+};
 use crate::planner::operator::Operator;
 use crate::planner::PlanArena;
 use crate::planner::{Childrens, LogicalPlan, MetaArena};
@@ -30,7 +32,11 @@ pub(crate) fn constant_calculation_current<A: MetaArena + ?Sized>(
     arena: &mut A,
 ) -> Result<(), DatabaseError> {
     let mut calculator = ConstantCalculator::new(arena);
-    OperatorExprVisitorMut::new(&mut calculator, arena).visit_operator(&mut plan.operator, None)
+    OperatorExprVisitorMut::new(&mut calculator, arena).visit_operator(
+        &mut plan.operator,
+        None,
+        &mut ChildrenVisitMut::empty(),
+    )
 }
 
 impl ConstantCalculation {

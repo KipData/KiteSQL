@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::expression::visitor::ExprVisitor;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
@@ -20,244 +21,160 @@ use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::limit::LimitOperator;
-use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
+use crate::planner::operator::visitor::{ChildrenVisit, OperatorExprVisitor, OperatorVisitor};
+use crate::planner::operator::visitor_mut::{
+    ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
+};
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::types::index::{IndexLookup, IndexOrderHint};
-use std::collections::HashSet;
 
 pub struct EliminateProject;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OutputMode {
-    Preserve,
-    Inline,
-    ColumnsOnly,
-}
-
-#[derive(Default)]
-struct Substitute {
-    exprs: Option<Vec<ExprRef>>,
-    visited: HashSet<ExprRef>,
+struct Substitute<'m> {
+    exprs: Option<&'m [ExprRef]>,
     offset: usize,
-    opaque: bool,
 }
 
-impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for Substitute {
+struct OpaqueCheck {
+    found: bool,
+}
+
+impl<A: MetaArena + ?Sized> ExprVisitor<A> for OpaqueCheck {
+    fn visit_expression_ref(&mut self, expr: ExprRef, arena: &A) -> Result<bool, DatabaseError> {
+        if self.found {
+            return Ok(false);
+        }
+        self.found = matches!(
+            arena.expression(expr),
+            ScalarExpression::ScalaFunction(_) | ScalarExpression::TableFunction(_)
+        );
+        Ok(!self.found)
+    }
+}
+
+fn contains_opaque<A: MetaArena + ?Sized>(
+    exprs: impl Iterator<Item = ExprRef>,
+    arena: &A,
+) -> Result<bool, DatabaseError> {
+    let mut check = OpaqueCheck { found: false };
+    for expr in exprs {
+        ExprVisitor::visit(&mut check, expr, arena)?;
+        if check.found {
+            break;
+        }
+    }
+    Ok(check.found)
+}
+
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for Substitute<'_> {
     fn visit_expression_ref(
         &mut self,
         expr: &mut ExprRef,
         arena: &mut A,
     ) -> Result<bool, DatabaseError> {
-        if matches!(
-            arena.expression(*expr),
-            ScalarExpression::ScalaFunction(_) | ScalarExpression::TableFunction(_)
-        ) {
-            self.opaque = true;
-            return Ok(false);
-        }
-        if let ScalarExpression::ColumnRef { column, position } = arena.expression(*expr) {
-            if let Some(exprs) = &self.exprs {
-                *expr = exprs[*position];
-            } else if self.offset != 0 {
-                *expr = arena.alloc_expression(ScalarExpression::column_expr(
-                    *column,
-                    self.offset + *position,
-                ));
+        match arena.expression(*expr) {
+            ScalarExpression::ColumnRef { position, column } => {
+                let (position, column) = (*position, *column);
+                if let Some(replacement) = self.exprs.and_then(|exprs| exprs.get(position)) {
+                    // Do not revisit or mutate the replacement's input expression.
+                    *expr = *replacement;
+                } else if self.offset != 0 {
+                    *expr = arena.alloc_expression(ScalarExpression::column_expr(
+                        column,
+                        position + self.offset,
+                    ));
+                }
+                Ok(false)
             }
-            return Ok(false); // Do not revisit the replacement's input layout.
+            ScalarExpression::Constant(_)
+            | ScalarExpression::OuterParam { .. }
+            | ScalarExpression::OuterValue { .. }
+            | ScalarExpression::InitValue { .. }
+            | ScalarExpression::Empty => Ok(false),
+            _ => {
+                // Reached only for a matched Project rewrite or a nonzero Cross offset.
+                // Copy before changing child refs: a retained operator may share this node
+                // but still require its original input positions.
+                let expression = arena.expression(*expr).clone();
+                *expr = arena.alloc_expression(expression);
+                Ok(true)
+            }
         }
-        Ok((self.exprs.is_none() && self.offset == 0) || self.visited.insert(*expr))
     }
 }
 
-struct EliminateVisitor<'a, 'b> {
-    arena: &'a mut PlanArena<'b>,
-    mapping: Substitute,
-    output: OutputMode,
-    changed: bool,
+fn movable_project(plan: &LogicalPlan, arena: &PlanArena) -> Result<bool, DatabaseError> {
+    let (Operator::Project(op), Childrens::Only(_)) = (&plan.operator, plan.childrens.as_ref())
+    else {
+        return Ok(false);
+    };
+    Ok(!contains_opaque(op.exprs.iter().copied(), arena)?)
 }
 
-impl EliminateVisitor<'_, '_> {
-    fn visit_input(
-        &mut self,
-        input: &mut LogicalPlan,
-        output: OutputMode,
-        apply: impl FnOnce(&mut Self, &mut LogicalPlan) -> Result<(), DatabaseError>,
-    ) -> Result<(), DatabaseError> {
-        self.output = output;
-        self.visit_plan(input)?;
-        apply(self, input)
-    }
-}
-
-impl<'p> OperatorVisitorMut<'p> for EliminateVisitor<'_, '_> {
-    fn visit_plan(&mut self, plan: &'p mut LogicalPlan) -> Result<(), DatabaseError> {
-        let output = self.output;
-        let schema = plan.output_schema(self.arena).clone();
-
-        self.mapping.exprs = None;
-        self.mapping.visited.clear();
-        self.mapping.opaque = false;
-        OperatorExprVisitorMut::new(&mut self.mapping, self.arena)
-            .visit_operator(&mut plan.operator, None)?;
-        let opaque = self.mapping.opaque;
-        match plan.childrens.as_mut() {
-            Childrens::Only(child) => {
-                let input_schema = child.output_schema(self.arena);
-                let forwards = schema.starts_with(input_schema);
-                let produces =
-                    matches!(plan.operator, Operator::Project(_) | Operator::Aggregate(_));
-                // A scalar subquery must materialize its value before generating
-                // the NULL row for an empty input. Other new layouts are also
-                // boundaries unless expressions explicitly produce their slots.
-                let input_mode = if opaque
-                    || matches!(plan.operator, Operator::ScalarSubquery(_))
-                    || !(forwards || produces)
-                {
-                    OutputMode::Preserve
-                } else {
-                    match (output, produces) {
-                        (OutputMode::ColumnsOnly, false) => OutputMode::ColumnsOnly,
-                        _ => OutputMode::Inline,
-                    }
-                };
-                self.visit_input(child, input_mode, |visitor, child| {
-                    let Some(_) = &visitor.mapping.exprs else {
-                        return Ok(());
-                    };
-                    OperatorExprVisitorMut::new(&mut visitor.mapping, visitor.arena)
-                        .visit_operator(&mut plan.operator, None)?;
-                    if !produces {
-                        let width = child.output_schema(visitor.arena).len();
-                        if let Some(exprs) = &mut visitor.mapping.exprs {
-                            for (index, column) in schema[exprs.len()..].iter().enumerate() {
-                                exprs.push(visitor.arena.alloc_expression(
-                                    ScalarExpression::column_expr(*column, width + index),
-                                ));
-                            }
-                        }
-                    }
-                    Ok(())
-                })?;
-            }
-            // TODO: Handle other join types and conditions appropriately.
-            Childrens::Twins { left, right }
-                if matches!(&plan.operator, Operator::Join(op)
-                    if op.join_type == JoinType::Cross && op.on == JoinCondition::None) =>
-            {
-                let old_left_width = left.output_schema(self.arena).len();
-                let left_mode = match output {
-                    OutputMode::ColumnsOnly => OutputMode::ColumnsOnly,
-                    _ => OutputMode::Inline,
-                };
-                let mut left_mapping = None;
-                self.visit_input(left, left_mode, |visitor, _| {
-                    left_mapping = visitor.mapping.exprs.take();
-                    Ok(())
-                })?;
-                let offset = left.output_schema(self.arena).len();
-                self.visit_input(right, OutputMode::ColumnsOnly, |visitor, _| {
-                    let mut right_mapping = visitor.mapping.exprs.take();
-                    if let Some(exprs) = right_mapping.as_mut().filter(|_| offset != 0) {
-                        visitor.mapping.offset = offset;
-                        visitor.mapping.visited.clear();
-                        for expr in exprs {
-                            // Keep aliases shared with retained branches untouched.
-                            *expr = expr.unpack_alias(visitor.arena);
-                            ExprVisitorMut::visit(&mut visitor.mapping, expr, visitor.arena)?;
-                        }
-                        visitor.mapping.offset = 0;
-                    }
-                    let mut append_identity = |exprs: &mut Vec<_>, columns: &[_], start| {
-                        exprs.extend(columns.iter().enumerate().map(|(index, column)| {
-                            visitor
-                                .arena
-                                .alloc_expression(ScalarExpression::column_expr(
-                                    *column,
-                                    start + index,
-                                ))
-                        }));
-                    };
-                    match (left_mapping.as_mut(), right_mapping.as_mut()) {
-                        (Some(left), Some(right)) => left.append(right),
-                        (Some(left), None) => {
-                            append_identity(left, &schema[old_left_width..], offset)
-                        }
-                        (None, Some(right)) => {
-                            append_identity(right, &schema[..old_left_width], 0);
-                            right.rotate_right(old_left_width);
-                        }
-                        (None, None) => (),
-                    }
-                    visitor.mapping.exprs = left_mapping.or(right_mapping);
-                    visitor.mapping.visited.clear();
-                    Ok(())
-                })?;
-            }
-            Childrens::Twins { left, right } => {
-                // Other binary operators retain their input layouts.
-                self.visit_input(left, OutputMode::Preserve, |_, _| Ok(()))?;
-                self.visit_input(right, OutputMode::Preserve, |_, _| Ok(()))?;
-            }
-            Childrens::None => (),
-        }
-        match &mut plan.operator {
-            Operator::Project(op) => {
-                self.mapping.exprs = None; // Project defines a new output slot space.
-                if !opaque
-                    && match output {
-                        OutputMode::Preserve => false,
-                        OutputMode::Inline => true,
-                        OutputMode::ColumnsOnly => op.exprs.iter().all(|expr| {
-                            matches!(
-                                expr.unpack_alias_ref(self.arena),
-                                ScalarExpression::ColumnRef { .. }
-                            )
-                        }),
-                    }
-                {
-                    let exprs = std::mem::take(&mut op.exprs);
-                    replace_with_only_child(plan);
-                    self.mapping.exprs = Some(exprs);
-                    self.mapping.visited.clear();
-                    self.changed = true;
-                    return Ok(());
-                }
-                for (expr, column) in op.exprs.iter_mut().zip(&schema) {
-                    let output = expr.output_column_ref(self.arena);
-                    if self.arena.column(output).name() != self.arena.column(*column).name() {
-                        let alias = AliasType::Name(self.arena.column(*column).name().to_string());
-                        *expr = self
-                            .arena
-                            .alloc_expression(ScalarExpression::Alias { expr: *expr, alias });
-                    }
-                }
-                op.moveable = None;
-            }
-            Operator::Aggregate(_) => self.mapping.exprs = None,
-            _ => (),
-        }
-        plan.reset_output_schema_cache();
-        if self.changed {
-            plan.clear_startup_work();
-        }
-        self.mapping.exprs = match (output, self.mapping.exprs.take()) {
-            (OutputMode::Preserve, Some(exprs)) => {
-                let input = plan.take();
-                *plan = LogicalPlan::new(
-                    Operator::Project(ProjectOperator::new(exprs)),
-                    Childrens::Only(Box::new(input)),
-                );
-                None
-            }
-            (_, exprs) => exprs,
+fn lift_cross_project(
+    plan: &mut LogicalPlan,
+    arena: &mut PlanArena,
+) -> Result<bool, DatabaseError> {
+    let Childrens::Twins { left, right } = plan.childrens.as_mut() else {
+        return Ok(false);
+    };
+    let (input, other, from_right) = if movable_project(left, arena)? {
+        (left, right, false)
+    } else if movable_project(right, arena)? {
+        (right, left, true)
+    } else {
+        return Ok(false);
+    };
+    let (Operator::Project(op), Childrens::Only(base)) =
+        (&mut input.operator, input.childrens.as_mut())
+    else {
+        return Ok(false);
+    };
+    let offset = if from_right {
+        other.output_schema(arena).len()
+    } else {
+        base.output_schema(arena).len()
+    };
+    if from_right && offset != 0 {
+        let mut shift = Substitute {
+            exprs: None,
+            offset,
         };
-        Ok(())
+        for expr in &mut op.exprs {
+            ExprVisitorMut::visit(&mut shift, expr, arena)?;
+        }
     }
+    let identity_start = if from_right { 0 } else { offset };
+    let columns = other.output_schema(arena);
+    op.exprs
+        .extend(columns.iter().enumerate().map(|(index, column)| {
+            arena.alloc_expression(ScalarExpression::column_expr(
+                *column,
+                identity_start + index,
+            ))
+        }));
+    if from_right {
+        op.exprs.rotate_right(offset);
+    }
+    op.moveable = None;
+
+    let mut project = input.take();
+    **input = std::mem::replace(&mut *project.childrens, Childrens::None).pop_only();
+    let mut join = plan.take();
+
+    join.reset_output_schema_cache();
+    join.clear_startup_work();
+
+    *project.childrens = Childrens::Only(Box::new(join));
+    project.physical_option = None;
+    project.reset_output_schema_cache();
+    project.clear_startup_work();
+
+    *plan = project;
+    Ok(true)
 }
 
 impl NormalizationRule for EliminateProject {
@@ -267,14 +184,98 @@ impl NormalizationRule for EliminateProject {
         arena: &mut PlanArena,
         _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
-        let mut visitor = EliminateVisitor {
-            arena,
-            mapping: Substitute::default(),
-            output: OutputMode::Preserve,
-            changed: false,
+        if matches!(&plan.operator, Operator::Join(op)
+            if op.join_type == JoinType::Cross && op.on == JoinCondition::None)
+        {
+            return lift_cross_project(plan, arena);
+        }
+        if !matches!(
+            plan.operator,
+            Operator::Project(_)
+                | Operator::Filter(_)
+                | Operator::Sort(_)
+                | Operator::Limit(_)
+                | Operator::TopK(_)
+        ) {
+            return Ok(false);
+        }
+        let Childrens::Only(child) = plan.childrens.as_ref() else {
+            return Ok(false);
         };
-        visitor.visit_plan(plan)?;
-        Ok(visitor.changed)
+        if !movable_project(child, arena)? {
+            return Ok(false);
+        }
+        let Operator::Project(project) = &child.operator else {
+            return Ok(false);
+        };
+        let mut check = OpaqueCheck { found: false };
+        OperatorExprVisitor::new(&mut check, arena).visit_operator(
+            &plan.operator,
+            None,
+            &mut ChildrenVisit::empty(),
+        )?;
+        if check.found {
+            return Ok(false);
+        }
+        let mut substitute = Substitute {
+            exprs: Some(&project.exprs),
+            offset: 0,
+        };
+        let merge = matches!(plan.operator, Operator::Project(_));
+        let schema = if let Operator::Project(op) = &plan.operator {
+            Some(
+                op.exprs
+                    .iter()
+                    .map(|expr| expr.output_column_ref(arena))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
+        OperatorExprVisitorMut::new(&mut substitute, arena).visit_operator(
+            &mut plan.operator,
+            None,
+            &mut ChildrenVisitMut::empty(),
+        )?;
+        match &mut plan.operator {
+            Operator::Project(op) => {
+                if let Some(schema) = schema {
+                    for (expr, column) in op.exprs.iter_mut().zip(schema) {
+                        let current = expr.output_column_ref(arena);
+                        if arena.column(current).name() != arena.column(column).name() {
+                            let alias = AliasType::Name(arena.column(column).name().to_string());
+                            *expr = arena
+                                .alloc_expression(ScalarExpression::Alias { expr: *expr, alias });
+                        }
+                    }
+                }
+                op.moveable = None;
+            }
+            Operator::Filter(op) => op.is_optimized = false,
+            _ => (),
+        }
+        let Childrens::Only(child) = plan.childrens.as_mut() else {
+            return Ok(false);
+        };
+        if merge {
+            replace_with_only_child(child);
+        } else {
+            // Lift the Project: its expressions keep the parent's output layout.
+            let mut project = child.take();
+            let mut parent = plan.take();
+            
+            std::mem::swap(&mut parent.childrens, &mut project.childrens);
+
+            parent.reset_output_schema_cache();
+            parent.clear_startup_work();
+
+            *project.childrens = Childrens::Only(Box::new(parent));
+            project.physical_option = None;
+            *plan = project;
+        }
+        plan.reset_output_schema_cache();
+        plan.clear_startup_work();
+        Ok(true)
     }
 }
 
@@ -770,8 +771,8 @@ pub(crate) fn covers<T>(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{
-        EliminateIndexFilter, EliminateProject, EliminateRedundantSort, EliminateVisitor,
-        ForceSpillAggregate, OutputMode, Substitute, UseStreamAggregate,
+        EliminateIndexFilter, EliminateProject, EliminateRedundantSort, ForceSpillAggregate,
+        UseStreamAggregate,
     };
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, TableName};
@@ -783,7 +784,6 @@ mod tests {
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
-    use crate::planner::operator::aggregate::AggregateOperator;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::limit::LimitOperator;
@@ -1144,57 +1144,6 @@ mod tests {
     }
 
     #[test]
-    fn cross_join_callback_reuses_an_existing_mapping_buffer() -> Result<(), DatabaseError> {
-        for (map_left, map_right, expected) in [
-            (true, true, [1, 0, 3, 2]),
-            (true, false, [1, 0, 2, 3]),
-            (false, true, [0, 1, 3, 2]),
-        ] {
-            let table_arena = crate::planner::TableArenaCell::default();
-            let mut arena = PlanArena::new(&table_arena);
-            let mut left = values(&mut arena, &["l0", "l1"]);
-            let mut right = values(&mut arena, &["r0", "r1"]);
-            if map_left {
-                left = permutation(&mut arena, left, &[1, 0]);
-            }
-            if map_right {
-                right = permutation(&mut arena, right, &[1, 0]);
-            }
-            let source = if map_left { &mut left } else { &mut right };
-            let Operator::Project(op) = &mut source.operator else {
-                unreachable!()
-            };
-            op.exprs.reserve(8);
-            let buffer = op.exprs.as_ptr();
-            let mut plan =
-                JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
-            let mut visitor = EliminateVisitor {
-                arena: &mut arena,
-                mapping: Substitute::default(),
-                output: OutputMode::Inline,
-                changed: false,
-            };
-            visitor.visit_input(&mut plan, OutputMode::Inline, |visitor, _| {
-                let Some(exprs) = &visitor.mapping.exprs else {
-                    panic!("expected a mapping")
-                };
-                assert_eq!(exprs.as_ptr(), buffer);
-                assert_eq!(exprs.len(), expected.len());
-                for (expr, expected) in exprs.iter().zip(expected) {
-                    let ScalarExpression::ColumnRef { position, .. } =
-                        expr.unpack_alias_ref(visitor.arena)
-                    else {
-                        unreachable!()
-                    };
-                    assert_eq!(*position, expected);
-                }
-                Ok(())
-            })?;
-        }
-        Ok(())
-    }
-
-    #[test]
     fn cross_join_distinguishes_empty_mapping_from_identity() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
@@ -1220,18 +1169,31 @@ mod tests {
     }
 
     #[test]
-    fn cross_join_preserves_computed_right_output_without_copying_it() -> Result<(), DatabaseError>
-    {
+    fn cross_join_inlines_computed_right_output_without_changing_source(
+    ) -> Result<(), DatabaseError> {
         let table = build_t1_table()?;
         let mut arena = PlanArena::new(&table.table_arena);
         let scan = table.plan_with_arena("select c1, c2 from t1", &mut arena)?;
-        let (right, _) = source(&mut arena, scan);
+        let (right, original) = source(&mut arena, scan);
         let left = values(&mut arena, &["l0"]);
         let cross = JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
         let mut plan = permutation(&mut arena, cross, &[0, 1, 2]);
 
-        assert!(!EliminateProject.apply(&mut plan, &mut arena, None)?);
-        assert_eq!(plan.explain(&mut arena, 0).matches("Projection").count(), 2);
+        assert!(EliminateProject.apply(&mut plan, &mut arena, None)?);
+        assert_eq!(plan.explain(&mut arena, 0).matches("Projection").count(), 1);
+        let Operator::Project(op) = &plan.operator else {
+            unreachable!()
+        };
+        for (expr, expected) in [(op.exprs[1], 2), (original, 1)] {
+            let ScalarExpression::Binary { left_expr, .. } = expr.unpack_alias_ref(&arena) else {
+                unreachable!()
+            };
+            let ScalarExpression::ColumnRef { position, .. } = left_expr.unpack_alias_ref(&arena)
+            else {
+                unreachable!()
+            };
+            assert_eq!(*position, expected);
+        }
         Ok(())
     }
 

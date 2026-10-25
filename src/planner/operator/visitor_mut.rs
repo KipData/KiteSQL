@@ -23,16 +23,36 @@ use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::planner::MetaArena;
 use crate::planner::{Childrens, LogicalPlan};
 
+/// One node's children. Taking the reference records that traversal was handled.
+pub struct ChildrenVisitMut<'a> {
+    children: Option<&'a mut Childrens>,
+}
+
+impl<'a> ChildrenVisitMut<'a> {
+    pub fn new(children: &'a mut Childrens) -> Self {
+        Self {
+            children: Some(children),
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self { children: None }
+    }
+
+    pub fn visit(
+        &mut self,
+        walk: impl FnOnce(&'a mut Childrens) -> Result<(), DatabaseError>,
+    ) -> Result<(), DatabaseError> {
+        if let Some(children) = self.children.take() {
+            walk(children)?;
+        }
+        Ok(())
+    }
+}
+
 pub trait OperatorVisitorMut<'a>: Sized {
     fn visit_plan(&mut self, plan: &'a mut LogicalPlan) -> Result<(), DatabaseError> {
-        let LogicalPlan {
-            operator,
-            physical_option,
-            childrens,
-            ..
-        } = plan;
-        self.visit_operator(operator, physical_option.as_mut())?;
-        self.visit_children(childrens)
+        walk_mut_plan(self, plan)
     }
 
     fn visit_children(&mut self, childrens: &'a mut Childrens) -> Result<(), DatabaseError> {
@@ -50,8 +70,9 @@ pub trait OperatorVisitorMut<'a>: Sized {
         &mut self,
         operator: &'a mut Operator,
         physical_option: Option<&'a mut PhysicalOption>,
+        children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
-        walk_mut_operator(self, operator)?;
+        walk_mut_operator(self, operator, children)?;
         if let Some(physical_option) = physical_option {
             self.visit_physical_option(physical_option)?;
         }
@@ -69,36 +90,58 @@ pub trait OperatorVisitorMut<'a>: Sized {
         Ok(())
     }
 
-    fn visit_aggregate(&mut self, _op: &'a mut AggregateOperator) -> Result<(), DatabaseError> {
+    fn visit_aggregate(
+        &mut self,
+        _op: &'a mut AggregateOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
     fn visit_scalar_query_init(
         &mut self,
         _op: &'a mut ScalarQueryInitOperator,
+        _children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_mark_apply(&mut self, _op: &'a mut MarkApplyOperator) -> Result<(), DatabaseError> {
+    fn visit_mark_apply(
+        &mut self,
+        _op: &'a mut MarkApplyOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_filter(&mut self, _op: &'a mut FilterOperator) -> Result<(), DatabaseError> {
+    fn visit_filter(
+        &mut self,
+        _op: &'a mut FilterOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_join(&mut self, _op: &'a mut JoinOperator) -> Result<(), DatabaseError> {
+    fn visit_join(
+        &mut self,
+        _op: &'a mut JoinOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_project(&mut self, _op: &'a mut ProjectOperator) -> Result<(), DatabaseError> {
+    fn visit_project(
+        &mut self,
+        _op: &'a mut ProjectOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
     fn visit_scalar_subquery(
         &mut self,
         _op: &'a mut ScalarSubqueryOperator,
+        _children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -114,19 +157,35 @@ pub trait OperatorVisitorMut<'a>: Sized {
         Ok(())
     }
 
-    fn visit_sort(&mut self, _op: &'a mut SortOperator) -> Result<(), DatabaseError> {
+    fn visit_sort(
+        &mut self,
+        _op: &'a mut SortOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_window(&mut self, _op: &'a mut window::WindowOperator) -> Result<(), DatabaseError> {
+    fn visit_window(
+        &mut self,
+        _op: &'a mut window::WindowOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_limit(&mut self, _op: &'a mut LimitOperator) -> Result<(), DatabaseError> {
+    fn visit_limit(
+        &mut self,
+        _op: &'a mut LimitOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_top_k(&mut self, _op: &'a mut TopKOperator) -> Result<(), DatabaseError> {
+    fn visit_top_k(
+        &mut self,
+        _op: &'a mut TopKOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
@@ -142,7 +201,7 @@ pub trait OperatorVisitorMut<'a>: Sized {
         Ok(())
     }
 
-    fn visit_explain(&mut self) -> Result<(), DatabaseError> {
+    fn visit_explain(&mut self, _children: &mut ChildrenVisitMut<'a>) -> Result<(), DatabaseError> {
         Ok(())
     }
 
@@ -153,17 +212,23 @@ pub trait OperatorVisitorMut<'a>: Sized {
     fn visit_set_membership(
         &mut self,
         _op: &'a mut SetMembershipOperator,
+        _children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_union(&mut self, _op: &'a mut UnionOperator) -> Result<(), DatabaseError> {
+    fn visit_union(
+        &mut self,
+        _op: &'a mut UnionOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
     fn visit_recursive_cte(
         &mut self,
         _op: &'a mut RecursiveCteOperator,
+        _children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -175,19 +240,35 @@ pub trait OperatorVisitorMut<'a>: Sized {
         Ok(())
     }
 
-    fn visit_insert(&mut self, _op: &'a mut InsertOperator) -> Result<(), DatabaseError> {
+    fn visit_insert(
+        &mut self,
+        _op: &'a mut InsertOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_update(&mut self, _op: &'a mut UpdateOperator) -> Result<(), DatabaseError> {
+    fn visit_update(
+        &mut self,
+        _op: &'a mut UpdateOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_delete(&mut self, _op: &'a mut DeleteOperator) -> Result<(), DatabaseError> {
+    fn visit_delete(
+        &mut self,
+        _op: &'a mut DeleteOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
-    fn visit_analyze(&mut self, _op: &'a mut AnalyzeOperator) -> Result<(), DatabaseError> {
+    fn visit_analyze(
+        &mut self,
+        _op: &'a mut AnalyzeOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 
@@ -216,6 +297,7 @@ pub trait OperatorVisitorMut<'a>: Sized {
     fn visit_create_index(
         &mut self,
         _op: &'a mut CreateIndexOperator,
+        _children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
         Ok(())
     }
@@ -249,7 +331,11 @@ pub trait OperatorVisitorMut<'a>: Sized {
     }
 
     #[cfg(feature = "copy")]
-    fn visit_copy_to_file(&mut self, _op: &'a mut CopyToFileOperator) -> Result<(), DatabaseError> {
+    fn visit_copy_to_file(
+        &mut self,
+        _op: &'a mut CopyToFileOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         Ok(())
     }
 }
@@ -275,7 +361,11 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
         Ok(())
     }
 
-    fn visit_aggregate(&mut self, op: &'a mut AggregateOperator) -> Result<(), DatabaseError> {
+    fn visit_aggregate(
+        &mut self,
+        op: &'a mut AggregateOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         for expr in op.agg_calls.iter_mut().chain(&mut op.groupby_exprs) {
             ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
@@ -285,6 +375,7 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
     fn visit_scalar_query_init(
         &mut self,
         op: &'a mut ScalarQueryInitOperator,
+        _children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
         ExprVisitorMut::visit(self.visitor, &mut op.value, self.arena)?;
         for (_, expr) in &mut op.param_bindings {
@@ -293,7 +384,11 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
         Ok(())
     }
 
-    fn visit_mark_apply(&mut self, op: &'a mut MarkApplyOperator) -> Result<(), DatabaseError> {
+    fn visit_mark_apply(
+        &mut self,
+        op: &'a mut MarkApplyOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         for expr in &mut op.predicates {
             ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
@@ -306,11 +401,19 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
         Ok(())
     }
 
-    fn visit_filter(&mut self, op: &'a mut FilterOperator) -> Result<(), DatabaseError> {
+    fn visit_filter(
+        &mut self,
+        op: &'a mut FilterOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         ExprVisitorMut::visit(self.visitor, &mut op.predicate, self.arena)
     }
 
-    fn visit_join(&mut self, op: &'a mut JoinOperator) -> Result<(), DatabaseError> {
+    fn visit_join(
+        &mut self,
+        op: &'a mut JoinOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         if let JoinCondition::On { on, filter } = &mut op.on {
             for (left_expr, right_expr) in on {
                 ExprVisitorMut::visit(self.visitor, left_expr, self.arena)?;
@@ -323,7 +426,11 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
         Ok(())
     }
 
-    fn visit_project(&mut self, op: &'a mut ProjectOperator) -> Result<(), DatabaseError> {
+    fn visit_project(
+        &mut self,
+        op: &'a mut ProjectOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         for expr in &mut op.exprs {
             ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
@@ -354,14 +461,22 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
         Ok(())
     }
 
-    fn visit_sort(&mut self, op: &'a mut SortOperator) -> Result<(), DatabaseError> {
+    fn visit_sort(
+        &mut self,
+        op: &'a mut SortOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         for field in &mut op.sort_fields {
             ExprVisitorMut::visit(self.visitor, &mut field.expr, self.arena)?;
         }
         Ok(())
     }
 
-    fn visit_window(&mut self, op: &'a mut window::WindowOperator) -> Result<(), DatabaseError> {
+    fn visit_window(
+        &mut self,
+        op: &'a mut window::WindowOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         for expr in op
             .sort_fields
             .iter_mut()
@@ -377,14 +492,22 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
         Ok(())
     }
 
-    fn visit_top_k(&mut self, op: &'a mut TopKOperator) -> Result<(), DatabaseError> {
+    fn visit_top_k(
+        &mut self,
+        op: &'a mut TopKOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         for field in &mut op.sort_fields {
             ExprVisitorMut::visit(self.visitor, &mut field.expr, self.arena)?;
         }
         Ok(())
     }
 
-    fn visit_update(&mut self, op: &'a mut UpdateOperator) -> Result<(), DatabaseError> {
+    fn visit_update(
+        &mut self,
+        op: &'a mut UpdateOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
         for (_, expr) in &mut op.value_exprs {
             ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
@@ -418,42 +541,58 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
     }
 }
 
+pub fn walk_mut_plan<'a, V: OperatorVisitorMut<'a>>(
+    visitor: &mut V,
+    plan: &'a mut LogicalPlan,
+) -> Result<(), DatabaseError> {
+    let LogicalPlan {
+        operator,
+        physical_option,
+        childrens,
+        ..
+    } = plan;
+    let mut children = ChildrenVisitMut::new(childrens);
+    visitor.visit_operator(operator, physical_option.as_mut(), &mut children)?;
+    children.visit(|children| visitor.visit_children(children))
+}
+
 pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
     visitor: &mut V,
     operator: &'a mut Operator,
+    children: &mut ChildrenVisitMut<'a>,
 ) -> Result<(), DatabaseError> {
     match operator {
         Operator::Dummy => visitor.visit_dummy(),
-        Operator::Aggregate(op) => visitor.visit_aggregate(op),
-        Operator::ScalarQueryInit(op) => visitor.visit_scalar_query_init(op),
-        Operator::MarkApply(op) => visitor.visit_mark_apply(op),
-        Operator::Filter(op) => visitor.visit_filter(op),
-        Operator::Join(op) => visitor.visit_join(op),
-        Operator::Project(op) => visitor.visit_project(op),
-        Operator::ScalarSubquery(op) => visitor.visit_scalar_subquery(op),
+        Operator::Aggregate(op) => visitor.visit_aggregate(op, children),
+        Operator::ScalarQueryInit(op) => visitor.visit_scalar_query_init(op, children),
+        Operator::MarkApply(op) => visitor.visit_mark_apply(op, children),
+        Operator::Filter(op) => visitor.visit_filter(op, children),
+        Operator::Join(op) => visitor.visit_join(op, children),
+        Operator::Project(op) => visitor.visit_project(op, children),
+        Operator::ScalarSubquery(op) => visitor.visit_scalar_subquery(op, children),
         Operator::TableScan(op) => visitor.visit_table_scan(op),
         Operator::FunctionScan(op) => visitor.visit_function_scan(op),
-        Operator::Sort(op) => visitor.visit_sort(op),
-        Operator::Limit(op) => visitor.visit_limit(op),
-        Operator::TopK(op) => visitor.visit_top_k(op),
+        Operator::Sort(op) => visitor.visit_sort(op, children),
+        Operator::Limit(op) => visitor.visit_limit(op, children),
+        Operator::TopK(op) => visitor.visit_top_k(op, children),
         Operator::Values(op) => visitor.visit_values(op),
         Operator::ShowTable => visitor.visit_show_table(),
         Operator::ShowView => visitor.visit_show_view(),
-        Operator::Explain => visitor.visit_explain(),
+        Operator::Explain => visitor.visit_explain(children),
         Operator::Describe(op) => visitor.visit_describe(op),
-        Operator::SetMembership(op) => visitor.visit_set_membership(op),
-        Operator::Union(op) => visitor.visit_union(op),
-        Operator::RecursiveCte(op) => visitor.visit_recursive_cte(op),
+        Operator::SetMembership(op) => visitor.visit_set_membership(op, children),
+        Operator::Union(op) => visitor.visit_union(op, children),
+        Operator::RecursiveCte(op) => visitor.visit_recursive_cte(op, children),
         Operator::RecursiveScan(op) => visitor.visit_recursive_scan(op),
-        Operator::Insert(op) => visitor.visit_insert(op),
-        Operator::Update(op) => visitor.visit_update(op),
-        Operator::Delete(op) => visitor.visit_delete(op),
-        Operator::Analyze(op) => visitor.visit_analyze(op),
+        Operator::Insert(op) => visitor.visit_insert(op, children),
+        Operator::Update(op) => visitor.visit_update(op, children),
+        Operator::Delete(op) => visitor.visit_delete(op, children),
+        Operator::Analyze(op) => visitor.visit_analyze(op, children),
         Operator::AddColumn(op) => visitor.visit_add_column(op),
         Operator::ChangeColumn(op) => visitor.visit_change_column(op),
         Operator::DropColumn(op) => visitor.visit_drop_column(op),
         Operator::CreateTable(op) => visitor.visit_create_table(op),
-        Operator::CreateIndex(op) => visitor.visit_create_index(op),
+        Operator::CreateIndex(op) => visitor.visit_create_index(op, children),
         Operator::CreateView(op) => visitor.visit_create_view(op),
         Operator::DropTable(op) => visitor.visit_drop_table(op),
         Operator::DropView(op) => visitor.visit_drop_view(op),
@@ -462,8 +601,8 @@ pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
         #[cfg(feature = "copy")]
         Operator::CopyFromFile(op) => visitor.visit_copy_from_file(op),
         #[cfg(feature = "copy")]
-        Operator::CopyToFile(op) => visitor.visit_copy_to_file(op),
-        Operator::Window(op) => visitor.visit_window(op),
+        Operator::CopyToFile(op) => visitor.visit_copy_to_file(op, children),
+        Operator::Window(op) => visitor.visit_window(op, children),
     }
 }
 
@@ -545,14 +684,14 @@ mod tests {
         let mut arena = PlanArena::new(&table_arena);
         let mut operators = all_operators(&mut arena)?;
         for operator in &mut operators {
-            NoopVisitor.visit_operator(operator, None)?;
+            NoopVisitor.visit_operator(operator, None, &mut ChildrenVisitMut::empty())?;
         }
 
         let mut counter = IncrementConstants(0);
         {
             let mut visitor = OperatorExprVisitorMut::new(&mut counter, &mut arena);
             for operator in &mut operators {
-                visitor.visit_operator(operator, None)?;
+                visitor.visit_operator(operator, None, &mut ChildrenVisitMut::empty())?;
             }
         }
         assert_eq!(counter.0, 22); // Includes the Values row expression.

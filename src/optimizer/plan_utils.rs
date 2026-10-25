@@ -18,7 +18,7 @@ use crate::expression::visitor::ExprVisitor;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::operator::visitor::OperatorVisitor;
+use crate::planner::operator::visitor::{ChildrenVisit, OperatorVisitor};
 use crate::planner::operator::{Operator, RowCountOption};
 use crate::planner::{Childrens, LogicalPlan, MetaArena, PlanArena};
 use crate::types::ColumnId;
@@ -128,7 +128,11 @@ impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'plan, '_
         if self.column.is_none() {
             return Ok(());
         }
-        self.visit_operator(&plan.operator, plan.physical_option.as_ref())?;
+        self.visit_operator(
+            &plan.operator,
+            plan.physical_option.as_ref(),
+            &mut ChildrenVisit::empty(),
+        )?;
         let follow = match &plan.operator {
             Operator::Project(_) | Operator::Filter(_) => true,
             Operator::Join(_) | Operator::Aggregate(_) | Operator::Limit(_) | Operator::TopK(_) => {
@@ -170,7 +174,11 @@ impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'plan, '_
         Ok(())
     }
 
-    fn visit_project(&mut self, project: &'plan ProjectOperator) -> Result<(), DatabaseError> {
+    fn visit_project(
+        &mut self,
+        project: &'plan ProjectOperator,
+        _children: &mut ChildrenVisit<'plan>,
+    ) -> Result<(), DatabaseError> {
         let Some(column) = self.column.take() else {
             return Ok(());
         };

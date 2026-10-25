@@ -18,7 +18,7 @@ use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
 use crate::planner::operator::visitor_mut::{
-    walk_mut_operator, OperatorExprVisitorMut, OperatorVisitorMut,
+    walk_mut_operator, ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
 };
 use crate::planner::operator::{Operator, PhysicalOption};
 use crate::planner::{LogicalPlan, ScalarQueryRef};
@@ -87,15 +87,20 @@ impl<'a, A: MetaArena + ?Sized> OperatorVisitorMut<'a> for ScalarQueryPlanReloca
         &mut self,
         operator: &'a mut Operator,
         physical_option: Option<&'a mut PhysicalOption>,
+        children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
-        OperatorExprVisitorMut::new(&mut self.references, self.arena)
-            .visit_operator(operator, physical_option)?;
-        walk_mut_operator(self, operator)
+        OperatorExprVisitorMut::new(&mut self.references, self.arena).visit_operator(
+            operator,
+            physical_option,
+            &mut ChildrenVisitMut::empty(),
+        )?;
+        walk_mut_operator(self, operator, children)
     }
 
     fn visit_scalar_query_init(
         &mut self,
         op: &'a mut ScalarQueryInitOperator,
+        _children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
         for (reference, _) in &mut op.param_bindings {
             self.references.relocate(reference);
@@ -252,7 +257,7 @@ pub trait MetaArena {
     }
 
     fn same_column(&self, left: ColumnRef, right: ColumnRef) -> bool {
-        self.column(left).summary() == self.column(right).summary()
+        left == right || self.column(left).summary() == self.column(right).summary()
     }
 
     fn clone_column(&self, column: ColumnRef) -> ColumnCatalog {
@@ -880,7 +885,7 @@ impl<'a> PlanArena<'a> {
     }
 
     pub(crate) fn same_column(&self, left: ColumnRef, right: ColumnRef) -> bool {
-        self.column(left).summary() == self.column(right).summary()
+        left == right || self.column(left).summary() == self.column(right).summary()
     }
 
     pub(crate) fn nullable_for_join(

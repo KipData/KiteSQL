@@ -97,7 +97,7 @@ use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::values::ValuesOperator;
-use crate::planner::operator::visitor::OperatorVisitor;
+use crate::planner::operator::visitor::{ChildrenVisit, OperatorVisitor};
 use crate::planner::{fmt_explain_list, Childrens, Explain, ExprRef, LogicalPlan, MetaArena};
 use crate::types::index::{IndexInfo, IndexMetaRef};
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -595,6 +595,7 @@ impl Operator {
             fn visit_aggregate(
                 &mut self,
                 op: &'operator AggregateOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for expr in op.agg_calls.iter().chain(&op.groupby_exprs) {
                     ExprVisitor::visit(self, *expr, self.arena)?;
@@ -605,6 +606,7 @@ impl Operator {
             fn visit_scalar_query_init(
                 &mut self,
                 op: &'operator ScalarQueryInitOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for (_, expr) in &op.param_bindings {
                     ExprVisitor::visit(self, *expr, self.arena)?;
@@ -615,6 +617,7 @@ impl Operator {
             fn visit_mark_apply(
                 &mut self,
                 op: &'operator MarkApplyOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for expr in &op.predicates {
                     ExprVisitor::visit(self, *expr, self.arena)?;
@@ -628,11 +631,19 @@ impl Operator {
                 Ok(())
             }
 
-            fn visit_filter(&mut self, op: &'operator FilterOperator) -> Result<(), DatabaseError> {
+            fn visit_filter(
+                &mut self,
+                op: &'operator FilterOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 ExprVisitor::visit(self, op.predicate, self.arena)
             }
 
-            fn visit_join(&mut self, op: &'operator JoinOperator) -> Result<(), DatabaseError> {
+            fn visit_join(
+                &mut self,
+                op: &'operator JoinOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 if let JoinCondition::On { on, filter } = &op.on {
                     for (left_expr, right_expr) in on {
                         ExprVisitor::visit(self, *left_expr, self.arena)?;
@@ -648,6 +659,7 @@ impl Operator {
             fn visit_project(
                 &mut self,
                 op: &'operator ProjectOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for expr in &op.exprs {
                     ExprVisitor::visit(self, *expr, self.arena)?;
@@ -675,7 +687,11 @@ impl Operator {
                 Ok(())
             }
 
-            fn visit_sort(&mut self, op: &'operator SortOperator) -> Result<(), DatabaseError> {
+            fn visit_sort(
+                &mut self,
+                op: &'operator SortOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 for field in &op.sort_fields {
                     ExprVisitor::visit(self, field.expr, self.arena)?;
                 }
@@ -685,6 +701,7 @@ impl Operator {
             fn visit_window(
                 &mut self,
                 op: &'operator window::WindowOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for expr in op
                     .sort_fields
@@ -697,7 +714,11 @@ impl Operator {
                 Ok(())
             }
 
-            fn visit_top_k(&mut self, op: &'operator TopKOperator) -> Result<(), DatabaseError> {
+            fn visit_top_k(
+                &mut self,
+                op: &'operator TopKOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 for field in &op.sort_fields {
                     ExprVisitor::visit(self, field.expr, self.arena)?;
                 }
@@ -711,7 +732,11 @@ impl Operator {
                 Ok(())
             }
 
-            fn visit_union(&mut self, op: &'operator UnionOperator) -> Result<(), DatabaseError> {
+            fn visit_union(
+                &mut self,
+                op: &'operator UnionOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 for column in op.left_schema_ref.iter().chain(&op._right_schema_ref) {
                     ExprVisitor::visit_column_ref(self, column)?;
                 }
@@ -721,6 +746,7 @@ impl Operator {
             fn visit_recursive_cte(
                 &mut self,
                 op: &'operator RecursiveCteOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for column in &op.schema_ref {
                     ExprVisitor::visit_column_ref(self, column)?;
@@ -741,6 +767,7 @@ impl Operator {
             fn visit_set_membership(
                 &mut self,
                 op: &'operator SetMembershipOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for column in op.left_schema_ref.iter().chain(&op._right_schema_ref) {
                     ExprVisitor::visit_column_ref(self, column)?;
@@ -748,14 +775,22 @@ impl Operator {
                 Ok(())
             }
 
-            fn visit_delete(&mut self, op: &'operator DeleteOperator) -> Result<(), DatabaseError> {
+            fn visit_delete(
+                &mut self,
+                op: &'operator DeleteOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 for column in &op.primary_keys {
                     ExprVisitor::visit_column_ref(self, column)?;
                 }
                 Ok(())
             }
 
-            fn visit_update(&mut self, op: &'operator UpdateOperator) -> Result<(), DatabaseError> {
+            fn visit_update(
+                &mut self,
+                op: &'operator UpdateOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 for (_, expr) in &op.value_exprs {
                     ExprVisitor::visit(self, *expr, self.arena)?;
                 }
@@ -800,7 +835,7 @@ impl Operator {
             f,
             keep_going: true,
         };
-        visitor.visit_operator(self, None)?;
+        visitor.visit_operator(self, None, &mut ChildrenVisit::empty())?;
         Ok(visitor.keep_going)
     }
 

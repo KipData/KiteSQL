@@ -483,7 +483,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         )
         .before_batch(
             "Collapse Project",
-            HepBatchStrategy::fix_point_topdown(10),
+            HepBatchStrategy::fix_point_bottomup(10),
             vec![NormalizationRuleImpl::EliminateProject],
         )
         .before_batch(
@@ -536,7 +536,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         )
         .after_batch(
             "Collapse Project",
-            HepBatchStrategy::fix_point_topdown(10),
+            HepBatchStrategy::fix_point_bottomup(10),
             vec![NormalizationRuleImpl::EliminateProject],
         )
         .after_batch(

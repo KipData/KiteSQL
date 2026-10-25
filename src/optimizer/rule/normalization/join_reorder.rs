@@ -415,9 +415,12 @@ fn inspect<'plan>(
 
         for &(left, right) in on {
             let mut endpoints = [None, None];
-            for (endpoint, expr) in endpoints.iter_mut().zip([left, right]) {
-                for (index, schema) in schemas.iter().enumerate() {
-                    if key_in_schema(expr, schema, arena)? {
+            for (endpoint, (expr, range)) in endpoints
+                .iter_mut()
+                .zip([(left, start..middle), (right, middle..schemas.len())])
+            {
+                for index in range {
+                    if key_in_schema(expr, schemas[index], arena)? {
                         *endpoint = Some(index);
                         break;
                     }

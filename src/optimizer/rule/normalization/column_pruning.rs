@@ -23,8 +23,10 @@ use crate::optimizer::rule::normalization::{
     remap_expr_positions, remap_exprs_positions, PositionRemapper,
 };
 use crate::planner::operator::join::JoinCondition;
-use crate::planner::operator::visitor::{OperatorExprVisitor, OperatorVisitor};
-use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
+use crate::planner::operator::visitor::{ChildrenVisit, OperatorExprVisitor, OperatorVisitor};
+use crate::planner::operator::visitor_mut::{
+    ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
+};
 use crate::planner::operator::Operator;
 use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
@@ -122,8 +124,11 @@ impl ColumnPruning {
             referenced_columns,
             arena,
         };
-        OperatorExprVisitor::new(&mut collector, arena as &dyn MetaArena)
-            .visit_operator(operator, None)?;
+        OperatorExprVisitor::new(&mut collector, arena as &dyn MetaArena).visit_operator(
+            operator,
+            None,
+            &mut ChildrenVisit::empty(),
+        )?;
 
         struct ReferencedOperatorColumnCollector<'a, 'p> {
             referenced_columns: &'a mut ReferencedColumns,
@@ -134,6 +139,7 @@ impl ColumnPruning {
             fn visit_mark_apply(
                 &mut self,
                 op: &'a crate::planner::operator::mark_apply::MarkApplyOperator,
+                _children: &mut ChildrenVisit<'a>,
             ) -> Result<(), DatabaseError> {
                 if !matches!(
                     op.kind,
@@ -166,6 +172,7 @@ impl ColumnPruning {
             fn visit_union(
                 &mut self,
                 op: &'a crate::planner::operator::union::UnionOperator,
+                _children: &mut ChildrenVisit<'a>,
             ) -> Result<(), DatabaseError> {
                 self.referenced_columns.extend(
                     op.left_schema_ref
@@ -180,6 +187,7 @@ impl ColumnPruning {
             fn visit_set_membership(
                 &mut self,
                 op: &'a crate::planner::operator::set_membership::SetMembershipOperator,
+                _children: &mut ChildrenVisit<'a>,
             ) -> Result<(), DatabaseError> {
                 self.referenced_columns.extend(
                     op.left_schema_ref
@@ -194,6 +202,7 @@ impl ColumnPruning {
             fn visit_delete(
                 &mut self,
                 op: &'a crate::planner::operator::delete::DeleteOperator,
+                _children: &mut ChildrenVisit<'a>,
             ) -> Result<(), DatabaseError> {
                 self.referenced_columns
                     .extend(op.primary_keys.iter().copied(), self.arena);
@@ -205,7 +214,7 @@ impl ColumnPruning {
             referenced_columns,
             arena,
         }
-        .visit_operator(operator, None)
+        .visit_operator(operator, None, &mut ChildrenVisit::empty())
     }
 
     fn extend_expr_referenced_columns<'a>(
@@ -262,7 +271,7 @@ impl ColumnPruning {
             &mut PositionRemapper::new(removed_positions, remapped_exprs),
             arena,
         )
-        .visit_operator(operator, None)
+        .visit_operator(operator, None, &mut ChildrenVisitMut::empty())
     }
 
     fn remap_exprs_after_child_change<'a>(

@@ -16,7 +16,9 @@ use crate::errors::DatabaseError;
 use crate::expression::BindEvaluator;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
+use crate::planner::operator::visitor_mut::{
+    ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
+};
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
 
@@ -28,7 +30,11 @@ pub(crate) fn evaluator_bind_current(
     arena: &mut PlanArena,
 ) -> Result<(), DatabaseError> {
     let mut evaluator = BindEvaluator;
-    OperatorExprVisitorMut::new(&mut evaluator, arena).visit_operator(&mut plan.operator, None)
+    OperatorExprVisitorMut::new(&mut evaluator, arena).visit_operator(
+        &mut plan.operator,
+        None,
+        &mut ChildrenVisitMut::empty(),
+    )
 }
 
 impl EvaluatorBind {
