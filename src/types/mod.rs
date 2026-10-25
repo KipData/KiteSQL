@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod bitset;
 pub mod evaluator;
 pub mod index;
 pub mod serialize;

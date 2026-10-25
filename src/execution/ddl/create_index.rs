@@ -120,7 +120,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             if arena.result_tuple().pk.is_none() {
                 continue;
             }
-            arena.rewrite(&column_exprs, plan_arena, None::<&[DataValue]>)?;
+            arena.rewrite(&column_exprs, plan_arena, None::<&[DataValue]>, None)?;
             {
                 let mut state = arena.local_state(plan_arena);
                 let (tuple, transaction, table_codec) = state.tuple_transaction_codec_mut();

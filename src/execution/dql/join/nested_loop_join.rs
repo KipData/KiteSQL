@@ -19,13 +19,13 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::join::RowBitmap;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
 use crate::storage::Transaction;
+use crate::types::bitset::BitSet;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 
@@ -85,15 +85,15 @@ pub struct NestedLoopJoin {
 
 enum NestedLoopJoinState {
     PullLeft {
-        right_bitmap: Option<RowBitmap>,
+        right_bitmap: Option<BitSet>,
     },
     ScanRight {
         active_left: ActiveLeftState,
-        right_bitmap: Option<RowBitmap>,
+        right_bitmap: Option<BitSet>,
     },
     EmitRightUnmatched {
         right_input: ExecId,
-        right_bitmap: Option<RowBitmap>,
+        right_bitmap: Option<BitSet>,
         right_emit_index: usize,
     },
     End,
@@ -257,7 +257,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                                 bits.insert(idx);
                             }
                         } else {
-                            let mut bits = RowBitmap::with_capacity(active_left.right_index);
+                            let mut bits = BitSet::with_capacity(active_left.right_index);
                             for idx in active_left.first_matches {
                                 bits.insert(idx);
                             }

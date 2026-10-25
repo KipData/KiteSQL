@@ -1318,7 +1318,7 @@ where
                     })
                     .collect();
                 plan = LogicalPlan::new(
-                    Operator::Project(ProjectOperator { exprs }),
+                    Operator::Project(ProjectOperator::new(exprs)),
                     Childrens::Only(Box::new(plan)),
                 );
             }

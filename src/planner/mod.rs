@@ -780,7 +780,7 @@ mod tests {
             assert_eq!(filter.estimated_startup_work()?, Some(0));
             assert_eq!(filter.estimated_work()?, Some(392));
             let mut project = LogicalPlan::new(
-                Operator::Project(ProjectOperator { exprs: vec![] }),
+                Operator::Project(ProjectOperator::new(vec![])),
                 Childrens::Only(Box::new(filter)),
             );
             project.physical_option = Some(PhysicalOption::new(

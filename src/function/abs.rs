@@ -18,7 +18,7 @@ use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::tuple::TupleLike;
+use crate::types::tuple::Input;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ordered_float::OrderedFloat;
@@ -62,7 +62,7 @@ impl ScalarFunctionImpl for Abs {
         &self,
         exprs: &[ExprRef],
         arena: &(dyn MetaArena + '_),
-        tuples: Option<&dyn TupleLike>,
+        tuples: Option<&dyn Input>,
     ) -> Result<DataValue, DatabaseError> {
         let value = arena.expression(exprs[0]).eval(arena, tuples)?;
         let overflow = || DatabaseError::OverFlow;

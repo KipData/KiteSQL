@@ -398,7 +398,7 @@ impl NormalizationRule for ParameterizeInnerJoin {
                 .collect();
             std::mem::swap(left, right);
             let mut project = LogicalPlan::new(
-                Operator::Project(ProjectOperator { exprs }),
+                Operator::Project(ProjectOperator::new(exprs)),
                 Childrens::None,
             );
             project.physical_option = Some(PhysicalOption::new(
@@ -852,7 +852,7 @@ mod inner_join_tests {
         });
         let project = |input| {
             LogicalPlan::new(
-                Operator::Project(ProjectOperator { exprs: vec![alias] }),
+                Operator::Project(ProjectOperator::new(vec![alias])),
                 Childrens::Only(Box::new(input)),
             )
         };
@@ -899,9 +899,7 @@ mod inner_join_tests {
             alias: AliasType::Expr(alias_column),
         });
         let mut projected = LogicalPlan::new(
-            Operator::Project(ProjectOperator {
-                exprs: vec![computed],
-            }),
+            Operator::Project(ProjectOperator::new(vec![computed])),
             Childrens::Only(Box::new(base)),
         );
         assert!(parameterize_right_subtree(&mut projected, &output, probe, &mut arena)?.is_none());

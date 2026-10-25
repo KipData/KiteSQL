@@ -558,7 +558,7 @@ mod tests {
         let column = alias.output_column_ref(&mut arena);
         let key = arena.alloc_expression(ScalarExpression::column_expr(column, 0));
         let mut project = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: vec![alias] }),
+            Operator::Project(ProjectOperator::new(vec![alias])),
             Childrens::Only(Box::new(scan)),
         );
         project.physical_option = Some(PhysicalOption::new(

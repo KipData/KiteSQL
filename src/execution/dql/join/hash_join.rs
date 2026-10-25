@@ -20,7 +20,6 @@ use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash::{
     JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
 };
-use crate::execution::dql::join::RowBitmap;
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
@@ -30,6 +29,7 @@ use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::Transaction;
+use crate::types::bitset::BitSet;
 use crate::types::tuple::Tuple;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
@@ -207,13 +207,13 @@ impl HashJoin {
             JoinType::LeftOuter => JoinProbeStateImpl::Left(LeftJoinState {
                 left_schema_len,
                 right_schema_len,
-                bits: RowBitmap::with_capacity(build_count),
+                bits: BitSet::with_capacity(build_count),
             }),
             JoinType::RightOuter => JoinProbeStateImpl::Right(RightJoinState { left_schema_len }),
             JoinType::Full => JoinProbeStateImpl::Full(FullJoinState {
                 left_schema_len,
                 right_schema_len,
-                bits: RowBitmap::with_capacity(build_count),
+                bits: BitSet::with_capacity(build_count),
             }),
             JoinType::Cross => unreachable!(),
         }

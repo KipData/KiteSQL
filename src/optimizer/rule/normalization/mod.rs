@@ -48,6 +48,8 @@ mod min_max_top_k;
 use guard_mark_apply::GuardMarkApply;
 use join_reorder::{GreedyJoinReorder, OrientNestedLoopJoin};
 use materialize_mark_apply::MaterializeMarkApply;
+mod project_move;
+use project_move::ProjectMove;
 mod parameterized_index;
 mod pushdown_limit;
 mod pushdown_predicates;
@@ -91,6 +93,7 @@ pub enum NormalizationRuleImpl {
     OrientNestedLoopJoin,
     MaterializeMarkApply,
     GuardMarkApply,
+    ProjectMove,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -180,9 +183,9 @@ impl NormalizationRuleImpl {
     pub fn root_tag(&self) -> NormalizationRuleRootTag {
         match self {
             NormalizationRuleImpl::ColumnPruning => NormalizationRuleRootTag::Any,
-            NormalizationRuleImpl::CollapseProject | NormalizationRuleImpl::GuardMarkApply => {
-                NormalizationRuleRootTag::Project
-            }
+            NormalizationRuleImpl::CollapseProject
+            | NormalizationRuleImpl::GuardMarkApply
+            | NormalizationRuleImpl::ProjectMove => NormalizationRuleRootTag::Project,
             NormalizationRuleImpl::CollapseGroupByAgg => NormalizationRuleRootTag::Aggregate,
             NormalizationRuleImpl::CombineFilter => NormalizationRuleRootTag::Filter,
             NormalizationRuleImpl::LimitProjectTranspose
@@ -223,6 +226,7 @@ impl NormalizationRule for NormalizationRuleImpl {
             }
             NormalizationRuleImpl::GuardMarkApply => GuardMarkApply.apply(plan, arena, loader),
             NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, arena, loader),
+            NormalizationRuleImpl::ProjectMove => ProjectMove.apply(plan, arena, loader),
             NormalizationRuleImpl::CollapseGroupByAgg => {
                 CollapseGroupByAgg.apply(plan, arena, loader)
             }

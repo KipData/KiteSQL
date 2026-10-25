@@ -151,7 +151,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                         continue;
                     }
 
-                    arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                    arena.rewrite(exprs, plan_arena, Some(&tuple), None)?;
                     let mut state = arena.local_state(plan_arena);
                     let (values, transaction, table_codec) =
                         state.index_values_transaction_codec_mut();
@@ -189,7 +189,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                     ) {
                         continue;
                     }
-                    arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                    arena.rewrite(exprs, plan_arena, Some(&tuple), None)?;
                     let mut state = arena.local_state(plan_arena);
                     let (values, transaction, table_codec) =
                         state.index_values_transaction_codec_mut();

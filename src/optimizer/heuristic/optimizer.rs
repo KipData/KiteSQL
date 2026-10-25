@@ -903,7 +903,7 @@ mod tests {
             let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
             for _ in 0..3 {
                 plan = LogicalPlan::new(
-                    Operator::Project(ProjectOperator { exprs: Vec::new() }),
+                    Operator::Project(ProjectOperator::new(Vec::new())),
                     Childrens::Only(Box::new(plan)),
                 );
             }
@@ -934,7 +934,7 @@ mod tests {
             let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
             for _ in 0..3 {
                 plan = LogicalPlan::new(
-                    Operator::Project(ProjectOperator { exprs: Vec::new() }),
+                    Operator::Project(ProjectOperator::new(Vec::new())),
                     Childrens::Only(Box::new(plan)),
                 );
             }

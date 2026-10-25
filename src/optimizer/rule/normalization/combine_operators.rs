@@ -431,18 +431,14 @@ mod tests {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let child = LogicalPlan::new(
-            Operator::Project(ProjectOperator {
-                exprs: vec![
-                    column_expr(&mut arena, "c2", 1),
-                    column_expr(&mut arena, "c1", 0),
-                ],
-            }),
+            Operator::Project(ProjectOperator::new(vec![
+                column_expr(&mut arena, "c2", 1),
+                column_expr(&mut arena, "c1", 0),
+            ])),
             Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
         );
         let mut plan = LogicalPlan::new(
-            Operator::Project(ProjectOperator {
-                exprs: vec![column_expr(&mut arena, "c2", 0)],
-            }),
+            Operator::Project(ProjectOperator::new(vec![column_expr(&mut arena, "c2", 0)])),
             Childrens::Only(Box::new(child)),
         );
 

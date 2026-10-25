@@ -143,7 +143,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
                 let value = match exprs.as_slice() {
                     [expr] => expr.eval(plan_arena, Some(&tuple))?.into_owned(),
                     _ => {
-                        arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                        arena.rewrite(exprs, plan_arena, Some(&tuple), None)?;
                         DataValue::Tuple(arena.materialize_tuple().values)
                     }
                 };

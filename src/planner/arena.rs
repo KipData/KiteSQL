@@ -1267,9 +1267,7 @@ mod tests {
         .map(|expr| arena.alloc_expression(expr))
         .collect::<Vec<_>>();
         let input = LogicalPlan::new(
-            Operator::Project(ProjectOperator {
-                exprs: exprs.clone(),
-            }),
+            Operator::Project(ProjectOperator::new(exprs.clone())),
             Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
         );
         let source = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(5)));

@@ -153,7 +153,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
                     let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-                    arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                    arena.rewrite(exprs, plan_arena, Some(&tuple), None)?;
                     let mut state = arena.local_state(plan_arena);
                     let (values, transaction, table_codec) =
                         state.index_values_transaction_codec_mut();

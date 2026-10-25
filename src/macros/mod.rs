@@ -102,7 +102,7 @@ macro_rules! scala_function {
             }
         }        impl ::kite_sql::expression::function::scala::ScalarFunctionImpl for $struct_name {
             #[allow(unused_variables, clippy::redundant_closure_call)]
-            fn eval(&self, args: &[::kite_sql::planner::ExprRef], arena: &dyn ::kite_sql::planner::MetaArena, tuple: Option<&dyn ::kite_sql::types::tuple::TupleLike>) -> Result<::kite_sql::types::value::DataValue, ::kite_sql::errors::DatabaseError> {
+            fn eval(&self, args: &[::kite_sql::planner::ExprRef], arena: &dyn ::kite_sql::planner::MetaArena, tuple: Option<&dyn ::kite_sql::types::tuple::Input>) -> Result<::kite_sql::types::value::DataValue, ::kite_sql::errors::DatabaseError> {
                 let mut _index = 0;
 
                 $closure($({

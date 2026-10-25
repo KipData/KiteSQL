@@ -370,7 +370,7 @@ mod tests {
             });
             let filter = FilterOperator::build(predicate, mark, false);
             let plan = LogicalPlan::new(
-                Operator::Project(ProjectOperator { exprs: vec![flag] }),
+                Operator::Project(ProjectOperator::new(vec![flag])),
                 Childrens::Only(Box::new(filter)),
             );
             Ok(Self { plan, flag, marker })

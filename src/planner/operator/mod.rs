@@ -1133,9 +1133,10 @@ mod tests {
         assert_eq!(referenced_columns(&join, &mut arena)?, vec![a, b, c]);
         assert!(!join.all_referenced_columns(&arena, |column| *column == a)?);
 
-        let project = Operator::Project(ProjectOperator {
-            exprs: vec![column_expr(b, 1, &mut arena), column_expr(c, 2, &mut arena)],
-        });
+        let project = Operator::Project(ProjectOperator::new(vec![
+            column_expr(b, 1, &mut arena),
+            column_expr(c, 2, &mut arena),
+        ]));
         assert_eq!(referenced_columns(&project, &mut arena)?, vec![b, c]);
 
         let update = Operator::Update(UpdateOperator {

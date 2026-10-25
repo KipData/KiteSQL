@@ -94,7 +94,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
                 continue;
             };
             for (index_id, index_ty, exprs) in index_templates.iter() {
-                arena.rewrite(exprs, plan_arena, Some(&tuple))?;
+                arena.rewrite(exprs, plan_arena, Some(&tuple), None)?;
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.index_values_transaction_codec_mut();
                 let index = Index::new(*index_id, values, *index_ty);

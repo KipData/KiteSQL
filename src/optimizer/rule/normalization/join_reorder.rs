@@ -132,7 +132,7 @@ fn restore_join_output(
         })
         .collect();
     let mut plan = LogicalPlan::new(
-        Operator::Project(ProjectOperator { exprs }),
+        Operator::Project(ProjectOperator::new(exprs)),
         Childrens::Only(Box::new(join)),
     );
     plan.physical_option = Some(PhysicalOption::new(
@@ -1452,7 +1452,7 @@ mod tests {
         });
         let output = alias.output_column_ref(&mut arena);
         let mut projected = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: vec![alias] }),
+            Operator::Project(ProjectOperator::new(vec![alias])),
             Childrens::Only(Box::new(left)),
         );
         projected.physical_option = Some(PhysicalOption::new(
@@ -1539,7 +1539,7 @@ mod tests {
         let output = alias.output_column_ref(&mut arena);
         let (source, _) = input("l", 10, &mut arena);
         let mut project = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: vec![alias] }),
+            Operator::Project(ProjectOperator::new(vec![alias])),
             Childrens::Only(Box::new(source)),
         );
         project.physical_option = Some(PhysicalOption::new(
@@ -1592,7 +1592,7 @@ mod tests {
         });
         let output = alias.output_column_ref(&mut arena);
         let mut project = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: vec![alias] }),
+            Operator::Project(ProjectOperator::new(vec![alias])),
             Childrens::Only(Box::new(scan)),
         );
         assert_eq!(
@@ -1858,7 +1858,7 @@ mod tests {
         let (left, l, li) = indexed_input("l", 1000, Some(100), &mut arena);
         let (right, r, _) = indexed_input("r", 200, Some(100), &mut arena);
         let mut left = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: vec![l] }),
+            Operator::Project(ProjectOperator::new(vec![l])),
             Childrens::Only(Box::new(left)),
         );
         left.physical_option = Some(PhysicalOption::new(
@@ -2028,7 +2028,7 @@ mod tests {
             })
             .collect();
         let mut project = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs }),
+            Operator::Project(ProjectOperator::new(exprs)),
             Childrens::Only(Box::new(join)),
         );
         project.physical_option = Some(PhysicalOption::new(
@@ -2064,7 +2064,7 @@ mod tests {
         assert_eq!(sort.estimated_startup_work()?, Some(192));
         assert_eq!(sort.estimated_work()?, Some(256));
         let mut project = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: vec![key] }),
+            Operator::Project(ProjectOperator::new(vec![key])),
             Childrens::Only(Box::new(sort)),
         );
         project.physical_option = Some(PhysicalOption::new(
@@ -2706,7 +2706,7 @@ mod tests {
             })
             .collect();
         let mut plan = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs }),
+            Operator::Project(ProjectOperator::new(exprs)),
             Childrens::Only(Box::new(join)),
         );
         let original_parent = plan.operator.clone();

@@ -523,9 +523,7 @@ pub(crate) mod tests {
                 force_nested_loop: false,
                 limit_pushed: false,
             }),
-            Operator::Project(ProjectOperator {
-                exprs: vec![expr(9)],
-            }),
+            Operator::Project(ProjectOperator::new(vec![expr(9)])),
             Operator::ScalarSubquery(ScalarSubqueryOperator),
             Operator::TableScan(TableScanOperator {
                 table_name: "t1".into(),
@@ -823,7 +821,7 @@ pub(crate) mod tests {
         }
 
         let right = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: vec![] }),
+            Operator::Project(ProjectOperator::new(vec![])),
             Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
         );
         let join = JoinOperator::build(
@@ -834,7 +832,7 @@ pub(crate) mod tests {
             false,
         );
         let plan = LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: vec![] }),
+            Operator::Project(ProjectOperator::new(vec![])),
             Childrens::Only(Box::new(join)),
         );
         let mut visitor = VisitOrder::default();

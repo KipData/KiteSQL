@@ -81,8 +81,9 @@ use crate::planner::MetaArena;
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
+use crate::types::bitset::BitSet;
 use crate::types::index::RuntimeIndexProbe;
-use crate::types::tuple::{Tuple, TupleLike};
+use crate::types::tuple::{Input, MoveableTuple, Tuple};
 use crate::types::value::DataValue;
 
 #[derive(Clone, Copy)]
@@ -789,23 +790,26 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         std::mem::take(&mut self.result.tuple)
     }
 
-    pub(crate) fn rewrite<E: RewriteExpression, TInput: TupleLike + ?Sized>(
+    pub(crate) fn rewrite<E: RewriteExpression, TInput: Input + ?Sized>(
         &mut self,
         exprs: &[E],
         arena: &dyn MetaArena,
         input: Option<&TInput>,
+        moveable: Option<&BitSet>,
     ) -> Result<(), DatabaseError> {
         let values = &mut self.result.tuple.values;
         let base = values.len();
         values.reserve(exprs.len());
-
+        // SAFETY: only the fixed input prefix is exposed. All output capacity
+        // is reserved before creating the view, and each Cow is owned before
+        // push. No source slice is subsequently materialized or resized.
+        let local = unsafe { MoveableTuple::from_raw_parts(values.as_mut_ptr(), base, moveable) };
         for expr in exprs {
             let value = {
-                let input_values = &values[..base];
                 let expression = expr.expression(arena);
                 match input {
                     Some(input) => expression.eval(arena, Some(input)),
-                    None => expression.eval(arena, Some(&input_values)),
+                    None => expression.eval(arena, Some(&local)),
                 }
                 .map(|value| value.into_owned())
             };

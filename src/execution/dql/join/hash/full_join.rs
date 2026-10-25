@@ -17,16 +17,16 @@ use crate::execution::dql::join::hash::{
     filter, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
 };
 use crate::execution::dql::join::hash_join::BuildState;
-use crate::execution::dql::join::RowBitmap;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
+use crate::types::bitset::BitSet;
 use crate::types::tuple::{SplitTupleRef, Tuple};
 use crate::types::value::DataValue;
 
 pub(crate) struct FullJoinState {
     pub(crate) left_schema_len: usize,
     pub(crate) right_schema_len: usize,
-    pub(crate) bits: RowBitmap,
+    pub(crate) bits: BitSet,
 }
 
 impl JoinProbeState for FullJoinState {

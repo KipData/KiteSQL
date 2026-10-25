@@ -502,9 +502,7 @@ mod tests {
             ty: LogicalType::Integer,
         });
         let recursive = LogicalPlan::new(
-            Operator::Project(ProjectOperator {
-                exprs: vec![project_expr],
-            }),
+            Operator::Project(ProjectOperator::new(vec![project_expr])),
             Childrens::Only(Box::new(filter)),
         );
 

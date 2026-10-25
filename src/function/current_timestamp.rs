@@ -18,7 +18,7 @@ use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::tuple::TupleLike;
+use crate::types::tuple::Input;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use chrono::Utc;
@@ -48,7 +48,7 @@ impl ScalarFunctionImpl for CurrentTimeStamp {
         &self,
         _: &[ExprRef],
         _: &(dyn MetaArena + '_),
-        _: Option<&dyn TupleLike>,
+        _: Option<&dyn Input>,
     ) -> Result<DataValue, DatabaseError> {
         Ok(DataValue::Time64(Utc::now().timestamp(), 0, false))
     }

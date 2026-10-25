@@ -16,10 +16,14 @@ use crate::catalog::{ColumnCatalog, ColumnRef};
 use crate::errors::DatabaseError;
 use crate::iter_ext::Itertools;
 use crate::planner::MetaArena;
+use crate::types::bitset::BitSet;
 use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
 use std::borrow::Borrow;
+use std::borrow::Cow;
+use std::cell::Cell;
 use std::io::Cursor;
+use std::slice::from_raw_parts;
 
 const BITS_MAX_INDEX: usize = 8;
 
@@ -72,6 +76,74 @@ impl<'a, 'p> SchemaView<'a, 'p> {
 
     pub fn position(&self, name: &str) -> Option<usize> {
         self.iter().position(|column| column.name() == name)
+    }
+}
+
+pub trait Input {
+    fn width(&self) -> usize;
+
+    fn column(&self, position: usize) -> Cow<'_, DataValue>;
+}
+
+impl<T: TupleLike + ?Sized> Input for T {
+    fn width(&self) -> usize {
+        TupleLike::len(self)
+    }
+
+    fn column(&self, position: usize) -> Cow<'_, DataValue> {
+        Cow::Borrowed(self.value_at(position))
+    }
+}
+
+// Sized adapter for passing any Input through the object-safe function interface.
+pub(crate) struct InputRef<'a, T: ?Sized>(pub &'a T);
+
+impl<T: Input + ?Sized> Input for InputRef<'_, T> {
+    fn width(&self) -> usize {
+        self.0.width()
+    }
+
+    fn column(&self, position: usize) -> Cow<'_, DataValue> {
+        self.0.column(position)
+    }
+}
+
+pub(crate) struct MoveableTuple<'a> {
+    values: &'a [Cell<DataValue>],
+    moveable: Option<&'a BitSet>,
+}
+
+impl<'a> MoveableTuple<'a> {
+    /// # Safety
+    /// The input prefix must remain allocated and must not be accessed mutably
+    /// outside this view until evaluation finishes. Appended output must not
+    /// reallocate the buffer. Borrowed columns must never be modified.
+    pub(crate) unsafe fn from_raw_parts(
+        values: *mut DataValue,
+        len: usize,
+        moveable: Option<&'a BitSet>,
+    ) -> Self {
+        Self {
+            values: from_raw_parts(values.cast::<Cell<DataValue>>(), len),
+            moveable,
+        }
+    }
+}
+
+impl Input for MoveableTuple<'_> {
+    fn width(&self) -> usize {
+        self.values.len()
+    }
+
+    fn column(&self, position: usize) -> Cow<'_, DataValue> {
+        let value = &self.values[position];
+        if self.moveable.is_some_and(|mask| mask.contains(position)) {
+            Cow::Owned(value.replace(DataValue::Null))
+        } else {
+            // The mask is immutable. Borrowed slots are never written, and
+            // movable slots never return a reference to their contents.
+            Cow::Borrowed(unsafe { &*value.as_ptr() })
+        }
     }
 }
 

@@ -544,6 +544,11 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             HepBatchStrategy::fix_point_topdown(10),
             vec![NormalizationRuleImpl::PushLimitIntoTableScan],
         )
+        .after_batch(
+            "Move Project Inputs",
+            HepBatchStrategy::fix_point_bottomup(1),
+            vec![NormalizationRuleImpl::ProjectMove],
+        )
         .implementations(vec![
             // DQL
             ImplementationRuleImpl::SimpleAggregate,
@@ -1623,9 +1628,7 @@ pub(crate) mod test {
             };
             // Repeating the selected column must not lose an output slot.
             let mut plan = LogicalPlan::new(
-                Operator::Project(ProjectOperator {
-                    exprs: vec![output, output, small],
-                }),
+                Operator::Project(ProjectOperator::new(vec![output, output, small])),
                 Childrens::Only(Box::new(join)),
             );
             let schema = plan.output_schema(&mut arena).clone();
@@ -1692,9 +1695,7 @@ pub(crate) mod test {
             ty: LogicalType::Integer,
         });
         let mut plan = LogicalPlan::new(
-            Operator::Project(ProjectOperator {
-                exprs: vec![computed, small],
-            }),
+            Operator::Project(ProjectOperator::new(vec![computed, small])),
             Childrens::Only(Box::new(join)),
         );
         let schema = plan.output_schema(&mut arena).clone();

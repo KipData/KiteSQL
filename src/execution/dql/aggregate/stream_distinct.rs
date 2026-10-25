@@ -74,7 +74,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a>
                 }
                 return Ok(());
             }
-            arena.rewrite(self.groupby_exprs, plan_arena, None::<&[DataValue]>)?;
+            arena.rewrite(self.groupby_exprs, plan_arena, None::<&[DataValue]>, None)?;
 
             if let Some(last_keys) = &mut self.last_keys {
                 if last_keys.values == arena.result_tuple().values {

@@ -987,14 +987,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 
         if !left_cast.is_empty() {
             left_plan = LogicalPlan::new(
-                Operator::Project(ProjectOperator { exprs: left_cast }),
+                Operator::Project(ProjectOperator::new(left_cast)),
                 Childrens::Only(Box::new(left_plan)),
             );
         }
 
         if !right_cast.is_empty() {
             right_plan = LogicalPlan::new(
-                Operator::Project(ProjectOperator { exprs: right_cast }),
+                Operator::Project(ProjectOperator::new(right_cast)),
                 Childrens::Only(Box::new(right_plan)),
             );
         }
@@ -1950,7 +1950,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         select_list: Vec<ExprRef>,
     ) -> LogicalPlan {
         LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: select_list }),
+            Operator::Project(ProjectOperator::new(select_list)),
             Childrens::Only(Box::new(children)),
         )
     }
