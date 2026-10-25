@@ -15,6 +15,7 @@
 use super::LogicalType;
 use crate::errors::DatabaseError;
 use crate::iter_ext::Itertools;
+use crate::planner::ScalarQueryRef;
 use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};
 use crate::types::evaluator::cast::cast_create;
 use crate::types::CharLengthUnits;
@@ -135,6 +136,10 @@ pub enum DataValue {
     /// A typed placeholder used only while preparing a plan.
     Parameter {
         id: usize,
+        ty: LogicalType,
+    },
+    InitValue {
+        id: ScalarQueryRef,
         ty: LogicalType,
     },
     Null,
@@ -363,6 +368,17 @@ impl PartialEq for DataValue {
                 },
             ) => left == right && left_ty == right_ty,
             (Parameter { .. }, _) => false,
+            (
+                InitValue {
+                    id: left,
+                    ty: left_ty,
+                },
+                InitValue {
+                    id: right,
+                    ty: right_ty,
+                },
+            ) => left == right && left_ty == right_ty,
+            (InitValue { .. }, _) => false,
             (Boolean(v1), Boolean(v2)) => v1.eq(v2),
             (Boolean(_), _) => false,
             (Float32(v1), Float32(v2)) => v1.eq(v2),
@@ -456,7 +472,7 @@ impl PartialOrd for DataValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         use DataValue::*;
         match (self, other) {
-            (Parameter { .. }, _) => None,
+            (Parameter { .. }, _) | (InitValue { .. }, _) => None,
             (Boolean(v1), Boolean(v2)) => v1.partial_cmp(v2),
             (Boolean(_), _) => None,
             (Float32(v1), Float32(v2)) => v1.partial_cmp(v2),
@@ -525,6 +541,11 @@ impl Hash for DataValue {
         match self {
             Parameter { id, ty } => {
                 19u8.hash(state);
+                id.hash(state);
+                ty.hash(state);
+            }
+            InitValue { id, ty } => {
+                20u8.hash(state);
                 id.hash(state);
                 ty.hash(state);
             }
@@ -676,30 +697,46 @@ impl DataValue {
         digits.parse().ok()
     }
 
-    pub(crate) fn bind_parameters<'p, F>(&mut self, get: &F) -> Result<(), DatabaseError>
+    pub(crate) fn bind_parameters<'p, F, G>(
+        &mut self,
+        params: &F,
+        init_values: &G,
+    ) -> Result<bool, DatabaseError>
     where
         F: Fn(usize) -> Option<&'p DataValue>,
+        G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
     {
         match self {
             DataValue::Parameter { id, ty } => {
-                let Some(input) = get(*id) else {
+                let Some(input) = params(*id) else {
                     return Err(DatabaseError::parameter_not_found(format!("${id}")));
                 };
                 *self = input.clone().cast(ty)?;
+                Ok(false)
+            }
+            DataValue::InitValue { id, ty } => {
+                let Some(input) = init_values(*id) else {
+                    return Err(DatabaseError::InvalidValue(format!(
+                        "scalar query {id} is not initialized"
+                    )));
+                };
+                *self = input.clone().cast(ty)?;
+                Ok(self.is_null())
             }
             DataValue::Tuple(values) => {
+                let mut has_null = false;
                 for value in values {
-                    value.bind_parameters(get)?;
+                    has_null |= value.bind_parameters(params, init_values)?;
                 }
+                Ok(has_null)
             }
-            _ => {}
+            _ => Ok(false),
         }
-        Ok(())
     }
 
     pub(crate) fn has_parameter(&self) -> bool {
         match self {
-            DataValue::Parameter { .. } => true,
+            DataValue::Parameter { .. } | DataValue::InitValue { .. } => true,
             DataValue::Tuple(values) => values.iter().any(Self::has_parameter),
             _ => false,
         }
@@ -707,7 +744,7 @@ impl DataValue {
 
     pub(crate) fn serialized_len_hint(&self) -> usize {
         match self {
-            DataValue::Parameter { .. } => 0,
+            DataValue::Parameter { .. } | DataValue::InitValue { .. } => 0,
             DataValue::Null => 0,
             DataValue::Boolean(_) | DataValue::Int8(_) | DataValue::UInt8(_) => 1,
             DataValue::Int16(_) | DataValue::UInt16(_) => 2,
@@ -992,7 +1029,7 @@ impl DataValue {
     #[inline]
     pub fn logical_type(&self) -> LogicalType {
         match self {
-            DataValue::Parameter { ty, .. } => ty.clone(),
+            DataValue::Parameter { ty, .. } | DataValue::InitValue { ty, .. } => ty.clone(),
             DataValue::Null => LogicalType::SqlNull,
             DataValue::Boolean(_) => LogicalType::Boolean,
             DataValue::Float32(_) => LogicalType::Float,
@@ -1166,7 +1203,7 @@ impl DataValue {
         b.push_byte(not_null_tag);
 
         match self {
-            DataValue::Parameter { .. } => {
+            DataValue::Parameter { .. } | DataValue::InitValue { .. } => {
                 return Err(DatabaseError::InvalidValue(
                     "unbound parameter reached storage encoding".to_string(),
                 ));
@@ -1580,6 +1617,9 @@ impl DataValue {
             (DataValue::Parameter { id, .. }, ty) => {
                 Ok(DataValue::Parameter { id, ty: ty.clone() })
             }
+            (DataValue::InitValue { id, .. }, ty) => {
+                Ok(DataValue::InitValue { id, ty: ty.clone() })
+            }
             (DataValue::Null, _) => Ok(DataValue::Null),
             (value, _) => {
                 let evaluator = cast_create(&from, to)?;
@@ -1902,6 +1942,7 @@ impl fmt::Display for DataValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             DataValue::Parameter { id, .. } => write!(f, "${id}")?,
+            DataValue::InitValue { id, .. } => write!(f, "InitValue({id})")?,
             DataValue::Boolean(e) => write!(f, "{e}")?,
             DataValue::Float32(e) => format_float_option!(f, e)?,
             DataValue::Float64(e) => format_float_option!(f, e)?,
@@ -1979,6 +2020,7 @@ impl fmt::Debug for DataValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             DataValue::Parameter { ty, .. } => write!(f, "Parameter({self}: {ty})"),
+            DataValue::InitValue { ty, .. } => write!(f, "{self}: {ty}"),
             DataValue::Boolean(_) => write!(f, "Boolean({self})"),
             DataValue::Float32(_) => write!(f, "Float32({self})"),
             DataValue::Float64(_) => write!(f, "Float64({self})"),

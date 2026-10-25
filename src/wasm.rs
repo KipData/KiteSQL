@@ -33,8 +33,8 @@ fn set_prop(object: &Object, key: &str, value: JsValue) -> Result<(), JsValue> {
 
 fn data_value_to_js(value: &DataValue) -> Result<JsValue, JsValue> {
     match value {
-        DataValue::Parameter { id, .. } => Err(to_js_err(format!(
-            "unbound parameter ${id} reached WASM output"
+        DataValue::Parameter { .. } | DataValue::InitValue { .. } => Err(to_js_err(format!(
+            "unbound parameter {value} reached WASM output"
         ))),
         DataValue::Null => Ok(JsValue::NULL),
         DataValue::Boolean(value) => Ok(JsValue::from_bool(*value)),

@@ -97,9 +97,9 @@ impl DataValue {
         writer: &mut W,
     ) -> Result<(), DatabaseError> {
         match self {
-            DataValue::Parameter { .. } => Err(DatabaseError::InvalidValue(
-                "unbound parameter cannot be serialized".to_string(),
-            )),
+            DataValue::Parameter { .. } | DataValue::InitValue { .. } => Err(
+                DatabaseError::InvalidValue("unbound parameter cannot be serialized".to_string()),
+            ),
             DataValue::Null => write_u8(writer, TAG_NULL),
             DataValue::Boolean(value) => {
                 write_u8(writer, TAG_BOOLEAN)?;

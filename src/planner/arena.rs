@@ -1143,11 +1143,14 @@ impl<'a> ParamArena<'a> {
             };
             let id = *id;
             let mut value = value.clone();
-            value.bind_parameters(&|id| {
-                params
-                    .iter()
-                    .find_map(|(candidate, value)| (*candidate == id).then_some(value))
-            })?;
+            value.bind_parameters(
+                &|id| {
+                    params
+                        .iter()
+                        .find_map(|(candidate, value)| (*candidate == id).then_some(value))
+                },
+                &|_| None,
+            )?;
             expressions.push((Some(id), ArenaExpr::new(ScalarExpression::Constant(value))));
         }
         Ok(Self {
@@ -1191,12 +1194,17 @@ impl MetaArena for ParamArena<'_> {
         true
     }
     fn bound_param(&self, id: usize) -> Option<&DataValue> {
-        self.expressions
-            .iter()
-            .find_map(|(slot, expr)| match (slot, &expr.expression) {
-                (Some(slot), ScalarExpression::Constant(value)) if *slot == id => Some(value),
-                _ => None,
-            })
+        for (slot, expr) in &self.expressions {
+            let Some(slot) = slot else {
+                return None;
+            };
+            if *slot == id {
+                if let ScalarExpression::Constant(value) = &expr.expression {
+                    return Some(value);
+                }
+            }
+        }
+        None
     }
     fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         self.parent.column(column)

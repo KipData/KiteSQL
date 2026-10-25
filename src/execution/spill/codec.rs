@@ -164,7 +164,7 @@ impl SpillCodec for DataValue {
     fn encoded_len(&self) -> Result<usize, DatabaseError> {
         use crate::types::value::Utf8Type;
         let payload = match self {
-            DataValue::Parameter { .. } => {
+            DataValue::Parameter { .. } | DataValue::InitValue { .. } => {
                 return Err(DatabaseError::InvalidValue(
                     "unbound parameter cannot be serialized".into(),
                 ))

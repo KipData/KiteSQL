@@ -54,11 +54,13 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
             IndexLookup::Probe => Cow::Owned(arena.pop_runtime_probe().into()),
         };
 
-        if plan_arena.has_bound_params() && range.has_parameter() {
+        if range.has_parameter() {
             let plan_arena = &*plan_arena;
             range
                 .to_mut()
-                .bind_parameters(&|id| plan_arena.bound_param(id))?;
+                .bind_parameters(&|id| plan_arena.bound_param(id), &|id| {
+                    plan_arena.init_value(id)
+                })?;
         }
         if let (
             Some(predicate),

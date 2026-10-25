@@ -209,7 +209,9 @@ fn bind_params(statement: &mut SqliteStatement<'_>, params: &[DbParam]) -> Resul
 
 fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
     Ok(match value {
-        DataValue::Parameter { .. } => return Err(TpccError::InvalidParameter),
+        DataValue::Parameter { .. } | DataValue::InitValue { .. } => {
+            return Err(TpccError::InvalidParameter)
+        }
         DataValue::Null => Value::Null,
         DataValue::Boolean(v) => Value::Integer(*v as i64),
         DataValue::Float32(v) => Value::Float(v.0 as f64),

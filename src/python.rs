@@ -34,9 +34,9 @@ fn to_py_err(err: impl ToString) -> PyErr {
 #[allow(deprecated)]
 fn data_value_to_py(py: Python<'_>, value: &DataValue) -> PyResult<PyObject> {
     let object = match value {
-        DataValue::Parameter { id, .. } => {
+        DataValue::Parameter { .. } | DataValue::InitValue { .. } => {
             return Err(PyRuntimeError::new_err(format!(
-                "unbound parameter ${id} reached Python output"
+                "unbound parameter {value} reached Python output"
             )));
         }
         DataValue::Null => py.None(),
