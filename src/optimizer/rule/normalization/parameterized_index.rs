@@ -299,7 +299,20 @@ fn constant_keys(expr: ExprRef, keys: &mut Vec<(ExprRef, ExprRef)>, arena: &Plan
 pub(crate) struct ProbeIndex {
     position: usize,
     pub(crate) probe: Vec<ExprRef>,
+    probed_keys: u64,
     pub(crate) lookup_work: usize,
+}
+
+#[inline]
+fn mark_probed(probed_keys: &mut u64, position: usize) {
+    if position < u64::BITS as usize {
+        *probed_keys |= 1 << position;
+    }
+}
+
+#[inline]
+fn is_probed(probed_keys: u64, position: usize) -> bool {
+    position < u64::BITS as usize && probed_keys & (1 << position) != 0
 }
 
 pub(crate) fn probe_index(
@@ -328,6 +341,7 @@ pub(crate) fn probe_index(
                 }
                 probe.clear();
                 let mut uses_join_key = false;
+                let mut probed_keys = 0u64;
                 'columns: for id in &meta.column_ids {
                     let Some(candidate) = scan
                         .columns
@@ -347,7 +361,10 @@ pub(crate) fn probe_index(
                                 == arena.column(*candidate).datatype()
                         {
                             probe.push(value);
-                            uses_join_key |= position < join_key_count;
+                            if position < join_key_count {
+                                uses_join_key = true;
+                                mark_probed(&mut probed_keys, position);
+                            }
                             continue 'columns;
                         }
                     }
@@ -367,6 +384,7 @@ pub(crate) fn probe_index(
                     best = Some(ProbeIndex {
                         position,
                         probe: mem::take(&mut probe),
+                        probed_keys,
                         lookup_work,
                     });
                 }
@@ -430,7 +448,7 @@ fn use_probe_index(plan: &mut LogicalPlan, position: usize, arena: &PlanArena<'_
 }
 
 /// Builds the inner `MarkApply` probing `right` with `index` for every `left` row. `on` holds
-/// the join keys bound to each side; all of them are still checked after the probe.
+/// the join keys bound to each side; keys not used by the probe are checked after it.
 pub(crate) fn probe_join(
     mut left: LogicalPlan,
     mut right: LogicalPlan,
@@ -447,7 +465,10 @@ pub(crate) fn probe_join(
         arena.alloc_expression(ScalarExpression::Tuple(index.probe))
     };
     let mut predicates = Vec::with_capacity(on.len());
-    for (left_expr, mut right_expr) in on {
+    for (i, (left_expr, mut right_expr)) in on.into_iter().enumerate() {
+        if is_probed(index.probed_keys, i) {
+            continue;
+        }
         PositionShift {
             delta: left_len as isize,
         }

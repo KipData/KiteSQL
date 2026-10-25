@@ -65,6 +65,15 @@ pub enum RuntimeIndexProbe {
     },
 }
 
+impl From<RuntimeIndexProbe> for Range {
+    fn from(probe: RuntimeIndexProbe) -> Self {
+        match probe {
+            RuntimeIndexProbe::Eq(value) => Range::Eq(value),
+            RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub enum IndexLookup {
     Static(Range),

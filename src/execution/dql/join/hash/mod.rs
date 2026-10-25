@@ -141,15 +141,15 @@ pub(crate) fn join_rows(
     probe: &mut TupleImpl,
     consume_probe: bool,
 ) -> TupleImpl {
+    if consume_probe {
+        let pk = build.pk().cloned().or_else(|| probe.take_pk());
+        let mut row = std::mem::take(probe);
+        row.prepend(build.iter().cloned());
+        row.set_pk(pk);
+        return row;
+    }
     let mut values = Vec::with_capacity(build.len() + probe.len());
     values.extend(build.iter().cloned());
-    let pk = if consume_probe {
-        let pk = build.pk().cloned().or_else(|| probe.take_pk());
-        probe.drain_values(|value| values.push(value));
-        pk
-    } else {
-        values.extend(probe.iter().cloned());
-        build.pk().or(probe.pk()).cloned()
-    };
-    Tuple::new(pk, values).into()
+    values.extend(probe.iter().cloned());
+    Tuple::new(build.pk().or(probe.pk()).cloned(), values).into()
 }

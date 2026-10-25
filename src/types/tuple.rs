@@ -420,11 +420,9 @@ impl TupleImpl {
                 let count = tuple.values.len() - len;
                 tuple.values.rotate_right(count);
             }
-            TupleImpl::Concat(_) => {
-                let pk = self.take_pk();
-                let rest = std::mem::take(self);
-                let head = Tuple::new(None, values.into_iter().collect());
-                *self = TupleImpl::concat(head.into(), rest, pk);
+            TupleImpl::Concat(concat) => {
+                concat.left.prepend(values);
+                concat.left_len = concat.left.len();
             }
         }
     }

@@ -35,7 +35,7 @@ use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNul
 use crate::planner::{MetaArena, TableArenaCell};
 use crate::serdes::ReferenceTables;
 use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
-use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
+use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType, RuntimeIndexProbe};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId, TupleImpl, TupleLike};
 use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef};
@@ -2162,9 +2162,22 @@ pub enum IndexIterState<'a, T: Transaction + 'a> {
 
 impl<'a, T: Transaction> IndexIter<'a, T> {
     pub(crate) fn reset(&mut self, ranges: IndexRanges<'a>, bounds: Bounds) {
-        self.state = IndexIterState::Init;
         self.params.reverse = ranges.reverse;
         self.ranges = ranges;
+        self.rewind(bounds);
+    }
+
+    pub(crate) fn reset_probe(&mut self, probe: RuntimeIndexProbe, bounds: Bounds) {
+        match (&mut self.ranges.source, probe) {
+            (RangeSource::Owned(Range::Eq(value)), RuntimeIndexProbe::Eq(probe)) => *value = probe,
+            (source, probe) => *source = RangeSource::Owned(probe.into()),
+        }
+        self.rewind(bounds);
+    }
+
+    pub(crate) fn rewind(&mut self, bounds: Bounds) {
+        self.state = IndexIterState::Init;
+        self.ranges.next = 0;
         self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
     }
 }

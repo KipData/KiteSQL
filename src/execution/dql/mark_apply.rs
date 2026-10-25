@@ -208,6 +208,10 @@ impl<'a> MarkApply<'a> {
         while arena.next_tuple(self.left_input, plan_arena)? {
             let mut left = arena.take_tuple();
             let value = self.parameterized_probe_value(&left, plan_arena)?;
+            if value.as_ref().is_some_and(DataValue::has_null) {
+                arena.release(left);
+                continue;
+            }
             let root = input.reset(arena, plan_arena, self.runtime_probe_for(value))?;
             // A full unique-key probe cannot have another match, so consume the left row.
             if arena.next_tuple(root, plan_arena)?

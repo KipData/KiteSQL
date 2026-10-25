@@ -14,12 +14,12 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
-use crate::expression::range_detacher::{IndexRangeColumn, Range, RangeDetacher};
+use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::SortOption;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::{IndexIter, IndexRanges, Iter, Transaction};
-use crate::types::index::{IndexInfo, IndexLookup, RuntimeIndexProbe};
+use crate::types::index::{IndexInfo, IndexLookup};
 use std::borrow::Cow;
 
 pub(crate) struct IndexScan<'a, T: Transaction + 'a> {
@@ -51,10 +51,7 @@ impl<'a, T: Transaction + 'a> IndexScan<'a, T> {
     ) -> Result<IndexRanges<'a>, DatabaseError> {
         let mut range = match lookup {
             IndexLookup::Static(range) => Cow::Borrowed(range),
-            IndexLookup::Probe => Cow::Owned(match arena.pop_runtime_probe() {
-                RuntimeIndexProbe::Eq(value) => Range::Eq(value),
-                RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max },
-            }),
+            IndexLookup::Probe => Cow::Owned(arena.pop_runtime_probe().into()),
         };
 
         if plan_arena.has_bound_params() && range.has_parameter() {
@@ -105,8 +102,16 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for IndexScan<'a, T> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if let Some(iter) = self.iter.as_mut() {
-            let ranges = Self::ranges(self.info, self.lookup, arena, plan_arena)?;
-            iter.reset(ranges, self.op.limit);
+            match self.lookup {
+                IndexLookup::Static(_) => iter.rewind(self.op.limit),
+                IndexLookup::Probe if self.info.residual_predicate.is_none() => {
+                    iter.reset_probe(arena.pop_runtime_probe(), self.op.limit)
+                }
+                IndexLookup::Probe => {
+                    let ranges = Self::ranges(self.info, self.lookup, arena, plan_arena)?;
+                    iter.reset(ranges, self.op.limit);
+                }
+            }
         }
         Ok(())
     }
@@ -163,6 +168,7 @@ mod tests {
     use crate::storage::memory::MemoryStorage;
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
+    use crate::types::index::RuntimeIndexProbe;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;

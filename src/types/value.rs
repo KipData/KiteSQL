@@ -885,6 +885,14 @@ impl DataValue {
     }
 
     #[inline]
+    pub fn has_null(&self) -> bool {
+        match self {
+            DataValue::Tuple(values) => values.iter().any(DataValue::has_null),
+            value => value.is_null(),
+        }
+    }
+
+    #[inline]
     pub fn init(logic_type: &LogicalType) -> DataValue {
         match logic_type {
             LogicalType::SqlNull => DataValue::Null,
