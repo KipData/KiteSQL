@@ -57,6 +57,50 @@ select * from t
 statement ok
 drop table t;
 
+# REPLACE spellings share INSERT OVERWRITE semantics for VALUES and queries.
+statement ok
+create table t_replace(id int primary key, v varchar(16) default 'default')
+
+statement ok
+insert into t_replace values (1, 'original')
+
+statement ok
+insert or replace into t_replace values (1, 'or replace'), (2, 'new')
+
+query IT
+select * from t_replace order by id
+----
+1 or replace
+2 new
+
+statement ok
+replace into t_replace values (1, 'replace')
+
+statement ok
+insert or replace into t_replace select 2, 'query replace'
+
+statement ok
+replace into t_replace select 3, 'query new'
+
+statement ok
+replace into t_replace(id) values (1)
+
+statement error
+insert or replace into t_replace values (2, 'insert or replace')
+
+statement error
+insert into t_replace values (2, 'duplicate')
+
+query IT
+select * from t_replace order by id
+----
+1 default
+2 query replace
+3 query new
+
+statement ok
+drop table t_replace
+
 statement ok
 create table t1(id int primary key, v1 bigint default 233)
 

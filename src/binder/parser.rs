@@ -48,8 +48,9 @@ pub(super) use sqlparser::ast::{
     FunctionArguments, GroupByExpr, Ident, IndexColumn, IndexOption, IndexType, Join,
     JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart, ObjectType, OrderByExpr,
     OrderByKind, Query, Select, SelectInto, SelectItem, SelectItemQualifiedWildcardKind, SetExpr,
-    SetOperator, SetQuantifier, Spanned, TableAlias, TableConstraint, TableFactor, TableObject,
-    TableWithJoins, TypedString, UnaryOperator, Value, ValueWithSpan, WindowType,
+    SetOperator, SetQuantifier, Spanned, SqliteOnConflict, TableAlias, TableConstraint,
+    TableFactor, TableObject, TableWithJoins, TypedString, UnaryOperator, Value, ValueWithSpan,
+    WindowType,
 };
 #[cfg(feature = "copy")]
 pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
@@ -1023,9 +1024,13 @@ where
             table,
             columns,
             overwrite,
+            or,
+            replace_into,
             source,
             ..
         } = insert;
+        let is_overwrite =
+            *overwrite || *replace_into || matches!(or, Some(SqliteOnConflict::Replace));
         let table_name = match table {
             TableObject::TableName(table_name) => table_name.clone(),
             TableObject::TableFunction(_) => {
@@ -1039,9 +1044,9 @@ where
             DatabaseError::UnsupportedStmt("insert without source is not supported".to_string())
         })?;
         if let SetExpr::Values(values) = source.body.as_ref() {
-            self.insert_values(table_name, columns, &values.rows, *overwrite, false)
+            self.insert_values(table_name, columns, &values.rows, is_overwrite, false)
         } else {
-            self.insert_query(table_name, columns, source, *overwrite)
+            self.insert_query(table_name, columns, source, is_overwrite)
         }
     }
 
