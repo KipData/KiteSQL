@@ -19,98 +19,34 @@ use crate::expression::ScalarExpression;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::scan_column;
+use crate::optimizer::rule::normalization::parameterized_index::{
+    probe_index, probe_join, ProbeIndex,
+};
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::{
     rows_work, InputCost, JoinImpl, Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
+    DEFAULT_TABLE_ROWS,
 };
 use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
 use crate::types::tuple::Schema;
 use std::borrow::Borrow;
-use std::collections::{btree_map::Entry, BTreeMap, HashMap};
+use std::collections::{btree_map::Entry, BTreeMap};
 use std::mem::swap;
 
 pub(crate) struct GreedyJoinReorder;
-pub(crate) struct OrientNestedLoopJoin;
 
-impl NormalizationRule for OrientNestedLoopJoin {
-    fn apply(
-        &self,
-        plan: &mut LogicalPlan,
-        arena: &mut PlanArena,
-        _loader: Option<&StatisticMetaLoader<'_>>,
-    ) -> Result<bool, DatabaseError> {
-        let (
-            Operator::Join(JoinOperator {
-                join_type: JoinType::Cross,
-                on: JoinCondition::None,
-                limit_pushed: false,
-                ..
-            }),
-            Childrens::Twins { left, right },
-            Some(PhysicalOption {
-                plan: PlanImpl::NestLoopJoin,
-                ..
-            }),
-        ) = (
-            &plan.operator,
-            plan.childrens.as_mut(),
-            plan.physical_option.as_ref(),
-        )
-        else {
-            return Ok(false);
-        };
-        let (Some(left_startup), Some(right_startup)) = (
-            left.estimated_startup_work(arena)?,
-            right.estimated_startup_work(arena)?,
-        ) else {
-            return Ok(false);
-        };
-        let should_swap = match (left.estimated_rows(), right.estimated_rows()) {
-            (Some(left_rows), Some(right_rows)) => {
-                if left_rows == 0 {
-                    false
-                } else if right_rows == 0 {
-                    true
-                } else {
-                    let (Some(left), Some(right)) =
-                        (left.estimated_cost(arena)?, right.estimated_cost(arena)?)
-                    else {
-                        return Ok(false);
-                    };
-                    // Both directions emit the same output, so it is left out of the comparison.
-                    let nest_loop = JoinImpl::NestLoop { full: false };
-                    nest_loop.work(&right, &left, 0, 0) < nest_loop.work(&left, &right, 0, 0)
-                }
-            }
-            (Some(0 | 1), None) => false,
-            _ => right_startup > left_startup,
-        };
-        if !should_swap {
-            return Ok(false);
-        }
-        let left_len = left.output_schema(arena).len();
-        let original_schema = plan.output_schema(arena).clone();
-        for (index, column) in original_schema.iter().enumerate() {
-            if original_schema[index + 1..]
-                .iter()
-                .any(|other| arena.same_column(*column, *other))
-            {
-                return Ok(false);
-            }
-        }
-        let mut join = plan.take();
-        let Childrens::Twins { left, right } = join.childrens.as_mut() else {
-            unreachable!()
-        };
-        swap(left, right);
-        join.reset_output_schema_cache();
-        join.clear_startup_work();
-        let right_len = original_schema.len() - left_len;
-        let positions = (right_len..original_schema.len()).chain(0..right_len);
-        *plan = project_join_output(join, original_schema, positions, arena);
-        Ok(true)
+/// Whether a cross nested loop should drive from its right input.
+fn nest_loop_swap(left: &InputCost, right: &InputCost) -> bool {
+    if left.rows == 0 {
+        false
+    } else if right.rows == 0 {
+        true
+    } else {
+        // Both directions emit the same output, so it is left out of the comparison.
+        let nest_loop = JoinImpl::NestLoop { full: false };
+        nest_loop.work(right, left, 0, 0) < nest_loop.work(left, right, 0, 0)
     }
 }
 
@@ -146,11 +82,12 @@ fn project_join_output(
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct JoinCandidate {
     cross_join: bool,
-    work: usize,
+    work: i128,
     rows: usize,
     left: usize,
     right: usize,
     swapped: bool,
+    probe: bool,
 }
 
 fn column_ndv<K: Borrow<(ExprRef, ExprRef)>>(
@@ -349,29 +286,31 @@ fn join_rows<I: Iterator<Item = (ExprRef, ExprRef)>>(
     estimate_join_rows(left_estimate, right_estimate)
 }
 
-fn can_expand(plan: &LogicalPlan) -> bool {
+// A region only spans joins sharing the `FORCE_NEST_LOOP_JOIN` setting of its root.
+fn can_expand(plan: &LogicalPlan, forced: bool) -> bool {
     let Operator::Join(JoinOperator {
         join_type,
         on,
-        force_nested_loop: false,
+        force_nested_loop,
         limit_pushed: false,
     }) = &plan.operator
     else {
         return false;
     };
-    matches!((join_type, on), (JoinType::Cross, JoinCondition::None))
-        || matches!((join_type, on),
-            (JoinType::Inner, JoinCondition::On { on, filter: None }) if !on.is_empty())
+    *force_nested_loop == forced
+        && (matches!((join_type, on), (JoinType::Cross, JoinCondition::None))
+            || matches!((join_type, on),
+                (JoinType::Inner, JoinCondition::On { on, filter: None }) if !on.is_empty()))
 }
 
 // Counts a region's inputs and reports whether it already contains a Cartesian product.
-fn region_shape(plan: &LogicalPlan) -> (usize, bool) {
-    if !can_expand(plan) {
+fn region_shape(plan: &LogicalPlan, forced: bool) -> (usize, bool) {
+    if !can_expand(plan, forced) {
         return (1, false);
     }
     let (left, right) = plan.childrens.twins();
-    let (left_inputs, left_cross) = region_shape(left);
-    let (right_inputs, right_cross) = region_shape(right);
+    let (left_inputs, left_cross) = region_shape(left, forced);
+    let (right_inputs, right_cross) = region_shape(right, forced);
     let cross = matches!(
         &plan.operator,
         Operator::Join(JoinOperator {
@@ -393,8 +332,9 @@ fn inspect<'plan>(
     keys: &mut JoinKeys,
     arena: &mut PlanArena,
     loader: Option<&StatisticMetaLoader<'_>>,
+    forced: bool,
 ) -> Result<Option<usize>, DatabaseError> {
-    if can_expand(plan) {
+    if can_expand(plan, forced) {
         let (Operator::Join(join), Childrens::Twins { left, right }) =
             (&plan.operator, plan.childrens.as_mut())
         else {
@@ -408,9 +348,9 @@ fn inspect<'plan>(
         };
         let ndvs = column_ndv(left, right, on.iter().copied(), loader, arena)?;
         let start = schemas.len();
-        let left_rows = inspect(left, schemas, keys, arena, loader)?;
+        let left_rows = inspect(left, schemas, keys, arena, loader, forced)?;
         let middle = schemas.len();
-        let right_rows = inspect(right, schemas, keys, arena, loader)?;
+        let right_rows = inspect(right, schemas, keys, arena, loader, forced)?;
 
         for &(left, right) in on {
             let mut endpoints = [None, None];
@@ -474,7 +414,7 @@ fn inspect<'plan>(
                     rows: rows,
                     ndv: None,
                 };
-                option.startup_work = None;
+                option.cost = None;
             }
         }
         Ok(Some(rows))
@@ -485,14 +425,14 @@ fn inspect<'plan>(
     }
 }
 
-fn flatten(plan: LogicalPlan, inputs: &mut Vec<(LogicalPlan, usize, u64)>) {
-    if can_expand(&plan) {
+fn flatten(plan: LogicalPlan, inputs: &mut Vec<(LogicalPlan, usize, u64)>, forced: bool) {
+    if can_expand(&plan, forced) {
         let (left, right) = plan.childrens.pop_twins();
-        flatten(left, inputs);
-        flatten(right, inputs);
+        flatten(left, inputs, forced);
+        flatten(right, inputs, forced);
     } else {
-        // Unused when the region is not fully estimated.
-        let rows = plan.estimated_rows().unwrap_or(0);
+        // Without statistics an input is assumed to have the default rows (RFC 0001 §3.9).
+        let rows = plan.estimated_rows().unwrap_or(DEFAULT_TABLE_ROWS);
         let mask = 1u64 << inputs.len();
         inputs.push((plan, rows, mask));
     }
@@ -535,13 +475,6 @@ impl JoinKeys {
             .get(&(left, right))
             .into_iter()
             .flat_map(|&id| self.on_keys[id].iter().copied())
-    }
-
-    fn pairs(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.links
-            .keys()
-            .copied()
-            .filter(|(left, right)| left < right)
     }
 
     fn take(&mut self, left: u64, right: u64) -> Vec<(ExprRef, ExprRef)> {
@@ -612,32 +545,61 @@ impl NormalizationRule for GreedyJoinReorder {
         arena: &mut PlanArena,
         loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
-        if !matches!(&plan.operator, Operator::Join(join) if join.join_type == JoinType::Inner)
-            || !can_expand(plan)
+        if plan
+            .physical_option
+            .as_ref()
+            .is_some_and(|option| option.join_decided)
         {
             return Ok(false);
         }
-        let (input_count, _) = region_shape(plan);
+        // `FORCE_NEST_LOOP_JOIN` regions are reordered too, but only with nested loops.
+        let forced = matches!(
+            &plan.operator,
+            Operator::Join(JoinOperator {
+                force_nested_loop: true,
+                ..
+            })
+        );
+        if !can_expand(plan, forced) {
+            return Ok(false);
+        }
+        let (input_count, _) = region_shape(plan, forced);
         if input_count > u64::BITS as usize {
             return Ok(false);
         }
         let original_schema = plan.output_schema(arena).clone();
         let mut schemas = Vec::new();
         let mut keys = JoinKeys::default();
-        let estimated = inspect(plan, &mut schemas, &mut keys, arena, loader)?.is_some();
-        // Unknown row counts remain unknown; only column widths break their ties.
-        // Two-input regions also need to choose the smaller hash build side.
+        // Inputs without statistics are priced with default rows, but joins built from them keep
+        // an unknown row count for later rules.
+        let estimated = inspect(plan, &mut schemas, &mut keys, arena, loader, forced)?.is_some();
         // Each original column keeps its input bit and position within its current join.
         let mut positions = Vec::with_capacity(original_schema.len());
         for (input, schema) in schemas.iter().enumerate() {
             positions.extend((0..schema.len()).map(|position| (1u64 << input, position)));
         }
         let mut inputs = Vec::with_capacity(schemas.len());
-        flatten(plan.take(), &mut inputs);
-        let mut row_cache = HashMap::new();
+        flatten(plan.take(), &mut inputs, forced);
+        let mut probe_keys = Vec::new();
+        // Left-deep: start from the smallest input (cheapest to read on ties), then add one
+        // remaining input per step, so every input stays a leaf until it joins and can still be
+        // probed (RFC 0001 §3.2).
+        let mut current = 0;
+        let mut start = (usize::MAX, usize::MAX);
+        for (i, (input, rows, _)) in inputs.iter_mut().enumerate() {
+            let work = input
+                .estimated_cost(arena)?
+                .map_or(usize::MAX, |cost| cost.work);
+            if (*rows, work) < start {
+                (start, current) = ((*rows, work), i);
+            }
+        }
         while inputs.len() > 1 {
             let mut best: Option<JoinCandidate> = None;
-            let connected = !keys.links.is_empty();
+            // The index chosen for `best` when it probes, kept to build the probe without a re-search.
+            let mut best_probe: Option<ProbeIndex> = None;
+            // A result of at most one row may take a Cartesian product before an equijoin.
+            let single = inputs[current].1 <= 1;
             let mut evaluate = |inputs: &mut [(LogicalPlan, usize, u64)],
                                 i: usize,
                                 j: usize|
@@ -645,20 +607,15 @@ impl NormalizationRule for GreedyJoinReorder {
                 let (prefix, suffix) = inputs.split_at_mut(j);
                 let (left, left_rows, left_mask) = &mut prefix[i];
                 let (right, right_rows, right_mask) = &mut suffix[0];
-                // This pair's inputs and keys stay fixed until either input is merged.
-                let cache_key = (*left_mask, *right_mask);
                 let candidate_keys = || keys.get(*left_mask, *right_mask);
-                let product = if !estimated {
-                    0
-                } else if let Some(rows) = row_cache.get(&cache_key) {
-                    *rows
-                } else {
+                // Left-deep evaluates each pair once, so the estimate is not cached.
+                let product = {
                     let ndvs = column_ndv(left, right, candidate_keys(), loader, arena)?;
                     let left_stats = index_statistics(left);
                     let right_stats = index_statistics(right);
                     let left_schema = left.output_schema(arena);
                     let right_schema = right.output_schema(arena);
-                    let rows = join_rows(
+                    join_rows(
                         &JoinInputStatistics {
                             rows: *left_rows,
                             schema: left_schema,
@@ -672,77 +629,105 @@ impl NormalizationRule for GreedyJoinReorder {
                         &candidate_keys,
                         ndvs,
                         arena,
-                    );
-                    row_cache.insert(cache_key, rows);
-                    rows
+                    )
                 };
-                // Without cardinalities every input counts as one row, so widths break ties.
-                let input_cost = |input: &mut LogicalPlan, arena: &mut PlanArena| {
-                    let cost = if estimated {
-                        input.estimated_cost(arena)?
-                    } else {
-                        None
-                    };
-                    Ok::<_, DatabaseError>(cost.unwrap_or_else(|| {
-                        let width = input.output_schema(arena).len();
-                        InputCost {
-                            rows: 1,
-                            width,
-                            work: rows_work(1, width),
+                let connected = candidate_keys().next().is_some();
+                let hash = connected && !forced;
+                // An input without a complete estimate is read once at its (default) rows.
+                let input_cost = |input: &mut LogicalPlan, rows: usize, arena: &mut PlanArena| {
+                    Ok::<_, DatabaseError>(match input.estimated_cost(arena)? {
+                        Some(cost) => cost,
+                        None => {
+                            let width = input.output_schema(arena).len();
+                            InputCost {
+                                rows,
+                                width,
+                                work: rows_work(rows, width),
+                            }
                         }
-                    }))
+                    })
                 };
-                let (left, right) = (input_cost(left, arena)?, input_cost(right, arena)?);
-                let out_rows = if estimated { product } else { 1 };
-                let implementation = if connected {
-                    JoinImpl::Hash
-                } else {
-                    JoinImpl::NestLoop { full: false }
-                };
+                let (left_cost, right_cost) = (
+                    input_cost(left, *left_rows, arena)?,
+                    input_cost(right, *right_rows, arena)?,
+                );
+                let nest_loop_swapped = !hash && nest_loop_swap(&left_cost, &right_cost);
+                let out_rows = product;
                 // Every input is read once in any order, so only this step's work is compared.
-                let step = |left: &InputCost, right: &InputCost| {
-                    implementation
-                        .work(left, right, out_rows, left.width + right.width)
-                        .saturating_sub(left.work)
-                        .saturating_sub(right.work)
+                // A probe never reads its inner input, so its step can be negative.
+                let step =
+                    |implementation: JoinImpl, outer: &InputCost, inner: &InputCost, rows| {
+                        implementation.work(outer, inner, rows, outer.width + inner.width) as i128
+                            - outer.work as i128
+                            - inner.work as i128
+                    };
+                // (work, rows, swapped, probe index); the left input is the hash build side and the
+                // nested loop / probe outer side.
+                let shape = if hash {
+                    let keep = step(JoinImpl::Hash, &left_cost, &right_cost, out_rows);
+                    let swap = step(JoinImpl::Hash, &right_cost, &left_cost, out_rows);
+                    let mut shape = (keep.min(swap), product, swap < keep, None);
+                    for swapped in [false, true] {
+                        let (inner, outer_cost, inner_cost) = if swapped {
+                            (&*left, &right_cost, &left_cost)
+                        } else {
+                            (&*right, &left_cost, &right_cost)
+                        };
+                        // Keys run from the outer value to the probed column.
+                        let flip = (*left_mask > *right_mask) != swapped;
+                        probe_keys.clear();
+                        probe_keys.extend(
+                            candidate_keys().map(|(l, r)| if flip { (r, l) } else { (l, r) }),
+                        );
+                        let key_count = probe_keys.len();
+                        let Some(index) =
+                            probe_index(inner, &mut probe_keys, key_count, arena, loader)?
+                        else {
+                            continue;
+                        };
+                        // A unique probe emits at most one row per outer row.
+                        let rows = product.min(outer_cost.rows);
+                        let work = step(
+                            JoinImpl::IndexProbe {
+                                lookup_work: index.lookup_work,
+                            },
+                            outer_cost,
+                            inner_cost,
+                            rows,
+                        );
+                        if work <= shape.0 {
+                            shape = (work, rows, swapped, Some(index));
+                        }
+                    }
+                    shape
+                } else {
+                    let (outer, inner) = if nest_loop_swapped {
+                        (&right_cost, &left_cost)
+                    } else {
+                        (&left_cost, &right_cost)
+                    };
+                    let work = step(JoinImpl::NestLoop { full: false }, outer, inner, out_rows);
+                    (work, product, nest_loop_swapped, None)
                 };
-                // The left input is the hash build side and the nested loop outer side.
-                let (keep, swap) = (step(&left, &right), step(&right, &left));
+                let (work, rows, swapped, probe) = shape;
                 let candidate = JoinCandidate {
-                    cross_join: !connected,
-                    work: keep.min(swap),
-                    rows: product,
+                    cross_join: !connected && !single,
+                    work,
+                    rows,
                     left: i,
                     right: j,
-                    swapped: swap < keep,
+                    swapped,
+                    probe: probe.is_some(),
                 };
                 if best.is_none_or(|previous| candidate < previous) {
                     best = Some(candidate);
+                    best_probe = probe;
                 }
                 Ok(())
             };
-            if connected {
-                for (left, right) in keys.pairs() {
-                    // SAFETY: keys only contains active input masks; merge rewrites removed
-                    // endpoints. Disjoint masks have unique lowest bits, and inserting each
-                    // merged input at the earlier position preserves their sorted order.
-                    let i = inputs
-                        .binary_search_by_key(&(left.trailing_zeros(), left), |(_, _, mask)| {
-                            (mask.trailing_zeros(), *mask)
-                        })
-                        .unwrap();
-                    let j = inputs
-                        .binary_search_by_key(&(right.trailing_zeros(), right), |(_, _, mask)| {
-                            (mask.trailing_zeros(), *mask)
-                        })
-                        .unwrap();
-                    evaluate(&mut inputs, i.min(j), i.max(j))?;
-                }
-            } else {
-                for i in 0..inputs.len() {
-                    for j in i + 1..inputs.len() {
-                        evaluate(&mut inputs, i, j)?;
-                    }
+            for other in 0..inputs.len() {
+                if other != current {
+                    evaluate(&mut inputs, current.min(other), current.max(other))?;
                 }
             }
             let Some(JoinCandidate {
@@ -776,30 +761,40 @@ impl NormalizationRule for GreedyJoinReorder {
                 BindPosition(left_schema).visit(l, arena)?;
                 BindPosition(right_schema).visit(r, arena)?;
             }
-            let (condition, join_type, implementation) = if on.is_empty() {
-                (JoinCondition::None, JoinType::Cross, PlanImpl::NestLoopJoin)
+            let row_count = if estimated {
+                RowCountOption::Estimated {
+                    rows: product,
+                    ndv: None,
+                }
             } else {
-                (
-                    JoinCondition::On { on, filter: None },
-                    JoinType::Inner,
-                    PlanImpl::HashJoin,
-                )
+                RowCountOption::Unknown
             };
-            let mut join = JoinOperator::build(left, right, condition, join_type, false);
-            join.physical_option = Some(PhysicalOption::new(
-                implementation,
-                SortOption::None,
-                if estimated {
-                    RowCountOption::Estimated {
-                        rows: product,
-                        ndv: None,
-                    }
+            let join = if let Some(mut index) = best_probe {
+                // Probe values were chosen before binding; they come from the outer (left) input.
+                for value in &mut index.probe {
+                    *value = value.clone_expression(arena)?;
+                    BindPosition(left_schema).visit(value, arena)?;
+                }
+                probe_join(left, right, on, index, row_count, arena)?
+            } else {
+                let (condition, join_type) = if on.is_empty() {
+                    (JoinCondition::None, JoinType::Cross)
                 } else {
-                    RowCountOption::Unknown
-                },
-            ));
+                    (JoinCondition::On { on, filter: None }, JoinType::Inner)
+                };
+                let mut join = JoinOperator::build(left, right, condition, join_type, forced);
+                let Operator::Join(op) = &join.operator else {
+                    unreachable!()
+                };
+                let implementation = op.plan_impl();
+                let mut option = PhysicalOption::new(implementation, SortOption::None, row_count);
+                option.join_decided = true;
+                join.physical_option = Some(option);
+                join
+            };
             keys.rewrite(left_mask, right_mask);
             inputs.insert(i, (join, product, left_mask | right_mask));
+            current = i;
         }
         // SAFETY: At this point, there should be exactly one plan left in the inputs vector, which is the final join result.
         let (join, _, _) = inputs.pop().unwrap();
@@ -976,65 +971,6 @@ mod tests {
                 assert_eq!(plan, original);
             }
         }
-        Ok(())
-    }
-
-    #[test]
-    fn merged_inputs_do_not_reuse_leaf_pair_row_estimates() -> Result<(), DatabaseError> {
-        let tables = TableArenaCell::default();
-        let mut arena = PlanArena::new(&tables);
-        let (a, ak) = input("a", 100, &mut arena);
-        let (b, bk) = input("b", 100, &mut arena);
-        let (c, ck) = input("c", 100, &mut arena);
-        let (d, dk) = input("d", 100, &mut arena);
-        let ab = JoinOperator::build(
-            a,
-            b,
-            JoinCondition::On {
-                on: vec![(ak, bk)],
-                filter: None,
-            },
-            JoinType::Inner,
-            false,
-        );
-        let abc = JoinOperator::build(
-            ab,
-            c,
-            JoinCondition::On {
-                on: vec![(bk, ck)],
-                filter: None,
-            },
-            JoinType::Inner,
-            false,
-        );
-        let mut plan = JoinOperator::build(
-            abc,
-            d,
-            JoinCondition::On {
-                on: vec![(ck, dk)],
-                filter: None,
-            },
-            JoinType::Inner,
-            false,
-        );
-        let schema = plan.output_schema(&mut arena).clone();
-        let mut cache = StatisticsMetaCache::default();
-        for (table, ndv) in [("a", 100), ("b", 100), ("c", 10), ("d", 10)] {
-            let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
-            for value in 0..ndv {
-                builder.append(&DataValue::Int32(value));
-            }
-            cache.columns.insert((table.into(), 0), builder.build());
-        }
-        assert!(GreedyJoinReorder.apply(
-            &mut plan,
-            &mut arena,
-            Some(&StatisticMetaLoader::new(&cache))
-        )?);
-        // A-B estimates 100, C-D estimates 1,000. Their merged inputs must not
-        // reuse any leaf-pair result when Vec positions are removed and reused.
-        assert_eq!(plan.estimated_rows(), Some(100 * 1_000));
-        assert_eq!(plan.output_schema(&mut arena), &schema);
         Ok(())
     }
 
@@ -1379,7 +1315,6 @@ mod tests {
             Some(usize::MAX)
         );
         assert_eq!(cross.estimated_rows(), Some(usize::MAX));
-        assert!(!OrientNestedLoopJoin.apply(&mut cross, &mut arena, None)?);
         Ok(())
     }
 
@@ -1391,8 +1326,11 @@ mod tests {
         let (mut left, _) = input("a", 100, &mut arena);
         let mut right = materialized_right(&mut arena);
         assert_eq!(left.estimated_startup_work(&mut arena)?, Some(0));
-        // The 10-row build side is read (50) and stored whole (50).
-        assert_eq!(right.estimated_startup_work(&mut arena)?, Some(100));
+        // The 10-row build side is read (50), stored whole (50) and hashed.
+        assert_eq!(
+            right.estimated_startup_work(&mut arena)?,
+            Some(100 + 10 * crate::planner::operator::HASH_BUILD_WORK)
+        );
         let mut plan =
             JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
         plan.physical_option = Some(PhysicalOption::new(
@@ -1404,7 +1342,7 @@ mod tests {
             },
         ));
         let schema = plan.output_schema(&mut arena).clone();
-        assert!(OrientNestedLoopJoin.apply(&mut plan, &mut arena, None)?);
+        assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
         assert_eq!(plan.output_schema(&mut arena), &schema);
         assert_eq!(plan.estimated_rows(), Some(20000));
         let Operator::Project(project) = &plan.operator else {
@@ -1421,7 +1359,7 @@ mod tests {
         assert_eq!(left.referenced_table(), vec!["b".into(), "c".into()]);
         assert_eq!(right.referenced_table(), vec!["a".into()]);
         let mut join = join.clone();
-        assert!(!OrientNestedLoopJoin.apply(&mut join, &mut arena, None)?);
+        assert!(!GreedyJoinReorder.apply(&mut join, &mut arena, None)?);
         Ok(())
     }
 
@@ -1586,8 +1524,8 @@ mod tests {
     #[test]
     fn unestimated_region_defers_cartesian_products_by_input_order() -> Result<(), DatabaseError> {
         // FROM a, c, d, b WHERE a = b AND c = b: FROM order crosses a, c and d
-        // before any join key applies. Without estimates the region is rebuilt
-        // by connectivity and input position, and only d stays a cross join.
+        // before any join key applies. Without estimates the region is priced with
+        // default rows, and only d stays a cross join.
         for known_b in [false, true] {
             let table_arena = TableArenaCell::default();
             let mut arena = PlanArena::new(&table_arena);
@@ -1630,9 +1568,9 @@ mod tests {
             // Without estimates, the narrower C becomes the build side of AB.
             let (c, ab) = abc.childrens.twins();
             assert_eq!(c.referenced_table(), vec!["c".into()]);
-            let (a, b) = ab.childrens.twins();
-            assert_eq!(a.referenced_table(), vec!["a".into()]);
-            assert_eq!(b.referenced_table(), vec!["b".into()]);
+            let mut tables = ab.referenced_table();
+            tables.sort();
+            assert_eq!(tables, vec!["a".into(), "b".into()]);
             for join in [cross, abc, ab] {
                 assert_eq!(join.row_count_option(), None);
             }
@@ -1706,11 +1644,13 @@ mod tests {
             right.physical_option.as_mut().unwrap().row_count = RowCountOption::Unknown;
         }
         let mut outer = plan.clone();
-        // Unknown inputs are still rebuilt by connectivity and width, without row estimates.
+        // Unknown inputs are rebuilt with default rows, but joins keep unknown row counts.
         assert!(GreedyJoinReorder.apply(&mut plan, &mut arena, None)?);
         let (c, ab) = plan.childrens.only().childrens.twins();
         assert_eq!(c.referenced_table(), vec!["c".into()]);
-        assert_eq!(ab.referenced_table(), vec!["a".into(), "b".into()]);
+        let mut tables = ab.referenced_table();
+        tables.sort();
+        assert_eq!(tables, vec!["a".into(), "b".into()]);
         assert_eq!(plan.row_count_option(), None);
 
         let mut plan = outer.take();

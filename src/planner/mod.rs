@@ -26,7 +26,9 @@ use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
-use crate::planner::operator::{input_cost, InputCost, Operator, PhysicalOption, RowCountOption};
+use crate::planner::operator::{
+    input_cost, InputCost, Operator, PhysicalOption, RowCountOption, WorkCost,
+};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -162,11 +164,12 @@ impl<'a, A: MetaArena> OperatorVisitorMut<'a> for StartupWorkVisitor<'_, A> {
         if plan
             .physical_option
             .as_ref()
-            .is_none_or(|option| option.startup_work.is_some())
+            .is_none_or(|option| option.cost.is_some())
         {
             return Ok(());
         }
         let width = plan.output_schema(self.arena).len();
+        let rows = plan.estimated_rows();
         let LogicalPlan {
             operator,
             childrens,
@@ -177,8 +180,14 @@ impl<'a, A: MetaArena> OperatorVisitorMut<'a> for StartupWorkVisitor<'_, A> {
             return Ok(());
         };
         OperatorVisitorMut::<'_>::visit_children(self, childrens)?;
-        option.width = Some(width);
-        option.calculate_startup_work(operator, childrens);
+        // Children are cached first, so this only prices the current node.
+        let mut cost = WorkCost {
+            width,
+            startup: option.calculate_startup_work(operator, childrens),
+            total: None,
+        };
+        cost.total = option.calculate_work(operator, childrens, rows, &cost);
+        option.cost = Some(cost);
         Ok(())
     }
 }
@@ -261,7 +270,7 @@ impl LogicalPlan {
         Ok(self
             .physical_option
             .as_ref()
-            .and_then(|option| option.startup_work.flatten()))
+            .and_then(|option| option.cost?.startup))
     }
 
     pub(crate) fn estimated_cost<A: MetaArena>(
@@ -272,9 +281,9 @@ impl LogicalPlan {
         Ok(input_cost(self))
     }
 
-    pub(crate) fn clear_startup_work(&mut self) {
+    pub(crate) fn clear_work_cost(&mut self) {
         if let Some(option) = self.physical_option.as_mut() {
-            option.startup_work = None;
+            option.cost = None;
         }
     }
 
@@ -723,12 +732,20 @@ mod tests {
         ));
         assert_eq!(sort.estimated_startup_work(&mut arena)?, None);
         assert_eq!(
-            sort.physical_option.as_ref().unwrap().startup_work,
+            sort.physical_option
+                .as_ref()
+                .unwrap()
+                .cost
+                .map(|cost| cost.startup),
             Some(None)
         );
         assert_eq!(sort.estimated_startup_work(&mut arena)?, None);
         assert_eq!(
-            sort.physical_option.as_ref().unwrap().startup_work,
+            sort.physical_option
+                .as_ref()
+                .unwrap()
+                .cost
+                .map(|cost| cost.startup),
             Some(None)
         );
 
@@ -752,23 +769,31 @@ mod tests {
         // 16 one-column rows (5 each) + 64 comparisons * 2 operator units.
         assert_eq!(sort.estimated_startup_work(&mut arena)?, Some(208));
         assert_eq!(
-            sort.physical_option.as_ref().unwrap().startup_work,
+            sort.physical_option
+                .as_ref()
+                .unwrap()
+                .cost
+                .map(|cost| cost.startup),
             Some(Some(208))
         );
         let Childrens::Only(scan) = sort.childrens.as_mut() else {
             unreachable!()
         };
         assert_eq!(
-            scan.physical_option.as_ref().unwrap().startup_work,
+            scan.physical_option
+                .as_ref()
+                .unwrap()
+                .cost
+                .map(|cost| cost.startup),
             Some(Some(0))
         );
         // A cached parent does not walk its children again in this round.
-        scan.clear_startup_work();
+        scan.clear_work_cost();
         assert_eq!(sort.estimated_startup_work(&mut arena)?, Some(208));
         let Childrens::Only(scan) = sort.childrens.as_mut() else {
             unreachable!()
         };
-        assert_eq!(scan.physical_option.as_ref().unwrap().startup_work, None);
+        assert_eq!(scan.physical_option.as_ref().unwrap().cost, None);
         Ok(())
     }
 

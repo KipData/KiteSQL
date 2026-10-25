@@ -758,3 +758,64 @@ drop table a
 
 statement ok
 drop table b
+
+# Greedy chooses the join implementation: a few outer rows probe a large unique key,
+# a large outer side hashes a small input, and a cross join drives from the smaller side.
+statement ok
+create table jp_big(id int primary key, c1 int, c2 int);
+
+statement ok
+copy jp_big from 'tests/data/row_20000.csv' ( DELIMITER '|' );
+
+statement ok
+create table jp_small(id int primary key, c1 int, c2 int);
+
+statement ok
+insert into jp_small values (0,3,1),(1,6,1),(2,9,1),(3,12,1),(4,15,1),(5,18,1),(6,21,1),(7,24,1),(8,27,1),(9,30,1);
+
+statement ok
+analyze table jp_big;
+
+statement ok
+analyze table jp_small;
+
+query T
+explain select jp_small.id, jp_big.c2 from jp_small join jp_big on jp_small.c1 = jp_big.id;
+----
+Projection [jp_small.id, jp_big.c2] [Project => (Sort Option: Follow)] InnerJoinApply [MarkApply => (Sort Option: Follow)] TableScan jp_small -> [jp_small.id, jp_small.c1] [SeqScan => (Sort Option: None)] TableScan jp_big -> [jp_big.id, jp_big.c2] [IndexScan By pk_index => Probe ? => (Sort Option: OrderBy: (jp_big.id Asc Nulls Last) ignore_prefix_len: 0)]
+
+query II rowsort
+select jp_small.id, jp_big.c2 from jp_small join jp_big on jp_small.c1 = jp_big.id;
+----
+0 5
+1 8
+2 11
+3 14
+4 17
+5 20
+6 23
+7 26
+8 29
+9 32
+
+query T
+explain select jp_big.id, jp_small.c2 from jp_big join jp_small on jp_big.c1 = jp_small.id;
+----
+Projection [jp_big.id, jp_small.c2] [Project => (Sort Option: Follow)] Inner Join On jp_small.id = jp_big.c1 [HashJoin => (Sort Option: None)] TableScan jp_small -> [jp_small.id, jp_small.c2] [SeqScan => (Sort Option: None)] TableScan jp_big -> [jp_big.id, jp_big.c1] [SeqScan => (Sort Option: None)]
+
+query T
+explain select jp_big.id, jp_small.id from jp_big, jp_small;
+----
+Projection [jp_big.id, jp_small.id] [Project => (Sort Option: Follow)] Cross Join Nothing [NestLoopJoin => (Sort Option: None)] TableScan jp_small -> [jp_small.id] [SeqScan => (Sort Option: None)] TableScan jp_big -> [jp_big.id] [SeqScan => (Sort Option: None)]
+
+# FORCE_NEST_LOOP_JOIN regions are still reordered, but only with nested loops.
+query T
+explain select /*+ FORCE_NEST_LOOP_JOIN */ jp_big.id, jp_small.c2 from jp_big join jp_small on jp_big.c1 = jp_small.id;
+----
+Projection [jp_big.id, jp_small.c2] [Project => (Sort Option: Follow)] Inner Join On jp_small.id = jp_big.c1 [NestLoopJoin => (Sort Option: None)] TableScan jp_small -> [jp_small.id, jp_small.c2] [SeqScan => (Sort Option: None)] TableScan jp_big -> [jp_big.id, jp_big.c1] [SeqScan => (Sort Option: None)]
+
+statement ok
+drop table jp_big
+
+statement ok
+drop table jp_small

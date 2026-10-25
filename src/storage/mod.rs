@@ -1640,11 +1640,14 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<(), DatabaseError> {
-        let tuple_id = TableCodec::decode_tuple_key(key, &params.index_meta().pk_ty)?;
+        let tuple_id = params
+            .with_pk
+            .then(|| TableCodec::decode_tuple_key(key, &params.index_meta().pk_ty))
+            .transpose()?;
         TableCodec::decode_tuple_into(
             tuple,
             &params.deserializers[..],
-            Some(tuple_id),
+            tuple_id,
             value,
             params.total_len,
         )
@@ -1675,7 +1678,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
                 TableCodec::decode_tuple_into(
                     tuple,
                     &params.deserializers[..],
-                    Some(tuple_id.clone()),
+                    params.with_pk.then(|| tuple_id.clone()),
                     bytes.as_ref(),
                     params.total_len,
                 )?;

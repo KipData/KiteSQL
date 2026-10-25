@@ -155,6 +155,8 @@ impl HashJoin {
         // build phase:
         // 1.construct hashtable, one hash key may contains multiple rows indices.
         // 2.merged all left tuples.
+        // TODO: std `RandomState` (SipHash) costs ~10% of an LMDB PK-sized hash join; a faster
+        // non-DoS-resistant hasher would do for build keys.
         #[allow(clippy::mutable_key_type)]
         let mut build_map = HashMap::new();
         let mut build_buf = BumpVec::with_capacity_in(self.on_left_keys.len(), &self.bump);
@@ -220,6 +222,8 @@ impl HashJoin {
     }
 }
 
+// TODO: dropping the build map (one heap `Vec` and owned `Tuple`s per key) costs ~13.5% of an
+// LMDB PK-sized hash join plus allocator consolidation; allocate build rows in `bump` instead.
 #[derive(Default, Debug)]
 pub(crate) struct BuildState {
     pub(crate) tuples: Vec<(usize, Tuple)>,

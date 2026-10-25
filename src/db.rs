@@ -532,11 +532,6 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             &[NormalizationRuleImpl::MaterializeMarkApply],
         )
         .after_batch(
-            "Orient Nested Loop Join",
-            HepBatchStrategy::fix_point_bottomup(1),
-            &[NormalizationRuleImpl::OrientNestedLoopJoin],
-        )
-        .after_batch(
             "Collapse Project",
             HepBatchStrategy::fix_point_bottomup(10),
             &[NormalizationRuleImpl::EliminateProject],

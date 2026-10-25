@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{DetachedPredicate, Range, RangeDetacher};
 use crate::expression::visitor_mut::{ExprVisitorMut, PositionShift};
@@ -25,6 +26,7 @@ use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef};
+use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::ops::Bound;
@@ -362,47 +364,67 @@ impl NormalizationRule for PushPredicateIntoScan {
 
             *lookup = Some(IndexLookup::Static(detached.range));
             *residual_predicate = detached.residual;
-            *covered_deserializers = None;
-            *cover_mapping = None;
-
-            // try index covered
-            let mut mapping_slots = vec![usize::MAX; scan_op.columns.len()];
-            let mut needs_mapping = false;
-            let index_meta = arena.index(*meta);
-            let index_column_types = match &index_meta.value_ty {
-                LogicalType::Tuple(tys) => tys,
-                ty => slice::from_ref(ty),
-            };
-            let mut deserializers = Vec::with_capacity(index_meta.column_ids.len());
-
-            for (idx, column_id) in index_meta.column_ids.iter().enumerate() {
-                if let Some((scan_idx, column)) =
-                    scan_op.columns.iter().enumerate().find(|(_, column)| {
-                        arena
-                            .column(**column)
-                            .id()
-                            .map(|id| id == *column_id)
-                            .unwrap_or(false)
-                    })
-                {
-                    mapping_slots[scan_idx] = idx;
-                    needs_mapping |= scan_idx != idx;
-                    deserializers.push(arena.column(*column).datatype().serializable());
-                } else {
-                    deserializers.push(index_column_types[idx].skip_serializable());
-                }
-            }
-
-            if mapping_slots.iter().all(|slot| *slot != usize::MAX) {
-                *covered_deserializers = Some(deserializers);
-                if needs_mapping {
-                    *cover_mapping = Some(mapping_slots);
-                }
-            }
+            (*covered_deserializers, *cover_mapping) =
+                match index_covering(&scan_op.columns, *meta, arena) {
+                    Some((deserializers, mapping)) => (Some(deserializers), mapping),
+                    None => (None, None),
+                };
         }
 
         Ok(changed)
     }
+}
+
+/// Index-only read layout when `index` holds every scanned column: deserializers for the
+/// index columns, plus a scan-to-index slot mapping when their orders differ.
+pub(crate) fn index_covering(
+    columns: &[ColumnRef],
+    index: IndexMetaRef,
+    arena: &PlanArena,
+) -> Option<(Vec<TupleValueSerializableImpl>, Option<Vec<usize>>)> {
+    if !is_index_covers(columns, index, arena) {
+        return None;
+    }
+    let mut mapping_slots = vec![usize::MAX; columns.len()];
+    let mut needs_mapping = false;
+    let index_meta = arena.index(index);
+    let index_column_types = match &index_meta.value_ty {
+        LogicalType::Tuple(tys) => tys,
+        ty => slice::from_ref(ty),
+    };
+    let mut deserializers = Vec::with_capacity(index_meta.column_ids.len());
+
+    for (idx, column_id) in index_meta.column_ids.iter().enumerate() {
+        if let Some((scan_idx, column)) = columns.iter().enumerate().find(|(_, column)| {
+            arena
+                .column(**column)
+                .id()
+                .map(|id| id == *column_id)
+                .unwrap_or(false)
+        }) {
+            mapping_slots[scan_idx] = idx;
+            needs_mapping |= scan_idx != idx;
+            deserializers.push(arena.column(*column).datatype().serializable());
+        } else {
+            deserializers.push(index_column_types[idx].skip_serializable());
+        }
+    }
+
+    Some((deserializers, needs_mapping.then_some(mapping_slots)))
+}
+
+pub(crate) fn is_index_covers(
+    columns: &[ColumnRef],
+    index: IndexMetaRef,
+    arena: &PlanArena,
+) -> bool {
+    let index_meta = arena.index(index);
+    columns.iter().all(|column| {
+        arena
+            .column(*column)
+            .id()
+            .is_some_and(|id| index_meta.column_ids.contains(&id))
+    })
 }
 
 impl PushPredicateIntoScan {

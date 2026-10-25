@@ -169,13 +169,22 @@ pub enum RowCountOption {
 // This is the same scale as row = 1 and operator = 0.25; I/O is not modeled.
 pub(crate) const CPU_ROW_WORK: usize = 4;
 pub(crate) const CPU_OPERATOR_WORK: usize = 1;
+// Rows assumed for a table without statistics (RFC 0001 §3.9).
+pub(crate) const DEFAULT_TABLE_ROWS: usize = 1000;
 // Rebuilding the inner executor for each outer row of an index probe.
 pub(crate) const PROBE_RESET_WORK: usize = CPU_ROW_WORK;
+// Hashing, inserting and later freeing one build row. Calibrated on LMDB, where a hash join
+// costs ~7 scanned rows per build/probe pair (RFC 0001 §4.2).
+pub(crate) const HASH_BUILD_WORK: usize = 6 * CPU_ROW_WORK;
 
 /// Work of producing `rows` rows of `width` columns. The fixed per-row part keeps
 /// zero-column rows (e.g. the input of `count(*)`) from being free.
 pub(crate) fn rows_work(rows: usize, width: usize) -> usize {
     rows.saturating_mul(CPU_ROW_WORK.saturating_add(width.saturating_mul(CPU_OPERATOR_WORK)))
+}
+
+fn hash_build_work(build: &InputCost) -> usize {
+    rows_work(build.rows, build.width).saturating_add(build.rows.saturating_mul(HASH_BUILD_WORK))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,7 +224,7 @@ impl JoinImpl {
             // Build rows are stored whole; each probe row costs one hash lookup.
             JoinImpl::Hash => right
                 .work
-                .saturating_add(rows_work(left.rows, left.width))
+                .saturating_add(hash_build_work(left))
                 .saturating_add(right.rows.saturating_mul(CPU_OPERATOR_WORK)),
             // The inner input is re-run and compared for every outer row.
             JoinImpl::NestLoop { full } => left
@@ -235,13 +244,23 @@ impl JoinImpl {
 }
 
 pub(crate) fn input_cost(input: &LogicalPlan) -> Option<InputCost> {
-    let option = input.physical_option.as_ref()?;
-    let rows = input.estimated_rows()?;
+    let cost = input.physical_option.as_ref()?.cost?;
     Some(InputCost {
-        rows,
-        width: option.width?,
-        work: option.calculate_work(&input.operator, &input.childrens, Some(rows))?,
+        rows: input.estimated_rows()?,
+        width: cost.width,
+        work: cost.total?,
     })
+}
+
+/// A node's cached work estimates, filled by `StartupWorkVisitor` and invalidated as a whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WorkCost {
+    /// Output column count.
+    pub(crate) width: usize,
+    /// Work before the first row; `None` when unknown.
+    pub(crate) startup: Option<usize>,
+    /// Work of producing every row; `None` when unknown.
+    pub(crate) total: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -249,9 +268,11 @@ pub struct PhysicalOption {
     pub plan: PlanImpl,
     pub(crate) sort_option: SortOption,
     pub(crate) row_count: RowCountOption,
-    pub(crate) startup_work: Option<Option<usize>>,
-    /// Output column count, cached together with `startup_work`.
-    pub(crate) width: Option<usize>,
+    /// `None` until computed.
+    pub(crate) cost: Option<WorkCost>,
+    /// Per-lookup work of a parameterized probe, priced with index statistics.
+    pub(crate) lookup_work: Option<usize>,
+    pub(crate) join_decided: bool,
 }
 
 impl PhysicalOption {
@@ -260,8 +281,9 @@ impl PhysicalOption {
             plan,
             sort_option,
             row_count,
-            startup_work: None,
-            width: None,
+            cost: None,
+            lookup_work: None,
+            join_decided: false,
         }
     }
 
@@ -276,6 +298,7 @@ impl PhysicalOption {
         operator: &Operator,
         childrens: &Childrens,
         rows: Option<usize>,
+        cost: &WorkCost,
     ) -> Option<usize> {
         match (&self.plan, operator, childrens) {
             (PlanImpl::Filter, Operator::Filter(_), Childrens::Only(input))
@@ -285,25 +308,27 @@ impl PhysicalOption {
             (PlanImpl::MarkApply, Operator::MarkApply(op), Childrens::Twins { left, right })
                 if op.parameterized_probe().is_some() && !op.materialize =>
             {
-                let right_option = right.physical_option.as_ref()?;
+                let right_cost = right.physical_option.as_ref()?.cost?;
                 let probed = InputCost {
                     rows: 1,
-                    width: right_option.width?,
-                    work: right_option.startup_work.flatten()?,
+                    width: right_cost.width,
+                    work: right_cost.startup?,
                 };
-                let lookup_work = probed
-                    .work
-                    .saturating_add(PROBE_RESET_WORK)
-                    .saturating_add(rows_work(probed.rows, probed.width));
+                let lookup_work = self.lookup_work.unwrap_or_else(|| {
+                    probed
+                        .work
+                        .saturating_add(PROBE_RESET_WORK)
+                        .saturating_add(rows_work(probed.rows, probed.width))
+                });
                 Some(JoinImpl::IndexProbe { lookup_work }.work(
                     &input_cost(left)?,
                     &probed,
                     rows?,
-                    self.width?,
+                    cost.width,
                 ))
             }
             (PlanImpl::HashJoin, Operator::Join(_), Childrens::Twins { left, right }) => Some(
-                JoinImpl::Hash.work(&input_cost(left)?, &input_cost(right)?, rows?, self.width?),
+                JoinImpl::Hash.work(&input_cost(left)?, &input_cost(right)?, rows?, cost.width),
             ),
             (PlanImpl::NestLoopJoin, Operator::Join(join), Childrens::Twins { left, right }) => {
                 let (outer, inner) = if join.join_type == join::JoinType::RightOuter {
@@ -319,23 +344,22 @@ impl PhysicalOption {
                         &input_cost(outer)?,
                         &input_cost(inner)?,
                         rows?,
-                        self.width?,
+                        cost.width,
                     ),
                 )
             }
-            _ => Some(
-                self.startup_work
-                    .flatten()?
-                    .saturating_add(rows_work(rows?, self.width?)),
-            ),
+            _ => Some(cost.startup?.saturating_add(rows_work(rows?, cost.width))),
         }
     }
 
-    pub(crate) fn calculate_startup_work(&mut self, operator: &Operator, childrens: &Childrens) {
-        let startup_work =
-            |input: &LogicalPlan| input.physical_option.as_ref()?.startup_work.flatten();
+    pub(crate) fn calculate_startup_work(
+        &self,
+        operator: &Operator,
+        childrens: &Childrens,
+    ) -> Option<usize> {
+        let startup_work = |input: &LogicalPlan| input.physical_option.as_ref()?.cost?.startup;
         let work = |input: &LogicalPlan| Some(input_cost(input)?.work);
-        self.startup_work = Some(match (&self.plan, operator, childrens) {
+        match (&self.plan, operator, childrens) {
             (
                 PlanImpl::SeqScan | PlanImpl::IndexScan(_) | PlanImpl::Values | PlanImpl::Dummy,
                 _,
@@ -355,7 +379,7 @@ impl PhysicalOption {
                     Some(
                         build
                             .work
-                            .saturating_add(rows_work(build.rows, build.width))
+                            .saturating_add(hash_build_work(&build))
                             .saturating_add(startup_work(right)?),
                     )
                 })
@@ -420,11 +444,11 @@ impl PhysicalOption {
             (PlanImpl::ScalarQueryInit, _, Childrens::Twins { left, right }) => startup_work(left)
                 .and_then(|left| work(right).map(|right| left.saturating_add(right))),
             _ => None,
-        });
+        }
     }
 }
 
-// Startup estimates are pass-local caches, not plan semantics or wire data.
+// Cost caches and Greedy's join decision are pass-local, not plan semantics or wire data.
 impl PartialEq for PhysicalOption {
     fn eq(&self, other: &Self) -> bool {
         self.plan == other.plan
@@ -1042,10 +1066,10 @@ mod tests {
             work: 5000,
         };
         let output = rows_work(100, 2);
-        // Both inputs read once, the build side stored, every probe row looked up once.
+        // Both inputs read once, the build side stored and hashed, every probe row looked up once.
         assert_eq!(
             JoinImpl::Hash.work(&small, &large, 100, 2),
-            50 + 5000 + rows_work(10, 1) + 1000 + output
+            50 + 5000 + rows_work(10, 1) + 10 * HASH_BUILD_WORK + 1000 + output
         );
         assert!(
             JoinImpl::Hash.work(&small, &large, 100, 2)

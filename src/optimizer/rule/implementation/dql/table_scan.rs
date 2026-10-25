@@ -100,9 +100,11 @@ impl ImplementationRule for IndexScanImplementation {
                 let mut ndv = None;
 
                 let index_meta = arena.index(index_info.meta);
-                if let Some((mut row_count, distinct_count)) =
-                    loader.collect_count(&scan_op.table_name, index_meta.id, range)?
-                {
+                // A PK/Unique equality range has an exact row count even without statistics.
+                let counted = loader
+                    .collect_count(&scan_op.table_name, index_meta.id, range)?
+                    .or_else(|| unique_eq_row_count(index_meta.ty, range).map(|rows| (rows, rows)));
+                if let Some((mut row_count, distinct_count)) = counted {
                     row_count = adjust_index_row_count(index_meta.ty, range, row_count);
                     estimated_rows = Some(row_count);
                     ndv = Some(distinct_count.min(row_count));

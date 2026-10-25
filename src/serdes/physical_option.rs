@@ -84,8 +84,9 @@ impl ReferenceSerialization for PhysicalOption {
             plan: PlanImpl::decode(reader, context, reference_tables, arena)?,
             sort_option: SortOption::decode(reader, context, reference_tables, arena)?,
             row_count: RowCountOption::decode(reader, context, reference_tables, arena)?,
-            startup_work: None,
-            width: None,
+            cost: None,
+            lookup_work: None,
+            join_decided: false,
         })
     }
 }
@@ -100,6 +101,7 @@ mod tests {
     use super::*;
     use crate::expression::ScalarExpression;
     use crate::planner::operator::sort::SortField;
+    use crate::planner::operator::WorkCost;
     use crate::planner::{PlanArena, TableArenaCell};
     #[cfg(all(not(feature = "rocksdb"), feature = "lmdb"))]
     use crate::storage::lmdb::LmdbTransaction as TestTransaction;
@@ -144,7 +146,7 @@ mod tests {
                     &mut arena,
                 )?;
                 assert_eq!(decoded, option);
-                assert_eq!(decoded.startup_work, None);
+                assert_eq!(decoded.cost, None);
                 assert!(reader.is_empty());
             }
         }
@@ -189,7 +191,11 @@ mod tests {
                 .row_count
                 .encode(&mut expected, is_direct, &mut reference_tables, &arena)?;
             for cache in [None, Some(None), Some(Some(192))] {
-                option.startup_work = cache;
+                option.cost = cache.map(|startup| WorkCost {
+                    width: 1,
+                    startup,
+                    total: startup,
+                });
                 let mut encoded = Vec::new();
                 let mut references = ReferenceTables::new();
                 option.encode(&mut encoded, is_direct, &mut references, &arena)?;
@@ -210,7 +216,7 @@ mod tests {
                         ndv: None
                     }
                 );
-                assert_eq!(decoded.startup_work, None);
+                assert_eq!(decoded.cost, None);
                 let SortOption::OrderBy {
                     fields,
                     ignore_prefix_len,

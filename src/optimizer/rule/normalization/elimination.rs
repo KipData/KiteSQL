@@ -166,12 +166,12 @@ fn lift_cross_project(
     let mut join = plan.take();
 
     join.reset_output_schema_cache();
-    join.clear_startup_work();
+    join.clear_work_cost();
 
     *project.childrens = Childrens::Only(Box::new(join));
     project.physical_option = None;
     project.reset_output_schema_cache();
-    project.clear_startup_work();
+    project.clear_work_cost();
 
     *plan = project;
     Ok(true)
@@ -267,14 +267,14 @@ impl NormalizationRule for EliminateProject {
             std::mem::swap(&mut parent.childrens, &mut project.childrens);
 
             parent.reset_output_schema_cache();
-            parent.clear_startup_work();
+            parent.clear_work_cost();
 
             *project.childrens = Childrens::Only(Box::new(parent));
             project.physical_option = None;
             *plan = project;
         }
         plan.reset_output_schema_cache();
-        plan.clear_startup_work();
+        plan.clear_work_cost();
         Ok(true)
     }
 }

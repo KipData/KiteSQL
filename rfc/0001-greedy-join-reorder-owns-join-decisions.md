@@ -28,7 +28,7 @@ Greedy 处于被动位置：它拿到的是 scan 已经选好的计划，只调�
 - probe 是否更优从未被比较：大外侧 ⋈ 小唯一内侧时，probe 的 seek 次数远多于 hash 的全量读取，
   但仍会被改写成 probe。
 - 索引选择与连接无关：probe 用的是第一个可用索引；Greedy 的 `index_statistics` 只读 implementation
-  选中的那个索引，覆盖连接键的其它索引提供的唯一性和 NDV 被忽略。
+  选中的那个索引，被连接键绑定的其它索引提供的唯一性和 NDV 被忽略。
 - 代价单位不统一，且 probe 单价被低估、HashJoin / NLJ 漏算部分代价（见第 4 节），
   即使让 Greedy 比较，也比较不出正确结果。
 
@@ -55,14 +55,14 @@ Greedy 处于被动位置：它拿到的是 scan 已经选好的计划，只调�
 | 规则 | 现在 | 改造后 |
 |---|---|---|
 | scan impl rule | 选访问路径 | 只提供静态最优的默认值；Greedy 区域内的叶子以 Greedy 的决策为准 |
-| `GreedyJoinReorder` | 只排顺序，按 hash 估算 | 每个 pair 决定顺序 + 实现 + 方向 + probe 索引，写入 `join_hint` |
-| `ParameterizeInnerJoin` | 能 probe 就改写 | 有 hint：校验后按 hint 执行；无 hint：原逻辑兜底 |
+| `GreedyJoinReorder` | 只排顺序，按 hash 估算 | 每个 pair 决定顺序 + 实现 + 方向 + probe 索引；probe 直接改写，其余标记 `join_decided` |
+| `ParameterizeInnerJoin` | 能 probe 就改写 | `join_decided`：不改写；否则原逻辑兜底 |
 | `OrientNestedLoopJoin` | 调整所有 Cross NLJ 方向 | 删除，职责并入 Greedy（3.10） |
 
 Greedy 区域内每个叶子的访问路径都由 Greedy 决定，scan impl rule 的结果只是 Greedy 的输入之一：
 
-- 叶子作为 probe 内侧：访问路径是 Greedy 选中的 probe 索引（hint 中的 `index`），
-  由 `ParameterizeInnerJoin` 替换掉 scan 原来的索引与 range。不存在"probe 更优但 scan 用了别的索引"的情况。
+- 叶子作为 probe 内侧：访问路径是 Greedy 选中的 probe 索引，
+  Greedy 改写时替换掉 scan 原来的索引与 range。不存在"probe 更优但 scan 用了别的索引"的情况。
 - 叶子作为 hash / NLJ 的输入：访问路径不使用连接键，候选就是 scan impl rule 用静态 range 比较过的那些，
   其最低代价方案也就是此时的最优方案；Greedy 以它的 `work` 作为该形态的输入代价，选择 Hash 即确认采用它。
   - 例：`a JOIN b ON a.id = b.a_id WHERE b.status = 1`，b 上有 `idx(a_id)`、`idx(status)`。hash 时 b 被独立读出，
@@ -76,22 +76,22 @@ Greedy 的决策在其上生效；对同一个叶子，Greedy 的决策优先级
 ### 3.2 决策流程
 
 1. 收集区域内的叶子和连接边（现有逻辑）。
-2. 对每个叶子生成 probe 候选并缓存（3.3）。
-3. 每轮对每个候选 pair 列出可行的实现形态，用代价模型给每种形态打分，取 pair 内最优形态（3.4）。
-4. 在所有 pair 中按 `JoinCandidate` 的顺序选出本轮合并的 pair。
-5. 按选中的形态构造 join：确定左右（probe 内侧、NLJ 内侧放右边，hash build 放左边），写入 `join_hint`（3.5）。
+2. 对每个 pair，用共用判定函数在叶子一侧找可 probe 的索引（3.3）。
+3. 搜索为左深：从行数最少（相同时读取代价最低）的输入开始，每轮只评估"当前结果 ⋈ 某个剩余输入"，列出可行形态并打分，取 pair 内最优形态（3.4）。
+   剩余输入在合并前始终是叶子，保留被 probe 的机会。
+4. 在这些 pair 中按 `JoinCandidate` 的顺序选出本轮合并的输入；当前结果估算不超过 1 行时，cross 不降优先级。
+5. 按选中的形态构造 join：确定左右（probe 内侧、NLJ 内侧放右边，hash build 放左边）；probe 直接改写为 MarkApply，其余标记 `join_decided`（3.5）。
 6. 合并结果作为新输入参与下一轮，其 `InputCost` 由所选形态的代价函数给出。
 
 ### 3.3 Source 与 probe 候选
 
-Greedy 根据 source 的列信息与其上存在的索引，自己生成候选，不依赖 impl rule 保留候选：
+Greedy 根据 source 的列信息与其上存在的索引，自己判定可用的 probe 索引，不依赖 impl rule 保留候选：
 
 ```rust
-struct ProbeCandidate {
-    index: IndexMetaRef,
-    key_columns: Vec<ColumnRef>, // 必须由连接键提供的索引列（已扣除常量等值列），非空
-    lookup_work: usize,          // 单次 probe 代价，见 4.3
-    rows_per_lookup: usize,      // 唯一索引 = 1，为非唯一索引预留
+struct ProbeIndex {
+    position: usize,                // scan.index_infos 中的位置
+    probe: Vec<ExprRef>,            // 外侧值与常量，按索引列顺序
+    lookup_work: usize,             // 单次 probe 代价，见 4.3
 }
 ```
 
@@ -99,10 +99,8 @@ struct ProbeCandidate {
   所以 probe 只出现在"已合并结果 ⋈ 叶子"的形态，与 Greedy 左深扩展的方式吻合。
 - 索引的每一列要么出现在某条连接边上（属于该叶子一侧），要么被叶子 filter 的常量等值绑定；
   两者都满足时按常量处理，减少对连接键的要求。
-- 每个叶子最多 10 个候选，按 PK → Unique → `key_columns` 少的优先 → index id 排序后截断。
-- 同一组覆盖连接键的索引也用于行数估算：任意被覆盖的 PK/Unique 即认为该侧唯一；
-  NDV 通过 `loader.load(table, index_id)` 读取该索引的 `distinct_values_len`（复合键得到联合 NDV），
-  再按 filter 后行数以 `min(N, rows)` 收紧。不再只看 implementation 选中的索引。
+- 每个 pair 直接调用判定函数，取 `lookup_work` 最低的 PK/Unique（相同时按索引顺序）；不缓存、不截断，候选数由表上的索引数决定。
+- probe 的输出行数按唯一性收紧为 `min(估算行数, 外侧行数)`：被 probe 的索引被连接键绑定，唯一性已知。
 
 ### 3.4 Pair 内的实现形态
 
@@ -111,44 +109,36 @@ struct ProbeCandidate {
 | 形态 | 条件 |
 |---|---|
 | Hash(build = L) / Hash(build = R) | pair 有连接键 |
-| Probe(inner = R) / Probe(inner = L) | 对应一侧是叶子，且某个候选的 `key_columns` 被该 pair 在这一侧的连接键覆盖 |
+| Probe(inner = R) / Probe(inner = L) | 对应一侧是叶子，且判定函数能用该 pair 的连接键找到索引 |
 | NestLoop(outer = L) / NestLoop(outer = R) | pair 没有连接键（cross） |
 
 每种形态按第 4 节的代价模型打分，pair 内取最低分。`JoinCandidate` 的比较顺序（`derive(Ord)`）：
 
 ```
-cross_join → score → impl_rank → rows → left → right → swapped
+cross_join → score → rows → left → right → swapped → probe
 ```
 
-- `cross_join` 按 pair 判断（该 pair 是否有连接键），不再用全局的 `connected`。
-- `impl_rank`：probe < hash < NLJ，只在分数相同或无统计时起作用。
+- pair 内分数相同时 probe 优先；无统计时按默认行数计价，见 3.9。
 
-### 3.5 决策下发：`join_hint`
+### 3.5 决策下发：`join_decided`
 
 ```rust
-enum JoinHint {
-    Hash,
-    Probe { index: IndexMetaRef, lookup_work: usize },
-    NestLoop,
-}
-
-// PhysicalOption 新增，参与 PartialEq / Hash（会影响后续改写结果）
-join_hint: Option<JoinHint>,
+// PhysicalOption 新增；与 startup_work 一样是 pass 内的标注，不参与 PartialEq / Hash，也不序列化
+join_decided: bool,
 ```
 
-Hint 写在 Greedy 构造 join 处（现在设置 `PhysicalOption(HashJoin/NestLoopJoin, ...)` 的位置）。
-左右已经由 Greedy 定好，hint 只表达"按这个形态执行，不要再判断"。
+Greedy 选中 probe 时直接调用与 `ParameterizeInnerJoin` 共用的改写函数生成 MarkApply，判定与执行是同一份代码，
+无需再校验；Hash / NestLoop 的 join 标记 `join_decided`，表达"按这个形态执行，不要再判断"。
 
 ### 3.6 下游规则的执行与兜底
 
 - `ParameterizeInnerJoin`
-  - `Probe`：用共用判定函数（3.7）再校验一次，通过则按指定索引改写，并把 `lookup_work` 写入
-    MarkApply 的 `PhysicalOption`；不尝试交换左右；校验失败按 hash 处理。
-  - `Hash` / `NestLoop`：不改写。
-  - `None`：Greedy 没处理过的 join（ON 带 filter、`force_nested_loop`、`limit_pushed` 等），走原逻辑兜底。
+  - `join_decided`：不改写。
+  - 否则：Greedy 没处理过的 join（ON 带 filter、`limit_pushed` 等），走原逻辑兜底，
+    用同一判定函数选索引、用 loader 计算 `lookup_work`。
 - NestLoop 方向由 Greedy 决定，下游不再有调整方向的规则（3.10）。
 - 被替换的静态 range 不会丢失过滤语义：Filter 仍在 scan 上方，`EliminateIndexFilter` 在 Parameterize 之后运行。
-- explain 只展示选中的索引（现有行为），不展示 hint 与 `lookup_work`。
+- explain 只展示选中的索引（现有行为），不展示 `join_decided` 与 `lookup_work`。
 
 ### 3.7 共用判定函数
 
@@ -174,17 +164,17 @@ probe 时仍会回表，代价按 `seeks = 2` 计。结果是 probe 与 scan 选
 1. 把覆盖计算从 `PushPredicateIntoScan` 拆成纯函数
    `index_covering(scan, index) -> Option<(deserializers, mapping)>`，只依赖 scan 的 `columns` 与索引列，与 range 无关。
 2. Greedy 生成候选时用它决定 `seeks`（PK 或覆盖 Unique = 1，否则 = 2）；scan cost 中非覆盖 ×2 的判断使用同一函数。
-3. `ParameterizeInnerJoin` 按 hint（以及兜底路径）改写为 probe 时，同时写入 `covered_deserializers` / `cover_mapping`，
+3. probe 改写（Greedy 与兜底路径共用），同时写入 `covered_deserializers` / `cover_mapping`，
    使执行器真正跳过回表。
 
 这样 Hash 形态用 scan 已选路径（可能是覆盖索引）的 `work`，Probe 形态枚举 `scan.index_infos` 中全部候选并按真实覆盖计价，
 "scan 选了覆盖索引，但 probe 更优"的情况在 pair 内比较时直接体现，由 Greedy 选出后覆盖 scan 的选择。
 
-### 3.9 无统计信息时的回退
+### 3.9 无统计信息时的默认行数
 
-一个 pair 只要有一侧缺少统计信息（行数，或 probe 所需的 N），该 pair 不做代价比较，
-按 `impl_rank` 启发式选择 probe > hash > NLJ，与现有 `ParameterizeInnerJoin` 的行为一致。
-NestLoop 方向在缺少统计时沿用 `OrientNestedLoopJoin` 现有的回退：一侧行数为 0 / 1 时它作外侧，否则比较 `startup_work`。
+缺少统计信息的输入按 `DEFAULT_TABLE_ROWS`（1000）行计价，probe 所需的 N 缺失时也取该值，代价比较照常进行，不再有启发式分支。
+PK/Unique 等值的静态 range 在无统计时也有确切行数，scan impl rule 据此选它并给出行数。
+由默认行数合并出的 join 仍记为未知行数，避免假估算泄漏给后续规则。
 
 ### 3.10 融合 `OrientNestedLoopJoin`
 
@@ -194,11 +184,11 @@ NestLoop 方向在缺少统计时沿用 `OrientNestedLoopJoin` 现有的回退�
 
 | 来源 | 现在 | 融合后 |
 |---|---|---|
-| Greedy 区域内无连接键的 pair | Greedy 构造时 `swapped: connected && ...`，cross 永不交换，方向靠 Orient 修正 | Greedy 比较 `NestLoop(outer = L / R)`，写入 `NestLoop` hint |
+| Greedy 区域内无连接键的 pair | Greedy 构造时 `swapped: connected && ...`，cross 永不交换，方向靠 Orient 修正 | Greedy 比较 `NestLoop(outer = L / R)` |
 | 根为 `Cross` 的区域（如 `FROM a, b`，或位于 outer join / 带 filter 的 inner join 之下） | Greedy 要求根为 `Inner`（`apply` 入口），不处理 | Greedy 触发条件放宽为 `can_expand(plan)`；`can_expand` 本就接受 Cross |
-| `force_nested_loop` 的 cross（`FORCE_NEST_LOOP_JOIN`） | `can_expand` 排除，不进区域；Orient 不检查该字段，仍调整方向 | 仍不进区域、不重排；Greedy 对这种单个 join 只做方向选择，行为不变 |
+| `FORCE_NEST_LOOP_JOIN` 下的 join | `can_expand` 排除，不进区域；Orient 只调整其中 cross 的方向 | 进入区域（只与同样带该标记的 join 组成区域），照常重排，但每个 pair 只比较 NestLoop |
 
-`force_nested_loop` 的语义是限制实现，不放开重排，所以只接管方向。
+该 hint 的语义是"用 NLJ、不用 hash"，不承诺按书写顺序执行。
 
 时序代价：Orient 原本在 `Parameterize Mark Apply`、`Eliminate Index Filter`、`Materialize Mark Apply` 之后运行，
 看到的是改写后的 `estimated_work`。并入 Greedy 后，NLJ 内侧子树若含子查询类 MarkApply，方向按其改写前的估算决定；
@@ -239,7 +229,7 @@ impl JoinImpl {
 ```
 Hash       = build.work                           // build 侧完整读一遍
            + probe.work                           // probe 侧完整读一遍
-           + rows_work(build)                     // build 侧整行存入哈希表
+           + rows_work(build) + build.rows × HASH_BUILD_WORK  // build 侧整行存入哈希表；哈希、分配与释放按 LMDB 实测校准
            + probe.rows × OP                      // probe 侧每行查一次哈希表
            + rows_work(out)                       // 输出满足条件的行
 IndexProbe = outer.work                           // 外侧完整读一遍
@@ -269,10 +259,10 @@ lookup_work = PROBE_RESET_WORK(= CPU_ROW_WORK)
             + rows_per_lookup × rows_work(1, inner_width)
 ```
 
-- N 取该索引直方图的 `values_len`，缺失时取 PK 直方图；都没有视为无统计。内侧 Filter 只按行计。
+- N 取该索引直方图的 `values_len`，没有时取 `DEFAULT_TABLE_ROWS`。内侧 Filter 只按行计。
 - 示例：内侧 100 万行、宽度 2，扫一行 = 6，查一次 = 30；外侧约小于内侧 1/4 时 probe 更优。
-- 存于 `PhysicalOption.lookup_work: Option<usize>`，由 Greedy 经 hint 传入，兜底路径由
-  `ParameterizeInnerJoin` 用 loader 计算。semi / anti 等子查询类 MarkApply 也改用该公式。
+- 存于 `PhysicalOption.lookup_work: Option<usize>`，由判定函数用 loader 计算，probe 改写时写入
+  （Greedy 与兜底路径共用）。semi / anti 等子查询类 MarkApply 也改用该公式。
 
 ### 4.4 Pair 分数：本步处理量
 
@@ -286,7 +276,7 @@ score(Probe)           = outer.rows × lookup_work + rows_work(out) − inner_le
 - Probe 的 `− inner_leaf.work` 是对基准（每张叶子都完整读一遍）的修正，不是处理量；
   内侧大、外侧小时分数为负，Greedy 会优先合并。分数用 `i128`，代码中需注释该项含义。
 
-## 5. Pipeline 与 hint 的有效性
+## 5. Pipeline 与 `join_decided` 的有效性
 
 `db.rs` 中 after_batches 的顺序：
 
@@ -298,8 +288,8 @@ score(Probe)           = outer.rows × lookup_work + rows_work(out) − inner_le
 6. ……
 
 Greedy 与 Parameterize 之间没有其它 batch；同一 batch 的 `ParameterizeMarkApply` 只匹配 `MarkApply`，
-其 `parameterize_right_subtree` 只处理 `Project` 和 `TableScan`，不修改 Join 节点，hint 不会被破坏。
-改写出的 MarkApply 的 `estimated_work` 仍须使用 Greedy 传入的 `lookup_work`，使 `calculate_work`
+其 `parameterize_right_subtree` 只处理 `Project` 和 `TableScan`，不修改 Join 节点，标记不会被破坏。
+改写出的 MarkApply 的 `estimated_work` 仍须使用 Greedy 写入的 `lookup_work`，使 `calculate_work`
 （含 explain 中的代价）与 Greedy 的决策口径一致。
 
 ## 6. 已核实的执行器行为
@@ -350,18 +340,18 @@ hash 输入或改写为 probe 时，不会丢失上层依赖的有序性、也�
 
 1. 统一代价（只改行为）：引入 `rows_work`、`JoinImpl` / `InputCost`，修正 HashJoin、NLJ、MarkApply 的估算，
    Greedy 分数改为本步处理量。现有连接顺序与 explain / slt 期望值会变化，需整体重新校准。
-2. 移交决策权：拆出共用判定函数与 `index_covering`；Greedy 生成 probe 候选、按形态比较并写入 `join_hint`；
-   `ParameterizeInnerJoin` 改为有 hint 时只执行；Greedy 触发条件放宽到 `can_expand`、接管 NestLoop 方向
-   （含 `force_nested_loop` 的单个 cross），删除 `OrientNestedLoopJoin` 及其 batch。
+2. 移交决策权：拆出共用判定函数与 `index_covering`；Greedy 按形态比较，probe 直接改写、其余标记 `join_decided`；
+   `ParameterizeInnerJoin` 跳过 `join_decided` 的 join；Greedy 触发条件放宽到 `can_expand`、接管 NestLoop 方向
+   （`FORCE_NEST_LOOP_JOIN` 区域只比较 NestLoop），删除 `OrientNestedLoopJoin` 及其 batch。
 
 测试（单测走 `make test`，slt 走 `make test-slt`）：
 
 - `rows_work` 与各 `JoinImpl::work`：Full join、零列行、饱和运算。
 - Greedy：大外侧 × 小唯一内侧选 hash；小外侧 × 大唯一内侧选 probe 且优先合并；临界点；
-  多个可用唯一索引时选代价最低的；复合唯一索引 + 常量等值；无统计回退启发式。
-- 下游规则：hint 为 `Probe` / `Hash` / `NestLoop` / `None` 四种路径；`Probe` 校验失败退回 hash。
-- NestLoop 方向：Greedy 区域内的 cross pair、根为 Cross 的区域、`force_nested_loop` 的 cross 三类，
-  方向均与原 `OrientNestedLoopJoin` 的现有用例结论一致（迁移其单测），`force_nested_loop` 下不发生重排。
+  多个可用唯一索引时选代价最低的；复合唯一索引 + 常量等值；无统计按默认行数。
+- 下游规则：`join_decided` 的 join 不被改写；未标记的走兜底。
+- NestLoop 方向：Greedy 区域内的 cross pair、根为 Cross 的区域、`FORCE_NEST_LOOP_JOIN` 区域三类，
+  方向均与原 `OrientNestedLoopJoin` 的现有用例结论一致（迁移其单测），`FORCE_NEST_LOOP_JOIN` 下只出现 NLJ。
 - 覆盖：scan 选了覆盖索引、另一个覆盖的 Unique 可 probe 时，probe 按 `seeks = 1` 计价并被选中，
   改写后的 IndexScan 带 `covered_deserializers`，执行时不回表。
 - 正确性：probe 后全部 `on` 条件、join filter、静态 filter 均保留（slt 覆盖）。
@@ -371,5 +361,8 @@ hash 输入或改写为 probe 时，不会丢失上层依赖的有序性、也�
 - 开启 `materialize` 的 MarkApply 的 `rescan_work`；以及 NLJ 内侧含子查询类 MarkApply 时，
   Greedy 按其参数化 / 物化前的估算决定方向的偏差（3.10）。
 - 非唯一索引 probe：执行器需支持每个外侧行输出多行，且每行 reset 内侧开销较大，按具体 case 评估；
-  届时 `rows_per_lookup` 由索引 NDV 估算，10 个候选上限才真正起作用。
+  届时 `rows_per_lookup` 由索引 NDV 估算。
+- 复合连接键的联合 NDV 与唯一性上界：hash 形态下，用被连接键绑定的任意 PK/Unique 估算行数，
+  不限于 implementation 选中的索引（行数是数据的性质，与 scan 走哪个索引无关）。单列键已能从列直方图得到 NDV，
+  收益只在复合键，按具体 case 再做。
 - I/O 建模。
