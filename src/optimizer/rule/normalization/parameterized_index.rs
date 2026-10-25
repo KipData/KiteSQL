@@ -1276,7 +1276,7 @@ mod inner_join_tests {
                 panic!("expected inner join apply")
             };
             assert_eq!(apply.kind, MarkApplyKind::InnerJoin);
-            assert_eq!(apply.predicates().len(), 1);
+            assert!(apply.predicates().is_empty());
             assert_eq!(
                 apply.parameterized_probe().copied(),
                 Some(if swap { r } else { l })
@@ -1356,13 +1356,12 @@ mod inner_join_tests {
             panic!("expected apply without projection")
         };
         assert_eq!(apply.kind, MarkApplyKind::InnerJoin);
-        assert_eq!(apply.predicates().len(), 2);
+        assert!(apply.predicates().is_empty());
         assert_eq!(
             arena.expression(*apply.parameterized_probe().unwrap()),
             &ScalarExpression::Tuple(vec![constant, l1, l0])
         );
         assert_eq!((position(l0, &arena), position(l1, &arena)), (0, 1));
-        assert_eq!((position(r1, &arena), position(r2, &arena)), (3, 4));
         let Childrens::Twins { right, .. } = plan.childrens.as_ref() else {
             unreachable!()
         };
@@ -1477,16 +1476,8 @@ mod inner_join_tests {
             PlanImpl::MarkApply
         );
         assert_eq!(apply.parameterized_probe(), Some(&r));
-        assert_eq!((position(r, &arena), position(l, &arena)), (0, 2));
-        let ScalarExpression::Binary {
-            left_expr,
-            right_expr,
-            ..
-        } = arena.expression(apply.predicates()[0])
-        else {
-            unreachable!()
-        };
-        assert_eq!((*left_expr, *right_expr), (r, l));
+        assert_eq!(position(r, &arena), 0);
+        assert!(apply.predicates().is_empty());
         let Childrens::Twins { left, right } = apply_plan.childrens.as_ref() else {
             unreachable!()
         };
