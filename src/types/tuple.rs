@@ -345,9 +345,15 @@ impl TupleImpl {
 
     #[inline]
     pub fn pk(&self) -> Option<&TupleId> {
+        self.pk_slot().as_ref()
+    }
+
+    /// The stored `Option` itself, for callers that encode it as a whole.
+    #[inline]
+    pub(crate) fn pk_slot(&self) -> &Option<TupleId> {
         match self {
-            TupleImpl::Tuple(tuple) => tuple.pk.as_ref(),
-            TupleImpl::Concat(concat) => concat.pk.as_ref(),
+            TupleImpl::Tuple(tuple) => &tuple.pk,
+            TupleImpl::Concat(concat) => &concat.pk,
         }
     }
 

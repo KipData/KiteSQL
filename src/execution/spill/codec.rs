@@ -210,12 +210,7 @@ impl SpillCodec for DataValue {
 
 impl<T: SpillCodec> SpillCodec for Vec<T> {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<(), DatabaseError> {
-        let len: u32 = self.len().try_into()?;
-        writer.write_all(&len.to_le_bytes())?;
-        for value in self {
-            value.encode(writer)?;
-        }
-        Ok(())
+        encode_seq(self.len(), self.iter(), writer)
     }
 
     fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError> {
@@ -230,11 +225,7 @@ impl<T: SpillCodec> SpillCodec for Vec<T> {
     }
 
     fn encoded_len(&self) -> Result<usize, DatabaseError> {
-        let _: u32 = self.len().try_into()?;
-        self.iter().try_fold(
-            size_of::<u32>(),
-            |len, value| Ok(len + value.encoded_len()?),
-        )
+        seq_encoded_len(self.len(), self.iter())
     }
 
     fn estimated_size(&self) -> usize {
@@ -255,10 +246,7 @@ impl<T: SpillCodec> SpillCodec for Option<T> {
                 writer.write_all(&[1])?;
                 value.encode(writer)
             }
-            None => {
-                writer.write_all(&[0])?;
-                Ok(())
-            }
+            None => Ok(writer.write_all(&[0])?),
         }
     }
 
@@ -330,23 +318,10 @@ impl SpillCodec for Tuple {
 }
 
 impl SpillCodec for TupleImpl {
+    // Same layout as `Tuple`, so a spilled Concat decodes back as a flat tuple.
     fn encode<W: Write>(&self, writer: &mut W) -> Result<(), DatabaseError> {
-        if let TupleImpl::Tuple(tuple) = self {
-            return tuple.encode(writer);
-        }
-        match self.pk() {
-            Some(pk) => {
-                writer.write_all(&[1])?;
-                pk.encode(writer)?;
-            }
-            None => writer.write_all(&[0])?,
-        }
-        let len: u32 = self.len().try_into()?;
-        writer.write_all(&len.to_le_bytes())?;
-        for value in self.iter() {
-            value.encode(writer)?;
-        }
-        Ok(())
+        self.pk_slot().encode(writer)?;
+        encode_seq(self.len(), self.iter(), writer)
     }
 
     fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError> {
@@ -354,18 +329,7 @@ impl SpillCodec for TupleImpl {
     }
 
     fn encoded_len(&self) -> Result<usize, DatabaseError> {
-        if let TupleImpl::Tuple(tuple) = self {
-            return tuple.encoded_len();
-        }
-        let _: u32 = self.len().try_into()?;
-        let pk_len = match self.pk() {
-            Some(pk) => 1 + pk.encoded_len()?,
-            None => 1,
-        };
-        self.iter()
-            .try_fold(pk_len + size_of::<u32>(), |len, value| {
-                Ok(len + value.encoded_len()?)
-            })
+        Ok(self.pk_slot().encoded_len()? + seq_encoded_len(self.len(), self.iter())?)
     }
 
     fn estimated_size(&self) -> usize {
@@ -381,6 +345,31 @@ impl SpillCodec for TupleImpl {
                 ),
         }
     }
+}
+
+#[inline]
+fn encode_seq<'v, T: SpillCodec + 'v, W: Write>(
+    len: usize,
+    values: impl IntoIterator<Item = &'v T>,
+    writer: &mut W,
+) -> Result<(), DatabaseError> {
+    let len: u32 = len.try_into()?;
+    writer.write_all(&len.to_le_bytes())?;
+    values
+        .into_iter()
+        .try_for_each(|value| value.encode(writer))
+}
+
+#[inline]
+fn seq_encoded_len<'v, T: SpillCodec + 'v>(
+    len: usize,
+    values: impl IntoIterator<Item = &'v T>,
+) -> Result<usize, DatabaseError> {
+    let _: u32 = len.try_into()?;
+    values.into_iter().try_fold(
+        size_of::<u32>(),
+        |len, value| Ok(len + value.encoded_len()?),
+    )
 }
 
 fn estimated_dynamic_value_size(value: &DataValue) -> usize {
