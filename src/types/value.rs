@@ -1073,7 +1073,14 @@ impl DataValue {
     #[inline]
     fn decode_string<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
         let mut result = Vec::new();
+        Self::read_memcomparable_string(reader, |group| result.extend_from_slice(group))?;
+        Ok(result)
+    }
 
+    fn read_memcomparable_string<R: Read>(
+        reader: &mut R,
+        mut append: impl FnMut(&[u8]),
+    ) -> std::io::Result<()> {
         loop {
             let mut group = [0u8; ENCODE_GROUP_SIZE];
             reader.read_exact(&mut group)?;
@@ -1092,14 +1099,40 @@ impl DataValue {
             }
 
             let data_len = ENCODE_GROUP_SIZE - pad_count;
-            result.extend_from_slice(&group[..data_len]);
+            append(&group[..data_len]);
 
             if pad_count != 0 {
-                break;
+                return Ok(());
             }
         }
+    }
 
-        Ok(result)
+    fn skip_memcomparable_string<R: Read>(reader: &mut R) -> std::io::Result<()> {
+        Self::read_memcomparable_string(reader, |_| {})
+    }
+
+    fn skip_memcomparable_decimal<R: Read>(reader: &mut R) -> Result<(), DatabaseError> {
+        let flag = reader.read_u8()?;
+        match flag {
+            0x08 | 0x14 | 0x16 | 0x22 => {
+                reader.read_u8()?;
+            }
+            0x09..=0x13 | 0x17..=0x21 => {}
+            0x15 => return Ok(()),
+            _ => {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "invalid decimal exponent: {flag}"
+                )))
+            }
+        }
+        let negative = (0x07..0x15).contains(&flag);
+        loop {
+            let byte = reader.read_u8()?;
+            let byte = if negative { !byte } else { byte };
+            if byte & 1 == 0 {
+                return Ok(());
+            }
+        }
     }
 
     #[inline]
@@ -1187,6 +1220,44 @@ impl DataValue {
         b: &mut B,
     ) -> Result<(), DatabaseError> {
         self.memcomparable_encode_with_null_order(b, false)
+    }
+
+    pub(crate) fn memcomparable_skip<R: Read>(
+        reader: &mut R,
+        ty: &LogicalType,
+    ) -> Result<(), DatabaseError> {
+        if reader.read_u8()? == NULL_TAG {
+            return Ok(());
+        }
+        let size = match ty {
+            LogicalType::SqlNull => return Ok(()),
+            LogicalType::Boolean | LogicalType::Tinyint | LogicalType::UTinyint => 1,
+            LogicalType::Smallint | LogicalType::USmallint => 2,
+            LogicalType::Integer
+            | LogicalType::UInteger
+            | LogicalType::Float
+            | LogicalType::Date
+            | LogicalType::Time(_) => 4,
+            LogicalType::Bigint
+            | LogicalType::UBigint
+            | LogicalType::Double
+            | LogicalType::DateTime
+            | LogicalType::TimeStamp(..) => 8,
+            LogicalType::Char(..) | LogicalType::Varchar(..) | LogicalType::Varbinary(_) => {
+                Self::skip_memcomparable_string(reader)?;
+                return Ok(());
+            }
+            LogicalType::Decimal(..) => return Self::skip_memcomparable_decimal(reader),
+            LogicalType::Tuple(types) => {
+                for ty in types {
+                    Self::memcomparable_skip(reader, ty)?;
+                }
+                return Ok(());
+            }
+        };
+        let mut discard = [0u8; 8];
+        reader.read_exact(&mut discard[..size])?;
+        Ok(())
     }
 
     pub fn memcomparable_decode<R: Read>(
@@ -2349,6 +2420,175 @@ mod test {
             .unwrap(),
             DataValue::Null
         );
+    }
+
+    #[test]
+    fn memcomparable_skip_keeps_following_values_aligned() -> Result<(), DatabaseError> {
+        let cases = [
+            (LogicalType::Integer, DataValue::Int32(-42)),
+            (
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+                DataValue::Utf8 {
+                    value: "汉字abcdefgh".into(),
+                    ty: Utf8Type::Variable(None),
+                    unit: CharLengthUnits::Characters,
+                },
+            ),
+            (
+                LogicalType::Char(16, CharLengthUnits::Octets),
+                DataValue::Utf8 {
+                    value: "0123456789abcdef".into(),
+                    ty: Utf8Type::Fixed(16),
+                    unit: CharLengthUnits::Octets,
+                },
+            ),
+            (
+                LogicalType::Varbinary(None),
+                DataValue::Binary {
+                    value: vec![0xff; 19],
+                    len: None,
+                },
+            ),
+            (
+                LogicalType::Tuple(vec![
+                    LogicalType::Integer,
+                    LogicalType::Varchar(None, CharLengthUnits::Characters),
+                ]),
+                DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Null]),
+            ),
+        ];
+        for (ty, value) in cases {
+            for value in [value, DataValue::Null] {
+                let mut bytes = Vec::new();
+                value.memcomparable_encode(&mut bytes)?;
+                let boundary = bytes.len();
+                DataValue::Int32(99).memcomparable_encode(&mut bytes)?;
+                let mut reader = Cursor::new(bytes.as_slice());
+                DataValue::memcomparable_skip(&mut reader, &ty)?;
+                assert_eq!(reader.position() as usize, boundary);
+                assert_eq!(
+                    DataValue::memcomparable_decode(&mut reader, &LogicalType::Integer)?,
+                    DataValue::Int32(99)
+                );
+                assert_eq!(reader.position() as usize, bytes.len());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn memcomparable_skip_matches_all_scalar_payload_widths() -> Result<(), DatabaseError> {
+        for ty in [
+            LogicalType::Boolean,
+            LogicalType::Tinyint,
+            LogicalType::Smallint,
+            LogicalType::Integer,
+            LogicalType::Bigint,
+            LogicalType::UTinyint,
+            LogicalType::USmallint,
+            LogicalType::UInteger,
+            LogicalType::UBigint,
+            LogicalType::Float,
+            LogicalType::Double,
+            LogicalType::Date,
+            LogicalType::DateTime,
+            LogicalType::Time(Some(3)),
+            LogicalType::TimeStamp(Some(6), true),
+        ] {
+            let mut bytes = Vec::new();
+            DataValue::init(&ty).memcomparable_encode(&mut bytes)?;
+            let boundary = bytes.len();
+            DataValue::Int32(99).memcomparable_encode(&mut bytes)?;
+            let mut reader = Cursor::new(bytes.as_slice());
+            DataValue::memcomparable_skip(&mut reader, &ty)?;
+            assert_eq!(reader.position() as usize, boundary, "{ty:?}");
+            assert_eq!(
+                DataValue::memcomparable_decode(&mut reader, &LogicalType::Integer)?,
+                DataValue::Int32(99)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn memcomparable_skip_matches_variable_group_boundaries() -> Result<(), DatabaseError> {
+        for length in [0, 1, 7, 8, 9, 16, 65] {
+            let value = DataValue::Binary {
+                value: vec![0xff; length],
+                len: None,
+            };
+            let mut bytes = Vec::new();
+            value.memcomparable_encode(&mut bytes)?;
+            let mut reader = Cursor::new(bytes.as_slice());
+            assert_eq!(
+                DataValue::memcomparable_decode(&mut reader, &LogicalType::Varbinary(None))?,
+                value
+            );
+            assert_eq!(reader.position() as usize, bytes.len());
+            reader.set_position(0);
+            DataValue::memcomparable_skip(&mut reader, &LogicalType::Varbinary(None))?;
+            assert_eq!(reader.position() as usize, bytes.len());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn memcomparable_skip_rejects_truncation_and_invalid_markers() {
+        assert!(DataValue::memcomparable_skip(
+            &mut Cursor::new(&[0, 1, 2][..]),
+            &LogicalType::Integer
+        )
+        .is_err());
+        assert!(
+            DataValue::memcomparable_skip(&mut Cursor::new(&[][..]), &LogicalType::Integer)
+                .is_err()
+        );
+        for bytes in [
+            vec![0, 1, 2],
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 246],
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 255],
+        ] {
+            assert!(DataValue::memcomparable_skip(
+                &mut Cursor::new(bytes.as_slice()),
+                &LogicalType::Varbinary(None)
+            )
+            .is_err());
+        }
+        for bytes in [vec![0, 7], vec![0, 0x22], vec![0, 0x18, 1]] {
+            assert!(DataValue::memcomparable_skip(
+                &mut Cursor::new(bytes.as_slice()),
+                &LogicalType::Decimal(None, None)
+            )
+            .is_err());
+        }
+    }
+
+    #[cfg(feature = "decimal")]
+    #[test]
+    fn memcomparable_skip_decimal_uses_variable_payload() -> Result<(), DatabaseError> {
+        for text in [
+            "0",
+            "1",
+            "-1",
+            "123.456",
+            "-0.001",
+            "79228162514264337593543950335",
+            "0.0000000000000000000000000001",
+        ] {
+            let value = DataValue::Decimal(text.parse::<Decimal>().unwrap());
+            let mut bytes = Vec::new();
+            value.memcomparable_encode(&mut bytes)?;
+            let boundary = bytes.len();
+            DataValue::Int32(99).memcomparable_encode(&mut bytes)?;
+            let mut reader = Cursor::new(bytes.as_slice());
+            DataValue::memcomparable_skip(&mut reader, &LogicalType::Decimal(None, None))?;
+            assert_eq!(reader.position() as usize, boundary);
+            assert_eq!(
+                DataValue::memcomparable_decode(&mut reader, &LogicalType::Integer)?,
+                DataValue::Int32(99)
+            );
+        }
+        Ok(())
     }
 
     #[test]

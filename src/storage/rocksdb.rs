@@ -1392,6 +1392,37 @@ mod test {
         );
         drop(iter);
 
+        // An identity prefix projection still skips the remaining key fields;
+        // omitted mapping must not widen the output back to the full index.
+        let prefix_deserializers = [
+            plan_arena.column(b_cover_column).datatype().serializable(),
+            plan_arena
+                .column(a_cover_column)
+                .datatype()
+                .skip_serializable(),
+        ];
+        let mut iter = transaction.read_by_index(
+            kite_sql.state.table_cache(),
+            &plan_arena,
+            "t1".to_string().into(),
+            (None, None),
+            &[b_cover_column],
+            composite_index,
+            &[Range::Scope {
+                min: Bound::Unbounded,
+                max: Bound::Unbounded,
+            }][..],
+            false,
+            Some(&prefix_deserializers),
+            None,
+        )?;
+        for value in [0, 1, 2, 4] {
+            let tuple = crate::storage::next_tuple_for_test(&mut iter)?.unwrap();
+            assert_eq!(tuple.values, vec![DataValue::Int32(value)]);
+        }
+        assert!(crate::storage::next_tuple_for_test(&mut iter)?.is_none());
+        drop(iter);
+
         let target_pk = DataValue::Int32(3);
         let covered_value = DataValue::Int32(4);
         let covered_ranges = [Range::Eq(covered_value.clone())];

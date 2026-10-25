@@ -881,26 +881,37 @@ impl TableCodec {
         )
     }
 
-    pub fn decode_index_key<M: IndexKeyMapping>(
+    pub fn decode_index_key_into<M: IndexKeyMapping>(
+        tuple: &mut Tuple,
         bytes: &[u8],
         ty: &LogicalType,
         mapping: &M,
-    ) -> Result<Vec<DataValue>, DatabaseError> {
+    ) -> Result<(), DatabaseError> {
         // Hash + TypeTag + Bound Min + Index Id Len + Bound Min
         let start = TUPLE_KEY_PREFIX_LEN + INDEX_ID_LEN + KEY_BOUND_LEN;
-        let mut reader = Cursor::new(&bytes[start..]);
+        let bytes = bytes.get(start..).ok_or(DatabaseError::InvalidIndex)?;
+        let mut reader = Cursor::new(bytes);
         let types = match ty {
             LogicalType::Tuple(types) => types.as_slice(),
             ty => std::slice::from_ref(ty),
         };
-        let mut values = vec![DataValue::Null; mapping.target_len(types.len())];
+        tuple.values.clear();
+        tuple
+            .values
+            .resize(mapping.target_len(types.len()), DataValue::Null);
         for (index_pos, ty) in types.iter().enumerate() {
-            let value = DataValue::memcomparable_decode(&mut reader, ty)?;
             if let Some(scan_pos) = mapping.scan_index(index_pos) {
-                values[scan_pos] = value;
+                let value = DataValue::memcomparable_decode(&mut reader, ty)?;
+                let target = tuple
+                    .values
+                    .get_mut(scan_pos)
+                    .ok_or(DatabaseError::InvalidIndex)?;
+                *target = value;
+            } else {
+                DataValue::memcomparable_skip(&mut reader, ty)?;
             }
         }
-        Ok(values)
+        Ok(())
     }
 
     pub fn decode_index(bytes: &[u8]) -> Result<TupleId, DatabaseError> {
@@ -1126,9 +1137,9 @@ mod tests {
     use crate::storage::Storage;
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
-    use crate::types::value::DataValue;
-    use crate::types::ColumnId;
+    use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef, Utf8Type};
     use crate::types::LogicalType;
+    use crate::types::{CharLengthUnits, ColumnId};
     use rust_decimal::Decimal;
     use std::collections::BTreeSet;
     use std::io::Cursor;
@@ -1149,6 +1160,59 @@ mod tests {
             ),
         ];
         TableCatalog::new("t1".to_string().into(), columns, table_arena.borrow_mut()).unwrap()
+    }
+
+    #[test]
+    fn covered_key_decode_uses_skip_configuration_and_output_mapping() -> Result<(), DatabaseError>
+    {
+        let varchar = LogicalType::Varchar(None, CharLengthUnits::Characters);
+        let char_type = LogicalType::Char(16, CharLengthUnits::Octets);
+        let values = vec![
+            DataValue::Int32(7),
+            DataValue::Null,
+            DataValue::Utf8 {
+                value: "skipped汉字abcdefgh".into(),
+                ty: Utf8Type::Variable(None),
+                unit: CharLengthUnits::Characters,
+            },
+            DataValue::Utf8 {
+                value: "0123456789abcdef".into(),
+                ty: Utf8Type::Fixed(16),
+                unit: CharLengthUnits::Octets,
+            },
+            DataValue::Int32(99),
+        ];
+        let index = Index::new(7, &values, IndexType::Normal);
+        let mut codec = TableCodec::default();
+        let key = codec.with_index("cover", &index, Some(&DataValue::Int32(1)), |key, _| {
+            Ok(key.to_vec())
+        })?;
+        let index_ty = LogicalType::Tuple(vec![
+            LogicalType::Integer,
+            varchar.clone(),
+            varchar,
+            char_type,
+            LogicalType::Integer,
+        ]);
+        let mapping = TupleMappingRef::new(&[1, usize::MAX, usize::MAX, usize::MAX, 0], 2);
+        let mut tuple = Tuple::new(None, Vec::with_capacity(8));
+        let allocation = (tuple.values.as_ptr(), tuple.values.capacity());
+        for _ in 0..2 {
+            TableCodec::decode_index_key_into(&mut tuple, &key, &index_ty, &mapping)?;
+            assert_eq!(
+                tuple.values,
+                vec![DataValue::Int32(99), DataValue::Int32(7)]
+            );
+            assert_eq!((tuple.values.as_ptr(), tuple.values.capacity()), allocation);
+        }
+
+        let mapping = TupleMappingRef::new(&[usize::MAX, 0, usize::MAX, usize::MAX, usize::MAX], 1);
+        TableCodec::decode_index_key_into(&mut tuple, &key, &index_ty, &mapping)?;
+        assert_eq!(tuple.values, vec![DataValue::Null]);
+        assert!(
+            TableCodec::decode_index_key_into(&mut tuple, &[], &index_ty, &OrderedMapping).is_err()
+        );
+        Ok(())
     }
 
     #[test]

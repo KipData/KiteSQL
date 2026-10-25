@@ -263,7 +263,14 @@ pub trait Transaction: Sized {
                     LogicalType::Tuple(tys) => tys.len(),
                     _ => 1,
                 };
-                let cover_mapping = mapping.map(|slots| TupleMapping::new(slots, tuple_len));
+                let cover_mapping = match mapping {
+                    Some(slots) => Some(TupleMapping::new(slots.iter().copied(), tuple_len)),
+                    None if columns.len() < tuple_len => {
+                        // Omitted mapping denotes an ordered prefix, not every key field.
+                        Some(TupleMapping::new(0..columns.len(), tuple_len))
+                    }
+                    None => None,
+                };
 
                 (
                     IndexImplEnum::Covered(CoveredIndexImpl),
@@ -1439,15 +1446,17 @@ struct TupleMapping {
 }
 
 impl TupleMapping {
-    fn new(scan_to_index: &[usize], tuple_len: usize) -> Self {
+    fn new(scan_to_index: impl Iterator<Item = usize>, tuple_len: usize) -> Self {
         let mut index_to_scan = vec![usize::MAX; tuple_len];
+        let mut target_len = 0;
 
-        for (scan_idx, index_idx) in scan_to_index.iter().enumerate() {
-            index_to_scan[*index_idx] = scan_idx;
+        for index_idx in scan_to_index {
+            index_to_scan[index_idx] = target_len;
+            target_len += 1;
         }
         TupleMapping {
             index_to_scan,
-            target_len: scan_to_index.len(),
+            target_len,
         }
     }
 
@@ -1891,12 +1900,14 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
         value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<(), DatabaseError> {
-        let key = match &params.cover_mapping {
+        match &params.cover_mapping {
             Some(mapping) => {
-                TableCodec::decode_index_key(key, params.value_ty(), &mapping.as_ref())?
+                TableCodec::decode_index_key_into(tuple, key, params.value_ty(), &mapping.as_ref())?
             }
-            None => TableCodec::decode_index_key(key, params.value_ty(), &OrderedMapping)?,
-        };
+            None => {
+                TableCodec::decode_index_key_into(tuple, key, params.value_ty(), &OrderedMapping)?
+            }
+        }
 
         let tuple_id = if params.with_pk {
             Some(TableCodec::decode_index(value)?)
@@ -1904,7 +1915,6 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
             None
         };
         tuple.pk = tuple_id;
-        tuple.values = key;
         Ok(())
     }
 
