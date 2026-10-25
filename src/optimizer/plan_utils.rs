@@ -19,7 +19,7 @@ use crate::expression::{AliasType, ScalarExpression};
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::visitor::{ChildrenVisit, OperatorVisitor};
-use crate::planner::operator::{Operator, RowCountOption};
+use crate::planner::operator::{Operator, PhysicalOption, RowCountOption};
 use crate::planner::{Childrens, LogicalPlan, MetaArena, PlanArena};
 use crate::types::ColumnId;
 use std::mem;
@@ -90,6 +90,31 @@ pub fn children(plan: &LogicalPlan) -> Vec<&LogicalPlan> {
         Childrens::None => vec![],
         Childrens::Only(child) => vec![child.as_ref()],
         Childrens::Twins { left, right } => vec![left.as_ref(), right.as_ref()],
+    }
+}
+
+pub(crate) fn predicate_scan_mut<'plan>(
+    plan: &'plan mut LogicalPlan,
+    arena: &PlanArena,
+) -> Option<(
+    &'plan mut TableScanOperator,
+    &'plan mut Option<PhysicalOption>,
+)> {
+    match (&mut plan.operator, plan.childrens.as_mut()) {
+        (Operator::TableScan(scan), _) if scan.limit == (None, None) => {
+            Some((scan, &mut plan.physical_option))
+        }
+        (Operator::Sort(_), Childrens::Only(input)) => predicate_scan_mut(input, arena),
+        (Operator::ScalarQueryInit(init), Childrens::Twins { left, .. })
+            if init.param_bindings.is_empty()
+                && matches!(
+                    arena.expression(init.value),
+                    ScalarExpression::InitValue { .. }
+                ) =>
+        {
+            predicate_scan_mut(left, arena)
+        }
+        _ => None,
     }
 }
 

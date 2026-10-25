@@ -18,7 +18,9 @@ use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
+use crate::optimizer::plan_utils::{
+    only_child_mut, predicate_scan_mut, replace_with_only_child, wrap_child_with,
+};
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::sort::{SortField, SortOperator};
@@ -329,7 +331,7 @@ impl NormalizationRule for EliminateIndexFilter {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        _: &mut PlanArena,
+        arena: &mut PlanArena,
         _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         if !matches!(plan.operator, Operator::Filter(_)) {
@@ -337,13 +339,15 @@ impl NormalizationRule for EliminateIndexFilter {
         }
 
         let residual = {
-            let Some(child) = only_child_mut(plan) else {
+            let Some((_, physical_option)) =
+                only_child_mut(plan).and_then(|child| predicate_scan_mut(child, arena))
+            else {
                 return Ok(false);
             };
             let Some(PhysicalOption {
                 plan: PlanImpl::IndexScan(index_info),
                 ..
-            }) = child.physical_option.as_ref()
+            }) = physical_option.as_ref()
             else {
                 return Ok(false);
             };
@@ -357,7 +361,11 @@ impl NormalizationRule for EliminateIndexFilter {
             let Operator::Filter(filter_op) = &mut plan.operator else {
                 unreachable!("filter operator checked before residual rewrite");
             };
+            if filter_op.predicate == residual {
+                return Ok(false);
+            }
             filter_op.predicate = residual;
+            filter_op.is_optimized = false;
             return Ok(true);
         }
 
@@ -787,6 +795,7 @@ mod tests {
     use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::limit::LimitOperator;
     use crate::planner::operator::project::ProjectOperator;
+    use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
     use crate::planner::operator::sort::{SortField, SortOperator};
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::top_k::TopKOperator;
@@ -794,7 +803,7 @@ mod tests {
     use crate::planner::operator::{
         Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
     };
-    use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
+    use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
     use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::ColumnId;
@@ -1490,35 +1499,46 @@ mod tests {
     }
 
     #[test]
-    fn exact_index_filter_is_removed_after_physical_selection() -> Result<(), DatabaseError> {
-        let table_arena = crate::planner::TableArenaCell::default();
-        let mut arena = crate::planner::PlanArena::new(&table_arena);
-        let predicate =
-            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
-        let mut plan = build_filter_with_selected_index(&mut arena, predicate, None);
-
-        let rule = EliminateIndexFilter;
-        assert!(rule.apply(&mut plan, &mut arena, None)?);
-        assert!(matches!(plan.operator, Operator::TableScan(_)));
-        Ok(())
-    }
-
-    #[test]
-    fn partial_index_filter_keeps_residual_after_physical_selection() -> Result<(), DatabaseError> {
+    fn index_filter_elimination_preserves_residual_and_initializer() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let predicate =
             arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
         let residual =
             arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(false)));
-        let mut plan = build_filter_with_selected_index(&mut arena, predicate, Some(residual));
-
+        let id = arena.alloc_scalar_query_ref(false);
+        let value = arena.alloc_expression(ScalarExpression::InitValue {
+            id,
+            ty: LogicalType::Integer,
+        });
         let rule = EliminateIndexFilter;
-        assert!(rule.apply(&mut plan, &mut arena, None)?);
-        let Operator::Filter(filter_op) = &plan.operator else {
-            unreachable!("residual predicate should keep filter");
-        };
-        assert_eq!(filter_op.predicate, residual);
+        for residual in [None, Some(residual)] {
+            for through_init in [false, true] {
+                let mut plan = build_filter_with_selected_index(&mut arena, predicate, residual);
+                if through_init {
+                    let scan = plan.childrens.pop_only();
+                    plan.childrens =
+                        Box::new(Childrens::Only(Box::new(ScalarQueryInitOperator::build(
+                            scan,
+                            LogicalPlan::new(Operator::Dummy, Childrens::None),
+                            value,
+                            vec![],
+                        ))));
+                }
+                let input = plan.childrens.only().clone();
+                assert!(rule.apply(&mut plan, &mut arena, None)?);
+                if let Some(residual) = residual {
+                    let Operator::Filter(filter) = &plan.operator else {
+                        panic!("residual predicate should keep filter")
+                    };
+                    assert_eq!(filter.predicate, residual);
+                    assert_eq!(plan.childrens.only(), &input);
+                } else {
+                    assert_eq!(plan, input);
+                }
+                assert!(!rule.apply(&mut plan, &mut arena, None)?);
+            }
+        }
         Ok(())
     }
 

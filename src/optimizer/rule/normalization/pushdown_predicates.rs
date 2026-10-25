@@ -19,7 +19,7 @@ use crate::expression::visitor_mut::{ExprVisitorMut, PositionShift};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::optimizer::plan_utils::{replace_with_only_child, wrap_child_with};
+use crate::optimizer::plan_utils::{predicate_scan_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::extract_join_keys;
 use crate::planner::operator::join::{JoinCondition, JoinType};
@@ -325,8 +325,7 @@ impl NormalizationRule for PushPredicateIntoScan {
         let Childrens::Only(child) = childrens.as_mut() else {
             return Ok(false);
         };
-        let child = child.as_mut();
-        let Operator::TableScan(scan_op) = &mut child.operator else {
+        let Some((scan_op, _)) = predicate_scan_mut(child, arena) else {
             return Ok(false);
         };
 
@@ -740,39 +739,46 @@ mod tests {
     fn test_push_predicate_into_scan() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
         let mut arena = PlanArena::new(&table_state.table_arena);
-        // 1 - c2 < 0 => c2 > 1
-        let plan =
-            table_state.plan_with_arena("select * from t1 where -(1 - c2) > 0", &mut arena)?;
+        // 1 - c2 < 0 => c2 > 1, directly and through scalar initialization.
+        for (sql, through_init) in [
+            ("select * from t1 where -(1 - c2) > 0", false),
+            (
+                "select * from t1 where -(1 - c2) > 0 and c1 = (select 1)",
+                true,
+            ),
+        ] {
+            let plan = table_state.plan_with_arena(sql, &mut arena)?;
+            let best_plan = apply_pipeline(
+                plan,
+                HepOptimizerPipeline::builder()
+                    .before_batch(
+                        "simplify_filter",
+                        HepBatchStrategy::once_topdown(),
+                        &[NormalizationRuleImpl::SimplifyFilter],
+                    )
+                    .before_batch(
+                        "test_push_predicate_into_scan",
+                        HepBatchStrategy::once_topdown(),
+                        &[NormalizationRuleImpl::PushPredicateIntoScan],
+                    ),
+                &mut arena,
+            )?;
 
-        let best_plan = apply_pipeline(
-            plan,
-            HepOptimizerPipeline::builder()
-                .before_batch(
-                    "simplify_filter",
-                    HepBatchStrategy::once_topdown(),
-                    &[NormalizationRuleImpl::SimplifyFilter],
-                )
-                .before_batch(
-                    "test_push_predicate_into_scan",
-                    HepBatchStrategy::once_topdown(),
-                    &[NormalizationRuleImpl::PushPredicateIntoScan],
-                ),
-            &mut arena,
-        )?;
-
-        let scan_op = best_plan.childrens.pop_only().childrens.pop_only();
-        if let Operator::TableScan(op) = &scan_op.operator {
-            let mock_range = Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(1)),
-                max: Bound::Unbounded,
+            let mut scan = best_plan.childrens.pop_only().childrens.pop_only();
+            if through_init {
+                assert!(matches!(scan.operator, Operator::ScalarQueryInit(_)));
+                scan = scan.childrens.pop_twins().0;
+            }
+            let Operator::TableScan(op) = &scan.operator else {
+                panic!("expected table scan")
             };
-
             assert_eq!(
                 op.index_infos[0].lookup,
-                Some(IndexLookup::Static(mock_range))
+                Some(IndexLookup::Static(Range::Scope {
+                    min: Bound::Excluded(DataValue::Int32(1)),
+                    max: Bound::Unbounded,
+                }))
             );
-        } else {
-            unreachable!("Should be a filter operator")
         }
 
         Ok(())
