@@ -106,8 +106,6 @@ pub struct MarkApply<'a> {
     right_root: ExecId,
     // Temporarily None while scan owns and transitions the right input.
     right_input: Option<RightInput>,
-    // Retain a streaming inner input across next_tuple calls, not its result rows.
-    join_input: Option<(ExecId, Tuple)>,
 }
 
 impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
@@ -132,7 +130,6 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
             left_input,
             right_root,
             right_input: Some(right_input),
-            join_input: None,
         }))
     }
 }
@@ -143,7 +140,6 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        self.join_input = None;
         // Materialization already makes the RHS reusable across left rows.
         // Keep both complete caches and paused prefixes; only reset the left input.
         if !self.op.materialize || self.right_input.is_none() {
@@ -206,31 +202,28 @@ impl<'a> MarkApply<'a> {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        loop {
-            if let Some((root, left)) = &mut self.join_input {
-                while arena.next_tuple(*root, plan_arena)? {
-                    let right = arena.result_tuple();
-                    if Self::predicates_matched(self.op.predicates(), left, right, plan_arena)? {
-                        let output = arena.result_tuple_mut();
-                        let right_len = output.values.len();
-                        output.values.extend(left.values.iter().cloned());
-                        output.values.rotate_left(right_len);
-                        output.pk = left.pk.clone().or(output.pk.take());
-                        arena.resume();
-                        return Ok(());
-                    }
-                }
-            }
-            if !arena.next_tuple(self.left_input, plan_arena)? {
-                self.join_input = None;
-                arena.finish();
-                return Ok(());
-            }
-            let left = arena.materialize_tuple();
+        while arena.next_tuple(self.left_input, plan_arena)? {
+            let mut left = arena.materialize_tuple();
             let value = self.parameterized_probe_value(&left, plan_arena)?;
             let root = input.reset(arena, plan_arena, self.runtime_probe_for(value))?;
-            self.join_input = Some((root, left));
+            // A full unique-key probe cannot have another match, so consume the left row.
+            if arena.next_tuple(root, plan_arena)?
+                && Self::predicates_matched(
+                    self.op.predicates(),
+                    &left,
+                    arena.result_tuple(),
+                    plan_arena,
+                )?
+            {
+                let right = arena.result_tuple_mut();
+                left.values.append(&mut right.values);
+                left.pk = left.pk.or(right.pk.take());
+                arena.produce_tuple(left);
+                return Ok(());
+            }
         }
+        arena.finish();
+        Ok(())
     }
 
     fn runtime_probe_for(&self, param_value: Option<DataValue>) -> Option<RuntimeIndexProbe> {
@@ -566,7 +559,7 @@ mod tests {
     use crate::types::evaluator::{binary_create, cast_create};
     use crate::types::index::RuntimeIndexProbe;
     use crate::types::tuple::Tuple;
-    use crate::types::LogicalType;
+    use crate::types::{CharLengthUnits, LogicalType};
     use std::borrow::Cow;
     use tempfile::TempDir;
 
@@ -656,17 +649,23 @@ mod tests {
     }
 
     #[test]
-    fn inner_join_apply_emits_all_matches_and_reuses_right_slots() -> Result<(), DatabaseError> {
+    fn inner_join_apply_moves_single_match_and_reuses_right_slots() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
-        let mut left = build_values(
+        let mut left = build_values_with_schema(
             &mut plan_arena,
-            "left_key",
             vec![
-                vec![DataValue::Int32(2)],
-                vec![DataValue::Null],
-                vec![DataValue::Int32(99)],
-                vec![DataValue::Int32(2)],
+                ("left_key", LogicalType::Integer),
+                (
+                    "payload",
+                    LogicalType::Varchar(None, CharLengthUnits::Characters),
+                ),
+            ],
+            vec![
+                vec![DataValue::Int32(2), DataValue::from("first".to_string())],
+                vec![DataValue::Null, DataValue::from("null".to_string())],
+                vec![DataValue::Int32(99), DataValue::from("missing".to_string())],
+                vec![DataValue::Int32(2), DataValue::from("again".to_string())],
             ],
         );
         let mut right = build_values_with_schema(
@@ -675,23 +674,17 @@ mod tests {
                 ("right_key", LogicalType::Integer),
                 ("flag", LogicalType::Boolean),
             ],
-            vec![
-                vec![DataValue::Int32(2), DataValue::Boolean(true)],
-                vec![DataValue::Int32(2), DataValue::Boolean(false)],
-                vec![DataValue::Int32(2), DataValue::Null],
-                vec![DataValue::Int32(2), DataValue::Boolean(true)],
-                vec![DataValue::Null, DataValue::Boolean(true)],
-            ],
+            vec![vec![DataValue::Int32(2), DataValue::Boolean(true)]],
         );
         let left_column = left.output_schema(&mut plan_arena)[0];
         let right_schema = right.output_schema(&mut plan_arena).clone();
         let equality =
-            build_equality_predicate(&mut plan_arena, left_column, 0, right_schema[0], 1)?;
+            build_equality_predicate(&mut plan_arena, left_column, 0, right_schema[0], 2)?;
         let residual =
-            plan_arena.alloc_expression(ScalarExpression::column_expr(right_schema[1], 2));
+            plan_arena.alloc_expression(ScalarExpression::column_expr(right_schema[1], 3));
         let probe = plan_arena.alloc_expression(ScalarExpression::column_expr(left_column, 0));
         let mut op = MarkApplyOperator::new_inner_join(vec![equality, residual], probe);
-        // Values has no parameterized IndexScan to consume a runtime probe.
+        // A single Values row stands in for the unique lookup, without a runtime probe.
         op.set_parameterized_probe(None);
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -709,12 +702,13 @@ mod tests {
         let count = arena.nodes.items.len();
         assert_eq!(count, 3);
         let mut plan_arena = ExecMetaArena::new(plan_arena);
-        for _ in 0..4 {
+        for payload in ["first", "again"] {
             assert!(arena.next_tuple(root, &mut plan_arena)?);
             assert_eq!(
                 arena.materialize_tuple().values,
                 vec![
                     DataValue::Int32(2),
+                    DataValue::from(payload.to_string()),
                     DataValue::Int32(2),
                     DataValue::Boolean(true)
                 ]
@@ -727,18 +721,14 @@ mod tests {
     }
 
     #[test]
-    fn inner_join_apply_does_not_read_past_the_returned_match() -> Result<(), DatabaseError> {
+    fn inner_join_apply_skips_a_rejected_unique_match() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values(&mut plan_arena, "left_key", vec![vec![DataValue::Int32(1)]]);
         let mut right = build_values_with_schema(
             &mut plan_arena,
             vec![("flag", LogicalType::Boolean)],
-            // A later row that cannot be cast must not fail the first fetch.
-            vec![
-                vec![DataValue::Boolean(true)],
-                vec![DataValue::from("not-a-boolean".to_string())],
-            ],
+            vec![vec![DataValue::Boolean(false)]],
         );
         let left_column = left.output_schema(&mut plan_arena)[0];
         let right_column = right.output_schema(&mut plan_arena)[0];
@@ -754,11 +744,7 @@ mod tests {
             plan_arena,
             &transaction,
         );
-        assert_eq!(
-            executor.next_tuple()?.unwrap().values,
-            vec![DataValue::Int32(1), DataValue::Boolean(true)]
-        );
-        assert!(executor.next_tuple().is_err());
+        assert!(executor.next_tuple()?.is_none());
         Ok(())
     }
 
@@ -926,7 +912,6 @@ mod tests {
             op: &op,
             right_input: Some(RightInput::Streaming { root: right_root }),
             left_input: 0,
-            join_input: None,
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]);
 
@@ -984,7 +969,6 @@ mod tests {
             op: &op,
             right_input: Some(RightInput::Streaming { root: right_root }),
             left_input: 0,
-            join_input: None,
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Int32(2)]);
 
@@ -1042,7 +1026,6 @@ mod tests {
             op: &op,
             right_input: Some(RightInput::Streaming { root: right_root }),
             left_input: 0,
-            join_input: None,
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Null]);
 
@@ -1182,7 +1165,6 @@ mod tests {
                         op: &op,
                         left_input,
                         right_input: Some(right_input),
-                        join_input: None,
                     };
                     let mut meta = ExecMetaArena::new(meta);
                     let result = exec.next_tuple(&mut arena, &mut meta);
@@ -1266,7 +1248,6 @@ mod tests {
                 op: &op,
                 left_input,
                 right_input: Some(right_input),
-                join_input: None,
             };
             let mut meta = ExecMetaArena::new(meta);
             for (index, (key, flag, marker)) in cases.iter().enumerate() {
@@ -1339,7 +1320,6 @@ mod tests {
                 op: &op,
                 right_input: Some(RightInput::Materialize { root: right_root }),
                 left_input,
-                join_input: None,
             };
             let mut meta = ExecMetaArena::new(meta);
             for value in [

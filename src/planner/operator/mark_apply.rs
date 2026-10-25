@@ -137,6 +137,7 @@ impl MarkApplyOperator {
             .expect("marker apply output column")
     }
 
+    // The RHS must be a full primary/unique-key point probe, yielding at most one row.
     pub(crate) fn new_inner_join(predicates: Vec<ExprRef>, probe: ExprRef) -> Self {
         Self {
             kind: MarkApplyKind::InnerJoin,

@@ -308,6 +308,9 @@ fn parameterize(
         (Operator::TableScan(scan), _) if scan.limit == (None, None) => {
             'indexes: for info in &mut scan.index_infos {
                 let meta = arena.index(info.meta);
+                if !matches!(meta.ty, IndexType::PrimaryKey { .. } | IndexType::Unique) {
+                    continue;
+                }
                 let mut probe = Vec::with_capacity(meta.column_ids.len());
                 let mut uses_join_key = false;
                 'columns: for id in &meta.column_ids {
@@ -705,6 +708,24 @@ mod inner_join_tests {
         )
     }
 
+    fn unique_scan(
+        arena: &mut PlanArena<'_>,
+        name: &str,
+        types: &[LogicalType],
+        indexes: &[&[usize]],
+    ) -> LogicalPlan {
+        let mut plan = scan(arena, name, types, indexes);
+        let Operator::TableScan(scan) = &mut plan.operator else {
+            unreachable!()
+        };
+        for info in &mut scan.index_infos {
+            let mut meta = arena.index(info.meta).clone();
+            meta.ty = IndexType::Unique;
+            info.meta = arena.alloc_index(meta);
+        }
+        plan
+    }
+
     fn column(plan: &LogicalPlan, position: usize, arena: &mut PlanArena<'_>) -> ExprRef {
         let Operator::TableScan(scan) = &plan.operator else {
             panic!("expected scan")
@@ -928,7 +949,7 @@ mod inner_join_tests {
             let tables = TableArenaCell::default();
             let mut arena = PlanArena::new(&tables);
             let mut left = scan(&mut arena, "outer", &[LogicalType::Integer], &[]);
-            let mut right = scan(&mut arena, "inner", &[LogicalType::Integer], &[&[0]]);
+            let mut right = unique_scan(&mut arena, "inner", &[LogicalType::Integer], &[&[0]]);
             let l = column(&left, 0, &mut arena);
             let r = column(&right, 0, &mut arena);
             left.physical_option = Some(PhysicalOption::new(
@@ -979,7 +1000,7 @@ mod inner_join_tests {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let mut left = scan(&mut arena, "outer", &[LogicalType::Integer], &[]);
-        let mut right = scan(&mut arena, "inner", &[LogicalType::Integer], &[&[0]]);
+        let mut right = unique_scan(&mut arena, "inner", &[LogicalType::Integer], &[&[0]]);
         let l = column(&left, 0, &mut arena);
         let r = column(&right, 0, &mut arena);
         left.physical_option = Some(PhysicalOption::new(
@@ -1043,7 +1064,7 @@ mod inner_join_tests {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let left = scan(&mut arena, "outer", &[LogicalType::Integer], &[]);
-        let mut right = scan(
+        let mut right = unique_scan(
             &mut arena,
             "inner",
             &[LogicalType::Integer, LogicalType::Integer],
@@ -1085,8 +1106,8 @@ mod inner_join_tests {
             let mut arena = PlanArena::new(&tables);
             let left_indexes: &[&[usize]] = if swap { &[&[0]] } else { &[] };
             let right_indexes: &[&[usize]] = if swap { &[&[1]] } else { &[&[1], &[0]] };
-            let left = scan(&mut arena, "outer", &[LogicalType::Integer], left_indexes);
-            let right = scan(
+            let left = unique_scan(&mut arena, "outer", &[LogicalType::Integer], left_indexes);
+            let right = unique_scan(
                 &mut arena,
                 "inner",
                 &[LogicalType::Integer, LogicalType::Integer],
@@ -1158,7 +1179,7 @@ mod inner_join_tests {
             &[],
         );
         // Skip the constant-only and unmatched indexes; the last uses both key sources.
-        let mut right = scan(
+        let mut right = unique_scan(
             &mut arena,
             "inner",
             &[const { LogicalType::Integer }; 4],
@@ -1178,6 +1199,9 @@ mod inner_join_tests {
             unreachable!()
         };
         let info = &mut scan.index_infos[2];
+        let mut meta = arena.index(info.meta).clone();
+        meta.ty = IndexType::PrimaryKey { is_multiple: true };
+        info.meta = arena.alloc_index(meta);
         info.lookup = Some(IndexLookup::Static(Range::Eq(DataValue::Int32(7))));
         info.residual_predicate = Some(residual);
         let index = info.meta;
@@ -1226,7 +1250,7 @@ mod inner_join_tests {
     fn swapped_join_restores_unequal_widths_and_filter_positions() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
-        let mut left = scan(
+        let mut left = unique_scan(
             &mut arena,
             "left",
             &[const { LogicalType::Integer }; 3],
@@ -1342,7 +1366,14 @@ mod inner_join_tests {
     #[test]
     fn rejected_probe_leaves_join_and_expression_positions_unchanged() -> Result<(), DatabaseError>
     {
-        for case in ["missing_key", "type_mismatch", "inner_limit", "outer_join"] {
+        for case in [
+            "missing_key",
+            "type_mismatch",
+            "inner_limit",
+            "outer_join",
+            "normal_index",
+            "composite_index",
+        ] {
             let tables = TableArenaCell::default();
             let mut arena = PlanArena::new(&tables);
             let left = scan(&mut arena, "left", &[LogicalType::Integer], &[]);
@@ -1351,8 +1382,16 @@ mod inner_join_tests {
             } else {
                 LogicalType::Integer
             };
-            let index: &[usize] = if case == "missing_key" { &[0, 1] } else { &[0] };
-            let mut right = scan(&mut arena, "right", &[ty, LogicalType::Integer], &[index]);
+            let index: &[usize] = if matches!(case, "missing_key" | "composite_index") {
+                &[0, 1]
+            } else {
+                &[0]
+            };
+            let mut right = if matches!(case, "normal_index" | "composite_index") {
+                scan(&mut arena, "right", &[ty, LogicalType::Integer], &[index])
+            } else {
+                unique_scan(&mut arena, "right", &[ty, LogicalType::Integer], &[index])
+            };
             if case == "inner_limit" {
                 let Operator::TableScan(scan) = &mut right.operator else {
                     unreachable!()
@@ -1361,7 +1400,11 @@ mod inner_join_tests {
             }
             let l = column(&left, 0, &mut arena);
             let r = column(&right, 0, &mut arena);
-            let mut plan = join(left, right, vec![(l, r)], None);
+            let mut keys = vec![(l, r)];
+            if case == "composite_index" {
+                keys.push((l, column(&right, 1, &mut arena)));
+            }
+            let mut plan = join(left, right, keys, None);
             if case == "outer_join" {
                 let Operator::Join(join) = &mut plan.operator else {
                     unreachable!()

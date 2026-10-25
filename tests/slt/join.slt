@@ -258,14 +258,28 @@ insert into lookup_outer values (1,10),(2,20),(3,null),(4,99),(5,10);
 statement ok
 insert into lookup_inner values (1,10,7),(2,10,9),(3,20,3),(4,null,8);
 
-# A plain SeqScan outer input is eligible; no size/limit heuristic is required.
+# A non-unique index stays on the ordinary join path, preserving all matches.
 query T
 explain select lookup_outer.id,lookup_inner.id from lookup_outer join lookup_inner on lookup_outer.k=lookup_inner.k;
 ----
-Projection [lookup_outer.id, lookup_inner.id] [Project => (Sort Option: Follow)] InnerJoinApply [MarkApply => (Sort Option: Follow)] TableScan lookup_outer -> [lookup_outer.id, lookup_outer.k] [SeqScan => (Sort Option: None)] TableScan lookup_inner -> [lookup_inner.id, lookup_inner.k] [IndexScan By lookup_inner_k => Probe ? => (Sort Option: OrderBy: (lookup_inner.k Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [lookup_outer.id, lookup_inner.id] [Project => (Sort Option: Follow)] Inner Join On lookup_outer.k = lookup_inner.k [HashJoin => (Sort Option: None)] TableScan lookup_outer -> [lookup_outer.id, lookup_outer.k] [SeqScan => (Sort Option: None)] TableScan lookup_inner -> [lookup_inner.id, lookup_inner.k] [SeqScan => (Sort Option: None)]
 
-# Resume the same non-unique probe across calls, then rebuild after NULL and
-# missing keys. In particular, NULL = NULL must not produce the inner NULL row.
+# A complete primary-key equality uses the single-match path.
+query III
+select o.id,i.id,i.v from lookup_outer o join lookup_inner i on o.id=i.id order by o.id;
+----
+1 1 7
+2 2 9
+3 3 3
+4 4 8
+
+# Extra equalities can reject the unique hit, including UNKNOWN from NULL.
+query II
+select o.id,i.id from lookup_outer o join lookup_inner i on o.id=i.id and o.k=i.k order by o.id;
+----
+1 1
+
+# Non-unique keys still emit every match. NULL = NULL must not match.
 query II
 select lookup_outer.id,lookup_inner.id from lookup_outer
 join lookup_inner on lookup_outer.k=lookup_inner.k
@@ -710,7 +724,7 @@ select greedy_a.v,greedy_b.v,greedy_c.v from greedy_a,greedy_b,greedy_c where gr
 10 100 1100
 20 200 2000
 
-# Parameterization must still select an index probe after the join tree is reordered.
+# A non-unique index added after reorder must preserve the ordinary join results.
 statement ok
 create index greedy_b_k on greedy_b(k)
 
