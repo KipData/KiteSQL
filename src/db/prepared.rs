@@ -1,9 +1,13 @@
 use super::*;
+// GRCOV_EXCL_START
 #[cfg(test)]
 use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
+// GRCOV_EXCL_STOP
 use crate::planner::{ExprRef, ParamArena, PlanInput};
+// GRCOV_EXCL_START
 #[cfg(test)]
 use crate::types::index::IndexLookup;
+// GRCOV_EXCL_STOP
 use crate::types::LogicalType;
 
 /// A bound and optimized reusable plan.
@@ -132,6 +136,7 @@ impl<S: Storage> State<S> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,6 +420,56 @@ mod tests {
         )?;
         assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
+
+        let unions = db.prepare_sql(
+            "select id from parameter_order where (id=$1 or id=$2) and id>$3 order by id",
+            &[
+                (1, LogicalType::Integer),
+                (2, LogicalType::Integer),
+                (3, LogicalType::Integer),
+            ],
+        )?;
+        for (first, second, lower, expected) in [
+            (
+                DataValue::Int32(1),
+                DataValue::Int32(4),
+                DataValue::Int32(2),
+                vec![DataValue::Int32(4)],
+            ),
+            (
+                DataValue::Int32(4),
+                DataValue::Int32(1),
+                DataValue::Int32(0),
+                vec![DataValue::Int32(1), DataValue::Int32(4)],
+            ),
+            (
+                DataValue::Int32(2),
+                DataValue::Int32(2),
+                DataValue::Int32(0),
+                vec![DataValue::Int32(2)],
+            ),
+            (
+                DataValue::Null,
+                DataValue::Int32(3),
+                DataValue::Int32(0),
+                vec![DataValue::Int32(3)],
+            ),
+            (
+                DataValue::Int32(1),
+                DataValue::Int32(4),
+                DataValue::Null,
+                vec![],
+            ),
+        ] {
+            let mut iter = db.execute(&unions, [(1, first), (2, second), (3, lower)])?;
+            let mut rows = Vec::new();
+            while iter
+                .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
+                .is_some()
+            {}
+            iter.done()?;
+            assert_eq!(rows, expected);
+        }
         Ok(())
     }
 
@@ -575,3 +630,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

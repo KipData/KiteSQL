@@ -1236,6 +1236,89 @@ mod tests {
     }
 
     #[test]
+    fn materializing_scalar_references_preserves_shared_catalog_ids() -> Result<(), DatabaseError> {
+        use crate::planner::operator::project::ProjectOperator;
+        use crate::planner::Childrens;
+        let catalog = TableArenaCell::default();
+        let persistent = catalog.borrow_mut().alloc_scalar_query_ref(false);
+        let mut arena = PlanArena::new(&catalog);
+        let param = arena.alloc_scalar_query_ref(false);
+        let result = arena.alloc_scalar_query_ref(true);
+        let constant = arena.alloc_scalar_query_ref(false);
+        let exprs = [
+            ScalarExpression::OuterParam {
+                id: param,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::OuterValue {
+                id: result,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::InitValue {
+                id: constant,
+                ty: LogicalType::Integer,
+            },
+            ScalarExpression::InitValue {
+                id: persistent,
+                ty: LogicalType::Integer,
+            },
+        ]
+        .into_iter()
+        .map(|expr| arena.alloc_expression(expr))
+        .collect::<Vec<_>>();
+        let input = LogicalPlan::new(
+            Operator::Project(ProjectOperator {
+                exprs: exprs.clone(),
+            }),
+            Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
+        );
+        let source = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(5)));
+        let mut plan = ScalarQueryInitOperator::build(
+            input,
+            LogicalPlan::new(Operator::Dummy, Childrens::None),
+            exprs[1],
+            vec![(param, source)],
+        );
+        arena.materialize_scalar_queries(&mut plan)?;
+        let expected_param = ScalarQueryRef {
+            arena_id: 0,
+            pos: 1,
+            is_outer_value: false,
+        };
+        let expected_result = ScalarQueryRef {
+            arena_id: 0,
+            pos: 2,
+            is_outer_value: true,
+        };
+        assert!(
+            matches!(arena.expression(exprs[0]), ScalarExpression::OuterParam { id, .. } if *id == expected_param)
+        );
+        assert!(
+            matches!(arena.expression(exprs[1]), ScalarExpression::OuterValue { id, .. } if *id == expected_result)
+        );
+        assert!(
+            matches!(arena.expression(exprs[2]), ScalarExpression::InitValue { id, .. } if id.arena_id == 0 && id.pos == 3)
+        );
+        assert!(
+            matches!(arena.expression(exprs[3]), ScalarExpression::InitValue { id, .. } if *id == persistent)
+        );
+        let Operator::ScalarQueryInit(op) = &plan.operator else {
+            unreachable!()
+        };
+        assert_eq!(op.param_bindings[0].0, expected_param);
+        arena.reserve_scalar_query_ref(expected_result);
+        arena.reserve_scalar_query_ref(constant);
+        let mut view = ExecMetaArena::new(arena);
+        let allocated = view.alloc_scalar_query_ref(true);
+        view.reserve_scalar_query_ref(allocated);
+        view.set_init_value(allocated, DataValue::Null);
+        let view = view.boxed();
+        assert_eq!(view.init_value(allocated), Some(&DataValue::Null));
+        assert_eq!(view.arena_id(), 1);
+        Ok(())
+    }
+
+    #[test]
     fn scalar_query_namespaces_follow_arena_parent() -> Result<(), DatabaseError> {
         let root = TableArenaCell::default();
         let catalog = root.borrow_mut().alloc_scalar_query_ref(false);
@@ -1261,6 +1344,8 @@ mod tests {
         let mut params = ParamArena::new(&plan, &[], &[])?;
         assert_eq!(params.arena_id(), 2);
         let param_local = params.alloc_scalar_query_ref(false);
+        params.reserve_scalar_query_ref(param_local);
+        params.reserve_scalar_query_ref(local);
         assert_eq!(
             param_local,
             ScalarQueryRef {
@@ -1280,6 +1365,11 @@ mod tests {
         view.set_init_value(local, DataValue::Int32(33));
         assert_eq!(view.init_value(catalog), Some(&DataValue::Int32(11)));
         assert_eq!(view.init_value(local), Some(&DataValue::Int32(33)));
+        let mut boxed = view.boxed();
+        let reference = boxed.alloc_scalar_query_ref(true);
+        boxed.reserve_scalar_query_ref(reference);
+        assert_eq!(reference.arena_id, 2);
+        assert_eq!(reference.pos, param_local.pos + 1);
         Ok(())
     }
 

@@ -223,6 +223,7 @@ impl ColumnTopN {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::ColumnTopN;
@@ -271,3 +272,4 @@ mod tests {
         assert_eq!(top_n.get(&DataValue::Null), None);
     }
 }
+// GRCOV_EXCL_STOP

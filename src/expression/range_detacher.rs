@@ -1255,6 +1255,7 @@ impl fmt::Display for Range {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
@@ -2749,6 +2750,74 @@ mod test {
     }
 
     #[test]
+    fn parameterized_range_union_keeps_residual_until_values_are_bound() -> Result<(), DatabaseError>
+    {
+        let parameter = |id| DataValue::Parameter {
+            id,
+            ty: LogicalType::Integer,
+        };
+        let left = Range::Scope {
+            min: Bound::Included(parameter(1)),
+            max: Bound::Unbounded,
+        };
+        let right = Range::Scope {
+            min: Bound::Unbounded,
+            max: Bound::Excluded(parameter(2)),
+        };
+        assert_eq!(
+            RangeDetacher::<IndexRangeColumn>::merge_binary(
+                BinaryOperator::Or,
+                left.clone(),
+                right.clone()
+            ),
+            Err((left.clone(), right.clone())),
+        );
+        let mut ranges = Range::SortedRanges(vec![left, right]);
+        let low = DataValue::Int32(8);
+        let high = DataValue::Int32(3);
+        ranges.bind_parameters(&|id| match id {
+            1 => Some(&low),
+            2 => Some(&high),
+            _ => None,
+        })?;
+        assert!(!ranges.has_parameter());
+        assert_eq!(
+            ranges,
+            Range::SortedRanges(vec![
+                Range::Scope {
+                    min: Bound::Included(low),
+                    max: Bound::Unbounded
+                },
+                Range::Scope {
+                    min: Bound::Unbounded,
+                    max: Bound::Excluded(high)
+                },
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn intersection_failure_restores_inputs_after_appending_a_match() {
+        let scope = |min, max| Range::Scope {
+            min: Bound::Included(min),
+            max: Bound::Included(max),
+        };
+        let left = scope(DataValue::Int32(1), DataValue::Int32(9));
+        let right = vec![
+            Range::Eq(DataValue::Int32(2)),
+            scope(
+                DataValue::new_utf8("a".into()),
+                DataValue::new_utf8("z".into()),
+            ),
+        ];
+        assert_eq!(
+            RangeDetacher::<IndexRangeColumn>::intersect_ranges(left.clone(), right.clone()),
+            Err((left, Range::SortedRanges(right))),
+        );
+    }
+
+    #[test]
     fn test_range_merge_preserves_open_closed_boundaries() {
         let gt_one = Range::Scope {
             min: Bound::Excluded(DataValue::Int32(1)),
@@ -2990,3 +3059,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

@@ -3299,6 +3299,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -3492,6 +3493,63 @@ mod tests {
     }
 
     #[test]
+    fn sql_type_binding_preserves_unsigned_widths_and_validates_precision(
+    ) -> Result<(), DatabaseError> {
+        use sqlparser::ast::{CharacterLength, ExactNumberInfo, TimezoneInfo};
+        for (sql, expected) in [
+            (DataType::TinyIntUnsigned(None), LogicalType::UTinyint),
+            (DataType::SmallIntUnsigned(None), LogicalType::USmallint),
+            (DataType::UnsignedInteger, LogicalType::UInteger),
+            (DataType::UInt64, LogicalType::UBigint),
+        ] {
+            assert_eq!(LogicalType::try_from(sql)?, expected);
+        }
+        for sql in [
+            DataType::Char(Some(CharacterLength::Max)),
+            DataType::Varchar(Some(CharacterLength::Max)),
+        ] {
+            assert!(matches!(
+                LogicalType::try_from(sql),
+                Err(DatabaseError::UnsupportedStmt(_))
+            ));
+        }
+        #[cfg(feature = "time")]
+        {
+            assert_eq!(
+                LogicalType::try_from(DataType::Time(Some(4), TimezoneInfo::None))?,
+                LogicalType::Time(Some(4))
+            );
+            assert_eq!(
+                LogicalType::try_from(DataType::Timestamp(Some(6), TimezoneInfo::WithTimeZone))?,
+                LogicalType::TimeStamp(Some(6), true)
+            );
+            for sql in [
+                DataType::Time(Some(5), TimezoneInfo::None),
+                DataType::Time(None, TimezoneInfo::WithTimeZone),
+                DataType::Timestamp(Some(2), TimezoneInfo::None),
+                DataType::Datetime(Some(3)),
+            ] {
+                assert!(matches!(
+                    LogicalType::try_from(sql),
+                    Err(DatabaseError::UnsupportedStmt(_))
+                ));
+            }
+        }
+        #[cfg(feature = "decimal")]
+        {
+            assert_eq!(
+                LogicalType::try_from(DataType::Numeric(ExactNumberInfo::Precision(12)))?,
+                LogicalType::Decimal(Some(12), None)
+            );
+            assert_eq!(
+                LogicalType::try_from(DataType::Dec(ExactNumberInfo::PrecisionAndScale(12, 3)))?,
+                LogicalType::Decimal(Some(12), Some(3))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_limit_parser_rejects_negative_and_non_constant_values() -> Result<(), DatabaseError> {
         let tables = build_t1_table()?;
 
@@ -3621,3 +3679,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

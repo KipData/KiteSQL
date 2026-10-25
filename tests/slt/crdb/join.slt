@@ -1224,6 +1224,21 @@ select a.id,b.id from ij_a a cross join ij_b b where a.k=b.k and a.v+b.v>320 ord
 ----
 4 3
 
+# Expression equalities remain residual predicates, not hash keys.
+query II
+select a.id,b.id from ij_a a inner join ij_b b on a.k=b.k and a.v+75=b.v*1 order by a.id,b.id;
+----
+4 1
+
+query II
+select a.id,b.id from ij_a a inner join ij_b b on a.k=b.k and a.v+10<b.v order by a.id,b.id;
+----
+1 2
+2 1
+2 3
+4 1
+4 3
+
 query II
 select a.id,b.id from ij_a a,ij_b b where a.k=b.k or a.id=b.id order by a.id,b.id;
 ----
@@ -1259,6 +1274,9 @@ select a.id,b.id from ij_a a,ij_a b where b.k=a.k and a.id=2 order by b.id;
 ----
 2 2
 2 4
+
+statement error can not compare two types
+select a.id,b.id from ij_a a inner join ij_b b on a.k=(b.k is null);
 
 statement ok
 drop table ij_c;

@@ -1327,6 +1327,7 @@ impl<T: Transaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::binder::{Binder, BinderContext};
@@ -2321,6 +2322,74 @@ pub(crate) mod test {
     }
 
     #[test]
+    fn optimistic_checkpoint_restores_rows_indexes_and_scalar_views() -> Result<(), DatabaseError> {
+        let directory = TempDir::new()?;
+        let live_path = directory.path().join("live");
+        let snapshot_path = directory.path().join("snapshot");
+        let mut database = DataBaseBuilder::path(&live_path).build_optimistic()?;
+        database.ddl("create table checkpoint_rows(id int primary key, v int unique)")?;
+        database
+            .run("insert into checkpoint_rows values(1,10),(2,20)")?
+            .done()?;
+        database.ddl(
+            "create view checkpoint_view as select (select max(v) from checkpoint_rows) as v",
+        )?;
+        database.checkpoint(&snapshot_path)?;
+        database
+            .run("update checkpoint_rows set v=30 where id=2")?
+            .done()?;
+        database
+            .run("insert into checkpoint_rows values(3,40)")?
+            .done()?;
+        let mut snapshot = DataBaseBuilder::path(&snapshot_path).build_optimistic()?;
+        snapshot.load(CatalogKind::Table("checkpoint_rows".into()))?;
+        snapshot.load(CatalogKind::View("checkpoint_view".into()))?;
+        let mut rows = snapshot.run("select id,v from checkpoint_rows order by id")?;
+        assert_eq!(
+            rows.next_tuple(|_, row| row.values.clone())?,
+            Some(vec![DataValue::Int32(1), DataValue::Int32(10)])
+        );
+        assert_eq!(
+            rows.next_tuple(|_, row| row.values.clone())?,
+            Some(vec![DataValue::Int32(2), DataValue::Int32(20)])
+        );
+        assert!(rows.next_tuple(|_, _| ())?.is_none());
+        rows.done()?;
+        assert_eq!(
+            read_single_i32(snapshot.run("select id from checkpoint_rows where v=20")?)?,
+            2
+        );
+        assert_eq!(
+            read_single_i32(snapshot.run("select v from checkpoint_view")?)?,
+            20
+        );
+        assert_eq!(
+            read_single_i32(database.run("select v from checkpoint_view")?)?,
+            40
+        );
+        assert!(matches!(
+            snapshot
+                .run("insert into checkpoint_rows values(4,20)")?
+                .done(),
+            Err(DatabaseError::DuplicateUniqueValue)
+        ));
+        let occupied = directory.path().join("occupied");
+        std::fs::write(&occupied, b"keep")?;
+        assert!(
+            matches!(database.checkpoint(&occupied), Err(DatabaseError::IO(ref err)) if err.kind() == ErrorKind::AlreadyExists)
+        );
+        assert_eq!(std::fs::read(&occupied)?, b"keep");
+        drop(snapshot);
+        let mut reopened = DataBaseBuilder::path(&snapshot_path).build_optimistic()?;
+        reopened.load(CatalogKind::Table("checkpoint_rows".into()))?;
+        assert_eq!(
+            read_single_i32(reopened.run("select count(*) from checkpoint_rows")?)?,
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_checkpoint_rejects_non_empty_target_dir() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let live_path = temp_dir.path().join("live");
@@ -2423,3 +2492,4 @@ pub(crate) mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

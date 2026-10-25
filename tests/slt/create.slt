@@ -28,6 +28,24 @@ create table if not exists t(id int primary key, v1 int, v2 int, v3 int)
 statement error
 create table test_default_expr(id int primary key, v1 int, v2 int, v3 int default (v1 + 1))
 
+# Defaults cannot capture other columns; a failed definition must not create a table.
+statement error
+create table default_guard(id int primary key, v int default id);
+
+statement ok
+create table default_guard(id int primary key, v int default 7);
+
+statement ok
+insert into default_guard(id) values(1);
+
+query II
+select id,v from default_guard;
+----
+1 7
+
+statement ok
+drop table default_guard;
+
 statement ok
 drop table t_m
 

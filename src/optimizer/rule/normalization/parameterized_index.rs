@@ -573,6 +573,7 @@ mod tests {
 }
 // GRCOV_EXCL_STOP
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod inner_join_tests {
     use super::*;
@@ -884,3 +885,4 @@ mod inner_join_tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

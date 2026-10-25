@@ -397,6 +397,7 @@ impl<K> ReferenceSerialization for CountMinSketch<K> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::expression::range_detacher::Range;
@@ -571,3 +572,4 @@ mod tests {
         assert_eq!(decoded.estimate(&7), 23);
     }
 }
+// GRCOV_EXCL_STOP

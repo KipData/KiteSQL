@@ -1,5 +1,7 @@
+// GRCOV_EXCL_START
 #[cfg(test)]
 use crate::planner::PlanArena;
+// GRCOV_EXCL_STOP
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -413,6 +415,7 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
     trimmed.to_string()
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,3 +664,4 @@ mod tests {
         assert_eq!(trim_string("hello", "", None), "hello");
     }
 }
+// GRCOV_EXCL_STOP

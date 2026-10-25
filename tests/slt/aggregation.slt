@@ -121,5 +121,23 @@ select count(*) from sn where a > 0;
 ----
 2
 
+# Pruning unused aggregate outputs must retain group cardinality, including an empty group.
+query I rowsort
+select 7 from (select a,sum(a) as total from sn group by a) q;
+----
+7
+7
+
+query I
+select 7 from (select sum(a) as total from sn where false) q;
+----
+7
+
+query I rowsort
+select a from (select a,sum(a) as total from sn group by a) q;
+----
+1
+2
+
 statement ok
 drop table sn

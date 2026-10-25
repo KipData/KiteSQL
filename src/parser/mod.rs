@@ -33,6 +33,7 @@ pub fn parse_sql<S: AsRef<str>>(sql: S) -> Result<Vec<Statement>, ParserError> {
     Parser::parse_sql(&DIALECT, sql.as_ref())
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::parse_sql;
@@ -54,3 +55,4 @@ mod tests {
         );
     }
 }
+// GRCOV_EXCL_STOP

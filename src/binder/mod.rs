@@ -691,6 +691,7 @@ pub(crate) fn is_valid_identifier(s: &str) -> bool {
         && !s.chars().all(|c| c == '_')
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub mod test {
     use crate::binder::{is_valid_identifier, Binder, BinderContext};
@@ -842,3 +843,4 @@ pub mod test {
         assert!(!is_valid_identifier("____"));
     }
 }
+// GRCOV_EXCL_STOP

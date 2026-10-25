@@ -81,6 +81,7 @@ impl Accumulator for AvgAccumulator {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,3 +122,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

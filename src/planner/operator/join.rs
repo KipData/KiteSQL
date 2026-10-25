@@ -272,6 +272,7 @@ pub(crate) fn extract_join_keys(
     Ok(())
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,3 +299,4 @@ mod tests {
         assert_eq!(operator.plan_impl(), PlanImpl::NestLoopJoin);
     }
 }
+// GRCOV_EXCL_STOP

@@ -854,6 +854,7 @@ fn next<'a, D: rocksdb::DBAccess>(
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
@@ -1419,3 +1420,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

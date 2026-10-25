@@ -14,6 +14,7 @@
 
 fn main() {}
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod test {
     use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc};
@@ -3122,3 +3123,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

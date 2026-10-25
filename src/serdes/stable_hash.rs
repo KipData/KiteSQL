@@ -114,6 +114,7 @@ fn mix64(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::StableHasher;
@@ -154,3 +155,4 @@ mod tests {
         assert_eq!(chunked.finish(), single.finish());
     }
 }
+// GRCOV_EXCL_STOP

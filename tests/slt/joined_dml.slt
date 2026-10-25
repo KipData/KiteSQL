@@ -168,6 +168,27 @@ select * from joined_dml_source
 8 800
 9 900
 
+# Joined assignments read target columns even after pruning the source side.
+statement ok
+update joined_dml_target inner join joined_dml_source on joined_dml_target.id=joined_dml_source.id
+set v=joined_dml_target.v+1 where joined_dml_target.id=5;
+
+query II rowsort
+select * from joined_dml_target;
+----
+5 506
+7 909
+
+statement error joined UPDATE SET expressions can only reference target table columns
+update joined_dml_target inner join joined_dml_source on joined_dml_target.id=joined_dml_source.id
+set v=joined_dml_source.v;
+
+query II rowsort
+select * from joined_dml_target;
+----
+5 506
+7 909
+
 statement ok
 drop table joined_dml_target
 

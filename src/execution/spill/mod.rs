@@ -81,6 +81,7 @@ impl<'on_flush, T: SpillCodec> SpillVec<'on_flush, T> {
         }
     }
 
+    // GRCOV_EXCL_START
     #[cfg(test)]
     pub(crate) fn limit(mut self, max_rows: usize, max_bytes: usize) -> Self {
         assert!(max_rows > 0, "spill row limit must be positive");
@@ -91,6 +92,7 @@ impl<'on_flush, T: SpillCodec> SpillVec<'on_flush, T> {
         }
         self
     }
+    // GRCOV_EXCL_STOP
 
     pub(crate) fn on_flush<F>(mut self, on_flush: F) -> Self
     where
@@ -408,6 +410,7 @@ fn create_spill_file() -> Result<(File, PathBuf), DatabaseError> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,3 +770,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

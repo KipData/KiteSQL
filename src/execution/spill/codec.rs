@@ -269,3 +269,169 @@ fn estimated_dynamic_value_size(value: &DataValue) -> usize {
         _ => 0,
     }
 }
+
+// GRCOV_EXCL_START
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::value::Utf8Type;
+    use crate::types::{CharLengthUnits, LogicalType};
+    use std::fmt::Debug;
+
+    fn round_trip<T: SpillCodec + PartialEq + Debug>(value: &T) -> Result<(), DatabaseError> {
+        let mut bytes = Vec::new();
+        value.encode(&mut bytes)?;
+        let mut reader = bytes.as_slice();
+        assert_eq!(&T::decode(&mut reader)?, value);
+        assert!(reader.is_empty());
+        assert!(value.estimated_size() >= size_of::<T>());
+        Ok(())
+    }
+
+    fn values() -> Vec<DataValue> {
+        let values = vec![
+            DataValue::Null,
+            DataValue::Boolean(false),
+            DataValue::Boolean(true),
+            DataValue::Int8(i8::MIN),
+            DataValue::Int16(i16::MAX),
+            DataValue::Int32(i32::MIN),
+            DataValue::Int64(i64::MAX),
+            DataValue::UInt8(u8::MAX),
+            DataValue::UInt16(u16::MAX),
+            DataValue::UInt32(u32::MAX),
+            DataValue::UInt64(u64::MAX),
+            DataValue::Float32((-1.25).into()),
+            DataValue::Float64(2.5.into()),
+            DataValue::Float64(f64::INFINITY.into()),
+            DataValue::Utf8 {
+                value: "text中\0".into(),
+                ty: Utf8Type::Variable(Some(20)),
+                unit: CharLengthUnits::Characters,
+            },
+            DataValue::Utf8 {
+                value: "fixed".into(),
+                ty: Utf8Type::Fixed(8),
+                unit: CharLengthUnits::Octets,
+            },
+            DataValue::new_utf8(String::new()),
+            DataValue::Date32(-1),
+            DataValue::Date64(1_700_000_000),
+            DataValue::Time32(12345, 3),
+            DataValue::Time64(-12345, 6, false),
+            DataValue::Time64(12345, 6, true),
+            DataValue::Tuple(Vec::new()),
+            DataValue::Tuple(vec![
+                DataValue::new_utf8("nested".into()),
+                DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(7)]),
+            ]),
+        ];
+        #[cfg(feature = "decimal")]
+        let values = {
+            let mut values = values;
+            values.push(DataValue::Decimal(rust_decimal::Decimal::new(-12345, 3)));
+            values
+        };
+        values
+    }
+
+    #[test]
+    fn data_value_codec_covers_all_materialized_variants() -> Result<(), DatabaseError> {
+        for value in values() {
+            round_trip(&value)?;
+        }
+        assert!(matches!(
+            DataValue::Parameter {
+                id: 1,
+                ty: LogicalType::Integer
+            }
+            .encode(&mut Vec::new()),
+            Err(DatabaseError::InvalidValue(_))
+        ));
+        assert!(matches!(
+            DataValue::decode(&mut &[255][..]),
+            Err(DatabaseError::InvalidValue(_))
+        ));
+        assert!(DataValue::decode(&mut &[7][..]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn composed_codecs_cover_containers_tuples_and_sort_rows() -> Result<(), DatabaseError> {
+        let values = values();
+        round_trip(&Vec::<DataValue>::new())?;
+        round_trip(&values)?;
+        round_trip(&Option::<DataValue>::None)?;
+        round_trip(&Some(DataValue::Null))?;
+        round_trip(&Some(DataValue::new_utf8("owned".into())))?;
+        round_trip(&(Some(DataValue::Int32(3)), values.clone()))?;
+        for is_outer_value in [false, true] {
+            let reference = ScalarQueryRef {
+                arena_id: 1,
+                pos: 7,
+                is_outer_value,
+            };
+            round_trip(&reference)?;
+            round_trip(&(reference, DataValue::Null))?;
+        }
+        for pk in [None, Some(DataValue::new_utf8("primary".into()))] {
+            let tuple = Tuple::new(pk, values.clone());
+            round_trip(&tuple)?;
+            let row = SortRow {
+                sort_values: vec![DataValue::Int32(2), DataValue::Null],
+                tuple,
+                outer_values: vec![(
+                    ScalarQueryRef {
+                        arena_id: 0,
+                        pos: 3,
+                        is_outer_value: true,
+                    },
+                    DataValue::new_utf8("scalar".into()),
+                )],
+            };
+            let mut bytes = Vec::new();
+            row.encode(&mut bytes)?;
+            let mut reader = bytes.as_slice();
+            let decoded = SortRow::decode(&mut reader)?;
+            assert!(reader.is_empty());
+            assert_eq!(decoded.sort_values, row.sort_values);
+            assert_eq!(decoded.tuple, row.tuple);
+            assert_eq!(decoded.outer_values, row.outer_values);
+            assert!(row.estimated_size() >= size_of::<SortRow>());
+        }
+        assert!(matches!(
+            Option::<DataValue>::decode(&mut &[2][..]),
+            Err(DatabaseError::InvalidValue(_))
+        ));
+        assert!(Vec::<DataValue>::decode(&mut &[1, 0, 0, 0][..]).is_err());
+        assert!(<(DataValue, DataValue)>::decode(&mut &[0][..]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn scalar_reference_spill_rejects_invalid_and_truncated_markers() -> Result<(), DatabaseError> {
+        for is_outer_value in [false, true] {
+            let reference = ScalarQueryRef {
+                arena_id: 2,
+                pos: 17,
+                is_outer_value,
+            };
+            let value = (reference, Some(DataValue::Null));
+            let mut bytes = Vec::new();
+            value.encode(&mut bytes)?;
+            assert_eq!(
+                <(ScalarQueryRef, Option<DataValue>)>::decode(&mut bytes.as_slice())?,
+                value
+            );
+            assert!(value.estimated_size() >= size_of_val(&value));
+            assert!(ScalarQueryRef::decode(&mut &bytes[..16]).is_err());
+            bytes[16] = 2;
+            assert!(matches!(
+                ScalarQueryRef::decode(&mut bytes.as_slice()),
+                Err(DatabaseError::InvalidValue(_))
+            ));
+        }
+        Ok(())
+    }
+}
+// GRCOV_EXCL_STOP

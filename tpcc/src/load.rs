@@ -859,6 +859,7 @@ impl Load {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::{init_permutation, SqlBatch, CUST_PER_DIST, LOAD_BATCH_SIZE};
@@ -924,3 +925,4 @@ mod tests {
         assert!(seen.iter().skip(1).all(|seen| *seen));
     }
 }
+// GRCOV_EXCL_STOP

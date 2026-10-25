@@ -677,6 +677,7 @@ mod tests {
 }
 // GRCOV_EXCL_STOP
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 pub(crate) mod test {
     use crate::expression::ScalarExpression;
@@ -718,3 +719,4 @@ pub(crate) mod test {
         }
     }
 }
+// GRCOV_EXCL_STOP

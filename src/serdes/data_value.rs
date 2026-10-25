@@ -400,6 +400,7 @@ fn read_char_length_units<R: Read>(reader: &mut R) -> Result<CharLengthUnits, Da
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use super::{TAG_BOOLEAN, TAG_INT64, TAG_TIME64, TAG_TUPLE, TAG_UTF8};
@@ -564,3 +565,4 @@ pub(crate) mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

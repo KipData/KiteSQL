@@ -2209,6 +2209,7 @@ impl<T: Transaction> ViewIter<'_, T> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 pub(crate) fn check_range_rev_matches_range<T: Transaction>(
     tx: &mut T,
@@ -3207,3 +3208,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

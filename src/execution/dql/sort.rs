@@ -215,6 +215,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -760,3 +761,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

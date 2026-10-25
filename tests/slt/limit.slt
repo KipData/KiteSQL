@@ -24,6 +24,25 @@ select v1 from t limit 2 offset 2
 3
 10
 
+# Comma LIMIT is offset,count; BIGINT limits use the same boundary semantics.
+query I
+select id from t order by id limit 1,2;
+----
+1
+2
+
+statement error invalid limit expression
+select id from t order by id limit cast(2 as bigint) offset cast(1 as bigint);
+
+query I
+select id from t order by id limit 2147483648 offset 4;
+----
+4
+
+query I
+select id from t order by id limit 5,0;
+----
+
 query I
 select v1 from t limit 6
 ----

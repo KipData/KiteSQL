@@ -373,7 +373,34 @@ where
     }
 
     #[cfg(feature = "orm")]
-    pub(crate) fn having_expr(mut self, expr: ExprRef) -> Result<Self, DatabaseError> {
+    pub(crate) fn having_expr(mut self, mut expr: ExprRef) -> Result<Self, DatabaseError> {
+        let mut input = &self.plan;
+        loop {
+            match &input.operator {
+                Operator::Aggregate(op) => {
+                    Binder::<T, A>::validate_having_orderby_with_outputs(
+                        expr,
+                        &op.agg_calls,
+                        &op.groupby_exprs,
+                        self.arena,
+                    )?;
+                    self.binder.bind_aggregate_output_exprs_with_outputs(
+                        &op.agg_calls,
+                        &op.groupby_exprs,
+                        std::iter::once(&mut expr),
+                        self.arena,
+                    )?;
+                    break;
+                }
+                Operator::Filter(_)
+                | Operator::Sort(_)
+                | Operator::TopK(_)
+                | Operator::Limit(_)
+                | Operator::Window(_) => input = input.childrens.only(),
+                Operator::ScalarQueryInit(_) => input = input.childrens.twins().0,
+                _ => break,
+            }
+        }
         self.plan = self.binder.bind_having(self.plan, expr, self.arena)?;
         Ok(self)
     }
@@ -2124,6 +2151,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{ProjectionOutputBinder, RightSidePositionGlobalizer};
@@ -2416,3 +2444,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

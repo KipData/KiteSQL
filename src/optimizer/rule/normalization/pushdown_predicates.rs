@@ -572,6 +572,7 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
 
@@ -1349,3 +1350,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

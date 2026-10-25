@@ -194,6 +194,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::mutable_key_type)]
 mod test {
@@ -850,3 +851,4 @@ mod test {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

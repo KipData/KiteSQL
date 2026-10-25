@@ -3425,6 +3425,7 @@ fn orm_list<'a, E: BindSource<'a>, M: Model>(
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+    use crate::expression::BinaryOperator;
     use crate::types::tuple::{Schema, SchemaView};
     use std::sync::Arc;
 
@@ -4060,6 +4061,238 @@ mod tests {
             "{nullable_plan}"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn chained_range_and_function_helpers_preserve_values_and_null_rows(
+    ) -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database()?;
+        let mut iter = database
+            .bind(|ctx| {
+                ctx.from::<OrmUnitUser>()?
+                    .filter(|e| e.column(OrmUnitUser::age())?.between(18, 20))?
+                    .project_tuple(|e| {
+                        Ok(vec![
+                            e.column(OrmUnitUser::id())?,
+                            e.column(OrmUnitUser::name())?
+                                .function("upper", std::iter::empty::<DataValue>())?,
+                        ])
+                    })?
+                    .order_by_expr(|e| Ok(e.column(OrmUnitUser::id())?.asc()))?
+                    .finish()
+            })?
+            .project_tuple::<(i32, String)>();
+        assert_eq!(iter.next().transpose()?, Some((1, "ALICE".into())));
+        assert_eq!(iter.next().transpose()?, Some((2, "BOB".into())));
+        assert!(iter.next().transpose()?.is_none());
+        iter.done()?;
+        let mut iter = database
+            .bind(|ctx| {
+                ctx.from::<OrmUnitUser>()?
+                    .filter(|e| {
+                        let age = e.column(OrmUnitUser::age())?;
+                        age.clone().not_between(18, 20)?.or(age.is_null())
+                    })?
+                    .project_scalar(OrmUnitUser::id())?
+                    .finish()
+            })?
+            .project_value::<i32>();
+        assert_eq!(iter.next().transpose()?, Some(3));
+        assert!(iter.next().transpose()?.is_none());
+        iter.done()?;
+        Ok(())
+    }
+
+    #[test]
+    fn insert_select_maps_columns_and_rejects_invalid_targets() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database()?;
+        database
+            .bind(|ctx| {
+                ctx.insert_select::<OrmUnitUser, _, _>(["name", "id", "age"], |ctx| {
+                    ctx.from::<OrmUnitUser>()?
+                        .filter(|e| e.column(OrmUnitUser::id())?.lte(2))?
+                        .project_tuple(|e| {
+                            Ok(vec![
+                                e.column(OrmUnitUser::name())?,
+                                e.binary(e.column(OrmUnitUser::id())?, BinaryOperator::Plus, 10)?,
+                                e.column(OrmUnitUser::age())?,
+                            ])
+                        })?
+                        .finish()
+                })
+            })?
+            .done()?;
+        database
+            .bind(|ctx| {
+                ctx.insert_select::<OrmUnitUser, _, _>(std::iter::empty::<String>(), |ctx| {
+                    ctx.from::<OrmUnitUser>()?
+                        .filter(|e| e.column(OrmUnitUser::id())?.eq(3))?
+                        .project_tuple(|e| {
+                            Ok(vec![
+                                e.binary(e.column(OrmUnitUser::id())?, BinaryOperator::Plus, 20)?,
+                                e.column(OrmUnitUser::name())?,
+                                e.column(OrmUnitUser::age())?,
+                            ])
+                        })?
+                        .finish()
+                })
+            })?
+            .done()?;
+        assert!(matches!(
+            database.bind(
+                |ctx| ctx.insert_select::<OrmUnitUser, _, _>(["id", "name"], |ctx| {
+                    ctx.from::<OrmUnitUser>()?
+                        .project_scalar(OrmUnitUser::id())?
+                        .finish()
+                })
+            ),
+            Err(DatabaseError::ValuesLenMismatch(2, 1))
+        ));
+        assert!(database
+            .bind(
+                |ctx| ctx.insert_select::<OrmUnitUser, _, _>(["missing"], |ctx| {
+                    ctx.from::<OrmUnitUser>()?
+                        .project_scalar(OrmUnitUser::id())?
+                        .finish()
+                })
+            )
+            .is_err());
+        let mut iter =
+            database.run("select id,name,age from orm_unit_users where id>3 order by id")?;
+        let mut rows = Vec::new();
+        while iter
+            .next_tuple(|_, row| rows.push(row.values.clone()))?
+            .is_some()
+        {}
+        iter.done()?;
+        assert_eq!(
+            rows,
+            vec![
+                vec![
+                    DataValue::Int32(11),
+                    DataValue::new_utf8("Alice".into()),
+                    DataValue::Int32(18)
+                ],
+                vec![
+                    DataValue::Int32(12),
+                    DataValue::new_utf8("Bob".into()),
+                    DataValue::Int32(20)
+                ],
+                vec![
+                    DataValue::Int32(23),
+                    DataValue::new_utf8("Cara".into()),
+                    DataValue::Null
+                ],
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn case_helpers_infer_else_types_and_preserve_null_fallbacks() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database()?;
+        let mut rows = database
+            .bind(|ctx| {
+                ctx.from::<OrmUnitUser>()?
+                    .project_tuple(|e| {
+                        Ok(vec![
+                            e.column(OrmUnitUser::id())?,
+                            e.case_when(std::iter::empty::<(bool, i32)>(), Some(7)),
+                            e.case_value(
+                                e.column(OrmUnitUser::id())?,
+                                std::iter::empty::<(i32, String)>(),
+                                Some("fallback".to_string()),
+                            ),
+                            e.case_when([(e.column(OrmUnitUser::age())?.gt(18)?, 1)], None::<i32>),
+                        ])
+                    })?
+                    .order_by(OrmUnitUser::id().asc())?
+                    .finish()
+            })?
+            .project_tuple::<(i32, i32, String, Option<i32>)>();
+        for expected in [
+            (1, 7, "fallback".into(), None),
+            (2, 7, "fallback".into(), Some(1)),
+            (3, 7, "fallback".into(), None),
+        ] {
+            assert_eq!(rows.next().transpose()?, Some(expected));
+        }
+        assert!(rows.next().transpose()?.is_none());
+        rows.done()?;
+        Ok(())
+    }
+
+    #[test]
+    fn grouped_orm_having_reads_the_aggregate_output() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database()?;
+        let mut rows = database
+            .bind(|ctx| {
+                ctx.from::<OrmUnitOrder>()?
+                    .project_tuple(|e| {
+                        Ok(vec![e.column(OrmUnitOrder::user_id())?, e.count_all()?])
+                    })?
+                    .group_by(|e| e.column(OrmUnitOrder::user_id()))?
+                    .having(|e| e.count_all()?.gt(1))?
+                    .having(|e| e.column(OrmUnitOrder::user_id())?.eq(1))?
+                    .order_by(OrmUnitOrder::user_id().asc())?
+                    .finish()
+            })?
+            .project_tuple::<(i32, i32)>();
+        assert_eq!(rows.next().transpose()?, Some((1, 2)));
+        assert!(rows.next().transpose()?.is_none());
+        rows.done()?;
+        assert!(matches!(
+            database.bind(|ctx| {
+                ctx.from::<OrmUnitOrder>()?
+                    .project_tuple(|e| {
+                        Ok(vec![e.column(OrmUnitOrder::user_id())?, e.count_all()?])
+                    })?
+                    .group_by(|e| e.column(OrmUnitOrder::user_id()))?
+                    .having(|e| e.column(OrmUnitOrder::amount())?.gt(100))?
+                    .finish()
+            }),
+            Err(DatabaseError::AggMiss(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn update_assignments_preserve_unmatched_rows() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database()?;
+        assert!(matches!(
+            database.bind(|ctx| ctx.mutate::<OrmUnitUser>()?.update(|_| Ok(()))),
+            Err(DatabaseError::ColumnsEmpty)
+        ));
+        database
+            .bind(|ctx| {
+                ctx.mutate::<OrmUnitUser>()?
+                    .filter(|e| e.column(OrmUnitUser::id())?.eq(1))?
+                    .update(|u| {
+                        u.set(OrmUnitUser::name(), "Alicia")?;
+                        u.set_bound_expr(
+                            OrmUnitUser::age(),
+                            ScalarExpression::Constant(DataValue::Int32(25)),
+                        )
+                    })
+            })?
+            .done()?;
+        let mut rows = database
+            .bind(|ctx| {
+                ctx.from::<OrmUnitUser>()?
+                    .project_scalars((OrmUnitUser::id(), OrmUnitUser::name(), OrmUnitUser::age()))?
+                    .order_by(OrmUnitUser::id().asc())?
+                    .finish()
+            })?
+            .project_tuple::<(i32, String, Option<i32>)>();
+        assert_eq!(
+            rows.next().transpose()?,
+            Some((1, "Alicia".into(), Some(25)))
+        );
+        assert_eq!(rows.next().transpose()?, Some((2, "Bob".into(), Some(20))));
+        assert_eq!(rows.next().transpose()?, Some((3, "Cara".into(), None)));
+        assert!(rows.next().transpose()?.is_none());
+        rows.done()?;
         Ok(())
     }
 

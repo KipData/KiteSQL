@@ -353,6 +353,7 @@ fn kite_sql(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+// GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
     use super::kite_sql;
@@ -582,3 +583,4 @@ except ValueError as exc:
         })
     }
 }
+// GRCOV_EXCL_STOP

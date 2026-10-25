@@ -856,6 +856,7 @@ impl_from_tpcc_error!(rust_decimal::Error, Decimal);
 impl_from_tpcc_error!(chrono::ParseError, Chrono);
 impl_from_tpcc_error!(std::io::Error, Io);
 
+// GRCOV_EXCL_START
 #[ignore]
 #[test]
 fn explain_tpcc() -> Result<(), DatabaseError> {
@@ -1187,3 +1188,4 @@ fn tpcc_db_path() -> PathBuf {
         .unwrap()
         .join("kite_sql_tpcc")
 }
+// GRCOV_EXCL_STOP

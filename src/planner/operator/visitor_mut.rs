@@ -1,5 +1,7 @@
+// GRCOV_EXCL_START
 #[cfg(test)]
 use crate::planner::PlanArena;
+// GRCOV_EXCL_STOP
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -456,6 +458,7 @@ pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -539,3 +542,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP

@@ -364,6 +364,7 @@ impl<'a> MarkApply<'a> {
     }
 }
 
+// GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -1032,3 +1033,4 @@ mod tests {
         Ok(())
     }
 }
+// GRCOV_EXCL_STOP
