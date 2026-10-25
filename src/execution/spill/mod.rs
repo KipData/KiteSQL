@@ -115,6 +115,32 @@ impl<'on_flush, T: SpillCodec> SpillVec<'on_flush, T> {
         matches!(&self.writer, Ok(state) if state.file.is_some())
     }
 
+    /// Replays the current prefix without consuming the writer or flushing its memory tail.
+    pub(crate) fn replay<B>(
+        &self,
+        mut evaluate: impl FnMut(&T) -> Result<Option<B>, DatabaseError>,
+    ) -> Result<Option<B>, DatabaseError> {
+        let state = self.writer.as_ref().map_err(|_| {
+            DatabaseError::InvalidValue("cannot replay a failed SpillVec".to_string())
+        })?;
+        if let Some(file) = &state.file {
+            let mut reader = SegmentReader::new(BufReader::new(File::open(&file.file_guard.path)?));
+            while reader.start_next_segment()? {
+                for value in &mut reader {
+                    if let Some(result) = evaluate(&value?)? {
+                        return Ok(Some(result));
+                    }
+                }
+            }
+        }
+        for value in &state.buffer {
+            if let Some(result) = evaluate(value)? {
+                return Ok(Some(result));
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) fn flush(&mut self) -> Result<Option<SegmentOffset>, DatabaseError> {
         let state = self.writer.as_mut().map_err(|_| {
             DatabaseError::InvalidValue("cannot flush a failed SpillVec".to_string())

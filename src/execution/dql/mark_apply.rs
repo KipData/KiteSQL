@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 #[cfg(feature = "spill")]
-use crate::execution::spill::{SpillReader, SpillVec};
+use crate::execution::spill::SpillVec;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
@@ -33,6 +33,11 @@ enum QuantifiedPredicateOutcome {
     Skip,
 }
 
+#[cfg(feature = "spill")]
+type MaterializedRows = SpillVec<'static, Tuple>;
+#[cfg(not(feature = "spill"))]
+type MaterializedRows = Vec<Tuple>;
+
 enum RightInput<'a> {
     Rebuild {
         plan: &'a LogicalPlan,
@@ -42,11 +47,11 @@ enum RightInput<'a> {
         plan: &'a LogicalPlan,
         pos: ExecId,
     },
-    Empty,
-    #[cfg(feature = "spill")]
-    Materialized(SpillReader<Tuple>),
-    #[cfg(not(feature = "spill"))]
-    Materialized(Vec<Tuple>),
+    Materializing {
+        root: ExecId,
+        rows: MaterializedRows,
+    },
+    Materialized(MaterializedRows),
 }
 
 impl<'a> RightInput<'a> {
@@ -75,78 +80,80 @@ impl<'a> RightInput<'a> {
     // Return the first terminal predicate result, or None after exhausting the RHS.
     // The caller supplies Mark semantics; this enum owns reconstruction and replay.
     fn scan<T: Transaction + 'a, A: MetaArena + 'a>(
-        &mut self,
+        self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
         probe: Option<RuntimeIndexProbe>,
         mut evaluate: impl FnMut(&Tuple, &ExecMetaArena<A>) -> Result<Option<DataValue>, DatabaseError>,
-    ) -> Result<Option<DataValue>, DatabaseError> {
-        if matches!(self, Self::Materialize { .. }) {
-            let root = self.build(arena, plan_arena, None);
-            #[cfg(feature = "spill")]
-            {
-                let mut rows = SpillVec::new();
-                while arena.next_tuple(root, plan_arena)? {
-                    let _ = rows.push(arena.materialize_tuple())?;
-                }
-                // Fully flush before replaying through the existing reset API.
-                let _ = rows.flush()?;
-                *self = if rows.is_spilled() {
-                    Self::Materialized(rows.into_iter())
-                } else {
-                    Self::Empty
-                };
-            }
-            #[cfg(not(feature = "spill"))]
-            {
-                let mut rows = Vec::new();
-                while arena.next_tuple(root, plan_arena)? {
-                    rows.push(arena.materialize_tuple());
-                }
-                *self = if rows.is_empty() {
-                    Self::Empty
-                } else {
-                    Self::Materialized(rows)
-                };
-            }
-        }
+    ) -> Result<(Self, Option<DataValue>), DatabaseError> {
         match self {
-            Self::Rebuild { .. } => {
-                let root = self.build(arena, plan_arena, probe);
+            input @ Self::Rebuild { .. } => {
+                let root = input.build(arena, plan_arena, probe);
                 while arena.next_tuple(root, plan_arena)? {
                     if let Some(value) = evaluate(arena.result_tuple(), plan_arena)? {
-                        return Ok(Some(value));
+                        return Ok((input, Some(value)));
                     }
                 }
+                Ok((input, None))
             }
-            #[cfg(feature = "spill")]
+            input @ Self::Materialize { .. } => {
+                let root = input.build(arena, plan_arena, None);
+                Self::Materializing {
+                    root,
+                    rows: MaterializedRows::new(),
+                }
+                .scan(arena, plan_arena, None, evaluate)
+            }
+            Self::Materializing { root, mut rows } => {
+                if let Some(value) = Self::replay(&rows, plan_arena, &mut evaluate)? {
+                    return Ok((Self::Materializing { root, rows }, Some(value)));
+                }
+                while arena.next_tuple(root, plan_arena)? {
+                    let right = arena.materialize_tuple();
+                    let result = evaluate(&right, plan_arena)?;
+                    #[cfg(feature = "spill")]
+                    let _ = rows.push(right)?;
+                    #[cfg(not(feature = "spill"))]
+                    rows.push(right);
+                    // A terminal result pauses the executor; cached rows remain a prefix.
+                    if result.is_some() {
+                        return Ok((Self::Materializing { root, rows }, result));
+                    }
+                }
+                // Only EOF makes the prefix complete; move its cache into the final state.
+                Ok((Self::Materialized(rows), None))
+            }
             Self::Materialized(rows) => {
-                rows.reset()?;
-                for right in rows {
-                    if let Some(value) = evaluate(&right?, plan_arena)? {
-                        return Ok(Some(value));
-                    }
-                }
+                let result = Self::replay(&rows, plan_arena, &mut evaluate)?;
+                Ok((Self::Materialized(rows), result))
             }
-            #[cfg(not(feature = "spill"))]
-            Self::Materialized(rows) => {
-                for right in rows {
-                    if let Some(value) = evaluate(right, plan_arena)? {
-                        return Ok(Some(value));
-                    }
-                }
-            }
-            Self::Empty => {}
-            Self::Materialize { .. } => unreachable!("RHS materialization is complete"),
         }
-        Ok(None)
+    }
+
+    fn replay<A: MetaArena>(
+        rows: &MaterializedRows,
+        plan_arena: &ExecMetaArena<A>,
+        mut evaluate: impl FnMut(&Tuple, &ExecMetaArena<A>) -> Result<Option<DataValue>, DatabaseError>,
+    ) -> Result<Option<DataValue>, DatabaseError> {
+        #[cfg(feature = "spill")]
+        return rows.replay(|right| evaluate(right, plan_arena));
+        #[cfg(not(feature = "spill"))]
+        {
+            for right in rows {
+                if let Some(value) = evaluate(right, plan_arena)? {
+                    return Ok(Some(value));
+                }
+            }
+            Ok(None)
+        }
     }
 }
 
 pub struct MarkApply<'a> {
     op: &'a MarkApplyOperator,
     left_input: ExecId,
-    right_input: RightInput<'a>,
+    // Temporarily None while scan owns and transitions the right input.
+    right_input: Option<RightInput<'a>>,
     // Retain a streaming inner input across next_tuple calls, not its result rows.
     join_input: Option<(ExecId, Tuple)>,
 }
@@ -178,7 +185,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
         arena.push(ExecNode::MarkApply(Self {
             op,
             left_input,
-            right_input,
+            right_input: Some(right_input),
             join_input: None,
         }))
     }
@@ -190,15 +197,22 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
+        let Some(input) = self.right_input.take() else {
+            arena.finish();
+            return Ok(());
+        };
         if matches!(self.op.kind, MarkApplyKind::InnerJoin) {
-            return self.next_join_tuple(arena, plan_arena);
+            self.next_join_tuple(&input, arena, plan_arena)?;
+            self.right_input = Some(input);
+            return Ok(());
         }
         if !arena.next_tuple(self.left_input, plan_arena)? {
             arena.finish();
             return Ok(());
         }
         let mut left = arena.materialize_tuple();
-        let marker = self.mark_value(arena, plan_arena, &left)?;
+        let (input, marker) = self.mark_value(input, arena, plan_arena, &left)?;
+        self.right_input = Some(input);
         left.values.push(marker);
         arena.produce_tuple(left);
         Ok(())
@@ -208,6 +222,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
 impl<'a> MarkApply<'a> {
     fn next_join_tuple<T: Transaction + 'a, A: MetaArena + 'a>(
         &mut self,
+        input: &RightInput<'a>,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
@@ -233,9 +248,7 @@ impl<'a> MarkApply<'a> {
             }
             let left = arena.materialize_tuple();
             let value = self.parameterized_probe_value(&left, plan_arena)?;
-            let root = self
-                .right_input
-                .build(arena, plan_arena, self.runtime_probe_for(value));
+            let root = input.build(arena, plan_arena, self.runtime_probe_for(value));
             self.join_input = Some((root, left));
         }
     }
@@ -275,32 +288,33 @@ impl<'a> MarkApply<'a> {
     }
 
     fn mark_value<T: Transaction + 'a, A: MetaArena + 'a>(
-        &mut self,
+        &self,
+        input: RightInput<'a>,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
         left_tuple: &Tuple,
-    ) -> Result<DataValue, DatabaseError> {
+    ) -> Result<(RightInput<'a>, DataValue), DatabaseError> {
         let probe = self.parameterized_probe_value(left_tuple, plan_arena)?;
         match self.op.kind {
             MarkApplyKind::InnerJoin => unreachable!("inner join streams tuples"),
             MarkApplyKind::Exists => {
                 let predicates = self.op.predicates();
                 let runtime_probe = self.runtime_probe_for(probe);
-                Ok(self
-                    .right_input
-                    .scan(arena, plan_arena, runtime_probe, |right, meta| {
+                let (input, value) =
+                    input.scan(arena, plan_arena, runtime_probe, |right, meta| {
                         Ok(
                             Self::predicates_matched(predicates, left_tuple, right, meta)?
                                 .then_some(DataValue::Boolean(true)),
                         )
-                    })?
-                    .unwrap_or(DataValue::Boolean(false)))
+                    })?;
+                Ok((input, value.unwrap_or(DataValue::Boolean(false))))
             }
             MarkApplyKind::Quantified(quantifier) => {
                 if matches!(quantifier, MarkApplyQuantifier::Any) {
                     if let Some(probe_value) = probe {
                         if !probe_value.is_null() {
-                            let value = self.scan_quantified_right_input(
+                            let (input, value) = self.scan_quantified_right_input(
+                                input,
                                 arena,
                                 plan_arena,
                                 Some(probe_value),
@@ -308,65 +322,73 @@ impl<'a> MarkApply<'a> {
                                 left_tuple,
                             )?;
                             if value == DataValue::Boolean(true) {
-                                return Ok(value);
+                                return Ok((input, value));
                             }
-                            let value = self.scan_quantified_right_input(
+                            let (input, value) = self.scan_quantified_right_input(
+                                input,
                                 arena,
                                 plan_arena,
                                 Some(DataValue::Null),
                                 quantifier,
                                 left_tuple,
                             )?;
-                            return Ok(if value.is_null() {
-                                DataValue::Null
-                            } else {
-                                DataValue::Boolean(false)
-                            });
+                            return Ok((
+                                input,
+                                if value.is_null() {
+                                    DataValue::Null
+                                } else {
+                                    DataValue::Boolean(false)
+                                },
+                            ));
                         }
                     }
                 }
-                self.scan_quantified_right_input(arena, plan_arena, None, quantifier, left_tuple)
+                self.scan_quantified_right_input(
+                    input, arena, plan_arena, None, quantifier, left_tuple,
+                )
             }
         }
     }
 
     fn scan_quantified_right_input<T: Transaction + 'a, A: MetaArena + 'a>(
-        &mut self,
+        &self,
+        input: RightInput<'a>,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
         probe: Option<DataValue>,
         quantifier: MarkApplyQuantifier,
         left_tuple: &Tuple,
-    ) -> Result<DataValue, DatabaseError> {
+    ) -> Result<(RightInput<'a>, DataValue), DatabaseError> {
         let mut saw_null = false;
         let predicates = self.op.predicates();
         let runtime_probe = self.runtime_probe_for(probe);
-        let value = self
-            .right_input
-            .scan(arena, plan_arena, runtime_probe, |right, meta| {
-                match Self::quantified_predicate_outcome(predicates, left_tuple, right, meta)? {
-                    QuantifiedPredicateOutcome::True
-                        if matches!(quantifier, MarkApplyQuantifier::Any) =>
-                    {
-                        return Ok(Some(DataValue::Boolean(true)));
-                    }
-                    QuantifiedPredicateOutcome::False
-                        if matches!(quantifier, MarkApplyQuantifier::All) =>
-                    {
-                        return Ok(Some(DataValue::Boolean(false)));
-                    }
-                    QuantifiedPredicateOutcome::Null => saw_null = true,
-                    _ => {}
+        let (input, value) = input.scan(arena, plan_arena, runtime_probe, |right, meta| {
+            match Self::quantified_predicate_outcome(predicates, left_tuple, right, meta)? {
+                QuantifiedPredicateOutcome::True
+                    if matches!(quantifier, MarkApplyQuantifier::Any) =>
+                {
+                    return Ok(Some(DataValue::Boolean(true)));
                 }
-                Ok(None)
-            })?;
-        Ok(value.unwrap_or_else(|| {
-            if saw_null {
-                DataValue::Null
-            } else {
-                DataValue::Boolean(matches!(quantifier, MarkApplyQuantifier::All))
+                QuantifiedPredicateOutcome::False
+                    if matches!(quantifier, MarkApplyQuantifier::All) =>
+                {
+                    return Ok(Some(DataValue::Boolean(false)));
+                }
+                QuantifiedPredicateOutcome::Null => saw_null = true,
+                _ => {}
             }
-        }))
+            Ok(None)
+        })?;
+        Ok((
+            input,
+            value.unwrap_or_else(|| {
+                if saw_null {
+                    DataValue::Null
+                } else {
+                    DataValue::Boolean(matches!(quantifier, MarkApplyQuantifier::All))
+                }
+            }),
+        ))
     }
 
     fn predicates_matched(
@@ -804,18 +826,20 @@ mod tests {
 
         let mut exec: MarkApply = MarkApply {
             op: &op,
-            right_input: RightInput::Rebuild {
+            right_input: Some(RightInput::Rebuild {
                 plan: &right,
                 pos: arena.nodes.position(),
-            },
+            }),
             left_input: 0,
             join_input: None,
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]);
 
         let mut plan_arena = ExecMetaArena::new(plan_arena);
+        let input = exec.right_input.take().unwrap();
         assert_eq!(
-            exec.mark_value(&mut arena, &mut plan_arena, &left_tuple)?,
+            exec.mark_value(input, &mut arena, &mut plan_arena, &left_tuple)?
+                .1,
             DataValue::Boolean(true)
         );
         assert_eq!(
@@ -860,18 +884,20 @@ mod tests {
 
         let mut exec: MarkApply = MarkApply {
             op: &op,
-            right_input: RightInput::Rebuild {
+            right_input: Some(RightInput::Rebuild {
                 plan: &right,
                 pos: arena.nodes.position(),
-            },
+            }),
             left_input: 0,
             join_input: None,
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Int32(2)]);
 
         let mut plan_arena = ExecMetaArena::new(plan_arena);
+        let input = exec.right_input.take().unwrap();
         assert_eq!(
-            exec.mark_value(&mut arena, &mut plan_arena, &left_tuple)?,
+            exec.mark_value(input, &mut arena, &mut plan_arena, &left_tuple)?
+                .1,
             DataValue::Boolean(true)
         );
         assert_eq!(
@@ -916,18 +942,20 @@ mod tests {
 
         let mut exec: MarkApply = MarkApply {
             op: &op,
-            right_input: RightInput::Rebuild {
+            right_input: Some(RightInput::Rebuild {
                 plan: &right,
                 pos: arena.nodes.position(),
-            },
+            }),
             left_input: 0,
             join_input: None,
         };
         let left_tuple = Tuple::new(None, vec![DataValue::Null]);
 
         let mut plan_arena = ExecMetaArena::new(plan_arena);
+        let input = exec.right_input.take().unwrap();
         assert_eq!(
-            exec.mark_value(&mut arena, &mut plan_arena, &left_tuple)?,
+            exec.mark_value(input, &mut arena, &mut plan_arena, &left_tuple)?
+                .1,
             DataValue::Null
         );
         assert_eq!(
@@ -995,15 +1023,19 @@ mod tests {
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
-        for quantifier in [MarkApplyQuantifier::Any, MarkApplyQuantifier::All] {
+        // Exercise both a single segment and the default 1024-row spill boundary.
+        for (quantifier, repeated_rows) in [
+            (MarkApplyQuantifier::Any, 1),
+            (MarkApplyQuantifier::All, 1),
+            (MarkApplyQuantifier::Any, 1025),
+            (MarkApplyQuantifier::All, 1025),
+        ] {
             let table_arena = crate::planner::TableArenaCell::default();
             let mut meta = crate::planner::PlanArena::new(&table_arena);
             let mut left = build_values(&mut meta, "left_key", vec![vec![DataValue::Int32(2)]; 8]);
-            let mut right = build_values(
-                &mut meta,
-                "right_key",
-                vec![vec![DataValue::Int32(2)], vec![DataValue::Null]],
-            );
+            let mut right_rows = vec![vec![DataValue::Int32(2)]; repeated_rows];
+            right_rows.push(vec![DataValue::Null]);
+            let mut right = build_values(&mut meta, "right_key", right_rows);
             let left_column = left.output_schema(&mut meta)[0];
             let right_column = right.output_schema(&mut meta)[0];
             let predicate = build_equality_predicate(&mut meta, left_column, 0, right_column, 1)?;
@@ -1021,38 +1053,146 @@ mod tests {
             build_read(&mut arena, &mut meta, &right, cache, &transaction);
             let mut exec = MarkApply {
                 op: &op,
-                right_input: RightInput::Materialize { plan: &right, pos },
+                right_input: Some(RightInput::Materialize { plan: &right, pos }),
                 left_input,
                 join_input: None,
             };
             let mut meta = ExecMetaArena::new(meta);
-            for value in [
+            for (index, value) in [
                 DataValue::Int32(2),
                 DataValue::Int32(1),
                 DataValue::Null,
                 DataValue::Int32(2),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let expected = match (quantifier, &value) {
                     (MarkApplyQuantifier::Any, DataValue::Int32(2)) => DataValue::Boolean(true),
                     (MarkApplyQuantifier::All, DataValue::Int32(1)) => DataValue::Boolean(false),
                     _ => DataValue::Null,
                 };
                 let tuple = Tuple::new(None, vec![value]);
-                assert_eq!(exec.mark_value(&mut arena, &mut meta, &tuple)?, expected);
-                assert!(matches!(exec.right_input, RightInput::Materialized(_)));
+                let input = exec.right_input.take().unwrap();
+                let (input, value) = exec.mark_value(input, &mut arena, &mut meta, &tuple)?;
+                exec.right_input = Some(input);
+                assert_eq!(value, expected);
+                if index == 0 && matches!(quantifier, MarkApplyQuantifier::Any) {
+                    let Some(RightInput::Materializing { rows, .. }) = &exec.right_input else {
+                        panic!("first match must pause the RHS")
+                    };
+                    #[cfg(feature = "spill")]
+                    {
+                        let mut cached = 0;
+                        rows.replay::<()>(|_| {
+                            cached += 1;
+                            Ok(None)
+                        })?;
+                        assert_eq!(cached, 1);
+                    }
+                    #[cfg(not(feature = "spill"))]
+                    assert_eq!(rows.len(), 1);
+                } else {
+                    assert!(matches!(
+                        exec.right_input,
+                        Some(RightInput::Materialized(_))
+                    ));
+                }
             }
-            // Empty RHS is a persistent state, including for a NULL left value.
-            exec.right_input = RightInput::Materialize { plan: &empty, pos };
+            // An empty RHS completes immediately, including for a NULL left value.
+            exec.right_input = Some(RightInput::Materialize { plan: &empty, pos });
+            let input = exec.right_input.take().unwrap();
+            let (input, value) = exec.mark_value(
+                input,
+                &mut arena,
+                &mut meta,
+                &Tuple::new(None, vec![DataValue::Null]),
+            )?;
+            exec.right_input = Some(input);
             assert_eq!(
-                exec.mark_value(
-                    &mut arena,
-                    &mut meta,
-                    &Tuple::new(None, vec![DataValue::Null])
-                )?,
+                value,
                 DataValue::Boolean(matches!(quantifier, MarkApplyQuantifier::All))
             );
-            assert!(matches!(exec.right_input, RightInput::Empty));
+            assert!(matches!(
+                exec.right_input,
+                Some(RightInput::Materialized(_))
+            ));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn paused_rhs_survives_left_subquery_rebuilds() -> Result<(), DatabaseError> {
+        let tables = crate::planner::TableArenaCell::default();
+        let mut meta = crate::planner::PlanArena::new(&tables);
+        let mut left = build_values(
+            &mut meta,
+            "left_key",
+            vec![
+                vec![DataValue::Int32(1)],
+                vec![DataValue::Int32(2)],
+                vec![DataValue::Int32(99)],
+                vec![DataValue::Int32(1)],
+            ],
+        );
+        let mut lookup = build_values(
+            &mut meta,
+            "lookup_key",
+            vec![vec![DataValue::Int32(1)], vec![DataValue::Int32(2)]],
+        );
+        let left_column = left.output_schema(&mut meta)[0];
+        let lookup_column = lookup.output_schema(&mut meta)[0];
+        let predicate = build_equality_predicate(&mut meta, left_column, 0, lookup_column, 1)?;
+        let marker = build_marker_column(&mut meta);
+        let left = MarkApplyOperator::build_exists(left, lookup, marker, vec![predicate]);
+        let mut right = build_values(
+            &mut meta,
+            "right_key",
+            vec![
+                vec![DataValue::Int32(1)],
+                vec![DataValue::Int32(2)],
+                vec![DataValue::Int32(3)],
+            ],
+        );
+        let right_column = right.output_schema(&mut meta)[0];
+        let predicate = build_equality_predicate(&mut meta, left_column, 0, right_column, 2)?;
+        let marker = build_marker_column(&mut meta);
+        let mut op =
+            MarkApplyOperator::new_quantified(MarkApplyQuantifier::Any, marker, vec![predicate]);
+        op.materialize = true;
+        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let transaction = storage.transaction()?;
+        let tuples = try_collect(execute_input::<_, MarkApply>(
+            (&op, &left, &right),
+            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            meta,
+            &transaction,
+        ))?;
+        assert_eq!(
+            tuples.into_iter().map(|row| row.values).collect::<Vec<_>>(),
+            vec![
+                vec![
+                    DataValue::Int32(1),
+                    DataValue::Boolean(true),
+                    DataValue::Boolean(true)
+                ],
+                vec![
+                    DataValue::Int32(2),
+                    DataValue::Boolean(true),
+                    DataValue::Boolean(true)
+                ],
+                vec![
+                    DataValue::Int32(99),
+                    DataValue::Boolean(false),
+                    DataValue::Boolean(false)
+                ],
+                vec![
+                    DataValue::Int32(1),
+                    DataValue::Boolean(true),
+                    DataValue::Boolean(true)
+                ],
+            ]
+        );
         Ok(())
     }
 
