@@ -782,7 +782,7 @@ analyze table jp_small;
 query T
 explain select jp_small.id, jp_big.c2 from jp_small join jp_big on jp_small.c1 = jp_big.id;
 ----
-Projection [jp_small.id, jp_big.c2] [Project => (Sort Option: Follow)] InnerJoinApply [MarkApply => (Sort Option: Follow)] TableScan jp_small -> [jp_small.id, jp_small.c1] [SeqScan => (Sort Option: None)] TableScan jp_big -> [jp_big.id, jp_big.c2] [IndexScan By pk_index => Probe ? => (Sort Option: OrderBy: (jp_big.id Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [jp_small.id, jp_big.c2] [Project => (Sort Option: Follow)] IndexProbeJoin [IndexProbeJoin => (Sort Option: Follow)] TableScan jp_small -> [jp_small.id, jp_small.c1] [SeqScan => (Sort Option: None)] TableScan jp_big -> [jp_big.id, jp_big.c2] [IndexScan By pk_index => Probe ? => (Sort Option: OrderBy: (jp_big.id Asc Nulls Last) ignore_prefix_len: 0)]
 
 query II rowsort
 select jp_small.id, jp_big.c2 from jp_small join jp_big on jp_small.c1 = jp_big.id;

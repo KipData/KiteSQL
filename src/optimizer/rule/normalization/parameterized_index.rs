@@ -20,8 +20,9 @@ use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::normalization::pushdown_predicates::{index_covering, is_index_covers};
 use crate::planner::operator::filter::FilterOperator;
+use crate::planner::operator::index_probe_join::IndexProbeJoinOperator;
 use crate::planner::operator::join::{JoinCondition, JoinType};
-use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
+use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyQuantifier};
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{
@@ -46,9 +47,7 @@ impl NormalizationRule for ParameterizeMarkApply {
         _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (op, new_probe) = match (&mut plan.operator, plan.childrens.as_mut()) {
-            (Operator::MarkApply(op), Childrens::Twins { left, right })
-                if !matches!(op.kind, MarkApplyKind::InnerJoin) =>
-            {
+            (Operator::MarkApply(op), Childrens::Twins { left, right }) => {
                 let probe = find_parameterized_probe(
                     op.kind,
                     op.predicates(),
@@ -97,7 +96,7 @@ fn find_parameterized_probe(
                 Ok(None)
             }
         }
-        MarkApplyKind::InnerJoin | MarkApplyKind::Quantified(MarkApplyQuantifier::All) => Ok(None),
+        MarkApplyKind::Quantified(MarkApplyQuantifier::All) => Ok(None),
     }
 }
 
@@ -447,7 +446,7 @@ fn use_probe_index(plan: &mut LogicalPlan, position: usize, arena: &PlanArena<'_
     }
 }
 
-/// Builds the inner `MarkApply` probing `right` with `index` for every `left` row. `on` holds
+/// Builds the `IndexProbeJoin` probing `right` with `index` for every `left` row. `on` holds
 /// the join keys bound to each side; keys not used by the probe are checked after it.
 pub(crate) fn probe_join(
     mut left: LogicalPlan,
@@ -482,13 +481,13 @@ pub(crate) fn probe_join(
         }));
     }
     let mut apply = LogicalPlan::new(
-        Operator::MarkApply(MarkApplyOperator::new_inner_join(predicates, probe)),
+        Operator::IndexProbeJoin(IndexProbeJoinOperator::new(probe, predicates)),
         Childrens::Twins {
             left: Box::new(left),
             right: Box::new(right),
         },
     );
-    let mut option = PhysicalOption::new(PlanImpl::MarkApply, SortOption::Follow, row_count);
+    let mut option = PhysicalOption::new(PlanImpl::IndexProbeJoin, SortOption::Follow, row_count);
     option.lookup_work = Some(index.lookup_work);
     apply.physical_option = Some(option);
     Ok(apply)
@@ -751,7 +750,6 @@ mod inner_join_tests {
     use crate::optimizer::rule::normalization::join_reorder::GreedyJoinReorder;
     use crate::planner::operator::join::JoinOperator;
     use crate::planner::operator::limit::LimitOperator;
-    use crate::planner::operator::mark_apply::MarkApplyKind;
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::WorkCost;
     use crate::planner::TableArenaCell;
@@ -1095,7 +1093,7 @@ mod inner_join_tests {
             }
             assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?);
             let option = plan.physical_option.as_ref().unwrap();
-            assert_eq!(option.plan, PlanImpl::MarkApply);
+            assert_eq!(option.plan, PlanImpl::IndexProbeJoin);
             assert_eq!(option.cost, None);
             assert_eq!(plan.estimated_rows(), rows);
             let Childrens::Twins { right, .. } = plan.childrens.as_ref() else {
@@ -1193,7 +1191,7 @@ mod inner_join_tests {
         let Childrens::Twins { left, .. } = join.childrens.as_ref() else {
             unreachable!()
         };
-        assert!(matches!(left.operator, Operator::MarkApply(_)));
+        assert!(matches!(left.operator, Operator::IndexProbeJoin(_)));
         Ok(())
     }
 
@@ -1272,15 +1270,11 @@ mod inner_join_tests {
             } else {
                 &plan
             };
-            let Operator::MarkApply(apply) = &apply_plan.operator else {
-                panic!("expected inner join apply")
+            let Operator::IndexProbeJoin(apply) = &apply_plan.operator else {
+                panic!("expected index probe join")
             };
-            assert_eq!(apply.kind, MarkApplyKind::InnerJoin);
-            assert!(apply.predicates().is_empty());
-            assert_eq!(
-                apply.parameterized_probe().copied(),
-                Some(if swap { r } else { l })
-            );
+            assert!(apply.predicates.is_empty());
+            assert_eq!(apply.probe, if swap { r } else { l });
             let Childrens::Twins { left, right } = apply_plan.childrens.as_ref() else {
                 unreachable!()
             };
@@ -1352,13 +1346,12 @@ mod inner_join_tests {
         let mut plan = join(left, right, vec![(l0, r1), (l1, r2)], None);
 
         assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?);
-        let Operator::MarkApply(apply) = &plan.operator else {
-            panic!("expected apply without projection")
+        let Operator::IndexProbeJoin(apply) = &plan.operator else {
+            panic!("expected index probe join without projection")
         };
-        assert_eq!(apply.kind, MarkApplyKind::InnerJoin);
-        assert!(apply.predicates().is_empty());
+        assert!(apply.predicates.is_empty());
         assert_eq!(
-            arena.expression(*apply.parameterized_probe().unwrap()),
+            arena.expression(apply.probe),
             &ScalarExpression::Tuple(vec![constant, l1, l0])
         );
         assert_eq!((position(l0, &arena), position(l1, &arena)), (0, 1));
@@ -1467,17 +1460,17 @@ mod inner_join_tests {
         let Childrens::Only(apply_plan) = project.childrens.as_ref() else {
             unreachable!()
         };
-        let Operator::MarkApply(apply) = &apply_plan.operator else {
-            panic!("expected apply")
+        let Operator::IndexProbeJoin(apply) = &apply_plan.operator else {
+            panic!("expected index probe join")
         };
         assert_eq!(apply_plan.estimated_rows(), Some(30));
         assert_eq!(
             apply_plan.physical_option.as_ref().unwrap().plan,
-            PlanImpl::MarkApply
+            PlanImpl::IndexProbeJoin
         );
-        assert_eq!(apply.parameterized_probe(), Some(&r));
+        assert_eq!(apply.probe, r);
         assert_eq!(position(r, &arena), 0);
-        assert!(apply.predicates().is_empty());
+        assert!(apply.predicates.is_empty());
         let Childrens::Twins { left, right } = apply_plan.childrens.as_ref() else {
             unreachable!()
         };

@@ -33,6 +33,7 @@ pub mod drop_table;
 pub mod drop_view;
 pub mod filter;
 pub mod function_scan;
+pub mod index_probe_join;
 pub mod insert;
 pub mod join;
 pub mod limit;
@@ -81,6 +82,7 @@ use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::operator::drop_table::DropTableOperator;
 use crate::planner::operator::drop_view::DropViewOperator;
 use crate::planner::operator::function_scan::FunctionScanOperator;
+use crate::planner::operator::index_probe_join::IndexProbeJoinOperator;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::set_membership::SetMembershipOperator;
@@ -143,6 +145,8 @@ pub enum Operator {
     #[cfg(feature = "copy")]
     CopyToFile(CopyToFileOperator),
     Window(window::WindowOperator),
+    // Appended to keep the serialized indices of earlier variants stable.
+    IndexProbeJoin(IndexProbeJoinOperator),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -291,6 +295,35 @@ impl PhysicalOption {
         &self.sort_option
     }
 
+    /// Probes `right` once per `left` row; without a planned `lookup_work`, one probe costs
+    /// the right input's startup plus resetting it and reading the matched row.
+    fn index_probe_work(
+        &self,
+        left: &LogicalPlan,
+        right: &LogicalPlan,
+        rows: usize,
+        cost: &WorkCost,
+    ) -> Option<usize> {
+        let right_cost = right.physical_option.as_ref()?.cost?;
+        let probed = InputCost {
+            rows: 1,
+            width: right_cost.width,
+            work: right_cost.startup?,
+        };
+        let lookup_work = self.lookup_work.unwrap_or_else(|| {
+            probed
+                .work
+                .saturating_add(PROBE_RESET_WORK)
+                .saturating_add(rows_work(probed.rows, probed.width))
+        });
+        Some(JoinImpl::IndexProbe { lookup_work }.work(
+            &input_cost(left)?,
+            &probed,
+            rows,
+            cost.width,
+        ))
+    }
+
     /// Join formulas: RFC 0001 §4.2 (`rfc/0001-greedy-join-reorder-owns-join-decisions.md`);
     /// probe `lookup_work`: §4.3.
     pub(crate) fn calculate_work(
@@ -308,25 +341,13 @@ impl PhysicalOption {
             (PlanImpl::MarkApply, Operator::MarkApply(op), Childrens::Twins { left, right })
                 if op.parameterized_probe().is_some() && !op.materialize =>
             {
-                let right_cost = right.physical_option.as_ref()?.cost?;
-                let probed = InputCost {
-                    rows: 1,
-                    width: right_cost.width,
-                    work: right_cost.startup?,
-                };
-                let lookup_work = self.lookup_work.unwrap_or_else(|| {
-                    probed
-                        .work
-                        .saturating_add(PROBE_RESET_WORK)
-                        .saturating_add(rows_work(probed.rows, probed.width))
-                });
-                Some(JoinImpl::IndexProbe { lookup_work }.work(
-                    &input_cost(left)?,
-                    &probed,
-                    rows?,
-                    cost.width,
-                ))
+                self.index_probe_work(left, right, rows?, cost)
             }
+            (
+                PlanImpl::IndexProbeJoin,
+                Operator::IndexProbeJoin(_),
+                Childrens::Twins { left, right },
+            ) => self.index_probe_work(left, right, rows?, cost),
             (PlanImpl::HashJoin, Operator::Join(_), Childrens::Twins { left, right }) => Some(
                 JoinImpl::Hash.work(&input_cost(left)?, &input_cost(right)?, rows?, cost.width),
             ),
@@ -441,6 +462,12 @@ impl PhysicalOption {
                     Some(left.saturating_add(right))
                 })
             }
+            (
+                PlanImpl::IndexProbeJoin,
+                Operator::IndexProbeJoin(_),
+                Childrens::Twins { left, right },
+            ) => startup_work(left)
+                .and_then(|left| startup_work(right).map(|right| left.saturating_add(right))),
             (PlanImpl::ScalarQueryInit, _, Childrens::Twins { left, right }) => startup_work(left)
                 .and_then(|left| work(right).map(|right| left.saturating_add(right))),
             _ => None,
@@ -504,6 +531,8 @@ pub enum PlanImpl {
     CopyToFile,
     Analyze,
     Window,
+    // Appended to keep the serialized indices of earlier variants stable.
+    IndexProbeJoin,
 }
 
 impl Explain for ColumnRef {
@@ -546,6 +575,7 @@ macro_rules! impl_display_explain {
 
 impl_display_explain!(
     MarkApplyOperator,
+    IndexProbeJoinOperator,
     ScalarSubqueryOperator,
     FunctionScanOperator,
     LimitOperator,
@@ -575,6 +605,7 @@ impl Explain for Operator {
             Operator::Aggregate(op) => Explain::fmt(op, arena, f),
             Operator::ScalarQueryInit(op) => Explain::fmt(op, arena, f),
             Operator::MarkApply(op) => Explain::fmt(op, arena, f),
+            Operator::IndexProbeJoin(op) => Explain::fmt(op, arena, f),
             Operator::Filter(op) => Explain::fmt(op, arena, f),
             Operator::Join(op) => Explain::fmt(op, arena, f),
             Operator::Project(op) => Explain::fmt(op, arena, f),
@@ -968,6 +999,7 @@ impl Explain for PlanImpl {
             PlanImpl::StreamDistinct => f.write_str("StreamDistinct"),
             PlanImpl::ScalarQueryInit => f.write_str("ScalarQueryInit"),
             PlanImpl::MarkApply => f.write_str("MarkApply"),
+            PlanImpl::IndexProbeJoin => f.write_str("IndexProbeJoin"),
             PlanImpl::Filter => f.write_str("Filter"),
             PlanImpl::HashJoin => f.write_str("HashJoin"),
             PlanImpl::NestLoopJoin => f.write_str("NestLoopJoin"),
@@ -1194,6 +1226,7 @@ mod tests {
             (PlanImpl::StreamDistinct, "StreamDistinct"),
             (PlanImpl::ScalarQueryInit, "ScalarQueryInit"),
             (PlanImpl::MarkApply, "MarkApply"),
+            (PlanImpl::IndexProbeJoin, "IndexProbeJoin"),
             (PlanImpl::Filter, "Filter"),
             (PlanImpl::HashJoin, "HashJoin"),
             (PlanImpl::NestLoopJoin, "NestLoopJoin"),

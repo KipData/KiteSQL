@@ -29,14 +29,13 @@ pub enum MarkApplyQuantifier {
 pub enum MarkApplyKind {
     Exists,
     Quantified(MarkApplyQuantifier),
-    InnerJoin,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct MarkApplyOperator {
     pub kind: MarkApplyKind,
     pub predicates: Vec<ExprRef>,
-    output_column: Option<ColumnRef>,
+    output_column: ColumnRef,
     pub parameterized_probe: Option<ExprRef>,
     pub(crate) materialize: bool,
     pub(crate) guard: Option<ExprRef>,
@@ -47,7 +46,7 @@ impl MarkApplyOperator {
         Self {
             kind: MarkApplyKind::Exists,
             predicates,
-            output_column: Some(output_column),
+            output_column,
             parameterized_probe: None,
             materialize: false,
             guard: None,
@@ -81,7 +80,7 @@ impl MarkApplyOperator {
         Self {
             kind: MarkApplyKind::Quantified(quantifier),
             predicates,
-            output_column: Some(output_column),
+            output_column,
             parameterized_probe: None,
             materialize: false,
             guard: None,
@@ -132,21 +131,7 @@ impl MarkApplyOperator {
     }
 
     pub fn output_column(&self) -> &ColumnRef {
-        self.output_column
-            .as_ref()
-            .expect("marker apply output column")
-    }
-
-    // The RHS must be a full primary/unique-key point probe, yielding at most one row.
-    pub(crate) fn new_inner_join(predicates: Vec<ExprRef>, probe: ExprRef) -> Self {
-        Self {
-            kind: MarkApplyKind::InnerJoin,
-            predicates,
-            output_column: None,
-            parameterized_probe: Some(probe),
-            materialize: false,
-            guard: None,
-        }
+        &self.output_column
     }
 
     pub fn parameterized_probe(&self) -> Option<&ExprRef> {
@@ -161,7 +146,6 @@ impl MarkApplyOperator {
 impl fmt::Display for MarkApplyOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self.kind {
-            MarkApplyKind::InnerJoin => write!(f, "InnerJoinApply"),
             MarkApplyKind::Exists => write!(f, "MarkExistsApply"),
             MarkApplyKind::Quantified(MarkApplyQuantifier::Any) => write!(f, "MarkAnyApply"),
             MarkApplyKind::Quantified(MarkApplyQuantifier::All) => write!(f, "MarkAllApply"),

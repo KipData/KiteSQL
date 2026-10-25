@@ -4438,7 +4438,7 @@ mod tests {
             inner_using_plan,
             concat!(
                 "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
-                "InnerJoinApply [MarkApply => (Sort Option: Follow)] ",
+                "IndexProbeJoin [IndexProbeJoin => (Sort Option: Follow)] ",
                 "TableScan orm_unit_orders -> [orm_unit_orders.id] [SeqScan => (Sort Option: None)] ",
                 "TableScan orm_unit_users -> [orm_unit_users.id] [IndexScan By pk_index => Probe ? Covered => (Sort Option: OrderBy: (orm_unit_users.id Asc Nulls Last) ignore_prefix_len: 0)]"
             ),

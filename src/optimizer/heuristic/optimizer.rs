@@ -25,7 +25,6 @@ use crate::optimizer::rule::normalization::{
     apply_annotated_post_rules, apply_scan_order_hint, constant_calculation_current,
     evaluator_bind_current, NormalizationRuleImpl, OrderHintKind, ScanOrderHint, WholeTreePassKind,
 };
-use crate::planner::operator::mark_apply::MarkApplyKind;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
@@ -523,16 +522,11 @@ impl ImplementationRuleIndex {
             Operator::Limit(_) if self.contains(ImplementationRuleImpl::Limit) => Some(
                 PhysicalOption::new(PlanImpl::Limit, SortOption::Follow, RowCountOption::Unknown),
             ),
-            Operator::MarkApply(op) if self.contains(ImplementationRuleImpl::MarkApply) => {
-                let rows = if matches!(op.kind, MarkApplyKind::InnerJoin) {
-                    RowCountOption::Unknown
-                } else {
-                    RowCountOption::Follow
-                };
+            Operator::MarkApply(_) if self.contains(ImplementationRuleImpl::MarkApply) => {
                 Some(PhysicalOption::new(
                     PlanImpl::MarkApply,
                     SortOption::Follow,
-                    rows,
+                    RowCountOption::Follow,
                 ))
             }
             Operator::Project(_) if self.contains(ImplementationRuleImpl::Projection) => {
@@ -704,7 +698,7 @@ mod tests {
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::limit::LimitOperator;
-    use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator};
+    use crate::planner::operator::mark_apply::MarkApplyOperator;
     use crate::planner::operator::project::ProjectOperator;
     use crate::planner::operator::sort::SortField;
     use crate::planner::operator::{
@@ -774,16 +768,6 @@ mod tests {
         let implementations = ImplementationRuleIndex::new(&[ImplementationRuleImpl::MarkApply]);
         plan.physical_option = implementations.direct_physical_option(&plan.operator);
         assert_eq!(plan.estimated_rows(), Some(12));
-        let Operator::MarkApply(op) = &mut plan.operator else {
-            unreachable!()
-        };
-        op.kind = MarkApplyKind::InnerJoin;
-        plan.physical_option = implementations.direct_physical_option(&plan.operator);
-        assert_eq!(
-            plan.physical_option.as_ref().unwrap().row_count,
-            RowCountOption::Unknown
-        );
-        assert_eq!(plan.estimated_rows(), None);
         Ok(())
     }
 

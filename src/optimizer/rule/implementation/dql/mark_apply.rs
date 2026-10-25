@@ -17,7 +17,6 @@ use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::{keep_best_physical_option, BestPhysicalOption};
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::mark_apply::MarkApplyKind;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{LogicalPlan, PlanArena};
 use std::sync::LazyLock;
@@ -43,18 +42,17 @@ impl ImplementationRule for MarkApplyImplementation {
         _: &StatisticMetaLoader<'_>,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
-        let Operator::MarkApply(op) = &plan.operator else {
+        if !matches!(plan.operator, Operator::MarkApply(_)) {
             return Ok(());
-        };
-        // A mark adds one value to each left row; INNER JOIN may duplicate rows.
-        let rows = if matches!(op.kind, MarkApplyKind::InnerJoin) {
-            RowCountOption::Unknown
-        } else {
-            RowCountOption::Follow
-        };
+        }
+        // A mark adds one value to each left row.
         keep_best_physical_option(
             best_physical_option,
-            PhysicalOption::new(PlanImpl::MarkApply, SortOption::Follow, rows),
+            PhysicalOption::new(
+                PlanImpl::MarkApply,
+                SortOption::Follow,
+                RowCountOption::Follow,
+            ),
             None,
         );
         Ok(())

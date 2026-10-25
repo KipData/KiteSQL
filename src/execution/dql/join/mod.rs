@@ -12,10 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::errors::DatabaseError;
 use crate::planner::operator::join::JoinType;
+use crate::planner::{ExprRef, MetaArena};
+use crate::types::tuple::{SplitTupleRef, TupleImpl};
+use crate::types::value::DataValue;
 
 mod hash;
 pub(crate) mod hash_join;
+pub(crate) mod index_probe_join;
 pub(crate) mod nested_loop_join;
 
 pub fn joins_nullable(join_type: &JoinType) -> (bool, bool) {
@@ -26,4 +31,25 @@ pub fn joins_nullable(join_type: &JoinType) -> (bool, bool) {
         JoinType::Full => (true, true),
         JoinType::Cross => (true, true),
     }
+}
+
+/// Evaluates join predicates bound to the `left ++ right` layout; NULL counts as no match.
+pub(crate) fn predicates_matched(
+    predicates: &[ExprRef],
+    left_tuple: &TupleImpl,
+    right_tuple: &TupleImpl,
+    plan_arena: &(dyn MetaArena + '_),
+) -> Result<bool, DatabaseError> {
+    let values = SplitTupleRef::new(left_tuple, right_tuple);
+    for predicate in predicates {
+        match *plan_arena
+            .expression(*predicate)
+            .eval(plan_arena, Some(&values))?
+        {
+            DataValue::Boolean(true) => {}
+            DataValue::Boolean(false) | DataValue::Null => return Ok(false),
+            _ => return Err(DatabaseError::InvalidType),
+        }
+    }
+    Ok(true)
 }

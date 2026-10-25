@@ -114,6 +114,14 @@ pub trait OperatorVisitorMut<'a>: Sized {
         Ok(())
     }
 
+    fn visit_index_probe_join(
+        &mut self,
+        _op: &'a mut IndexProbeJoinOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn visit_filter(
         &mut self,
         _op: &'a mut FilterOperator,
@@ -401,6 +409,18 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
         Ok(())
     }
 
+    fn visit_index_probe_join(
+        &mut self,
+        op: &'a mut IndexProbeJoinOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
+        ExprVisitorMut::visit(self.visitor, &mut op.probe, self.arena)?;
+        for expr in &mut op.predicates {
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
+        }
+        Ok(())
+    }
+
     fn visit_filter(
         &mut self,
         op: &'a mut FilterOperator,
@@ -566,6 +586,7 @@ pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
         Operator::Aggregate(op) => visitor.visit_aggregate(op, children),
         Operator::ScalarQueryInit(op) => visitor.visit_scalar_query_init(op, children),
         Operator::MarkApply(op) => visitor.visit_mark_apply(op, children),
+        Operator::IndexProbeJoin(op) => visitor.visit_index_probe_join(op, children),
         Operator::Filter(op) => visitor.visit_filter(op, children),
         Operator::Join(op) => visitor.visit_join(op, children),
         Operator::Project(op) => visitor.visit_project(op, children),
@@ -694,7 +715,7 @@ mod tests {
                 visitor.visit_operator(operator, None, &mut ChildrenVisitMut::empty())?;
             }
         }
-        assert_eq!(counter.0, 22); // Includes the Values row expression.
+        assert_eq!(counter.0, 24); // Includes the Values row expression.
 
         Ok(())
     }

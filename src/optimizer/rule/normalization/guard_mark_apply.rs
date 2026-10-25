@@ -19,7 +19,6 @@ use crate::expression::{BinaryOperator, ScalarExpression, TypeCast, UnaryOperato
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{only_child, only_child_mut};
-use crate::planner::operator::mark_apply::MarkApplyKind;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::evaluator::BinaryEvaluatorRef;
@@ -53,9 +52,6 @@ impl NormalizationRule for GuardMarkApply {
         while let (Operator::MarkApply(op), Childrens::Twins { left, .. }) =
             (&input.operator, input.childrens.as_ref())
         {
-            if matches!(op.kind, MarkApplyKind::InnerJoin) {
-                break;
-            }
             markers.push(*op.output_column());
             input = left;
         }

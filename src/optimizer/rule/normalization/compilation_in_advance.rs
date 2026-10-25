@@ -47,6 +47,7 @@ impl EvaluatorBind {
                     plan.operator,
                     Operator::ScalarQueryInit(_)
                         | Operator::MarkApply(_)
+                        | Operator::IndexProbeJoin(_)
                         | Operator::Join(_)
                         | Operator::Union(_)
                         | Operator::SetMembership(_)

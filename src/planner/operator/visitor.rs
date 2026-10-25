@@ -109,6 +109,14 @@ pub trait OperatorVisitor<'a>: Sized {
         Ok(())
     }
 
+    fn visit_index_probe_join(
+        &mut self,
+        _op: &'a IndexProbeJoinOperator,
+        _children: &mut ChildrenVisit<'a>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn visit_filter(
         &mut self,
         _op: &'a FilterOperator,
@@ -384,6 +392,18 @@ impl<'a, V: ExprVisitor<A>, A: MetaArena + ?Sized> OperatorVisitor<'a>
         Ok(())
     }
 
+    fn visit_index_probe_join(
+        &mut self,
+        op: &'a IndexProbeJoinOperator,
+        _children: &mut ChildrenVisit<'a>,
+    ) -> Result<(), DatabaseError> {
+        ExprVisitor::visit(self.visitor, op.probe, self.arena)?;
+        for expr in &op.predicates {
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
+        }
+        Ok(())
+    }
+
     fn visit_filter(
         &mut self,
         op: &'a FilterOperator,
@@ -539,6 +559,7 @@ pub fn walk_operator<'a, V: OperatorVisitor<'a>>(
         Operator::Aggregate(op) => visitor.visit_aggregate(op, children),
         Operator::ScalarQueryInit(op) => visitor.visit_scalar_query_init(op, children),
         Operator::MarkApply(op) => visitor.visit_mark_apply(op, children),
+        Operator::IndexProbeJoin(op) => visitor.visit_index_probe_join(op, children),
         Operator::Filter(op) => visitor.visit_filter(op, children),
         Operator::Join(op) => visitor.visit_join(op, children),
         Operator::Project(op) => visitor.visit_project(op, children),
@@ -654,6 +675,7 @@ pub(crate) mod tests {
                 value: expr(0),
             }),
             Operator::MarkApply(mark_apply),
+            Operator::IndexProbeJoin(IndexProbeJoinOperator::new(expr(16), vec![expr(3)])),
             Operator::Filter(FilterOperator {
                 predicate: expr(5),
                 is_optimized: false,
@@ -1019,7 +1041,7 @@ pub(crate) mod tests {
         for operator in &operators {
             visitor.visit_operator(operator, None, &mut ChildrenVisit::empty())?;
         }
-        assert_eq!(counter.0, 22); // Includes the Values row expression.
+        assert_eq!(counter.0, 24); // Includes the Values row expression.
 
         Ok(())
     }

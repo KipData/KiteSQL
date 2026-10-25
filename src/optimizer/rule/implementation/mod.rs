@@ -102,6 +102,8 @@ impl ImplementationRuleRootTag {
             Operator::Join(_) => Some(Self::Join),
             Operator::Limit(_) => Some(Self::Limit),
             Operator::MarkApply(_) => Some(Self::MarkApply),
+            // The join planner sets its physical option when building it.
+            Operator::IndexProbeJoin(_) => None,
             Operator::Project(_) => Some(Self::Project),
             Operator::ScalarQueryInit(_) => Some(Self::ScalarQueryInit),
             Operator::ScalarSubquery(_) => Some(Self::ScalarSubquery),
@@ -324,7 +326,6 @@ mod tests {
         ImplementationRuleImpl, ImplementationRuleRootTag,
     };
     use crate::planner::operator::function_scan::FunctionScanOperator;
-    use crate::planner::operator::mark_apply::MarkApplyKind;
     use crate::planner::operator::top_k::TopKOperator;
     use crate::planner::operator::{
         Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
@@ -442,16 +443,10 @@ mod tests {
         with_operator_from_sql(
             "select * from t1 where exists(select * from t2)",
             |op| matches!(op, Operator::MarkApply(_)),
-            |mut operator, arena| {
+            |operator, arena| {
                 let option = best_option(ImplementationRuleImpl::MarkApply, &operator, arena)?;
                 assert_eq!(option.plan, PlanImpl::MarkApply);
                 assert_eq!(option.row_count, RowCountOption::Follow);
-                let Operator::MarkApply(op) = &mut operator else {
-                    unreachable!()
-                };
-                op.kind = MarkApplyKind::InnerJoin;
-                let option = best_option(ImplementationRuleImpl::MarkApply, &operator, arena)?;
-                assert_eq!(option.row_count, RowCountOption::Unknown);
                 Ok(())
             },
         )?;

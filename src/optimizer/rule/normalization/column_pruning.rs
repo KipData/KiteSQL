@@ -142,13 +142,8 @@ impl ColumnPruning {
                 op: &'a crate::planner::operator::mark_apply::MarkApplyOperator,
                 _children: &mut ChildrenVisit<'a>,
             ) -> Result<(), DatabaseError> {
-                if !matches!(
-                    op.kind,
-                    crate::planner::operator::mark_apply::MarkApplyKind::InnerJoin
-                ) {
-                    self.referenced_columns
-                        .insert(*op.output_column(), self.arena);
-                }
+                self.referenced_columns
+                    .insert(*op.output_column(), self.arena);
                 Ok(())
             }
 
@@ -273,18 +268,6 @@ impl ColumnPruning {
             arena,
         )
         .visit_operator(operator, None, &mut ChildrenVisitMut::empty())
-    }
-
-    fn remap_exprs_after_child_change<'a>(
-        exprs: impl IntoIterator<Item = &'a mut ExprRef>,
-        removed_positions: &[usize],
-        remapped_exprs: &mut HashSet<ExprRef>,
-        arena: &mut PlanArena<'_>,
-    ) -> Result<(), DatabaseError> {
-        if removed_positions.is_empty() {
-            return Ok(());
-        }
-        remap_exprs_positions(exprs, removed_positions, remapped_exprs, arena)
     }
 
     fn apply_only_child(
@@ -522,6 +505,7 @@ impl ColumnPruning {
             | Operator::Limit(_)
             | Operator::ScalarQueryInit(_)
             | Operator::MarkApply(_)
+            | Operator::IndexProbeJoin(_)
             | Operator::ScalarSubquery(_)
             | Operator::Join(_)
             | Operator::Filter(_)
@@ -559,7 +543,11 @@ impl ColumnPruning {
                     )?;
                     changed |= outcome.changed;
                     outcome.removed_positions.truncate(main_removed_end);
-                } else if matches!(operator, Operator::MarkApply(_)) {
+                } else if matches!(
+                    operator,
+                    Operator::MarkApply(_) | Operator::IndexProbeJoin(_)
+                ) {
+                    // Both inputs stay intact, so probe/predicate positions need no remapping.
                     Self::extend_operator_referenced_columns(
                         operator,
                         &mut required_columns,
@@ -665,21 +653,6 @@ impl ColumnPruning {
                                     );
                                 }
                             }
-                        } else if let Operator::MarkApply(op) = operator {
-                            Self::offset_removed_positions(
-                                &mut outcome.removed_positions
-                                    [right_removed_start..right_removed_end],
-                                old_left_outputs_len,
-                            );
-                            let removed_positions =
-                                &outcome.removed_positions[left_removed_start..right_removed_end];
-                            Self::remap_exprs_after_child_change(
-                                op.predicates.iter_mut().chain(op.guard.iter_mut()),
-                                removed_positions,
-                                &mut outcome.remapped_exprs,
-                                arena,
-                            )?;
-                            outcome.removed_positions.truncate(right_removed_start);
                         } else {
                             Self::offset_removed_positions(
                                 &mut outcome.removed_positions

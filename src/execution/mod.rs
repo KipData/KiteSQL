@@ -62,6 +62,7 @@ use crate::execution::dql::filter::Filter;
 use crate::execution::dql::function_scan::FunctionScan;
 use crate::execution::dql::index_scan::IndexScan;
 use crate::execution::dql::join::hash_join::HashJoin;
+use crate::execution::dql::join::index_probe_join::IndexProbeJoin;
 use crate::execution::dql::limit::Limit;
 use crate::execution::dql::projection::Projection;
 use crate::execution::dql::recursive_cte::{RecursiveCte, RecursiveInput, RecursiveScan};
@@ -226,6 +227,7 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Insert(Insert<'a>),
     Limit(Limit),
     MarkApply(MarkApply<'a>),
+    IndexProbeJoin(IndexProbeJoin<'a>),
     NestedLoopJoin(NestedLoopJoin),
     Projection(Projection<'a>),
     RecursiveCte(RecursiveCte<'a, T>),
@@ -347,6 +349,9 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             ExecNode::Limit(exec) => <Limit as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena),
             ExecNode::MarkApply(exec) => {
                 <MarkApply<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::IndexProbeJoin(exec) => {
+                <IndexProbeJoin<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
             }
             ExecNode::NestedLoopJoin(exec) => {
                 <NestedLoopJoin as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
@@ -492,6 +497,9 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             }
             ExecNode::MarkApply(exec) => {
                 <MarkApply<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+            }
+            ExecNode::IndexProbeJoin(exec) => {
+                <IndexProbeJoin<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::NestedLoopJoin(exec) => {
                 <NestedLoopJoin as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -977,6 +985,10 @@ where
         Operator::MarkApply(op) => {
             let (left, right) = plan.childrens.twins();
             read!(MarkApply<'a>, (op, left, right))
+        }
+        Operator::IndexProbeJoin(op) => {
+            let (left, right) = plan.childrens.twins();
+            read!(IndexProbeJoin<'a>, (op, left, right))
         }
         Operator::Join(op) => {
             let use_hash_join = matches!(
