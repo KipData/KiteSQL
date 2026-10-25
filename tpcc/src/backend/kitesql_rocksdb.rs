@@ -34,20 +34,22 @@ pub struct KiteSqlRocksBackend<S: Storage> {
 }
 
 impl KiteSqlRocksDbBackend {
-    pub fn new(path: &str, rocksdb_stats: bool) -> Result<Self, TpccError> {
+    pub fn new(path: &str, rocksdb_stats: bool, sync: bool) -> Result<Self, TpccError> {
         Ok(Self {
             database: DataBaseBuilder::path(path)
                 .storage_statistics(rocksdb_stats)
+                .sync(sync)
                 .build_rocksdb()?,
         })
     }
 }
 
 impl KiteSqlOptimisticRocksDbBackend {
-    pub fn new(path: &str, rocksdb_stats: bool) -> Result<Self, TpccError> {
+    pub fn new(path: &str, rocksdb_stats: bool, sync: bool) -> Result<Self, TpccError> {
         Ok(Self {
             database: DataBaseBuilder::path(path)
                 .storage_statistics(rocksdb_stats)
+                .sync(sync)
                 .build_optimistic()?,
         })
     }

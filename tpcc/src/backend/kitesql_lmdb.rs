@@ -27,11 +27,9 @@ pub struct KiteSqlLmdbBackend {
 }
 
 impl KiteSqlLmdbBackend {
-    pub fn new(path: &str) -> Result<Self, TpccError> {
+    pub fn new(path: &str, sync: bool) -> Result<Self, TpccError> {
         Ok(Self {
-            database: DataBaseBuilder::path(path)
-                .lmdb_no_sync(true)
-                .build_lmdb()?,
+            database: DataBaseBuilder::path(path).sync(sync).build_lmdb()?,
         })
     }
 
