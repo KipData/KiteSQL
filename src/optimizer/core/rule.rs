@@ -28,7 +28,12 @@ pub trait MatchPattern {
 
 pub trait NormalizationRule {
     /// Returns true when the plan tree is modified.
-    fn apply(&self, plan: &mut LogicalPlan, arena: &mut PlanArena) -> Result<bool, DatabaseError>;
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut PlanArena,
+        loader: Option<&StatisticMetaLoader<'_>>,
+    ) -> Result<bool, DatabaseError>;
 }
 
 fn compare_costs(candidate_cost: Option<usize>, best_cost: Option<usize>) -> Ordering {

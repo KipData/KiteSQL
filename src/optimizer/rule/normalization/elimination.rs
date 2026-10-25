@@ -15,12 +15,13 @@
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
-use crate::planner::{Childrens, ExprRef, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::index::{IndexLookup, IndexOrderHint};
 
 pub struct EliminateRedundantSort;
@@ -29,7 +30,8 @@ impl NormalizationRule for EliminateRedundantSort {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (sort_fields, topk_limit) = match &plan.operator {
             Operator::Sort(sort_op) => (sort_op.sort_fields.clone(), None),
@@ -74,7 +76,8 @@ impl NormalizationRule for EliminateIndexFilter {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        _: &mut crate::planner::PlanArena,
+        _: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         if !matches!(plan.operator, Operator::Filter(_)) {
             return Ok(false);
@@ -268,7 +271,8 @@ impl NormalizationRule for UseStreamAggregate {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let Operator::Aggregate(op) = &plan.operator else {
             return Ok(false);
@@ -315,7 +319,8 @@ impl NormalizationRule for ForceSpillAggregate {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        _: &mut crate::planner::PlanArena,
+        _: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (implementation, sort_fields) = match (&plan.operator, &plan.physical_option) {
             (
@@ -369,14 +374,14 @@ pub(crate) fn apply_annotated_post_rules(
 ) -> Result<bool, DatabaseError> {
     let mut changed = false;
 
-    if EliminateRedundantSort.apply(plan, arena)? {
+    if EliminateRedundantSort.apply(plan, arena, None)? {
         changed = true;
     }
-    if UseStreamAggregate.apply(plan, arena)? {
+    if UseStreamAggregate.apply(plan, arena, None)? {
         changed = true;
     }
     // Run last so an existing ordered child is reused before a forced spill adds a Sort.
-    if ForceSpillAggregate.apply(plan, arena)? {
+    if ForceSpillAggregate.apply(plan, arena, None)? {
         changed = true;
     }
 
@@ -741,7 +746,7 @@ mod tests {
         let mut plan = build_filter_with_selected_index(&mut arena, predicate, None);
 
         let rule = EliminateIndexFilter;
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(rule.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(plan.operator, Operator::TableScan(_)));
         Ok(())
     }
@@ -757,7 +762,7 @@ mod tests {
         let mut plan = build_filter_with_selected_index(&mut arena, predicate, Some(residual));
 
         let rule = EliminateIndexFilter;
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(rule.apply(&mut plan, &mut arena, None)?);
         let Operator::Filter(filter_op) = &plan.operator else {
             unreachable!("residual predicate should keep filter");
         };
@@ -798,7 +803,7 @@ mod tests {
         index_info.lookup = Some(IndexLookup::Probe);
 
         let rule = EliminateIndexFilter;
-        assert!(!rule.apply(&mut plan, &mut arena)?);
+        assert!(!rule.apply(&mut plan, &mut arena, None)?);
         let Operator::Filter(filter) = &plan.operator else {
             panic!("probe cannot discharge the static filter")
         };
@@ -814,7 +819,7 @@ mod tests {
         let mut plan = build_plan(&mut arena, vec![sort_field.clone()], vec![sort_field], 0);
         let rule = EliminateRedundantSort;
 
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(rule.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(plan.operator, Operator::Filter(_)));
         Ok(())
     }
@@ -837,7 +842,7 @@ mod tests {
         });
         let rule = EliminateRedundantSort;
 
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(rule.apply(&mut plan, &mut arena, None)?);
         match plan.operator {
             Operator::Limit(limit_op) => {
                 assert_eq!(limit_op.limit, Some(10));
@@ -893,7 +898,7 @@ mod tests {
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let (mut plan, _) = desc_topk_plan(&mut arena, false);
 
-        assert!(EliminateRedundantSort.apply(&mut plan, &mut arena)?);
+        assert!(EliminateRedundantSort.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(plan.operator, Operator::Limit(_)));
         assert!(scan_is_reverse(&plan));
         Ok(())
@@ -905,7 +910,7 @@ mod tests {
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let (mut plan, _) = desc_topk_plan(&mut arena, true);
 
-        assert!(!EliminateRedundantSort.apply(&mut plan, &mut arena)?);
+        assert!(!EliminateRedundantSort.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(plan.operator, Operator::TopK(_)));
         assert!(!scan_is_reverse(&plan));
         Ok(())
@@ -929,7 +934,7 @@ mod tests {
             RowCountOption::Unknown,
         ));
 
-        assert!(!EliminateRedundantSort.apply(&mut plan, &mut arena)?);
+        assert!(!EliminateRedundantSort.apply(&mut plan, &mut arena, None)?);
         assert!(!scan_is_reverse(&plan));
         Ok(())
     }
@@ -967,7 +972,7 @@ mod tests {
                 info.lookup = lookup;
             }
             super::mark_sort_preserving_indexes(&mut plan, std::slice::from_ref(&c2), &arena)?;
-            assert!(EliminateRedundantSort.apply(&mut plan, &mut arena)?);
+            assert!(EliminateRedundantSort.apply(&mut plan, &mut arena, None)?);
         }
         Ok(())
     }
@@ -995,7 +1000,7 @@ mod tests {
         });
 
         let rule = EliminateRedundantSort;
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(rule.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(plan.operator, Operator::Limit(_)));
         Ok(())
     }
@@ -1107,7 +1112,7 @@ mod tests {
         ));
 
         let rule = UseStreamAggregate;
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(rule.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(
             plan.physical_option,
             Some(PhysicalOption {
@@ -1146,7 +1151,7 @@ mod tests {
         ));
 
         let rule = UseStreamAggregate;
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(rule.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(
             plan.physical_option,
             Some(PhysicalOption {
@@ -1155,7 +1160,7 @@ mod tests {
             })
         ));
         let force_spill = ForceSpillAggregate;
-        assert!(!force_spill.apply(&mut plan, &mut arena)?);
+        assert!(!force_spill.apply(&mut plan, &mut arena, None)?);
         assert!(!matches!(
             plan.childrens.as_ref(),
             Childrens::Only(child) if matches!(child.operator, Operator::Sort(_))
@@ -1171,7 +1176,7 @@ mod tests {
             SortOption::None,
             RowCountOption::Unknown,
         ));
-        assert!(!rule.apply(&mut unordered, &mut arena)?);
+        assert!(!rule.apply(&mut unordered, &mut arena, None)?);
         assert!(matches!(
             unordered.physical_option,
             Some(PhysicalOption {
@@ -1200,7 +1205,7 @@ mod tests {
         ));
 
         let rule = ForceSpillAggregate;
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(rule.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(
             plan.physical_option,
             Some(PhysicalOption {
@@ -1239,7 +1244,7 @@ mod tests {
         super::mark_sort_preserving_indexes(&mut plan, &[c2], &arena)?;
         let rule = EliminateRedundantSort;
 
-        assert!(!rule.apply(&mut plan, &mut arena)?);
+        assert!(!rule.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(plan.operator, Operator::Sort(_)));
         Ok(())
     }
@@ -1309,7 +1314,7 @@ mod tests {
         };
         super::mark_sort_preserving_indexes(&mut plan, &sort_fields, &arena)?;
         let rule = EliminateRedundantSort;
-        assert!(rule.apply(&mut plan, &mut arena)?);
+        assert!(rule.apply(&mut plan, &mut arena, None)?);
         assert!(matches!(plan.operator, Operator::Filter(_)));
 
         let table_plan = plan.childrens.pop_only();

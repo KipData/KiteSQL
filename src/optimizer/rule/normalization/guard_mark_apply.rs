@@ -18,6 +18,7 @@ use crate::errors::DatabaseError;
 use crate::expression::visitor::ExprVisitor;
 use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TypeCast, UnaryOperator};
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::mark_apply::MarkApplyKind;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
@@ -28,7 +29,12 @@ use crate::types::LogicalType;
 pub struct GuardMarkApply;
 
 impl NormalizationRule for GuardMarkApply {
-    fn apply(&self, plan: &mut LogicalPlan, arena: &mut PlanArena) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
+    ) -> Result<bool, DatabaseError> {
         let (Operator::Project(project), Childrens::Only(filter)) =
             (&plan.operator, plan.childrens.as_mut())
         else {
@@ -448,7 +454,7 @@ mod tests {
             let mut arena = PlanArena::new(&tables);
             let mut fixture = Fixture::new(&mut arena, op, false)?;
             fixture.add_mark(&mut arena, op)?;
-            assert!(GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+            assert!(GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
             let upper = fixture.mark().guard.unwrap();
             let Childrens::Only(filter) = fixture.plan.childrens.as_mut() else {
                 unreachable!()
@@ -465,7 +471,7 @@ mod tests {
             let lower = lower.guard.unwrap();
             assert_ne!(upper, lower);
             let predicate = fixture.predicate();
-            EvaluatorBind.apply(&mut fixture.plan, &mut arena)?;
+            EvaluatorBind.apply(&mut fixture.plan, &mut arena, None)?;
             for flag in [
                 DataValue::Boolean(false),
                 DataValue::Boolean(true),
@@ -512,7 +518,7 @@ mod tests {
                     }
                 }
             }
-            assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+            assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
         }
         Ok(())
     }
@@ -555,7 +561,7 @@ mod tests {
                     .exprs
                     .push(if escaped == 1 { fixture.marker } else { upper });
             }
-            assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+            assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
             assert!(fixture.mark().guard.is_none());
             let Childrens::Only(filter) = fixture.plan.childrens.as_mut() else {
                 unreachable!()
@@ -581,11 +587,11 @@ mod tests {
                 let tables = TableArenaCell::default();
                 let mut arena = PlanArena::new(&tables);
                 let mut fixture = Fixture::new(&mut arena, op, marker_first)?;
-                assert!(GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+                assert!(GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
                 let guard = fixture.mark().guard.unwrap();
                 assert_ne!(guard, fixture.flag);
-                assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
-                EvaluatorBind.apply(&mut fixture.plan, &mut arena)?;
+                assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
+                EvaluatorBind.apply(&mut fixture.plan, &mut arena, None)?;
                 let predicate = fixture.predicate();
                 for flag in [
                     DataValue::Boolean(false),
@@ -641,7 +647,7 @@ mod tests {
             unreachable!()
         };
         project.exprs.push(fixture.marker);
-        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
         assert!(fixture.mark().guard.is_none());
         let Operator::Project(project) = &mut fixture.plan.operator else {
             unreachable!()
@@ -662,7 +668,7 @@ mod tests {
             unreachable!()
         };
         op.predicate = predicate;
-        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
         assert!(fixture.mark().guard.is_none());
         Ok(())
     }
@@ -686,9 +692,9 @@ mod tests {
             unreachable!()
         };
         *right_expr = failing;
-        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
         assert!(fixture.mark().guard.is_none());
-        EvaluatorBind.apply(&mut fixture.plan, &mut arena)?;
+        EvaluatorBind.apply(&mut fixture.plan, &mut arena, None)?;
         let matched = Tuple::new(
             None,
             vec![DataValue::Boolean(false), DataValue::Boolean(true)],
@@ -830,7 +836,7 @@ mod tests {
             unreachable!()
         };
         *left_expr = alias;
-        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+        assert!(!GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
         assert!(fixture.mark().guard.is_none());
         let alias = arena.alloc_expression(ScalarExpression::Alias {
             expr: fixture.flag,
@@ -841,7 +847,7 @@ mod tests {
             unreachable!()
         };
         *left_expr = alias;
-        assert!(GuardMarkApply.apply(&mut fixture.plan, &mut arena)?);
+        assert!(GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?);
         Ok(())
     }
 }

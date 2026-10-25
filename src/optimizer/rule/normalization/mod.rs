@@ -16,6 +16,7 @@ use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
 use crate::optimizer::rule::normalization::combine_operators::{
     CollapseGroupByAgg, CollapseProject, CombineFilter,
@@ -34,7 +35,7 @@ use crate::optimizer::rule::normalization::pushdown_predicates::{
 use crate::optimizer::rule::normalization::simplification::ConstantCalculation;
 use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
 use crate::optimizer::rule::normalization::top_k::TopK;
-use crate::planner::{ExprRef, LogicalPlan};
+use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use std::collections::HashSet;
 mod column_pruning;
 mod combine_operators;
@@ -209,43 +210,60 @@ impl NormalizationRule for NormalizationRuleImpl {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         match self {
-            NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, arena),
-            NormalizationRuleImpl::GreedyJoinReorder => GreedyJoinReorder.apply(plan, arena),
-            NormalizationRuleImpl::OrientNestedLoopJoin => OrientNestedLoopJoin.apply(plan, arena),
-            NormalizationRuleImpl::GuardMarkApply => GuardMarkApply.apply(plan, arena),
-            NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, arena),
-            NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(plan, arena),
-            NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan, arena),
-            NormalizationRuleImpl::LimitProjectTranspose => {
-                LimitProjectTranspose.apply(plan, arena)
+            NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, arena, loader),
+            NormalizationRuleImpl::GreedyJoinReorder => {
+                GreedyJoinReorder.apply(plan, arena, loader)
             }
-            NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.apply(plan, arena),
-            NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.apply(plan, arena),
+            NormalizationRuleImpl::OrientNestedLoopJoin => {
+                OrientNestedLoopJoin.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::GuardMarkApply => GuardMarkApply.apply(plan, arena, loader),
+            NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, arena, loader),
+            NormalizationRuleImpl::CollapseGroupByAgg => {
+                CollapseGroupByAgg.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan, arena, loader),
+            NormalizationRuleImpl::LimitProjectTranspose => {
+                LimitProjectTranspose.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::PushLimitThroughJoin => {
+                PushLimitThroughJoin.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::PushLimitIntoTableScan => {
+                PushLimitIntoScan.apply(plan, arena, loader)
+            }
             NormalizationRuleImpl::PushPredicateThroughJoin => {
-                PushPredicateThroughJoin.apply(plan, arena)
+                PushPredicateThroughJoin.apply(plan, arena, loader)
             }
             NormalizationRuleImpl::PushJoinPredicateIntoScan => {
-                PushJoinPredicateIntoScan.apply(plan, arena)
+                PushJoinPredicateIntoScan.apply(plan, arena, loader)
             }
-            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan, arena),
+            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan, arena, loader),
             NormalizationRuleImpl::PushPredicateIntoScan => {
-                PushPredicateIntoScan.apply(plan, arena)
+                PushPredicateIntoScan.apply(plan, arena, loader)
             }
-            NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(plan, arena),
-            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan, arena),
-            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan, arena),
-            NormalizationRuleImpl::TopK => TopK.apply(plan, arena),
-            NormalizationRuleImpl::EliminateIndexFilter => EliminateIndexFilter.apply(plan, arena),
+            NormalizationRuleImpl::ConstantCalculation => {
+                ConstantCalculation.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan, arena, loader),
+            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan, arena, loader),
+            NormalizationRuleImpl::TopK => TopK.apply(plan, arena, loader),
+            NormalizationRuleImpl::EliminateIndexFilter => {
+                EliminateIndexFilter.apply(plan, arena, loader)
+            }
             NormalizationRuleImpl::ParameterizeInnerJoin => {
-                ParameterizeInnerJoin.apply(plan, arena)
+                ParameterizeInnerJoin.apply(plan, arena, loader)
             }
             NormalizationRuleImpl::ParameterizeMarkApply => {
-                ParameterizeMarkApply.apply(plan, arena)
+                ParameterizeMarkApply.apply(plan, arena, loader)
             }
-            NormalizationRuleImpl::MaterializeMarkApply => MaterializeMarkApply.apply(plan, arena),
+            NormalizationRuleImpl::MaterializeMarkApply => {
+                MaterializeMarkApply.apply(plan, arena, loader)
+            }
         }
     }
 }

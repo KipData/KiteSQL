@@ -341,7 +341,7 @@ impl DataBaseBuilder {
         let transaction_isolation =
             transaction_isolation.unwrap_or_else(|| storage.default_transaction_isolation());
         storage.validate_transaction_isolation(transaction_isolation)?;
-        let meta_cache = HashMap::default();
+        let meta_cache = StatisticsMetaCache::default();
         let table_cache = HashMap::default();
         let view_cache = HashMap::default();
         let table_arena = TableArenaCell::default();
@@ -808,17 +808,13 @@ impl DDLApply {
                 let table = table.transplant_to_table_arena(plan_arena)?;
                 state.table_cache.insert(name.clone(), table);
                 if clear_statistics {
-                    state
-                        .meta_cache
-                        .retain(|(cached_table_name, _), _| cached_table_name != &name);
+                    state.meta_cache.remove_table(&name);
                 }
                 catalog_changed = true;
             }
             DDLApply::DropTable { name } => {
                 state.table_cache.remove(&name);
-                state
-                    .meta_cache
-                    .retain(|(cached_table_name, _), _| cached_table_name != &name);
+                state.meta_cache.remove_table(&name);
                 catalog_changed = true;
             }
             DDLApply::UpsertView { view } => {
@@ -831,18 +827,31 @@ impl DDLApply {
                 state.view_cache.remove(&name);
                 catalog_changed = true;
             }
-            DDLApply::UpsertStatisticsMeta {
+            DDLApply::UpsertIndexStatistics {
                 table_name,
                 index_id,
                 meta,
             } => {
-                state.meta_cache.insert((table_name, index_id), meta);
+                state
+                    .meta_cache
+                    .indexes
+                    .insert((table_name, index_id), meta);
             }
-            DDLApply::RemoveStatisticsMeta {
+            DDLApply::RemoveIndexStatistics {
                 table_name,
                 index_id,
             } => {
-                state.meta_cache.remove(&(table_name, index_id));
+                state.meta_cache.indexes.remove(&(table_name, index_id));
+            }
+            DDLApply::UpsertColumnStatistics {
+                table_name,
+                column_id,
+                meta,
+            } => {
+                state
+                    .meta_cache
+                    .columns
+                    .insert((table_name, column_id), meta);
             }
         }
         Ok(catalog_changed)
@@ -953,17 +962,47 @@ impl<S: Storage> Database<S> {
                         name.clone(),
                     )?
                     .ok_or(DatabaseError::TableNotFound)?;
+                let mut indexes = Vec::new();
+                let mut columns = Vec::new();
                 for index in table.indexes() {
                     let index_id = self.state.table_arena.borrow().index(*index).id;
-                    if let Some(meta) = transaction.statistics_meta(
+                    if let Some(meta) = transaction.index_statistics(
                         &mut table_codec,
                         name.as_ref(),
                         index_id,
                         self.state.table_arena.borrow_mut(),
                     )? {
-                        self.state.meta_cache.insert((name.clone(), index_id), meta);
+                        indexes.push((index_id, meta));
                     }
                 }
+                for column in table.columns() {
+                    let column_id = self
+                        .state
+                        .table_arena
+                        .borrow()
+                        .column(*column)
+                        .id()
+                        .unwrap();
+                    if let Some(meta) = transaction.column_statistics(
+                        &mut table_codec,
+                        name.as_ref(),
+                        column_id,
+                        self.state.table_arena.borrow_mut(),
+                    )? {
+                        columns.push((column_id, meta));
+                    }
+                }
+                self.state.meta_cache.remove_table(&name);
+                self.state.meta_cache.indexes.extend(
+                    indexes
+                        .into_iter()
+                        .map(|(id, meta)| ((name.clone(), id), meta)),
+                );
+                self.state.meta_cache.columns.extend(
+                    columns
+                        .into_iter()
+                        .map(|(id, meta)| ((name.clone(), id), meta)),
+                );
                 self.state.table_cache.insert(name, table);
                 self.state.recycle_table_arena()?;
                 Ok(())

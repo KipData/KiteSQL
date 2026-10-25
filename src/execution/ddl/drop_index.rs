@@ -62,7 +62,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
         };
         if let Some((table, index_id)) = dropped {
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
-            arena.push_ddl_apply(DDLApply::RemoveStatisticsMeta {
+            arena.push_ddl_apply(DDLApply::RemoveIndexStatistics {
                 table_name: table_name.clone(),
                 index_id,
             });

@@ -32,7 +32,11 @@ pub trait OperatorVisitorMut<'a>: Sized {
             ..
         } = plan;
         self.visit_operator(operator, physical_option.as_mut())?;
-        match childrens.as_mut() {
+        self.visit_children(childrens)
+    }
+
+    fn visit_children(&mut self, childrens: &'a mut Childrens) -> Result<(), DatabaseError> {
+        match childrens {
             Childrens::Only(child) => self.visit_plan(child),
             Childrens::Twins { left, right } => {
                 self.visit_plan(left)?;

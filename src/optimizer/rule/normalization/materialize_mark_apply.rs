@@ -14,6 +14,7 @@
 
 use super::NormalizationRule;
 use crate::errors::DatabaseError;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator};
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
@@ -30,7 +31,12 @@ impl MaterializeMarkApply {
 }
 
 impl NormalizationRule for MaterializeMarkApply {
-    fn apply(&self, plan: &mut LogicalPlan, _: &mut PlanArena) -> Result<bool, DatabaseError> {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        _: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
+    ) -> Result<bool, DatabaseError> {
         let (Operator::MarkApply(op), Childrens::Twins { left, right }) =
             (&mut plan.operator, plan.childrens.as_ref())
         else {
@@ -118,32 +124,38 @@ mod tests {
             left.physical_option = Some(PhysicalOption::new(
                 PlanImpl::Values,
                 SortOption::None,
-                RowCountOption::Estimated(left_rows),
+                RowCountOption::Estimated {
+                    rows: left_rows,
+                    ndv: None,
+                },
             ));
             right.physical_option = Some(PhysicalOption::new(
                 PlanImpl::Values,
                 SortOption::None,
-                RowCountOption::Estimated(right_rows),
+                RowCountOption::Estimated {
+                    rows: right_rows,
+                    ndv: None,
+                },
             ));
             assert_eq!(
-                MaterializeMarkApply.apply(&mut plan, &mut arena)?,
+                MaterializeMarkApply.apply(&mut plan, &mut arena, None)?,
                 materialize
             );
         }
-        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena)?);
+        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena, None)?);
         let Operator::MarkApply(op) = &mut plan.operator else {
             unreachable!()
         };
         assert!(op.materialize);
         op.materialize = false;
         op.set_parameterized_probe(Some(predicate));
-        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena)?);
+        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena, None)?);
         let Operator::MarkApply(op) = &mut plan.operator else {
             unreachable!()
         };
         op.set_parameterized_probe(None);
         op.predicates.push(predicate);
-        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena)?);
+        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena, None)?);
         let Operator::MarkApply(op) = &mut plan.operator else {
             unreachable!()
         };
@@ -152,7 +164,7 @@ mod tests {
             unreachable!()
         };
         right.physical_option = None;
-        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena)?);
+        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena, None)?);
         Ok(())
     }
 }

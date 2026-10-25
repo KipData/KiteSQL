@@ -17,6 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::{ExprVisitorMut, PositionShift};
 use crate::expression::{BinaryOperator, ScalarExpression, TypeCast};
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
@@ -36,7 +37,8 @@ impl NormalizationRule for ParameterizeMarkApply {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (op, new_probe) = match (&mut plan.operator, plan.childrens.as_mut()) {
             (Operator::MarkApply(op), Childrens::Twins { left, right })
@@ -348,6 +350,7 @@ impl NormalizationRule for ParameterizeInnerJoin {
         &self,
         plan: &mut LogicalPlan,
         arena: &mut PlanArena<'_>,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (Operator::Join(join), Childrens::Twins { left, right }) =
             (&mut plan.operator, plan.childrens.as_mut())
@@ -573,7 +576,7 @@ mod tests {
         let probe = arena.alloc_expression(ScalarExpression::from(2));
         let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::None);
 
-        assert!(!ParameterizeMarkApply.apply(&mut plan, &mut arena)?);
+        assert!(!ParameterizeMarkApply.apply(&mut plan, &mut arena, None)?);
         assert!(parameterize_right_subtree(&mut plan, &column, probe, &mut arena)?.is_none());
 
         let mut filter = LogicalPlan::new(
@@ -936,7 +939,7 @@ mod inner_join_tests {
         let right = FilterOperator::build(predicate, right, false);
         let mut plan = join(left, right, vec![(l0, r1), (l1, r2)], None);
 
-        assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena)?);
+        assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?);
         let Operator::MarkApply(apply) = &plan.operator else {
             panic!("expected apply without projection")
         };
@@ -988,7 +991,7 @@ mod inner_join_tests {
         let predicate = binary(&mut arena, BinaryOperator::Gt, filter_left, filter_right);
         let mut plan = join(left, right, vec![(l, r)], Some(predicate));
 
-        assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena)?);
+        assert!(ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?);
         assert_eq!(plan.output_schema(&mut arena), &schema);
         let Operator::Filter(filter) = &plan.operator else {
             panic!("join filter must remain above projection")
@@ -1077,7 +1080,7 @@ mod inner_join_tests {
             }
             let before = plan.clone();
             assert!(
-                !ParameterizeInnerJoin.apply(&mut plan, &mut arena)?,
+                !ParameterizeInnerJoin.apply(&mut plan, &mut arena, None)?,
                 "{case}"
             );
             assert_eq!(plan, before, "{case}");

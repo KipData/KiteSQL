@@ -1211,6 +1211,7 @@ impl MetaArena for ParamArena<'_> {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::planner::Childrens;
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::LogicalType;
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1238,7 +1239,6 @@ mod tests {
     #[test]
     fn materializing_scalar_references_preserves_shared_catalog_ids() -> Result<(), DatabaseError> {
         use crate::planner::operator::project::ProjectOperator;
-        use crate::planner::Childrens;
         let catalog = TableArenaCell::default();
         let persistent = catalog.borrow_mut().alloc_scalar_query_ref(false);
         let mut arena = PlanArena::new(&catalog);

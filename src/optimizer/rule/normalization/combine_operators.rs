@@ -16,6 +16,7 @@ use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::optimizer::rule::normalization::strip_alias;
 use crate::planner::operator::filter::FilterOperator;
@@ -118,7 +119,8 @@ impl NormalizationRule for CollapseProject {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let Operator::Project(parent_op) = &mut plan.operator else {
             return Ok(false);
@@ -223,7 +225,8 @@ impl NormalizationRule for CombineFilter {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let parent_filter = match mem::replace(&mut plan.operator, Operator::Dummy) {
             Operator::Filter(op) => op,
@@ -295,7 +298,8 @@ impl NormalizationRule for CollapseGroupByAgg {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let can_collapse = {
             let LogicalPlan {
@@ -442,7 +446,7 @@ mod tests {
             Childrens::Only(Box::new(child)),
         );
 
-        assert!(CollapseProject.apply(&mut plan, &mut arena)?);
+        assert!(CollapseProject.apply(&mut plan, &mut arena, None)?);
 
         let Operator::Project(op) = &plan.operator else {
             unreachable!("expected project");
@@ -469,7 +473,7 @@ mod tests {
                 project.exprs.reverse();
             }
         }
-        assert!(!super::CombineFilter.apply(&mut filter, &mut arena)?);
+        assert!(!super::CombineFilter.apply(&mut filter, &mut arena, None)?);
         assert!(matches!(
             filter.childrens.pop_only().operator,
             Operator::Project(_)
@@ -552,7 +556,7 @@ mod tests {
         let expr = column_expr(&mut arena, "c2", 0);
         let mut plan = AggregateOperator::build(child, vec![], vec![expr], true, false);
 
-        assert!(CollapseGroupByAgg.apply(&mut plan, &mut arena)?);
+        assert!(CollapseGroupByAgg.apply(&mut plan, &mut arena, None)?);
         let Operator::Aggregate(op) = &plan.operator else {
             unreachable!("expected aggregate");
         };

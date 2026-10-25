@@ -29,11 +29,12 @@ use crate::iter_ext::Itertools;
 use crate::optimizer::core::cm_sketch::{
     CountMinSketch, CountMinSketchPage, COUNT_MIN_SKETCH_STORAGE_PAGE_LEN,
 };
-use crate::optimizer::core::statistics_meta::StatisticsMeta;
+use crate::optimizer::core::histogram::HistogramMeta;
+use crate::optimizer::core::statistics_meta::IndexStatistics;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::{MetaArena, TableArenaCell};
 use crate::serdes::ReferenceTables;
-use crate::storage::table_codec::{Bytes, StatisticsCodecType, TableCodec, BOUND_MAX_TAG};
+use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId};
@@ -49,7 +50,18 @@ use std::path::Path;
 
 pub type KeyValueRef<'a> = (&'a [u8], &'a [u8]);
 
-pub(crate) type StatisticsMetaCache = HashMap<(TableName, IndexId), StatisticsMeta>;
+#[derive(Default)]
+pub(crate) struct StatisticsMetaCache {
+    pub(crate) indexes: HashMap<(TableName, IndexId), IndexStatistics>,
+    pub(crate) columns: HashMap<(TableName, ColumnId), HistogramMeta>,
+}
+
+impl StatisticsMetaCache {
+    pub(crate) fn remove_table(&mut self, table_name: &TableName) {
+        self.indexes.retain(|(name, _), _| name != table_name);
+        self.columns.retain(|(name, _), _| name != table_name);
+    }
+}
 pub(crate) type TableCache = HashMap<TableName, TableCatalog>;
 pub(crate) type ViewCache = HashMap<TableName, View>;
 
@@ -632,6 +644,7 @@ pub trait Transaction: Sized {
             column_id
         };
 
+        self.remove_column_statistics(table_codec, table_name, column_id, plan_arena)?;
         for index_meta in table_catalog.indexes.iter() {
             let index_meta = plan_arena.index(*index_meta);
             if !index_meta.column_ids.contains(&column_id) {
@@ -649,7 +662,7 @@ pub trait Transaction: Sized {
                 self.remove_range(Bound::Included(min), Bound::Included(max))
             })?;
 
-            self.remove_statistics_meta(table_codec, table_name, index_meta.id)?;
+            self.remove_index_statistics(table_codec, table_name, index_meta.id)?;
         }
         self.load_table(table_codec, plan_arena, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)
@@ -800,7 +813,7 @@ pub trait Transaction: Sized {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        self.remove_statistics_meta(table_codec, &table_name, index_id)?;
+        self.remove_index_statistics(table_codec, &table_name, index_id)?;
 
         self.load_table(table_codec, plan_arena, table_name.clone())?
             .map(|table| (table, index_id))
@@ -950,16 +963,61 @@ pub trait Transaction: Sized {
         })
     }
 
-    fn save_statistics_meta(
+    fn save_column_statistics(
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &TableName,
-        statistics_meta: StatisticsMeta,
+        column_id: ColumnId,
+        meta: &HistogramMeta,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        let index_id = statistics_meta.index_id();
-        let (root, buckets, cm_sketch, top_n) = statistics_meta.into_parts();
-        table_codec.with_statistics_meta(
+        table_codec.with_column_statistics(
+            table_name,
+            column_id,
+            Some(meta),
+            arena,
+            |key, value| self.set(key, value),
+        )
+    }
+
+    fn column_statistics(
+        &self,
+        table_codec: &mut TableCodec,
+        table_name: &str,
+        column_id: ColumnId,
+        arena: &mut (impl MetaArena + ?Sized),
+    ) -> Result<Option<HistogramMeta>, DatabaseError> {
+        let value =
+            table_codec.with_column_statistics(table_name, column_id, None, arena, |key, _| {
+                self.get_borrowed(key)
+            })?;
+        value
+            .map(|bytes| TableCodec::decode_column_statistics::<Self>(bytes.as_ref(), arena))
+            .transpose()
+    }
+
+    fn remove_column_statistics(
+        &mut self,
+        table_codec: &mut TableCodec,
+        table_name: &TableName,
+        column_id: ColumnId,
+        arena: &(impl MetaArena + ?Sized),
+    ) -> Result<(), DatabaseError> {
+        table_codec.with_column_statistics(table_name, column_id, None, arena, |key, _| {
+            self.remove(key)
+        })
+    }
+
+    fn save_index_statistics(
+        &mut self,
+        table_codec: &mut TableCodec,
+        table_name: &TableName,
+        index_statistics: IndexStatistics,
+        arena: &(impl MetaArena + ?Sized),
+    ) -> Result<(), DatabaseError> {
+        let index_id = index_statistics.index_id();
+        let (root, buckets, cm_sketch, top_n) = index_statistics.into_parts();
+        table_codec.with_index_statistics(
             table_name.as_ref(),
             index_id,
             Some(&root),
@@ -968,7 +1026,7 @@ pub trait Transaction: Sized {
         )?;
         let (sketch_meta, sketch_pages) =
             cm_sketch.into_storage_parts(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN);
-        table_codec.with_statistics_sketch_meta(
+        table_codec.with_index_statistics_sketch_meta(
             table_name.as_ref(),
             index_id,
             Some(&sketch_meta),
@@ -976,7 +1034,7 @@ pub trait Transaction: Sized {
             |key, value| self.set(key, value),
         )?;
         for sketch_page in sketch_pages {
-            table_codec.with_statistics_sketch_page(
+            table_codec.with_index_statistics_sketch_page(
                 table_name.as_ref(),
                 index_id,
                 &sketch_page,
@@ -987,7 +1045,7 @@ pub trait Transaction: Sized {
         }
 
         for (ordinal, bucket) in buckets.iter().enumerate() {
-            table_codec.with_statistics_bucket(
+            table_codec.with_index_statistics_bucket(
                 table_name.as_ref(),
                 index_id,
                 ordinal as u32,
@@ -996,7 +1054,7 @@ pub trait Transaction: Sized {
                 |key, value| self.set(key, value),
             )?;
         }
-        table_codec.with_statistics_top_n(
+        table_codec.with_index_statistics_top_n(
             table_name.as_ref(),
             index_id,
             Some(&top_n),
@@ -1007,14 +1065,14 @@ pub trait Transaction: Sized {
         Ok(())
     }
 
-    fn statistics_meta(
+    fn index_statistics(
         &self,
         table_codec: &mut TableCodec,
         table_name: &str,
         index_id: IndexId,
         arena: &mut (impl MetaArena + ?Sized),
-    ) -> Result<Option<StatisticsMeta>, DatabaseError> {
-        table_codec.with_statistics_index_bound(table_name, index_id, |min, max| {
+    ) -> Result<Option<IndexStatistics>, DatabaseError> {
+        table_codec.with_index_statistics_bound(table_name, index_id, |min, max| {
             let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
             let mut root = None;
             let mut buckets = Vec::new();
@@ -1023,25 +1081,29 @@ pub trait Transaction: Sized {
             let mut top_n = None;
 
             while let Some((key, value)) = iter.try_next()? {
-                match TableCodec::decode_statistics_codec_type(key)? {
-                    StatisticsCodecType::Root => {
-                        root = Some(TableCodec::decode_statistics_meta::<Self>(value, arena)?);
+                match TableCodec::decode_index_statistics_codec_type(key)? {
+                    IndexStatisticsCodecType::Root => {
+                        root = Some(TableCodec::decode_index_statistics::<Self>(value, arena)?);
                     }
-                    StatisticsCodecType::SketchMeta => {
-                        sketch_meta = Some(TableCodec::decode_statistics_sketch_meta::<Self>(
+                    IndexStatisticsCodecType::SketchMeta => {
+                        sketch_meta = Some(
+                            TableCodec::decode_index_statistics_sketch_meta::<Self>(value, arena)?,
+                        );
+                    }
+                    IndexStatisticsCodecType::SketchPage => {
+                        sketch_pages.push(TableCodec::decode_index_statistics_sketch_page::<Self>(
                             value, arena,
                         )?);
                     }
-                    StatisticsCodecType::SketchPage => {
-                        sketch_pages.push(TableCodec::decode_statistics_sketch_page::<Self>(
+                    IndexStatisticsCodecType::Bucket => {
+                        buckets.push(TableCodec::decode_index_statistics_bucket::<Self>(
                             value, arena,
                         )?);
                     }
-                    StatisticsCodecType::Bucket => {
-                        buckets.push(TableCodec::decode_statistics_bucket::<Self>(value, arena)?);
-                    }
-                    StatisticsCodecType::TopN => {
-                        top_n = Some(TableCodec::decode_statistics_top_n::<Self>(value, arena)?);
+                    IndexStatisticsCodecType::TopN => {
+                        top_n = Some(TableCodec::decode_index_statistics_top_n::<Self>(
+                            value, arena,
+                        )?);
                     }
                 }
             }
@@ -1049,7 +1111,7 @@ pub trait Transaction: Sized {
             match (root, sketch_meta) {
                 (Some(root), Some(sketch_meta)) => {
                     let sketch = CountMinSketch::from_storage_parts(sketch_meta, sketch_pages)?;
-                    StatisticsMeta::from_parts(root, buckets, sketch, top_n).map(Some)
+                    IndexStatistics::from_parts(root, buckets, sketch, top_n).map(Some)
                 }
                 (None, None)
                     if buckets.is_empty() && sketch_pages.is_empty() && top_n.is_none() =>
@@ -1063,13 +1125,13 @@ pub trait Transaction: Sized {
         })
     }
 
-    fn remove_statistics_meta(
+    fn remove_index_statistics(
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &TableName,
         index_id: IndexId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_statistics_index_bound(table_name.as_ref(), index_id, |min, max| {
+        table_codec.with_index_statistics_bound(table_name.as_ref(), index_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 

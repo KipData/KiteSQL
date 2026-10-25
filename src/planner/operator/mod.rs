@@ -90,9 +90,10 @@ use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::visitor::OperatorVisitor;
-use crate::planner::{fmt_explain_list, Explain, ExprRef, MetaArena};
+use crate::planner::{fmt_explain_list, Childrens, Explain, ExprRef, LogicalPlan, MetaArena};
 use crate::types::index::{IndexInfo, IndexMetaRef};
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum Operator {
@@ -156,18 +157,24 @@ pub enum SortOption {
     None,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum RowCountOption {
     Follow,
     Unknown,
-    Estimated(usize),
+    Estimated { rows: usize, ndv: Option<usize> },
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
+// Relative CPU units: a row costs four units, an operator/hash operation one.
+// This is the same scale as row = 1 and operator = 0.25; I/O is not modeled.
+pub(crate) const CPU_ROW_WORK: usize = 4;
+pub(crate) const CPU_OPERATOR_WORK: usize = 1;
+
+#[derive(Debug, Clone)]
 pub struct PhysicalOption {
     pub plan: PlanImpl,
     pub(crate) sort_option: SortOption,
     pub(crate) row_count: RowCountOption,
+    pub(crate) startup_work: Option<Option<usize>>,
 }
 
 impl PhysicalOption {
@@ -176,6 +183,7 @@ impl PhysicalOption {
             plan,
             sort_option,
             row_count,
+            startup_work: None,
         }
     }
 
@@ -183,16 +191,125 @@ impl PhysicalOption {
         &self.sort_option
     }
 
-    pub(crate) fn materializes(&self) -> bool {
-        matches!(
-            self.plan,
-            PlanImpl::SimpleAggregate
-                | PlanImpl::HashAggregate
-                | PlanImpl::HashJoin
-                | PlanImpl::Sort
-                | PlanImpl::TopK
-                | PlanImpl::Window
-        )
+    pub(crate) fn calculate_startup_work(&mut self, operator: &Operator, childrens: &Childrens) {
+        let startup_work =
+            |input: &LogicalPlan| input.physical_option.as_ref()?.startup_work.flatten();
+        let work = |input: &LogicalPlan| {
+            Some(
+                startup_work(input)?
+                    .saturating_add(input.estimated_rows()?.saturating_mul(CPU_ROW_WORK)),
+            )
+        };
+        self.startup_work = Some(match (&self.plan, operator, childrens) {
+            (
+                PlanImpl::SeqScan | PlanImpl::IndexScan(_) | PlanImpl::Values | PlanImpl::Dummy,
+                _,
+                Childrens::None,
+            ) => Some(0),
+            (
+                PlanImpl::Project
+                | PlanImpl::Filter
+                | PlanImpl::Limit
+                | PlanImpl::StreamAggregate
+                | PlanImpl::StreamDistinct,
+                _,
+                Childrens::Only(input),
+            ) => startup_work(input),
+            (PlanImpl::HashJoin, Operator::Join(join), Childrens::Twins { left, right }) => {
+                let keys = match &join.on {
+                    JoinCondition::On { on, .. } => on.len(),
+                    JoinCondition::None => 0,
+                };
+                work(left).and_then(|build| {
+                    Some(
+                        build
+                            .saturating_add(left.estimated_rows()?.saturating_mul(
+                                CPU_ROW_WORK.saturating_add(keys.saturating_mul(CPU_OPERATOR_WORK)),
+                            ))
+                            .saturating_add(startup_work(right)?),
+                    )
+                })
+            }
+            (PlanImpl::NestLoopJoin, _, Childrens::Twins { left, right }) => startup_work(left)
+                .and_then(|left| startup_work(right).map(|right| left.saturating_add(right))),
+            (PlanImpl::Sort | PlanImpl::TopK | PlanImpl::Window, _, Childrens::Only(input)) => {
+                let keys = match operator {
+                    Operator::Sort(op) => op.sort_fields.len(),
+                    Operator::TopK(op) => op.sort_fields.len(),
+                    Operator::Window(op) => op.sort_fields.len(),
+                    _ => unreachable!(),
+                };
+                work(input).and_then(|read| {
+                    let rows = input.estimated_rows()?;
+                    let comparisons = if rows <= 1 {
+                        0
+                    } else {
+                        ((rows as f64) * (rows as f64).log2()).ceil() as usize
+                    };
+                    Some(
+                        read.saturating_add(
+                            comparisons.saturating_mul(
+                                2usize
+                                    .saturating_mul(keys)
+                                    .saturating_mul(CPU_OPERATOR_WORK),
+                            ),
+                        ),
+                    )
+                })
+            }
+            (
+                PlanImpl::SimpleAggregate | PlanImpl::HashAggregate,
+                Operator::Aggregate(op),
+                Childrens::Only(input),
+            ) => {
+                let per_row = op
+                    .agg_calls
+                    .len()
+                    .saturating_mul(CPU_OPERATOR_WORK)
+                    .saturating_add(if matches!(self.plan, PlanImpl::HashAggregate) {
+                        CPU_ROW_WORK.saturating_add(
+                            op.groupby_exprs.len().saturating_mul(CPU_OPERATOR_WORK),
+                        )
+                    } else {
+                        0
+                    });
+                work(input).and_then(|read| {
+                    Some(read.saturating_add(input.estimated_rows()?.saturating_mul(per_row)))
+                })
+            }
+            (PlanImpl::MarkApply, Operator::MarkApply(op), Childrens::Twins { left, right }) => {
+                startup_work(left).and_then(|left| {
+                    let right = if op.materialize {
+                        work(right)
+                    } else {
+                        startup_work(right)
+                    }?;
+                    Some(left.saturating_add(right))
+                })
+            }
+            (PlanImpl::ScalarQueryInit, _, Childrens::Twins { left, right }) => startup_work(left)
+                .and_then(|left| work(right).map(|right| left.saturating_add(right))),
+            _ => None,
+        });
+    }
+}
+
+// Startup estimates are pass-local caches, not plan semantics or wire data.
+impl PartialEq for PhysicalOption {
+    fn eq(&self, other: &Self) -> bool {
+        self.plan == other.plan
+            && self.sort_option == other.sort_option
+            && self.row_count == other.row_count
+    }
+}
+
+impl Eq for PhysicalOption {}
+
+impl Hash for PhysicalOption {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.plan.hash(state);
+        self.sort_option.hash(state);
+        self.row_count.hash(state);
     }
 }
 
@@ -590,7 +707,7 @@ impl Operator {
             f,
             keep_going: true,
         };
-        visitor.visit_operator(self)?;
+        visitor.visit_operator(self, None)?;
         Ok(visitor.keep_going)
     }
 

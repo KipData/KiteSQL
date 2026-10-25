@@ -16,11 +16,48 @@ use super::alter_table::change_column::DefaultChange;
 use super::*;
 use crate::errors::DatabaseError;
 use crate::expression::visitor::ExprVisitor;
-use crate::planner::MetaArena;
+use crate::planner::{Childrens, LogicalPlan, MetaArena};
 
 pub trait OperatorVisitor<'a>: Sized {
-    fn visit_operator(&mut self, operator: &'a Operator) -> Result<(), DatabaseError> {
-        walk_operator(self, operator)
+    fn visit_plan(&mut self, plan: &'a LogicalPlan) -> Result<(), DatabaseError> {
+        let LogicalPlan {
+            operator,
+            physical_option,
+            childrens,
+            ..
+        } = plan;
+        self.visit_operator(operator, physical_option.as_ref())?;
+        self.visit_children(childrens)
+    }
+
+    fn visit_children(&mut self, childrens: &'a Childrens) -> Result<(), DatabaseError> {
+        match childrens {
+            Childrens::Only(child) => self.visit_plan(child),
+            Childrens::Twins { left, right } => {
+                self.visit_plan(left)?;
+                self.visit_plan(right)
+            }
+            Childrens::None => Ok(()),
+        }
+    }
+
+    fn visit_operator(
+        &mut self,
+        operator: &'a Operator,
+        physical_option: Option<&'a PhysicalOption>,
+    ) -> Result<(), DatabaseError> {
+        walk_operator(self, operator)?;
+        if let Some(physical_option) = physical_option {
+            self.visit_physical_option(physical_option)?;
+        }
+        Ok(())
+    }
+
+    fn visit_physical_option(
+        &mut self,
+        _physical_option: &'a PhysicalOption,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
     }
 
     fn visit_dummy(&mut self) -> Result<(), DatabaseError> {
@@ -415,6 +452,7 @@ pub(crate) mod tests {
     use crate::planner::operator::join::{JoinOperator, JoinType};
     use crate::planner::operator::mark_apply::MarkApplyOperator;
     use crate::planner::operator::set_membership::SetMembershipKind;
+    use crate::planner::operator::visitor_mut::OperatorVisitorMut;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::ExprRef;
     use crate::planner::{Childrens, LogicalPlan};
@@ -660,6 +698,150 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn read_only_and_mutable_visitors_follow_the_same_order() -> Result<(), DatabaseError> {
+        #[derive(Default)]
+        struct VisitOrder(Vec<&'static str>);
+
+        impl<'a> OperatorVisitor<'a> for VisitOrder {
+            fn visit_join(&mut self, _op: &'a JoinOperator) -> Result<(), DatabaseError> {
+                self.0.push("operator");
+                Ok(())
+            }
+
+            fn visit_dummy(&mut self) -> Result<(), DatabaseError> {
+                self.0.push("operator");
+                Ok(())
+            }
+
+            fn visit_physical_option(
+                &mut self,
+                _option: &'a PhysicalOption,
+            ) -> Result<(), DatabaseError> {
+                self.0.push("physical");
+                Ok(())
+            }
+        }
+
+        impl<'a> OperatorVisitorMut<'a> for VisitOrder {
+            fn visit_join(&mut self, _op: &'a mut JoinOperator) -> Result<(), DatabaseError> {
+                self.0.push("operator");
+                Ok(())
+            }
+
+            fn visit_dummy(&mut self) -> Result<(), DatabaseError> {
+                self.0.push("operator");
+                Ok(())
+            }
+
+            fn visit_physical_option(
+                &mut self,
+                _option: &'a mut PhysicalOption,
+            ) -> Result<(), DatabaseError> {
+                self.0.push("physical");
+                Ok(())
+            }
+        }
+
+        let left = LogicalPlan::new(Operator::Dummy, Childrens::None);
+        let mut right = LogicalPlan::new(Operator::Dummy, Childrens::None);
+        right.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Dummy,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let mut plan =
+            JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::NestLoopJoin,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let mut read_only = VisitOrder::default();
+        OperatorVisitor::visit_plan(&mut read_only, &plan)?;
+        let mut mutable = VisitOrder::default();
+        OperatorVisitorMut::visit_plan(&mut mutable, &mut plan)?;
+        assert_eq!(
+            read_only.0,
+            ["operator", "physical", "operator", "operator", "physical"]
+        );
+        assert_eq!(read_only.0, mutable.0);
+        Ok(())
+    }
+
+    #[test]
+    fn physical_option_error_stops_read_only_plan_traversal() {
+        struct FailOnPhysical(usize);
+
+        impl<'a> OperatorVisitor<'a> for FailOnPhysical {
+            fn visit_dummy(&mut self) -> Result<(), DatabaseError> {
+                self.0 += 1;
+                Ok(())
+            }
+
+            fn visit_physical_option(
+                &mut self,
+                _option: &'a PhysicalOption,
+            ) -> Result<(), DatabaseError> {
+                Err(DatabaseError::invalid_column("physical"))
+            }
+        }
+
+        let child = LogicalPlan::new(Operator::Dummy, Childrens::None);
+        let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::Only(Box::new(child)));
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Dummy,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let mut visitor = FailOnPhysical(0);
+        assert!(visitor.visit_plan(&plan).is_err());
+        assert_eq!(visitor.0, 1);
+    }
+
+    #[test]
+    fn traverses_read_only_plans_in_input_order() -> Result<(), DatabaseError> {
+        #[derive(Default)]
+        struct VisitOrder(Vec<&'static str>);
+
+        impl OperatorVisitor<'_> for VisitOrder {
+            fn visit_project(&mut self, _op: &ProjectOperator) -> Result<(), DatabaseError> {
+                self.0.push("project");
+                Ok(())
+            }
+
+            fn visit_join(&mut self, _op: &JoinOperator) -> Result<(), DatabaseError> {
+                self.0.push("join");
+                Ok(())
+            }
+
+            fn visit_dummy(&mut self) -> Result<(), DatabaseError> {
+                self.0.push("dummy");
+                Ok(())
+            }
+        }
+
+        let right = LogicalPlan::new(
+            Operator::Project(ProjectOperator { exprs: vec![] }),
+            Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
+        );
+        let join = JoinOperator::build(
+            LogicalPlan::new(Operator::Dummy, Childrens::None),
+            right,
+            JoinCondition::None,
+            JoinType::Cross,
+            false,
+        );
+        let plan = LogicalPlan::new(
+            Operator::Project(ProjectOperator { exprs: vec![] }),
+            Childrens::Only(Box::new(join)),
+        );
+        let mut visitor = VisitOrder::default();
+        visitor.visit_plan(&plan)?;
+        assert_eq!(visitor.0, ["project", "join", "dummy", "project", "dummy"]);
+        Ok(())
+    }
+
+    #[test]
     fn dispatches_all_variants_and_visits_expressions() -> Result<(), DatabaseError> {
         struct NoopVisitor;
         impl OperatorVisitor<'_> for NoopVisitor {}
@@ -668,13 +850,13 @@ pub(crate) mod tests {
         let mut arena = crate::planner::PlanArena::new(&table_arena);
         let operators = all_operators(&mut arena)?;
         for operator in &operators {
-            NoopVisitor.visit_operator(operator)?;
+            NoopVisitor.visit_operator(operator, None)?;
         }
 
         let mut counter = ExpressionCounter::default();
         let mut visitor = OperatorExprVisitor::new(&mut counter, &arena);
         for operator in &operators {
-            visitor.visit_operator(operator)?;
+            visitor.visit_operator(operator, None)?;
         }
         assert_eq!(counter.0, 22); // Includes the Values row expression.
 

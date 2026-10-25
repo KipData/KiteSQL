@@ -34,13 +34,17 @@ use std::sync::OnceLock;
 const ANALYZE_STATISTICS_CONFIDENCE: f64 = 0.95;
 pub(crate) const ANALYZE_STATISTICS_RELATIVE_ERROR: f64 = 0.001;
 
-pub struct HistogramBuilder {
-    index_id: IndexId,
+pub struct HistogramMetaBuilder {
     null_count: usize,
     values_len: usize,
+    hll: HyperLogLog<DataValue>,
+}
+
+pub struct HistogramBuilder {
+    index_id: IndexId,
+    meta: HistogramMetaBuilder,
     quantile: KllSketchBuilder,
     sketch: CountMinSketch<DataValue>,
-    hll: HyperLogLog<DataValue>,
     top_n: ColumnTopN,
 }
 
@@ -54,7 +58,6 @@ struct BoundComparator {
 
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
 pub struct HistogramMeta {
-    index_id: IndexId,
     number_of_distinct_value: usize,
     null_count: usize,
     values_len: usize,
@@ -68,6 +71,7 @@ pub struct HistogramMeta {
 // Equal depth histogram
 #[derive(Debug)]
 pub struct Histogram {
+    index_id: IndexId,
     meta: HistogramMeta,
     buckets: Vec<Bucket>,
     comparator: OnceLock<BoundComparator>,
@@ -76,6 +80,7 @@ pub struct Histogram {
 impl Clone for Histogram {
     fn clone(&self) -> Self {
         Self {
+            index_id: self.index_id,
             meta: self.meta.clone(),
             buckets: self.buckets.clone(),
             comparator: OnceLock::new(),
@@ -85,7 +90,7 @@ impl Clone for Histogram {
 
 impl PartialEq for Histogram {
     fn eq(&self, other: &Self) -> bool {
-        self.meta == other.meta && self.buckets == other.buckets
+        self.index_id == other.index_id && self.meta == other.meta && self.buckets == other.buckets
     }
 }
 
@@ -97,32 +102,61 @@ pub struct Bucket {
     // repeat: u64,
 }
 
+impl HistogramMetaBuilder {
+    pub fn new(relative_error: f64) -> Result<Self, DatabaseError> {
+        Ok(Self {
+            null_count: 0,
+            values_len: 0,
+            hll: HyperLogLog::with_relative_error(relative_error)?,
+        })
+    }
+
+    pub fn append(&mut self, value: &DataValue) -> bool {
+        if value.is_null() {
+            self.null_count += 1;
+            false
+        } else {
+            self.values_len += 1;
+            self.hll.add(value);
+            true
+        }
+    }
+
+    pub fn build(self) -> HistogramMeta {
+        HistogramMeta {
+            number_of_distinct_value: if self.values_len == 0 {
+                0
+            } else {
+                self.hll.estimate().clamp(1, self.values_len)
+            },
+            null_count: self.null_count,
+            values_len: self.values_len,
+            buckets_len: 0,
+            correlation: 0.0,
+        }
+    }
+}
+
 impl HistogramBuilder {
     pub fn new(index_meta: &IndexMeta, relative_error: f64) -> Result<Self, DatabaseError> {
         Ok(Self {
             index_id: index_meta.id,
-            null_count: 0,
-            values_len: 0,
+            meta: HistogramMetaBuilder::new(relative_error)?,
             quantile: KllSketchBuilder::with_relative_error(relative_error)?,
             sketch: CountMinSketch::with_relative_error(
                 ANALYZE_STATISTICS_CONFIDENCE,
                 relative_error,
             )?,
-            hll: HyperLogLog::with_relative_error(relative_error)?,
             top_n: ColumnTopN::default(),
         })
     }
 
     pub fn append(&mut self, value: DataValue) -> Result<(), DatabaseError> {
-        if value.is_null() {
-            self.null_count += 1;
-        } else {
+        if self.meta.append(&value) {
             self.sketch.increment(&value);
-            self.hll.add(&value);
             self.top_n
                 .add_with_size(ANALYZE_STATISTICS_TOP_N_SIZE, value.clone(), 1);
             self.quantile.insert(value)?;
-            self.values_len += 1;
         }
 
         Ok(())
@@ -138,19 +172,17 @@ impl HistogramBuilder {
             ));
         }
 
-        let values_len = self.values_len;
+        let values_len = self.meta.values_len;
         if number_of_buckets > values_len {
             return Err(DatabaseError::TooManyBuckets(number_of_buckets, values_len));
         }
 
         let HistogramBuilder {
             index_id,
-            null_count,
+            meta,
             quantile,
             mut sketch,
-            hll,
             top_n,
-            ..
         } = self;
         let mut buckets = Vec::with_capacity(number_of_buckets);
         let quantile = quantile.build()?;
@@ -178,20 +210,16 @@ impl HistogramBuilder {
                 count: (upper_rank - lower_rank + 1) as u64,
             });
         }
-        sketch.add(&DataValue::Null, self.null_count);
-        let number_of_distinct_value = hll.estimate().clamp(1, values_len);
+        let mut meta = meta.build();
+        sketch.add(&DataValue::Null, meta.null_count);
+        meta.buckets_len = buckets.len();
+        meta.correlation = correlation;
         let top_n = top_n.finish_with_size(ANALYZE_STATISTICS_TOP_N_SIZE);
 
         Ok((
             Histogram {
-                meta: HistogramMeta {
-                    index_id,
-                    number_of_distinct_value,
-                    null_count,
-                    values_len,
-                    buckets_len: buckets.len(),
-                    correlation,
-                },
+                index_id,
+                meta,
                 buckets,
                 comparator: OnceLock::new(),
             },
@@ -282,7 +310,11 @@ fn is_above(
 }
 
 impl Histogram {
-    pub fn from_parts(meta: HistogramMeta, buckets: Vec<Bucket>) -> Result<Self, DatabaseError> {
+    pub fn from_parts(
+        index_id: IndexId,
+        meta: HistogramMeta,
+        buckets: Vec<Bucket>,
+    ) -> Result<Self, DatabaseError> {
         if meta.buckets_len != buckets.len() {
             return Err(DatabaseError::InvalidValue(format!(
                 "histogram bucket count mismatch: meta={}, actual={}",
@@ -292,14 +324,15 @@ impl Histogram {
         }
 
         Ok(Self {
+            index_id,
             meta,
             buckets,
             comparator: OnceLock::new(),
         })
     }
 
-    pub fn into_parts(self) -> (HistogramMeta, Vec<Bucket>) {
-        (self.meta, self.buckets)
+    pub fn into_parts(self) -> (IndexId, HistogramMeta, Vec<Bucket>) {
+        (self.index_id, self.meta, self.buckets)
     }
 
     fn comparator(&self) -> Result<&BoundComparator, DatabaseError> {
@@ -331,7 +364,7 @@ impl Histogram {
     }
 
     pub fn index_id(&self) -> IndexId {
-        self.meta.index_id
+        self.index_id
     }
 
     pub fn values_len(&self) -> usize {
@@ -670,8 +703,8 @@ fn scope_lower_includes_null(min: &Bound<DataValue>) -> bool {
 }
 
 impl HistogramMeta {
-    pub fn index_id(&self) -> IndexId {
-        self.index_id
+    pub fn null_count(&self) -> usize {
+        self.null_count
     }
 
     pub fn values_len(&self) -> usize {
@@ -694,13 +727,43 @@ mod tests {
     use crate::expression::range_detacher::Range;
     use crate::optimizer::core::cm_sketch::CountMinSketch;
     use crate::optimizer::core::histogram::{
-        Bucket, HistogramBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
+        Bucket, HistogramBuilder, HistogramMetaBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
     };
     use crate::optimizer::core::top_n::ColumnTopN;
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
+
+    #[test]
+    fn column_meta_counts_values_without_histogram_buckets() -> Result<(), DatabaseError> {
+        let empty = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?.build();
+        assert_eq!(empty.values_len(), 0);
+        assert_eq!(empty.null_count(), 0);
+        assert_eq!(empty.distinct_values_len(), 0);
+        assert_eq!(empty.buckets_len(), 0);
+        let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        for value in [
+            DataValue::Null,
+            DataValue::Int32(1),
+            DataValue::Int32(1),
+            DataValue::Int32(2),
+        ] {
+            builder.append(&value);
+        }
+        let meta = builder.build();
+        assert_eq!(meta.values_len(), 3);
+        assert_eq!(meta.null_count(), 1);
+        assert_eq!(meta.distinct_values_len(), 2);
+        assert_eq!(meta.buckets_len(), 0);
+        let mut builder = HistogramMetaBuilder::new(ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        builder.append(&DataValue::Null);
+        let meta = builder.build();
+        assert_eq!(meta.values_len(), 0);
+        assert_eq!(meta.null_count(), 1);
+        assert_eq!(meta.distinct_values_len(), 0);
+        Ok(())
+    }
 
     fn index_meta() -> IndexMeta {
         IndexMeta {

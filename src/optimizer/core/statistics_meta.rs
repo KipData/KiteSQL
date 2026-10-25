@@ -21,6 +21,7 @@ use crate::optimizer::core::top_n::ColumnTopN;
 use crate::storage::StatisticsMetaCache;
 use crate::types::index::IndexId;
 use crate::types::value::DataValue;
+use crate::types::ColumnId;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::slice;
 
@@ -37,9 +38,17 @@ impl<'a> StatisticMetaLoader<'a> {
         &self,
         table_name: &TableName,
         index_id: IndexId,
-    ) -> Result<Option<&StatisticsMeta>, DatabaseError> {
+    ) -> Result<Option<&IndexStatistics>, DatabaseError> {
         let key = (table_name.clone(), index_id);
-        Ok(self.cache.get(&key))
+        Ok(self.cache.indexes.get(&key))
+    }
+
+    pub fn load_column(
+        &self,
+        table_name: &TableName,
+        column_id: ColumnId,
+    ) -> Option<&HistogramMeta> {
+        self.cache.columns.get(&(table_name.clone(), column_id))
     }
 
     pub fn collect_count(
@@ -47,7 +56,7 @@ impl<'a> StatisticMetaLoader<'a> {
         table_name: &TableName,
         index_id: IndexId,
         range: &Range,
-    ) -> Result<Option<usize>, DatabaseError> {
+    ) -> Result<Option<(usize, usize)>, DatabaseError> {
         let Some(entry) = self.load(table_name, index_id)? else {
             return Ok(None);
         };
@@ -60,20 +69,20 @@ impl<'a> StatisticMetaLoader<'a> {
         entry
             .histogram()
             .collect_count(ranges, entry.sketch(), entry.top_n())
-            .map(Some)
+            .map(|rows| Some((rows, entry.histogram().distinct_values_len())))
     }
 }
 
 #[derive(Debug, Clone, ReferenceSerialization)]
-pub struct StatisticsMetaRoot {
+pub struct IndexStatisticsRoot {
     index_id: IndexId,
     histogram_meta: HistogramMeta,
 }
 
-impl StatisticsMetaRoot {
-    pub fn new(histogram_meta: HistogramMeta) -> Self {
+impl IndexStatisticsRoot {
+    pub fn new(index_id: IndexId, histogram_meta: HistogramMeta) -> Self {
         Self {
-            index_id: histogram_meta.index_id(),
+            index_id,
             histogram_meta,
         }
     }
@@ -92,16 +101,16 @@ impl StatisticsMetaRoot {
 }
 
 #[derive(Debug, Clone)]
-pub struct StatisticsMeta {
+pub struct IndexStatistics {
     index_id: IndexId,
     histogram: Histogram,
     sketch: CountMinSketch<DataValue>,
     top_n: ColumnTopN,
 }
 
-impl StatisticsMeta {
+impl IndexStatistics {
     pub fn new(histogram: Histogram, sketch: CountMinSketch<DataValue>, top_n: ColumnTopN) -> Self {
-        StatisticsMeta {
+        IndexStatistics {
             index_id: histogram.index_id(),
             histogram,
             sketch,
@@ -110,12 +119,13 @@ impl StatisticsMeta {
     }
 
     pub fn from_parts(
-        root: StatisticsMetaRoot,
+        root: IndexStatisticsRoot,
         buckets: Vec<Bucket>,
         sketch: CountMinSketch<DataValue>,
         top_n: Option<ColumnTopN>,
     ) -> Result<Self, DatabaseError> {
-        let histogram = Histogram::from_parts(root.into_histogram_meta(), buckets)?;
+        let histogram =
+            Histogram::from_parts(root.index_id(), root.into_histogram_meta(), buckets)?;
 
         Ok(Self::new(histogram, sketch, top_n.unwrap_or_default()))
     }
@@ -123,14 +133,14 @@ impl StatisticsMeta {
     pub fn into_parts(
         self,
     ) -> (
-        StatisticsMetaRoot,
+        IndexStatisticsRoot,
         Vec<Bucket>,
         CountMinSketch<DataValue>,
         ColumnTopN,
     ) {
-        let (histogram_meta, buckets) = self.histogram.into_parts();
+        let (index_id, histogram_meta, buckets) = self.histogram.into_parts();
         (
-            StatisticsMetaRoot::new(histogram_meta),
+            IndexStatisticsRoot::new(index_id, histogram_meta),
             buckets,
             self.sketch,
             self.top_n,
@@ -158,8 +168,10 @@ impl StatisticsMeta {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
+    use crate::expression::range_detacher::Range;
     use crate::optimizer::core::histogram::{HistogramBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR};
-    use crate::optimizer::core::statistics_meta::StatisticsMeta;
+    use crate::optimizer::core::statistics_meta::{IndexStatistics, StatisticMetaLoader};
+    use crate::storage::StatisticsMetaCache;
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -199,18 +211,32 @@ mod tests {
         let (histogram, sketch, top_n) = builder.build(4)?;
         let expected_estimate = sketch.estimate(&DataValue::Int32(7));
         let expected_top_n_count = top_n.get(&DataValue::Int32(7));
-        let meta = StatisticsMeta::new(histogram.clone(), sketch, top_n);
+        let meta = IndexStatistics::new(histogram.clone(), sketch, top_n);
         let (root, buckets, sketch, top_n) = meta.into_parts();
-        let statistics_meta = StatisticsMeta::from_parts(root, buckets, sketch, Some(top_n))?;
+        let index_statistics = IndexStatistics::from_parts(root, buckets, sketch, Some(top_n))?;
 
-        assert_eq!(histogram, statistics_meta.histogram);
+        let mut cache = StatisticsMetaCache::default();
+        cache.indexes.insert(
+            (index.table_name.clone(), index.id),
+            index_statistics.clone(),
+        );
+        let loader = StatisticMetaLoader::new(&cache);
+        assert_eq!(
+            loader.collect_count(&index.table_name, index.id, &Range::Eq(DataValue::Int32(7)))?,
+            Some((1, histogram.distinct_values_len()))
+        );
+        assert_eq!(
+            loader.collect_count(&index.table_name, 1, &Range::Dummy)?,
+            None
+        );
+        assert_eq!(histogram, index_statistics.histogram);
         assert_eq!(
             expected_estimate,
-            statistics_meta.sketch().estimate(&DataValue::Int32(7))
+            index_statistics.sketch().estimate(&DataValue::Int32(7))
         );
         assert_eq!(
             expected_top_n_count,
-            statistics_meta.top_n().get(&DataValue::Int32(7))
+            index_statistics.top_n().get(&DataValue::Int32(7))
         );
 
         Ok(())

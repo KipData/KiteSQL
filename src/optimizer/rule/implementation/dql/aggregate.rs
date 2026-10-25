@@ -60,6 +60,6 @@ single_mapping!(
     PhysicalOption::new(
         PlanImpl::SimpleAggregate,
         SortOption::None,
-        RowCountOption::Estimated(1)
+        RowCountOption::Estimated { rows: 1, ndv: None }
     )
 );

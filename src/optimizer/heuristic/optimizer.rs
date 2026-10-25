@@ -68,6 +68,7 @@ impl<'a> HepOptimizer<'a> {
             self.before_batches,
             &mut applied_rules,
             arena,
+            loader,
         )?;
 
         if let Some(loader) = loader {
@@ -91,6 +92,7 @@ impl<'a> HepOptimizer<'a> {
             self.after_batches,
             &mut applied_rules,
             arena,
+            loader,
         )?;
 
         Ok(self.plan)
@@ -102,24 +104,25 @@ impl<'a> HepOptimizer<'a> {
         batches: &[HepBatch],
         applied_rules: &mut Vec<bool>,
         arena: &mut PlanArena,
+        loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<(), DatabaseError> {
         for batch in batches {
             match batch.strategy {
                 HepBatchStrategy::Once(order) => {
-                    Self::apply_batch(plan, batch, order, applied_rules, arena)?;
+                    Self::apply_batch(plan, batch, order, applied_rules, arena, loader)?;
                 }
                 HepBatchStrategy::MaxTimes {
                     max_iteration,
                     order,
                 } => {
                     for _ in 0..max_iteration {
-                        if !Self::apply_batch(plan, batch, order, applied_rules, arena)? {
+                        if !Self::apply_batch(plan, batch, order, applied_rules, arena, loader)? {
                             break;
                         }
                     }
                 }
                 HepBatchStrategy::LoopIfApplied(order) => {
-                    while Self::apply_batch(plan, batch, order, applied_rules, arena)? {}
+                    while Self::apply_batch(plan, batch, order, applied_rules, arena, loader)? {}
                 }
             }
         }
@@ -133,12 +136,13 @@ impl<'a> HepOptimizer<'a> {
         order: HepMatchOrder,
         applied_rules: &mut Vec<bool>,
         arena: &mut PlanArena,
+        loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
         for step in &batch.steps {
             match step {
                 HepBatchStep::WholeTree(pass) => {
-                    if Self::apply_whole_tree_pass(plan, pass, arena)? {
+                    if Self::apply_whole_tree_pass(plan, pass, arena, loader)? {
                         applied = true;
                     }
                 }
@@ -147,7 +151,7 @@ impl<'a> HepOptimizer<'a> {
                     if matches!(batch.strategy, HepBatchStrategy::Once(_)) {
                         applied_rules.resize(rules.len(), false);
                     }
-                    if Self::apply_local_rules(plan, rules, order, applied_rules, arena)? {
+                    if Self::apply_local_rules(plan, rules, order, applied_rules, arena, loader)? {
                         applied = true;
                     }
                 }
@@ -160,12 +164,13 @@ impl<'a> HepOptimizer<'a> {
         plan: &mut LogicalPlan,
         pass: &HepWholeTreePass,
         arena: &mut PlanArena,
+        loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         match pass.kind {
             WholeTreePassKind::ColumnPruning => {
                 let mut applied = false;
                 for rule in &pass.rules {
-                    applied |= rule.apply(plan, arena)?;
+                    applied |= rule.apply(plan, arena, loader)?;
                 }
                 if applied {
                     plan.reset_output_schema_cache_recursive();
@@ -407,24 +412,25 @@ impl<'a> HepOptimizer<'a> {
         order: HepMatchOrder,
         applied_rules: &mut [bool],
         arena: &mut PlanArena,
+        loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         if !applied_rules.is_empty() && applied_rules.iter().all(|done| *done) {
             return Ok(false);
         }
         let mut applied = false;
         if matches!(order, HepMatchOrder::TopDown) {
-            applied |= Self::apply_local_rules_current(plan, rules, applied_rules, arena)?;
+            applied |= Self::apply_local_rules_current(plan, rules, applied_rules, arena, loader)?;
         }
 
         let child_applied = match plan.childrens.as_mut() {
             Childrens::Only(child) => {
-                Self::apply_local_rules(child, rules, order, applied_rules, arena)?
+                Self::apply_local_rules(child, rules, order, applied_rules, arena, loader)?
             }
             Childrens::Twins { left, right } => {
                 let left_applied =
-                    Self::apply_local_rules(left, rules, order, applied_rules, arena)?;
+                    Self::apply_local_rules(left, rules, order, applied_rules, arena, loader)?;
                 let right_applied =
-                    Self::apply_local_rules(right, rules, order, applied_rules, arena)?;
+                    Self::apply_local_rules(right, rules, order, applied_rules, arena, loader)?;
                 left_applied || right_applied
             }
             Childrens::None => false,
@@ -435,7 +441,7 @@ impl<'a> HepOptimizer<'a> {
         applied |= child_applied;
 
         if matches!(order, HepMatchOrder::BottomUp) {
-            applied |= Self::apply_local_rules_current(plan, rules, applied_rules, arena)?;
+            applied |= Self::apply_local_rules_current(plan, rules, applied_rules, arena, loader)?;
         }
         Ok(applied)
     }
@@ -445,6 +451,7 @@ impl<'a> HepOptimizer<'a> {
         rules: &HepLocalRewriteBatch,
         applied_rules: &mut [bool],
         arena: &mut PlanArena,
+        loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
         let mut next_rule_idx = 0;
@@ -453,7 +460,7 @@ impl<'a> HepOptimizer<'a> {
             if applied_rules.get(idx).copied().unwrap_or(false) {
                 continue;
             }
-            if rules.rules[idx].apply(plan, arena)? {
+            if rules.rules[idx].apply(plan, arena, loader)? {
                 if let Some(done) = applied_rules.get_mut(idx) {
                     *done = true;
                 }
@@ -506,7 +513,7 @@ impl ImplementationRuleIndex {
                 Some(PhysicalOption::new(
                     PlanImpl::SimpleAggregate,
                     SortOption::None,
-                    RowCountOption::Estimated(1),
+                    RowCountOption::Estimated { rows: 1, ndv: None },
                 ))
             }
             Operator::Dummy if self.contains(ImplementationRuleImpl::Dummy) => Some(
@@ -593,7 +600,10 @@ impl ImplementationRuleIndex {
                 Some(PhysicalOption::new(
                     PlanImpl::Values,
                     SortOption::None,
-                    RowCountOption::Estimated(op.rows.len() / op.schema_ref.len()),
+                    RowCountOption::Estimated {
+                        rows: op.rows.len() / op.schema_ref.len(),
+                        ndv: None,
+                    },
                 ))
             }
             Operator::Window(op) if self.contains(ImplementationRuleImpl::Window) => Some(
@@ -737,7 +747,10 @@ mod tests {
         child.physical_option = Some(PhysicalOption::new(
             PlanImpl::Dummy,
             SortOption::None,
-            RowCountOption::Estimated(12),
+            RowCountOption::Estimated {
+                rows: 12,
+                ndv: None,
+            },
         ));
         let implementations = ImplementationRuleIndex::new(vec![ImplementationRuleImpl::Filter]);
         plan.physical_option = implementations.direct_physical_option(&plan.operator);
@@ -786,7 +799,8 @@ mod tests {
             &batch,
             HepMatchOrder::TopDown,
             &mut applied_rules,
-            &mut arena
+            &mut arena,
+            None,
         )?);
         assert!(matches!(
             topdown.childrens.only().operator,
@@ -798,7 +812,8 @@ mod tests {
             &batch,
             HepMatchOrder::BottomUp,
             &mut applied_rules,
-            &mut arena
+            &mut arena,
+            None,
         )?);
         assert!(matches!(
             bottomup.childrens.only().operator,
@@ -809,7 +824,8 @@ mod tests {
             &batch,
             HepMatchOrder::BottomUp,
             &mut applied_rules,
-            &mut arena
+            &mut arena,
+            None,
         )?);
 
         for strategy in [

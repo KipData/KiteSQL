@@ -20,12 +20,13 @@ mod scalar_query_ref;
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprCloner;
+use crate::planner::operator::join::JoinType;
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
-use crate::planner::operator::{Operator, PhysicalOption, RowCountOption};
+use crate::planner::operator::{Operator, PhysicalOption, RowCountOption, CPU_ROW_WORK};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -152,6 +153,28 @@ impl<'a> Iterator for ChildrensIter<'a> {
     }
 }
 
+struct StartupWorkVisitor;
+
+impl<'a> OperatorVisitorMut<'a> for StartupWorkVisitor {
+    fn visit_plan(&mut self, plan: &'a mut LogicalPlan) -> Result<(), DatabaseError> {
+        let LogicalPlan {
+            operator,
+            childrens,
+            physical_option,
+            ..
+        } = plan;
+        let Some(option) = physical_option.as_mut() else {
+            return Ok(());
+        };
+        if option.startup_work.is_some() {
+            return Ok(());
+        }
+        OperatorVisitorMut::<'_>::visit_children(self, childrens)?;
+        option.calculate_startup_work(operator, childrens);
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct LogicalPlan {
     pub(crate) operator: Operator,
@@ -185,10 +208,33 @@ impl LogicalPlan {
         std::mem::replace(self, Self::new(Operator::Dummy, Childrens::None))
     }
 
+    pub(crate) fn row_count_option(&self) -> Option<&PhysicalOption> {
+        let option = self.physical_option.as_ref()?;
+        match option.row_count {
+            RowCountOption::Estimated { .. } => Some(option),
+            RowCountOption::Unknown => None,
+            RowCountOption::Follow => match self.childrens.as_ref() {
+                Childrens::Only(child) => child.row_count_option(),
+                Childrens::Twins { left, .. } => left.row_count_option(),
+                Childrens::None => None,
+            },
+        }
+    }
+
     pub(crate) fn estimated_rows(&self) -> Option<usize> {
         match &self.physical_option.as_ref()?.row_count {
-            RowCountOption::Estimated(rows) => Some(*rows),
-            RowCountOption::Unknown => None,
+            RowCountOption::Estimated { rows, .. } => Some(*rows),
+            RowCountOption::Unknown => match (&self.operator, self.childrens.as_ref()) {
+                (Operator::Join(op), Childrens::Twins { left, right })
+                    if op.join_type == JoinType::Cross && !op.limit_pushed =>
+                {
+                    Some(
+                        left.estimated_rows()?
+                            .saturating_mul(right.estimated_rows()?),
+                    )
+                }
+                _ => None,
+            },
             RowCountOption::Follow => match self.childrens.as_ref() {
                 Childrens::Only(child) => child.estimated_rows(),
                 Childrens::Twins { left, .. } => left.estimated_rows(),
@@ -197,12 +243,30 @@ impl LogicalPlan {
         }
     }
 
-    pub(crate) fn has_materialization(&self) -> bool {
-        self.physical_option
+    // Pass-local memoization for NLJ orientation. New physical options start
+    // empty; orientation preserves child rows/startup, so their cache is reusable.
+    pub(crate) fn estimated_startup_work(&mut self) -> Result<Option<usize>, DatabaseError> {
+        StartupWorkVisitor.visit_plan(self)?;
+        Ok(self
+            .physical_option
             .as_ref()
-            .is_some_and(PhysicalOption::materializes)
-            || matches!(&self.operator, Operator::MarkApply(op) if op.materialize)
-            || self.childrens.iter().any(Self::has_materialization)
+            .and_then(|option| option.startup_work.flatten()))
+    }
+
+    pub(crate) fn estimated_work(&mut self) -> Result<Option<usize>, DatabaseError> {
+        let (Some(startup), Some(rows)) = (self.estimated_startup_work()?, self.estimated_rows())
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            startup.saturating_add(rows.saturating_mul(CPU_ROW_WORK)),
+        ))
+    }
+
+    pub(crate) fn clear_startup_work(&mut self) {
+        if let Some(option) = self.physical_option.as_mut() {
+            option.startup_work = None;
+        }
     }
 
     pub fn referenced_table(&self) -> Vec<TableName> {
@@ -544,8 +608,10 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::expression::ScalarExpression;
     use crate::planner::operator::describe::DescribeOperator;
     use crate::planner::operator::limit::LimitOperator;
+    use crate::planner::operator::sort::{SortField, SortOperator};
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::{PlanImpl, SortOption};
     use crate::types::LogicalType;
@@ -586,7 +652,10 @@ mod tests {
         input.physical_option = Some(PhysicalOption::new(
             PlanImpl::SeqScan,
             SortOption::None,
-            RowCountOption::Estimated(12),
+            RowCountOption::Estimated {
+                rows: 12,
+                ndv: None,
+            },
         ));
         let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::Only(Box::new(input)));
         plan.physical_option = Some(PhysicalOption::new(
@@ -597,10 +666,89 @@ mod tests {
         assert_eq!(plan.estimated_rows(), Some(12));
         plan.physical_option.as_mut().unwrap().row_count = RowCountOption::Unknown;
         assert_eq!(plan.estimated_rows(), None);
-        plan.physical_option.as_mut().unwrap().row_count = RowCountOption::Estimated(0);
+        plan.physical_option.as_mut().unwrap().row_count =
+            RowCountOption::Estimated { rows: 0, ndv: None };
         assert_eq!(plan.estimated_rows(), Some(0));
         plan.physical_option = None;
         assert_eq!(plan.estimated_rows(), None);
+    }
+
+    #[test]
+    fn startup_cache_reuses_known_and_unknown_estimates_for_the_round() -> Result<(), DatabaseError>
+    {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let id = column("id", LogicalType::Integer, &mut arena);
+        let key = arena.alloc_expression(ScalarExpression::column_expr(id, 0));
+        let mut scan = table_scan("users", vec![id]);
+        scan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::SeqScan,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let mut sort = LogicalPlan::new(
+            Operator::Sort(SortOperator {
+                sort_fields: vec![SortField {
+                    expr: key,
+                    asc: true,
+                    nulls_first: false,
+                }],
+            }),
+            Childrens::Only(Box::new(scan)),
+        );
+        sort.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Sort,
+            SortOption::None,
+            RowCountOption::Follow,
+        ));
+        assert_eq!(sort.estimated_startup_work()?, None);
+        assert_eq!(
+            sort.physical_option.as_ref().unwrap().startup_work,
+            Some(None)
+        );
+        assert_eq!(sort.estimated_startup_work()?, None);
+        assert_eq!(
+            sort.physical_option.as_ref().unwrap().startup_work,
+            Some(None)
+        );
+
+        // A new physical selection starts the next round with empty caches.
+        let Childrens::Only(scan) = sort.childrens.as_mut() else {
+            unreachable!()
+        };
+        scan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::SeqScan,
+            SortOption::None,
+            RowCountOption::Estimated {
+                rows: 16,
+                ndv: None,
+            },
+        ));
+        sort.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Sort,
+            SortOption::None,
+            RowCountOption::Follow,
+        ));
+        assert_eq!(sort.estimated_startup_work()?, Some(192));
+        assert_eq!(
+            sort.physical_option.as_ref().unwrap().startup_work,
+            Some(Some(192))
+        );
+        let Childrens::Only(scan) = sort.childrens.as_mut() else {
+            unreachable!()
+        };
+        assert_eq!(
+            scan.physical_option.as_ref().unwrap().startup_work,
+            Some(Some(0))
+        );
+        // A cached parent does not walk its children again in this round.
+        scan.clear_startup_work();
+        assert_eq!(sort.estimated_startup_work()?, Some(192));
+        let Childrens::Only(scan) = sort.childrens.as_mut() else {
+            unreachable!()
+        };
+        assert_eq!(scan.physical_option.as_ref().unwrap().startup_work, None);
+        Ok(())
     }
 
     #[test]

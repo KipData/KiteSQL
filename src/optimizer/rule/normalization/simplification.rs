@@ -16,8 +16,10 @@ use crate::errors::DatabaseError;
 use crate::expression::simplify::{ConstantCalculator, Simplify};
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::Operator;
+use crate::planner::PlanArena;
 use crate::planner::{Childrens, LogicalPlan};
 
 #[derive(Copy, Clone)]
@@ -54,7 +56,8 @@ impl NormalizationRule for ConstantCalculation {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         Self::_apply(plan, arena)?;
         Ok(true)
@@ -82,7 +85,8 @@ impl NormalizationRule for SimplifyFilter {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         if let Operator::Filter(filter_op) = &mut plan.operator {
             if filter_op.is_optimized {

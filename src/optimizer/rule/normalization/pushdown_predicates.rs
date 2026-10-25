@@ -17,6 +17,7 @@ use crate::expression::range_detacher::{DetachedPredicate, Range, RangeDetacher}
 use crate::expression::visitor_mut::{ExprVisitorMut, PositionShift};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{replace_with_only_child, wrap_child_with};
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::extract_join_keys;
@@ -133,7 +134,8 @@ impl NormalizationRule for PushPredicateThroughJoin {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let mut applied = false;
 
@@ -298,7 +300,8 @@ impl NormalizationRule for PushPredicateIntoScan {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let LogicalPlan {
             operator,
@@ -472,7 +475,8 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (join_type, filter_expr) = {
             let Operator::Join(join_op) = &mut plan.operator else {

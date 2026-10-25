@@ -16,11 +16,12 @@ use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{only_child, wrap_child_with};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::operator::Operator;
-use crate::planner::LogicalPlan;
+use crate::planner::{LogicalPlan, PlanArena};
 
 pub struct MinMaxToTopK;
 
@@ -28,7 +29,8 @@ impl NormalizationRule for MinMaxToTopK {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let Operator::Aggregate(op) = &plan.operator else {
             return Ok(false);
@@ -119,7 +121,7 @@ mod tests {
         let mut plan = table_state.plan_with_arena("select min(c1) from t1", &mut arena)?;
 
         let agg_plan = find_aggregate_mut(&mut plan);
-        assert!(MinMaxToTopK.apply(agg_plan, &mut arena)?);
+        assert!(MinMaxToTopK.apply(agg_plan, &mut arena, None)?);
 
         let agg_plan = find_aggregate(&plan);
         let Operator::Aggregate(op) = &agg_plan.operator else {
@@ -157,7 +159,7 @@ mod tests {
         let mut plan = table_state.plan_with_arena("select max(c2) from t1", &mut arena)?;
 
         let agg_plan = find_aggregate_mut(&mut plan);
-        assert!(MinMaxToTopK.apply(agg_plan, &mut arena)?);
+        assert!(MinMaxToTopK.apply(agg_plan, &mut arena, None)?);
 
         let agg_plan = find_aggregate(&plan);
         let child = match agg_plan.childrens.as_ref() {

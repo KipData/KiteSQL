@@ -29,6 +29,7 @@ mod option;
 mod pair;
 mod path_buf;
 mod phantom;
+mod physical_option;
 mod ptr;
 mod slice;
 pub(crate) mod stable_hash;

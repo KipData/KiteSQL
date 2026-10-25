@@ -18,6 +18,7 @@ use crate::expression::agg::AggKind;
 use crate::expression::visitor::ExprVisitor;
 use crate::expression::{AliasType, HasCountStar, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::normalization::{
     remap_expr_positions, remap_exprs_positions, PositionRemapper,
 };
@@ -131,7 +132,7 @@ impl ColumnPruning {
             arena,
         };
         OperatorExprVisitor::new(&mut collector, arena as &dyn MetaArena)
-            .visit_operator(operator)?;
+            .visit_operator(operator, None)?;
 
         struct ReferencedOperatorColumnCollector<'a, 'p> {
             referenced_columns: &'a mut ReferencedColumns,
@@ -213,7 +214,7 @@ impl ColumnPruning {
             referenced_columns,
             arena,
         }
-        .visit_operator(operator)
+        .visit_operator(operator, None)
     }
 
     fn extend_expr_referenced_columns<'a>(
@@ -835,7 +836,8 @@ impl NormalizationRule for ColumnPruning {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let outcome = Self::_apply(
             ReferencedColumns::with_arena_capacity(arena),

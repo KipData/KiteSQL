@@ -15,6 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::BindEvaluator;
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan, PlanArena};
@@ -60,7 +61,8 @@ impl NormalizationRule for EvaluatorBind {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         Self::_apply(plan, arena)?;
         Ok(true)
@@ -222,7 +224,7 @@ mod tests {
                 right: Box::new(right_filter),
             },
         );
-        assert!(EvaluatorBind.apply(&mut join, &mut arena)?);
+        assert!(EvaluatorBind.apply(&mut join, &mut arena, None)?);
         let Operator::Join(op) = &join.operator else {
             unreachable!()
         };
@@ -243,7 +245,7 @@ mod tests {
         let union_left = filter(&mut arena, column);
         let union_right = filter(&mut arena, column);
         let mut union = UnionOperator::build(vec![column], vec![column], union_left, union_right);
-        EvaluatorBind.apply(&mut union, &mut arena)?;
+        EvaluatorBind.apply(&mut union, &mut arena, None)?;
         assert!(union.childrens.iter().all(|child| {
             matches!(&child.operator, Operator::Filter(op) if is_bound(op.predicate, &arena))
         }));

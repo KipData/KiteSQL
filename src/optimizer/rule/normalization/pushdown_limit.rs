@@ -14,11 +14,12 @@
 
 use crate::errors::DatabaseError;
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::operator::Operator;
-use crate::planner::LogicalPlan;
+use crate::planner::{LogicalPlan, PlanArena};
 
 pub struct LimitProjectTranspose;
 
@@ -26,7 +27,8 @@ impl NormalizationRule for LimitProjectTranspose {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        _: &mut crate::planner::PlanArena,
+        _: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let operator = std::mem::replace(&mut plan.operator, Operator::Dummy);
 
@@ -71,7 +73,8 @@ impl NormalizationRule for PushLimitThroughJoin {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        _: &mut crate::planner::PlanArena,
+        _: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let limit_op = match &plan.operator {
             Operator::Limit(LimitOperator {
@@ -110,7 +113,8 @@ impl NormalizationRule for PushLimitIntoScan {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        _: &mut crate::planner::PlanArena,
+        _: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (offset, limit) = match &plan.operator {
             Operator::Limit(limit_op) => (limit_op.offset, limit_op.limit),
