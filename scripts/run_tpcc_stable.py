@@ -26,7 +26,6 @@ class Variant:
     name: str
     backend: str
     db_name: str
-    sqlite_profile: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,16 +43,15 @@ class Health:
 VARIANTS = [
     Variant("kitesql-lmdb", "kitesql-lmdb", "kitesql-lmdb"),
     Variant("kitesql-rocksdb", "kitesql-rocksdb", "kitesql-rocksdb"),
-    Variant("sqlite-balanced", "sqlite", "sqlite-balanced.sqlite", "balanced"),
-    Variant("sqlite-practical", "sqlite", "sqlite-practical.sqlite", "practical"),
+    Variant("sqlite", "sqlite", "sqlite.sqlite"),
 ]
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run kitesql-lmdb, kitesql-rocksdb, sqlite-balanced, and "
-            "sqlite-practical TPCC benchmarks with cooldown gates between runs."
+            "Run kitesql-lmdb, kitesql-rocksdb, and sqlite TPCC benchmarks "
+            "with cooldown gates between runs."
         )
     )
     parser.add_argument("--binary", type=Path, default=DEFAULT_BINARY)
@@ -354,8 +352,6 @@ def build_command(args: argparse.Namespace, variant: Variant, db_path: Path) -> 
     ]
     if args.measure_time is not None:
         cmd.extend(["--measure-time", str(args.measure_time)])
-    if variant.sqlite_profile is not None:
-        cmd.extend(["--sqlite-profile", variant.sqlite_profile])
     return cmd
 
 

@@ -9,7 +9,6 @@ TPCC_NUM_WARE ?= 1
 TPCC_PPROF_OUTPUT ?= /tmp/tpcc_lmdb.svg
 TPCC_HEAPTRACK_MEASURE_TIME ?= 300
 TPCC_HEAPTRACK_OUTPUT ?= /tmp/tpcc_lmdb_heaptrack
-TPCC_SQLITE_PROFILE ?= balanced
 CODECOV_OUTPUT ?= lcov.info
 COVERAGE_PROFILE_DIR ?= target/grcov/profraw
 COVERAGE_HTML_DIR ?= target/grcov/html
@@ -36,7 +35,7 @@ FUZZ_ARGS_sql_gen = -max_len=4096
 FUZZ_PASS_EXIT_sql_gen = 0
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
-.PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-sqlite-practical tpcc-sqlite-balanced tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz
+.PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -139,17 +138,9 @@ tpcc-lmdb-heaptrack:
 	@ls -1 $(TPCC_HEAPTRACK_OUTPUT)*
 	@echo "open gui: heaptrack_gui $$(ls -1 $(TPCC_HEAPTRACK_OUTPUT)* | tail -n 1)"
 
-## Execute the TPCC workload on SQLite with the practical profile.
+## Execute the TPCC workload on SQLite.
 tpcc-sqlite:
-	$(CARGO) run -p tpcc --release -- --backend sqlite --sqlite-profile $(TPCC_SQLITE_PROFILE) --path kite_sql_tpcc.sqlite
-
-## Execute the TPCC workload on SQLite with the practical profile.
-tpcc-sqlite-practical:
-	$(MAKE) tpcc-sqlite TPCC_SQLITE_PROFILE=practical
-
-## Execute the TPCC workload on SQLite with the balanced profile.
-tpcc-sqlite-balanced:
-	$(MAKE) tpcc-sqlite TPCC_SQLITE_PROFILE=balanced
+	$(CARGO) run -p tpcc --release -- --backend sqlite --path kite_sql_tpcc.sqlite
 
 ## Execute TPCC while mirroring every statement to an in-memory SQLite instance for validation.
 tpcc-dual:

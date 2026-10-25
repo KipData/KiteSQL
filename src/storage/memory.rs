@@ -162,6 +162,16 @@ impl Transaction for MemoryTransaction {
         = MemoryIter<'a>
     where
         Self: 'a;
+
+    type PointCursor<'a>
+        = ()
+    where
+        Self: 'a;
+
+    fn point_cursor(&self) -> Result<Self::PointCursor<'_>, DatabaseError> {
+        Ok(())
+    }
+
     fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
         let stamp = self.statements.get() + 1;
         self.statements.set(stamp);

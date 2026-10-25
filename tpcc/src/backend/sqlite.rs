@@ -17,7 +17,6 @@ use super::{
 };
 use crate::TpccError;
 use chrono::{NaiveDateTime, TimeZone, Utc};
-use clap::ValueEnum;
 use kite_sql::types::tuple::Tuple;
 use kite_sql::types::value::{DataValue, Utf8Type};
 use kite_sql::types::{CharLengthUnits, LogicalType};
@@ -28,22 +27,16 @@ pub struct SqliteBackend {
     connection: Connection,
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-pub enum SqliteProfile {
-    Balanced,
-    Practical,
-}
-
 impl SqliteBackend {
-    pub fn new(path: &str, profile: SqliteProfile) -> Result<Self, TpccError> {
+    pub fn new(path: &str, sync: bool) -> Result<Self, TpccError> {
         let connection = Connection::open(path)?;
-        configure_sqlite(&connection, profile)?;
+        configure_sqlite(&connection, sync)?;
         Ok(Self { connection })
     }
 
     pub fn new_memory() -> Result<Self, TpccError> {
         let connection = Connection::open(":memory:")?;
-        configure_sqlite(&connection, SqliteProfile::Balanced)?;
+        configure_sqlite(&connection, false)?;
         Ok(Self { connection })
     }
 
@@ -275,27 +268,21 @@ fn format_time64(value: i64, precision: u64) -> Result<String, TpccError> {
         .to_string())
 }
 
-fn configure_sqlite(connection: &Connection, profile: SqliteProfile) -> Result<(), TpccError> {
-    let pragmas: &[&str] = match profile {
-        SqliteProfile::Balanced => &[
-            "PRAGMA journal_mode = WAL;",
-            "PRAGMA synchronous = NORMAL;",
-            "PRAGMA temp_store = FILE;",
-            "PRAGMA foreign_keys = OFF;",
-            "PRAGMA busy_timeout = 5000;",
-        ],
-        SqliteProfile::Practical => &[
-            "PRAGMA journal_mode = WAL;",
-            "PRAGMA synchronous = NORMAL;",
-            "PRAGMA temp_store = MEMORY;",
-            "PRAGMA cache_size = -32768;",
-            "PRAGMA mmap_size = 67108864;",
-            "PRAGMA foreign_keys = OFF;",
-            "PRAGMA busy_timeout = 5000;",
-        ],
+fn configure_sqlite(connection: &Connection, sync: bool) -> Result<(), TpccError> {
+    let synchronous = if sync {
+        "PRAGMA synchronous = FULL;"
+    } else {
+        "PRAGMA synchronous = OFF;"
     };
-
-    for pragma in pragmas {
+    for pragma in [
+        "PRAGMA journal_mode = WAL;",
+        synchronous,
+        "PRAGMA temp_store = MEMORY;",
+        "PRAGMA cache_size = -32768;",
+        "PRAGMA mmap_size = 67108864;",
+        "PRAGMA foreign_keys = OFF;",
+        "PRAGMA busy_timeout = 5000;",
+    ] {
         connection.execute(pragma)?;
     }
     Ok(())
@@ -310,6 +297,9 @@ fn normalize_sqlite_sql(sql: &str) -> Option<String> {
             return None;
         }
         return Some(format!("ANALYZE {table};"));
+    }
+    if lower.starts_with("create table") {
+        return Some(format!("{} WITHOUT ROWID;", trimmed.trim_end_matches(';')));
     }
     Some(trimmed.to_string())
 }

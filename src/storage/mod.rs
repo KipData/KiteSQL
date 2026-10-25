@@ -166,6 +166,10 @@ pub trait Transaction: Sized {
     where
         Self: 'a;
 
+    type PointCursor<'a>
+    where
+        Self: 'a;
+
     fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
         Ok(0)
     }
@@ -276,6 +280,7 @@ pub trait Transaction: Sized {
                 deserializers,
                 total_len,
                 tx: self,
+                cursor: None,
                 cover_mapping,
                 with_pk,
                 reverse: ranges.reverse,
@@ -1162,6 +1167,16 @@ pub trait Transaction: Sized {
         key: &[u8],
     ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError>;
 
+    fn point_cursor(&self) -> Result<Self::PointCursor<'_>, DatabaseError>;
+
+    fn get_at<'a>(
+        &'a self,
+        _cursor: &Self::PointCursor<'a>,
+        key: &[u8],
+    ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
+        self.get_borrowed(key)
+    }
+
     fn exists(&self, key: &[u8]) -> Result<bool, DatabaseError> {
         Ok(self.get_borrowed(key)?.is_some())
     }
@@ -1386,6 +1401,7 @@ struct IndexImplParams<'a, T: Transaction> {
     deserializers: Cow<'a, [TupleValueSerializableImpl]>,
     total_len: usize,
     tx: &'a T,
+    cursor: Option<T::PointCursor<'a>>,
     cover_mapping: Option<TupleMapping>,
     with_pk: bool,
     reverse: bool,
@@ -1578,7 +1594,11 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
             value,
             None,
             |key, _| {
-                let Some(bytes) = params.tx.get_borrowed(key)? else {
+                let bytes = match &params.cursor {
+                    Some(cursor) => params.tx.get_at(cursor, key)?,
+                    None => params.tx.get_borrowed(key)?,
+                };
+                let Some(bytes) = bytes else {
                     return Ok(false);
                 };
                 TableCodec::decode_tuple_into(
@@ -2107,6 +2127,11 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                             self.state = IndexIterState::Range(iter);
                         }
                         Range::Eq(val) => {
+                            if self.params.cursor.is_none()
+                                && matches!(self.inner, IndexImplEnum::PrimaryKey(_))
+                            {
+                                self.params.cursor = Some(self.params.tx.point_cursor()?);
+                            }
                             match self.inner.eq_to_res(
                                 table_codec,
                                 tuple,

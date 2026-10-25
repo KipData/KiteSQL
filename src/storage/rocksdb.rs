@@ -21,8 +21,9 @@ use librocksdb_sys as ffi;
 use rocksdb::{
     checkpoint::Checkpoint,
     statistics::{StatsLevel, Ticker},
-    DBPinnableSlice, DBRawIteratorWithThreadMode, OptimisticTransactionDB, Options, ReadOptions,
-    SliceTransform, SnapshotWithThreadMode, TransactionDB,
+    DBPinnableSlice, DBRawIteratorWithThreadMode, OptimisticTransactionDB,
+    OptimisticTransactionOptions, Options, ReadOptions, SliceTransform, SnapshotWithThreadMode,
+    TransactionDB, TransactionOptions, WriteOptions,
 };
 use std::collections::Bound;
 #[cfg(feature = "unsafe_txdb_checkpoint")]
@@ -59,6 +60,13 @@ pub struct RocksDbMetrics {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StorageConfig {
     pub enable_statistics: bool,
+    pub sync: bool,
+}
+
+fn sync_write_options() -> WriteOptions {
+    let mut options = WriteOptions::default();
+    options.set_sync(true);
+    options
 }
 
 impl RocksDbMetrics {
@@ -440,9 +448,17 @@ impl Storage for OptimisticRocksStorage {
         isolation: TransactionIsolationLevel,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
+        let tx = if self.config.sync {
+            self.inner.transaction_opt(
+                &sync_write_options(),
+                &OptimisticTransactionOptions::default(),
+            )
+        } else {
+            self.inner.transaction()
+        };
         Ok(OptimisticRocksTransaction {
             db: self.inner.as_ref(),
-            tx: self.inner.transaction(),
+            tx,
             isolation,
             current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
                 .then(|| self.inner.snapshot()),
@@ -488,9 +504,15 @@ impl Storage for RocksStorage {
         isolation: TransactionIsolationLevel,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
+        let tx = if self.config.sync {
+            self.inner
+                .transaction_opt(&sync_write_options(), &TransactionOptions::default())
+        } else {
+            self.inner.transaction()
+        };
         Ok(RocksTransaction {
             db: self.inner.as_ref(),
-            tx: self.inner.transaction(),
+            tx,
             isolation,
             current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
                 .then(|| self.inner.snapshot()),
@@ -629,6 +651,16 @@ macro_rules! impl_transaction {
                 = $iter<'storage, 'iter>
             where
                 Self: 'iter;
+
+            type PointCursor<'a>
+                = ()
+            where
+                Self: 'a;
+
+            fn point_cursor(&self) -> Result<Self::PointCursor<'_>, DatabaseError> {
+                Ok(())
+            }
+
             fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
                 statement_stamp(self.db, &mut self.statements)
             }
@@ -1115,6 +1147,7 @@ mod test {
                 deserializers: std::borrow::Cow::Owned(deserializers),
                 total_len: table.columns_len(),
                 tx: &transaction,
+                cursor: None,
                 cover_mapping: None,
                 with_pk: true,
                 reverse: false,

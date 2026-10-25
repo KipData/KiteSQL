@@ -190,6 +190,24 @@ impl DataBaseBuilder {
         self
     }
 
+    #[cfg(all(
+        not(target_arch = "wasm32"),
+        any(feature = "rocksdb", feature = "lmdb")
+    ))]
+    pub fn sync(mut self, enable: bool) -> Self {
+        #[cfg(feature = "rocksdb")]
+        {
+            self.storage_config.sync = enable;
+        }
+        #[cfg(feature = "lmdb")]
+        {
+            self.lmdb_config
+                .flags
+                .set(lmdb::EnvironmentFlags::NO_SYNC, !enable);
+        }
+        self
+    }
+
     /// Sets the LMDB map size in bytes.
     #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
     pub fn lmdb_map_size(mut self, map_size: usize) -> Self {

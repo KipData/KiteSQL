@@ -42,7 +42,7 @@ impl PreparedStatement for DualPreparedStatement<'_> {
 impl DualBackend {
     pub fn new(path: &str, rocksdb_stats: bool) -> Result<Self, TpccError> {
         Ok(Self {
-            kitesql: KiteSqlRocksDbBackend::new(path, rocksdb_stats)?,
+            kitesql: KiteSqlRocksDbBackend::new(path, rocksdb_stats, false)?,
             sqlite: SqliteBackend::new_memory()?,
         })
     }

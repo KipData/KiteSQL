@@ -15,7 +15,7 @@
 use crate::backend::dual::DualBackend;
 use crate::backend::kitesql_lmdb::KiteSqlLmdbBackend;
 use crate::backend::kitesql_rocksdb::{KiteSqlOptimisticRocksDbBackend, KiteSqlRocksDbBackend};
-use crate::backend::sqlite::{SqliteBackend, SqliteProfile};
+use crate::backend::sqlite::SqliteBackend;
 use crate::backend::{BackendControl, BackendTransaction, StatementSpec};
 use crate::delivery::DeliveryTest;
 use crate::load::Load;
@@ -110,8 +110,8 @@ struct Args {
     num_ware: usize,
     #[clap(long, default_value = "false")]
     rocksdb_stats: bool,
-    #[clap(long, value_enum, default_value = "balanced")]
-    sqlite_profile: SqliteProfile,
+    #[clap(long, default_value = "false")]
+    sync: bool,
     #[cfg(feature = "pprof")]
     #[clap(long)]
     pprof_output: Option<PathBuf>,
@@ -137,22 +137,24 @@ fn main() -> Result<(), TpccError> {
     match args.backend {
         BackendKind::KitesqlRocksdb => {
             reset_db_path(Path::new(&args.path))?;
-            let mut backend = KiteSqlRocksDbBackend::new(&args.path, args.rocksdb_stats)?;
+            let mut backend =
+                KiteSqlRocksDbBackend::new(&args.path, args.rocksdb_stats, args.sync)?;
             run_tpcc(&mut backend, &args, &mut rng)
         }
         BackendKind::KitesqlOptimisticRocksdb => {
             reset_db_path(Path::new(&args.path))?;
-            let mut backend = KiteSqlOptimisticRocksDbBackend::new(&args.path, args.rocksdb_stats)?;
+            let mut backend =
+                KiteSqlOptimisticRocksDbBackend::new(&args.path, args.rocksdb_stats, args.sync)?;
             run_tpcc(&mut backend, &args, &mut rng)
         }
         BackendKind::KitesqlLmdb => {
             reset_db_path(Path::new(&args.path))?;
-            let mut backend = KiteSqlLmdbBackend::new(&args.path)?;
+            let mut backend = KiteSqlLmdbBackend::new(&args.path, args.sync)?;
             run_tpcc(&mut backend, &args, &mut rng)
         }
         BackendKind::Sqlite => {
             reset_db_path(Path::new(&args.path))?;
-            let mut backend = SqliteBackend::new(&args.path, args.sqlite_profile)?;
+            let mut backend = SqliteBackend::new(&args.path, args.sync)?;
             run_tpcc(&mut backend, &args, &mut rng)
         }
         BackendKind::Dual => {
