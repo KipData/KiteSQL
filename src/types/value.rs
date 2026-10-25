@@ -16,7 +16,7 @@ use super::LogicalType;
 use crate::errors::DatabaseError;
 use crate::iter_ext::Itertools;
 use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};
-use crate::types::evaluator::cast::{cast_create, to_char, to_varchar};
+use crate::types::evaluator::cast::cast_create;
 use crate::types::CharLengthUnits;
 #[cfg(feature = "time")]
 use chrono::{
@@ -1502,20 +1502,9 @@ impl DataValue {
                 Ok(DataValue::Parameter { id, ty: ty.clone() })
             }
             (DataValue::Null, _) => Ok(DataValue::Null),
-            (DataValue::Binary { value, .. }, LogicalType::Varbinary(len)) => {
-                let result = DataValue::Binary { value, len: *len };
-                result.check_len(to)?;
-                Ok(result)
-            }
-            (DataValue::Utf8 { value, .. }, LogicalType::Char(len, unit)) => {
-                to_char(value, *len, *unit)
-            }
-            (DataValue::Utf8 { value, .. }, LogicalType::Varchar(len, unit)) => {
-                to_varchar(value, *len, *unit)
-            }
             (value, _) => {
                 let evaluator = cast_create(&from, to)?;
-                evaluator.eval(&value)
+                evaluator.eval(value)
             }
         }
     }
@@ -2009,6 +1998,16 @@ mod test {
             }
             previous = Some(encoded);
         }
+        let text = "中\0".to_string();
+        let buffer = text.as_ptr();
+        let binary = DataValue::from(text).cast(&LogicalType::Varbinary(Some(4)))?;
+        assert_eq!(binary.binary(), Some("中\0".as_bytes()));
+        assert_eq!(binary.binary().unwrap().as_ptr(), buffer);
+        assert_eq!(binary.logical_type(), LogicalType::Varbinary(Some(4)));
+        assert!(matches!(
+            DataValue::from("中".to_string()).cast(&LogicalType::Varbinary(Some(2))),
+            Err(DatabaseError::TooLong)
+        ));
         let bytes = DataValue::from(vec![0, 255]);
         assert_eq!(bytes.binary(), Some([0, 255].as_slice()));
         assert_eq!(values[0].binary(), Some([].as_slice()));

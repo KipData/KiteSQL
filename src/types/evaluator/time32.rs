@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
+use crate::types::evaluator::cast::{cast_fail, to_char, to_varbinary, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::value::{ONE_DAY_TO_SEC, ONE_SEC_TO_NANO};
 use crate::types::CharLengthUnits;
@@ -97,9 +97,9 @@ crate::define_cast_evaluator!(
     },
     DataValue::Time32(value, precision) => |this| {
         to_char(
-            DataValue::format_time(*value, *precision).ok_or_else(|| {
+            DataValue::format_time(value, precision).ok_or_else(|| {
                 cast_fail(
-                    LogicalType::Time(Some(*precision)),
+                    LogicalType::Time(Some(precision)),
                     LogicalType::Char(this.len, this.unit),
                 )
             })?,
@@ -115,9 +115,9 @@ crate::define_cast_evaluator!(
     },
     DataValue::Time32(value, precision) => |this| {
         to_varchar(
-            DataValue::format_time(*value, *precision).ok_or_else(|| {
+            DataValue::format_time(value, precision).ok_or_else(|| {
                 cast_fail(
-                    LogicalType::Time(Some(*precision)),
+                    LogicalType::Time(Some(precision)),
                     LogicalType::Varchar(this.len, this.unit),
                 )
             })?,
@@ -127,11 +127,22 @@ crate::define_cast_evaluator!(
     }
 );
 crate::define_cast_evaluator!(
+    time32_to_varbinary_cast_eval { len: Option<u32> },
+    DataValue::Time32(value, precision) => |this| {
+        to_varbinary(
+            DataValue::format_time(value, precision).ok_or_else(|| {
+                cast_fail(LogicalType::Time(Some(precision)), LogicalType::Varbinary(this.len))
+            })?.into_bytes(),
+            this.len,
+        )
+    }
+);
+crate::define_cast_evaluator!(
     time32_to_time_cast_eval {
         precision: Option<u64>
     },
     DataValue::Time32(value, _precision) => |this| {
-        Ok(DataValue::Time32(*value, this.precision.unwrap_or(0)))
+        Ok(DataValue::Time32(value, this.precision.unwrap_or(0)))
     }
 );
 time32_order_binary!(time_lt_binary_eval, is_lt);
@@ -268,7 +279,7 @@ mod test {
             3,
         );
         assert_eq!(
-            time32_to_char_cast_eval(12, CharLengthUnits::Characters, &value).unwrap(),
+            time32_to_char_cast_eval(12, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
                 value: "03:04:05.123".to_string(),
                 ty: Utf8Type::Fixed(12),
@@ -276,21 +287,25 @@ mod test {
             }
         );
         assert_eq!(
-            time32_to_varchar_cast_eval(Some(12), CharLengthUnits::Characters, &value).unwrap(),
+            time32_to_varchar_cast_eval(Some(12), CharLengthUnits::Characters, value.clone())
+                .unwrap(),
             DataValue::Utf8 {
                 value: "03:04:05.123".to_string(),
                 ty: Utf8Type::Variable(Some(12)),
                 unit: CharLengthUnits::Characters,
             }
         );
-        assert_eq!(time32_to_time_cast_eval(Some(3), &value).unwrap(), value);
+        assert_eq!(
+            time32_to_time_cast_eval(Some(3), value.clone()).unwrap(),
+            value
+        );
         let invalid = DataValue::Time32(u32::MAX, 0);
         assert!(matches!(
-            time32_to_char_cast_eval(8, CharLengthUnits::Characters, &invalid),
+            time32_to_char_cast_eval(8, CharLengthUnits::Characters, invalid.clone()),
             Err(DatabaseError::CastFail { .. })
         ));
         assert!(matches!(
-            time32_to_varchar_cast_eval(Some(8), CharLengthUnits::Characters, &invalid),
+            time32_to_varchar_cast_eval(Some(8), CharLengthUnits::Characters, invalid.clone()),
             Err(DatabaseError::CastFail { .. })
         ));
     }

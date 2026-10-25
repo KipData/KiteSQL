@@ -48,6 +48,7 @@ pub use self::unary::unary_create;
 use crate::errors::DatabaseError;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum BinaryEvaluatorParams {
@@ -68,7 +69,7 @@ impl BinaryEvaluatorRef {
 
     pub fn binary_eval(
         &self,
-        left: &DataValue,
+        left: Cow<'_, DataValue>,
         right: &DataValue,
     ) -> Result<DataValue, DatabaseError> {
         binary::eval_binary(self.pos, &self.params, left, right)

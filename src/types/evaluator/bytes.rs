@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::types::evaluator::cast::to_varbinary;
 use crate::types::value::DataValue;
 
 macro_rules! bytes_binary {
@@ -28,6 +29,11 @@ macro_rules! bytes_binary {
         }
     };
 }
+
+crate::define_cast_evaluator!(
+    bytes_to_varbinary_cast_eval { len: Option<u32> },
+    DataValue::Binary { value, .. } => |this| to_varbinary(value, this.len)
+);
 
 bytes_binary!(bytes_eq_binary_eval, ==);
 bytes_binary!(bytes_not_eq_binary_eval, !=);

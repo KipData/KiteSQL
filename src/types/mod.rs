@@ -261,7 +261,9 @@ impl LogicalType {
                 return Ok(Cow::Owned(LogicalType::DateTime));
             }
         }
-        if let (LogicalType::Varbinary(_), LogicalType::Varbinary(_)) = (left, right) {
+        if matches!(left, LogicalType::Varbinary(_)) && !matches!(right, LogicalType::Tuple(_))
+            || matches!(right, LogicalType::Varbinary(_)) && !matches!(left, LogicalType::Tuple(_))
+        {
             return Ok(Cow::Owned(LogicalType::Varbinary(None)));
         }
         if (left.is_numeric() && matches!(right, LogicalType::Char(..) | LogicalType::Varchar(..)))

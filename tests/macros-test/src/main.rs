@@ -34,6 +34,7 @@ mod test {
     use kite_sql::types::{CharLengthUnits, LogicalType};
     use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
     use rust_decimal::Decimal;
+    use std::borrow::Cow;
     use tempfile::TempDir;
 
     fn build_tuple(arena: &mut impl MetaArena) -> (Tuple, Schema) {
@@ -3027,7 +3028,7 @@ mod test {
     }
 
     scala_function!(MyScalaFunction::SUM(LogicalType::Integer, LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue, v2: DataValue| {
-        binary_create(std::borrow::Cow::Owned(LogicalType::Integer), BinaryOperator::Plus)?.binary_eval(&v1, &v2)
+        binary_create(Cow::Owned(LogicalType::Integer), BinaryOperator::Plus)?.binary_eval(Cow::Owned(v1), &v2)
     }));
 
     scala_function!(MyOrmFunction::ADD_ONE(LogicalType::Integer) -> LogicalType::Integer => (|v1: DataValue| {

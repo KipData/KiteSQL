@@ -68,7 +68,7 @@ impl Accumulator for AvgAccumulator {
         let value = acc.result().clone().cast(&LogicalType::Double)?;
         let quantity = DataValue::Float64((self.count as f64).into());
         let evaluator = binary_create(Cow::Owned(LogicalType::Double), BinaryOperator::Divide)?;
-        self.result = evaluator.binary_eval(&value, &quantity)?;
+        self.result = evaluator.binary_eval(Cow::Borrowed(&value), &quantity)?;
         Ok(())
     }
 

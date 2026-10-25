@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::types::evaluator::cast::{to_char, to_varchar};
+use crate::types::evaluator::cast::{to_char, to_varbinary, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
@@ -67,34 +67,34 @@ pub fn boolean_eq_binary_eval(
 }
 
 crate::define_cast_evaluator!(boolean_to_tinyint_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::Int8(if *value { 1 } else { 0 }))
+    Ok(DataValue::Int8(if value { 1 } else { 0 }))
 });
 crate::define_cast_evaluator!(boolean_to_utinyint_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::UInt8(if *value { 1 } else { 0 }))
+    Ok(DataValue::UInt8(if value { 1 } else { 0 }))
 });
 crate::define_cast_evaluator!(boolean_to_smallint_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::Int16(if *value { 1 } else { 0 }))
+    Ok(DataValue::Int16(if value { 1 } else { 0 }))
 });
 crate::define_cast_evaluator!(boolean_to_usmallint_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::UInt16(if *value { 1 } else { 0 }))
+    Ok(DataValue::UInt16(if value { 1 } else { 0 }))
 });
 crate::define_cast_evaluator!(boolean_to_integer_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::Int32(if *value { 1 } else { 0 }))
+    Ok(DataValue::Int32(if value { 1 } else { 0 }))
 });
 crate::define_cast_evaluator!(boolean_to_uinteger_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::UInt32(if *value { 1 } else { 0 }))
+    Ok(DataValue::UInt32(if value { 1 } else { 0 }))
 });
 crate::define_cast_evaluator!(boolean_to_bigint_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::Int64(if *value { 1 } else { 0 }))
+    Ok(DataValue::Int64(if value { 1 } else { 0 }))
 });
 crate::define_cast_evaluator!(boolean_to_ubigint_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::UInt64(if *value { 1 } else { 0 }))
+    Ok(DataValue::UInt64(if value { 1 } else { 0 }))
 });
 crate::define_cast_evaluator!(boolean_to_float_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::Float32(OrderedFloat(if *value { 1.0 } else { 0.0 })))
+    Ok(DataValue::Float32(OrderedFloat(if value { 1.0 } else { 0.0 })))
 });
 crate::define_cast_evaluator!(boolean_to_double_cast_eval, DataValue::Boolean(value) => {
-    Ok(DataValue::Float64(OrderedFloat(if *value { 1.0 } else { 0.0 })))
+    Ok(DataValue::Float64(OrderedFloat(if value { 1.0 } else { 0.0 })))
 });
 crate::define_cast_evaluator!(
     boolean_to_char_cast_eval {
@@ -109,6 +109,10 @@ crate::define_cast_evaluator!(
         unit: CharLengthUnits
     },
     DataValue::Boolean(value) => |this| to_varchar(value.to_string(), this.len, this.unit)
+);
+crate::define_cast_evaluator!(
+    boolean_to_varbinary_cast_eval { len: Option<u32> },
+    DataValue::Boolean(value) => |this| to_varbinary(value.to_string().into_bytes(), this.len)
 );
 pub fn boolean_not_eq_binary_eval(
     left: &DataValue,
@@ -184,47 +188,47 @@ mod test {
         let value = DataValue::Boolean(true);
 
         assert_eq!(
-            boolean_to_tinyint_cast_eval(&value).unwrap(),
+            boolean_to_tinyint_cast_eval(value.clone()).unwrap(),
             DataValue::Int8(1)
         );
         assert_eq!(
-            boolean_to_utinyint_cast_eval(&value).unwrap(),
+            boolean_to_utinyint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt8(1)
         );
         assert_eq!(
-            boolean_to_smallint_cast_eval(&value).unwrap(),
+            boolean_to_smallint_cast_eval(value.clone()).unwrap(),
             DataValue::Int16(1)
         );
         assert_eq!(
-            boolean_to_usmallint_cast_eval(&value).unwrap(),
+            boolean_to_usmallint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt16(1)
         );
         assert_eq!(
-            boolean_to_integer_cast_eval(&value).unwrap(),
+            boolean_to_integer_cast_eval(value.clone()).unwrap(),
             DataValue::Int32(1)
         );
         assert_eq!(
-            boolean_to_uinteger_cast_eval(&value).unwrap(),
+            boolean_to_uinteger_cast_eval(value.clone()).unwrap(),
             DataValue::UInt32(1)
         );
         assert_eq!(
-            boolean_to_bigint_cast_eval(&value).unwrap(),
+            boolean_to_bigint_cast_eval(value.clone()).unwrap(),
             DataValue::Int64(1)
         );
         assert_eq!(
-            boolean_to_ubigint_cast_eval(&value).unwrap(),
+            boolean_to_ubigint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt64(1)
         );
         assert_eq!(
-            boolean_to_float_cast_eval(&value).unwrap(),
+            boolean_to_float_cast_eval(value.clone()).unwrap(),
             DataValue::Float32(OrderedFloat(1.0))
         );
         assert_eq!(
-            boolean_to_double_cast_eval(&value).unwrap(),
+            boolean_to_double_cast_eval(value.clone()).unwrap(),
             DataValue::Float64(OrderedFloat(1.0))
         );
         assert_eq!(
-            boolean_to_char_cast_eval(4, CharLengthUnits::Characters, &value).unwrap(),
+            boolean_to_char_cast_eval(4, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
                 value: "true".to_string(),
                 ty: Utf8Type::Fixed(4),
@@ -232,7 +236,8 @@ mod test {
             }
         );
         assert_eq!(
-            boolean_to_varchar_cast_eval(Some(4), CharLengthUnits::Characters, &value).unwrap(),
+            boolean_to_varchar_cast_eval(Some(4), CharLengthUnits::Characters, value.clone())
+                .unwrap(),
             DataValue::Utf8 {
                 value: "true".to_string(),
                 ty: Utf8Type::Variable(Some(4)),
@@ -240,14 +245,14 @@ mod test {
             }
         );
         assert_eq!(
-            boolean_to_double_cast_eval(&DataValue::Boolean(false)).unwrap(),
+            boolean_to_double_cast_eval(DataValue::Boolean(false)).unwrap(),
             DataValue::Float64(OrderedFloat(0.0))
         );
         assert_eq!(
             boolean_to_varchar_cast_eval(
                 None,
                 CharLengthUnits::Characters,
-                &DataValue::Boolean(false)
+                DataValue::Boolean(false)
             )
             .unwrap(),
             DataValue::Utf8 {

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::numeric_binary_evaluator_definition;
-use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
+use crate::types::evaluator::cast::{cast_fail, to_char, to_varbinary, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
@@ -27,7 +27,7 @@ crate::define_cast_evaluator!(
     },
     DataValue::Date32(value) => |this| {
         to_char(
-            DataValue::format_date(*value).ok_or_else(|| {
+            DataValue::format_date(value).ok_or_else(|| {
                 cast_fail(LogicalType::Date, LogicalType::Char(this.len, this.unit))
             })?,
             this.len,
@@ -42,7 +42,7 @@ crate::define_cast_evaluator!(
     },
     DataValue::Date32(value) => |this| {
         to_varchar(
-            DataValue::format_date(*value).ok_or_else(|| {
+            DataValue::format_date(value).ok_or_else(|| {
                 cast_fail(LogicalType::Date, LogicalType::Varchar(this.len, this.unit))
             })?,
             this.len,
@@ -50,8 +50,19 @@ crate::define_cast_evaluator!(
         )
     }
 );
+crate::define_cast_evaluator!(
+    date32_to_varbinary_cast_eval { len: Option<u32> },
+    DataValue::Date32(value) => |this| {
+        to_varbinary(
+            DataValue::format_date(value).ok_or_else(|| {
+                cast_fail(LogicalType::Date, LogicalType::Varbinary(this.len))
+            })?.into_bytes(),
+            this.len,
+        )
+    }
+);
 crate::define_cast_evaluator!(date32_to_datetime_cast_eval, DataValue::Date32(value) => {
-        let value = NaiveDate::from_num_days_from_ce_opt(*value)
+        let value = NaiveDate::from_num_days_from_ce_opt(value)
             .ok_or_else(|| cast_fail(LogicalType::Date, LogicalType::DateTime))?
             .and_hms_opt(0, 0, 0)
             .ok_or_else(|| cast_fail(LogicalType::Date, LogicalType::DateTime))?
@@ -78,7 +89,7 @@ mod test {
                 .num_days_from_ce(),
         );
         assert_eq!(
-            date32_to_char_cast_eval(10, CharLengthUnits::Characters, &value).unwrap(),
+            date32_to_char_cast_eval(10, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
                 value: "2024-01-02".to_string(),
                 ty: Utf8Type::Fixed(10),
@@ -86,7 +97,8 @@ mod test {
             }
         );
         assert_eq!(
-            date32_to_varchar_cast_eval(Some(10), CharLengthUnits::Characters, &value).unwrap(),
+            date32_to_varchar_cast_eval(Some(10), CharLengthUnits::Characters, value.clone())
+                .unwrap(),
             DataValue::Utf8 {
                 value: "2024-01-02".to_string(),
                 ty: Utf8Type::Variable(Some(10)),
@@ -94,7 +106,7 @@ mod test {
             }
         );
         assert_eq!(
-            date32_to_datetime_cast_eval(&value).unwrap(),
+            date32_to_datetime_cast_eval(value.clone()).unwrap(),
             DataValue::Date64(
                 NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -110,15 +122,15 @@ mod test {
         );
         let invalid = DataValue::Date32(i32::MAX);
         assert!(matches!(
-            date32_to_char_cast_eval(10, CharLengthUnits::Characters, &invalid),
+            date32_to_char_cast_eval(10, CharLengthUnits::Characters, invalid.clone()),
             Err(DatabaseError::CastFail { .. })
         ));
         assert!(matches!(
-            date32_to_varchar_cast_eval(Some(10), CharLengthUnits::Characters, &invalid),
+            date32_to_varchar_cast_eval(Some(10), CharLengthUnits::Characters, invalid.clone()),
             Err(DatabaseError::CastFail { .. })
         ));
         assert!(matches!(
-            date32_to_datetime_cast_eval(&invalid),
+            date32_to_datetime_cast_eval(invalid.clone()),
             Err(DatabaseError::CastFail { .. })
         ));
     }

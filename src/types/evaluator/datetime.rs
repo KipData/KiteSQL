@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::numeric_binary_evaluator_definition;
-use crate::types::evaluator::cast::{cast_fail, to_char, to_varchar};
+use crate::types::evaluator::cast::{cast_fail, to_char, to_varbinary, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
@@ -27,7 +27,7 @@ crate::define_cast_evaluator!(
     },
     DataValue::Date64(value) => |this| {
         to_char(
-            DataValue::format_datetime(*value).ok_or_else(|| {
+            DataValue::format_datetime(value).ok_or_else(|| {
                 cast_fail(LogicalType::DateTime, LogicalType::Char(this.len, this.unit))
             })?,
             this.len,
@@ -42,7 +42,7 @@ crate::define_cast_evaluator!(
     },
     DataValue::Date64(value) => |this| {
         to_varchar(
-            DataValue::format_datetime(*value).ok_or_else(|| {
+            DataValue::format_datetime(value).ok_or_else(|| {
                 cast_fail(LogicalType::DateTime, LogicalType::Varchar(this.len, this.unit))
             })?,
             this.len,
@@ -50,8 +50,19 @@ crate::define_cast_evaluator!(
         )
     }
 );
+crate::define_cast_evaluator!(
+    date64_to_varbinary_cast_eval { len: Option<u32> },
+    DataValue::Date64(value) => |this| {
+        to_varbinary(
+            DataValue::format_datetime(value).ok_or_else(|| {
+                cast_fail(LogicalType::DateTime, LogicalType::Varbinary(this.len))
+            })?.into_bytes(),
+            this.len,
+        )
+    }
+);
 crate::define_cast_evaluator!(date64_to_date_cast_eval, DataValue::Date64(value) => {
-        let value = DateTime::from_timestamp(*value, 0)
+        let value = DateTime::from_timestamp(value, 0)
             .ok_or_else(|| cast_fail(LogicalType::DateTime, LogicalType::Date))?
             .naive_utc()
             .date()
@@ -66,7 +77,7 @@ crate::define_cast_evaluator!(
     },
     DataValue::Date64(value) => |this| {
         let precision = this.precision.unwrap_or(0);
-        let value = DateTime::from_timestamp(*value, 0)
+        let value = DateTime::from_timestamp(value, 0)
             .map(|date_time| date_time.time().num_seconds_from_midnight())
             .ok_or_else(|| {
                 cast_fail(LogicalType::DateTime, LogicalType::Time(this.precision))
@@ -81,7 +92,7 @@ crate::define_cast_evaluator!(
         zone: bool
     },
     DataValue::Date64(value) => |this| {
-        Ok(DataValue::Time64(*value, this.precision.unwrap_or(0), this.zone))
+        Ok(DataValue::Time64(value, this.precision.unwrap_or(0), this.zone))
     }
 );
 
@@ -104,7 +115,7 @@ mod test {
                 .timestamp(),
         );
         assert_eq!(
-            date64_to_char_cast_eval(19, CharLengthUnits::Characters, &value).unwrap(),
+            date64_to_char_cast_eval(19, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
                 value: "2024-01-02 03:04:05".to_string(),
                 ty: Utf8Type::Fixed(19),
@@ -112,7 +123,8 @@ mod test {
             }
         );
         assert_eq!(
-            date64_to_varchar_cast_eval(Some(19), CharLengthUnits::Characters, &value).unwrap(),
+            date64_to_varchar_cast_eval(Some(19), CharLengthUnits::Characters, value.clone())
+                .unwrap(),
             DataValue::Utf8 {
                 value: "2024-01-02 03:04:05".to_string(),
                 ty: Utf8Type::Variable(Some(19)),
@@ -120,7 +132,7 @@ mod test {
             }
         );
         assert_eq!(
-            date64_to_date_cast_eval(&value).unwrap(),
+            date64_to_date_cast_eval(value.clone()).unwrap(),
             DataValue::Date32(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -128,11 +140,11 @@ mod test {
             )
         );
         assert_eq!(
-            date64_to_time_cast_eval(Some(0), &value).unwrap(),
+            date64_to_time_cast_eval(Some(0), value.clone()).unwrap(),
             DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0)
         );
         assert_eq!(
-            date64_to_timestamp_cast_eval(Some(0), true, &value).unwrap(),
+            date64_to_timestamp_cast_eval(Some(0), true, value.clone()).unwrap(),
             DataValue::Time64(
                 chrono::NaiveDate::from_ymd_opt(2024, 1, 2)
                     .unwrap()
@@ -151,19 +163,19 @@ mod test {
 
         let invalid = DataValue::Date64(i64::MAX);
         assert!(matches!(
-            date64_to_char_cast_eval(19, CharLengthUnits::Characters, &invalid),
+            date64_to_char_cast_eval(19, CharLengthUnits::Characters, invalid.clone()),
             Err(DatabaseError::CastFail { .. })
         ));
         assert!(matches!(
-            date64_to_varchar_cast_eval(Some(19), CharLengthUnits::Characters, &invalid),
+            date64_to_varchar_cast_eval(Some(19), CharLengthUnits::Characters, invalid.clone()),
             Err(DatabaseError::CastFail { .. })
         ));
         assert!(matches!(
-            date64_to_date_cast_eval(&invalid),
+            date64_to_date_cast_eval(invalid.clone()),
             Err(DatabaseError::CastFail { .. })
         ));
         assert!(matches!(
-            date64_to_time_cast_eval(Some(0), &invalid),
+            date64_to_time_cast_eval(Some(0), invalid.clone()),
             Err(DatabaseError::CastFail { .. })
         ));
     }

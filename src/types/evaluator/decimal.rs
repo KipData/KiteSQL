@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::types::evaluator::cast::{to_char, to_varchar};
+use crate::types::evaluator::cast::{to_char, to_varbinary, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
@@ -60,7 +60,7 @@ crate::define_cast_evaluator!(decimal_to_double_cast_eval, DataValue::Decimal(va
     })?)))
 });
 crate::define_cast_evaluator!(decimal_to_decimal_cast_eval, DataValue::Decimal(value) => {
-    Ok(DataValue::Decimal(*value))
+    Ok(DataValue::Decimal(value))
 });
 crate::define_cast_evaluator!(
     decimal_to_char_cast_eval {
@@ -76,29 +76,33 @@ crate::define_cast_evaluator!(
     },
     DataValue::Decimal(value) => |this| to_varchar(value.to_string(), this.len, this.unit)
 );
+crate::define_cast_evaluator!(
+    decimal_to_varbinary_cast_eval { len: Option<u32> },
+    DataValue::Decimal(value) => |this| to_varbinary(value.to_string().into_bytes(), this.len)
+);
 crate::define_cast_evaluator!(decimal_to_tinyint_cast_eval, DataValue::Decimal(value) => {
-    Ok(DataValue::Int8(crate::decimal_to_int_cast!(*value, i8)))
+    Ok(DataValue::Int8(crate::decimal_to_int_cast!(value, i8)))
 });
 crate::define_cast_evaluator!(decimal_to_smallint_cast_eval, DataValue::Decimal(value) => {
-    Ok(DataValue::Int16(crate::decimal_to_int_cast!(*value, i16)))
+    Ok(DataValue::Int16(crate::decimal_to_int_cast!(value, i16)))
 });
 crate::define_cast_evaluator!(decimal_to_integer_cast_eval, DataValue::Decimal(value) => {
-    Ok(DataValue::Int32(crate::decimal_to_int_cast!(*value, i32)))
+    Ok(DataValue::Int32(crate::decimal_to_int_cast!(value, i32)))
 });
 crate::define_cast_evaluator!(decimal_to_bigint_cast_eval, DataValue::Decimal(value) => {
-    Ok(DataValue::Int64(crate::decimal_to_int_cast!(*value, i64)))
+    Ok(DataValue::Int64(crate::decimal_to_int_cast!(value, i64)))
 });
 crate::define_cast_evaluator!(decimal_to_utinyint_cast_eval, DataValue::Decimal(value) => {
-    Ok(DataValue::UInt8(crate::decimal_to_int_cast!(*value, u8)))
+    Ok(DataValue::UInt8(crate::decimal_to_int_cast!(value, u8)))
 });
 crate::define_cast_evaluator!(decimal_to_usmallint_cast_eval, DataValue::Decimal(value) => {
-    Ok(DataValue::UInt16(crate::decimal_to_int_cast!(*value, u16)))
+    Ok(DataValue::UInt16(crate::decimal_to_int_cast!(value, u16)))
 });
 crate::define_cast_evaluator!(decimal_to_uinteger_cast_eval, DataValue::Decimal(value) => {
-    Ok(DataValue::UInt32(crate::decimal_to_int_cast!(*value, u32)))
+    Ok(DataValue::UInt32(crate::decimal_to_int_cast!(value, u32)))
 });
 crate::define_cast_evaluator!(decimal_to_ubigint_cast_eval, DataValue::Decimal(value) => {
-    Ok(DataValue::UInt64(crate::decimal_to_int_cast!(*value, u64)))
+    Ok(DataValue::UInt64(crate::decimal_to_int_cast!(value, u64)))
 });
 decimal_binary!(
     decimal_multiply_binary_eval,
@@ -150,19 +154,19 @@ mod test {
         let value = DataValue::Decimal(Decimal::new(125, 1));
 
         assert_eq!(
-            decimal_to_float_cast_eval(&value).unwrap(),
+            decimal_to_float_cast_eval(value.clone()).unwrap(),
             DataValue::Float32(OrderedFloat(12.5))
         );
         assert_eq!(
-            decimal_to_double_cast_eval(&value).unwrap(),
+            decimal_to_double_cast_eval(value.clone()).unwrap(),
             DataValue::Float64(OrderedFloat(12.5))
         );
         assert_eq!(
-            decimal_to_decimal_cast_eval(&value).unwrap(),
+            decimal_to_decimal_cast_eval(value.clone()).unwrap(),
             DataValue::Decimal(Decimal::new(125, 1))
         );
         assert_eq!(
-            decimal_to_char_cast_eval(4, CharLengthUnits::Characters, &value).unwrap(),
+            decimal_to_char_cast_eval(4, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
                 value: "12.5".to_string(),
                 ty: Utf8Type::Fixed(4),
@@ -170,7 +174,8 @@ mod test {
             }
         );
         assert_eq!(
-            decimal_to_varchar_cast_eval(Some(4), CharLengthUnits::Characters, &value).unwrap(),
+            decimal_to_varchar_cast_eval(Some(4), CharLengthUnits::Characters, value.clone())
+                .unwrap(),
             DataValue::Utf8 {
                 value: "12.5".to_string(),
                 ty: Utf8Type::Variable(Some(4)),
@@ -178,35 +183,35 @@ mod test {
             }
         );
         assert_eq!(
-            decimal_to_tinyint_cast_eval(&value).unwrap(),
+            decimal_to_tinyint_cast_eval(value.clone()).unwrap(),
             DataValue::Int8(12)
         );
         assert_eq!(
-            decimal_to_smallint_cast_eval(&value).unwrap(),
+            decimal_to_smallint_cast_eval(value.clone()).unwrap(),
             DataValue::Int16(12)
         );
         assert_eq!(
-            decimal_to_integer_cast_eval(&value).unwrap(),
+            decimal_to_integer_cast_eval(value.clone()).unwrap(),
             DataValue::Int32(12)
         );
         assert_eq!(
-            decimal_to_bigint_cast_eval(&value).unwrap(),
+            decimal_to_bigint_cast_eval(value.clone()).unwrap(),
             DataValue::Int64(12)
         );
         assert_eq!(
-            decimal_to_utinyint_cast_eval(&value).unwrap(),
+            decimal_to_utinyint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt8(12)
         );
         assert_eq!(
-            decimal_to_usmallint_cast_eval(&value).unwrap(),
+            decimal_to_usmallint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt16(12)
         );
         assert_eq!(
-            decimal_to_uinteger_cast_eval(&value).unwrap(),
+            decimal_to_uinteger_cast_eval(value.clone()).unwrap(),
             DataValue::UInt32(12)
         );
         assert_eq!(
-            decimal_to_ubigint_cast_eval(&value).unwrap(),
+            decimal_to_ubigint_cast_eval(value.clone()).unwrap(),
             DataValue::UInt64(12)
         );
     }

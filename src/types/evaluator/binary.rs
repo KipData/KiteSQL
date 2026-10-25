@@ -355,9 +355,13 @@ macro_rules! eval_numeric_binary {
 pub(crate) fn eval_binary(
     pos: u16,
     params: &BinaryEvaluatorParams,
-    left: &crate::types::value::DataValue,
+    left: Cow<'_, crate::types::value::DataValue>,
     right: &crate::types::value::DataValue,
 ) -> Result<crate::types::value::DataValue, DatabaseError> {
+    if pos == binary_pos(BINARY_UTF8_BASE, UTF8_STRING_CONCAT_OFFSET) {
+        return utf8_string_concat_binary_eval(left.into_owned(), right);
+    }
+    let left = left.as_ref();
     match pos {
         BINARY_INT8_BASE..BINARY_INT16_BASE => {
             eval_numeric_binary!(pos, BINARY_INT8_BASE, Int8, left, right)
@@ -494,9 +498,6 @@ pub(crate) fn eval_binary(
         x if x == binary_pos(BINARY_UTF8_BASE, UTF8_EQ_OFFSET) => utf8_eq_binary_eval(left, right),
         x if x == binary_pos(BINARY_UTF8_BASE, UTF8_NOT_EQ_OFFSET) => {
             utf8_not_eq_binary_eval(left, right)
-        }
-        x if x == binary_pos(BINARY_UTF8_BASE, UTF8_STRING_CONCAT_OFFSET) => {
-            utf8_string_concat_binary_eval(left, right)
         }
         x if x == binary_pos(BINARY_UTF8_BASE, UTF8_LIKE_OFFSET) => {
             let BinaryEvaluatorParams::Like { escape_char } = params else {
@@ -725,7 +726,7 @@ mod test {
         left: &DataValue,
         right: &DataValue,
     ) -> Result<DataValue, DatabaseError> {
-        create(ty, op)?.binary_eval(left, right)
+        create(ty, op)?.binary_eval(Cow::Borrowed(left), right)
     }
 
     fn assert_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
@@ -735,7 +736,7 @@ mod test {
     fn assert_binary_ref_panics(pos: u16, params: BinaryEvaluatorParams, value: &DataValue) {
         assert_panics(|| {
             let evaluator = BinaryEvaluatorRef::new(pos, params);
-            let _ = evaluator.binary_eval(value, value).unwrap();
+            let _ = evaluator.binary_eval(Cow::Borrowed(value), value).unwrap();
         });
     }
 
@@ -768,21 +769,29 @@ mod test {
                 let divide = binary_create(Cow::Owned($ty), BinaryOperator::Divide)?;
                 for (left, right, expected) in [(5, 2, 2), (-5, 2, -2), (5, -2, -2), (-5, -2, 2)] {
                     assert_eq!(
-                        divide
-                            .binary_eval(&DataValue::$variant(left), &DataValue::$variant(right))?,
+                        divide.binary_eval(
+                            Cow::Borrowed(&DataValue::$variant(left)),
+                            &DataValue::$variant(right)
+                        )?,
                         DataValue::$variant(expected)
                     );
                 }
                 assert!(matches!(
-                    divide.binary_eval(&DataValue::$variant(<$int>::MIN), &DataValue::$variant(-1)),
+                    divide.binary_eval(
+                        Cow::Borrowed(&DataValue::$variant(<$int>::MIN)),
+                        &DataValue::$variant(-1)
+                    ),
                     Err(DatabaseError::OverFlow)
                 ));
                 assert!(matches!(
-                    divide.binary_eval(&DataValue::$variant(1), &DataValue::$variant(0)),
+                    divide.binary_eval(
+                        Cow::Borrowed(&DataValue::$variant(1)),
+                        &DataValue::$variant(0)
+                    ),
                     Err(DatabaseError::InvalidValue(_))
                 ));
                 assert_eq!(
-                    divide.binary_eval(&DataValue::Null, &DataValue::$variant(0))?,
+                    divide.binary_eval(Cow::Borrowed(&DataValue::Null), &DataValue::$variant(0))?,
                     DataValue::Null
                 );
             }};
@@ -818,9 +827,9 @@ mod test {
             ),
         ] {
             let divide = binary_create(Cow::Owned(ty), BinaryOperator::Divide)?;
-            assert_eq!(divide.binary_eval(&left, &right)?, expected);
+            assert_eq!(divide.binary_eval(Cow::Borrowed(&left), &right)?, expected);
             assert_eq!(
-                divide.binary_eval(&left, &DataValue::Null)?,
+                divide.binary_eval(Cow::Borrowed(&left), &DataValue::Null)?,
                 DataValue::Null
             );
         }
@@ -1021,7 +1030,7 @@ mod test {
         assert_panics(|| {
             let evaluator = BinaryEvaluatorRef::new(u16::MAX, BinaryEvaluatorParams::Unit);
             let _ = evaluator
-                .binary_eval(&DataValue::Int32(1), &DataValue::Int32(1))
+                .binary_eval(Cow::Borrowed(&DataValue::Int32(1)), &DataValue::Int32(1))
                 .unwrap();
         });
     }
