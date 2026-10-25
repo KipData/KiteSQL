@@ -35,7 +35,7 @@ use crate::types::{CharLengthUnits, ColumnId};
 use ordered_float::OrderedFloat;
 use std::fmt::{self, Formatter};
 
-const DEFAULT_NUM_OF_BUCKETS: usize = 100;
+const DEFAULT_NUM_OF_BUCKETS: usize = 10;
 
 pub struct Analyze<'a> {
     table_name: &'a TableName,
