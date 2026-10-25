@@ -36,6 +36,19 @@ jobs:
 
       - name: Run cargo fmt
         run: make fmt
+  # 2.1
+  clippy:
+    name: Rust clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run cargo clippy
+        run: make clippy
   # 3
   e2e:
     name: Rust e2e sqllogictest
