@@ -1094,18 +1094,6 @@ impl HepOptimizerPipeline {
         }
     }
 
-    pub fn new(
-        before_batches: Vec<HepBatch>,
-        after_batches: Vec<HepBatch>,
-        implementations: &[ImplementationRuleImpl],
-    ) -> Self {
-        Self {
-            before_batches,
-            after_batches,
-            implementation_index: ImplementationRuleIndex::new(implementations),
-        }
-    }
-
     pub fn instantiate(&self, plan: LogicalPlan) -> HepOptimizer<'_> {
         HepOptimizer::new(
             plan,
