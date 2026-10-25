@@ -229,7 +229,7 @@ select id,v from alter_atomic order by id;
 statement ok
 drop index alter_atomic.uk_v_index;
 
-statement error out of range integral type conversion
+statement error try from int:
 alter table alter_atomic alter column v type int;
 
 query II
