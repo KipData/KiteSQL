@@ -51,13 +51,15 @@ impl NormalizationRule for MaterializeMarkApply {
         if op.materialize || !Self::can_materialize(op, arena) {
             return Ok(false);
         }
-        let (Some(left_rows), Some(right_rows)) = (left.estimated_rows(), right.estimated_rows())
-        else {
-            return Ok(false);
+        // Streaming rebuilds the RHS once per left row, which nested subqueries multiply,
+        // so materialize by default. Stream only when estimates show the cache would not
+        // pay off: no repeated left input, or fewer rebuilds than retained RHS rows.
+        let stream = match (left.estimated_rows(), right.estimated_rows()) {
+            (Some(left_rows), _) if left_rows <= 1 => true,
+            (Some(left_rows), Some(right_rows)) => left_rows < right_rows,
+            _ => false,
         };
-        // Prefer reuse when rebuilds are at least as numerous as retained rows,
-        // but avoid eager RHS evaluation when there is no repeated left input.
-        if left_rows <= 1 || left_rows < right_rows {
+        if stream {
             return Ok(false);
         }
         op.materialize = true;
@@ -130,11 +132,14 @@ mod tests {
             },
         );
         for (left_rows, right_rows, materialize) in [
-            (0, 2, false),
-            (1, 0, false),
-            (2, 8, false),
-            (2, 2, true),
-            (8, 2, true),
+            (Some(0), Some(2), false),
+            (Some(1), Some(0), false),
+            (Some(1), None, false),
+            (Some(2), Some(8), false),
+            (Some(2), Some(2), true),
+            (Some(8), Some(2), true),
+            (None, None, true),
+            (Some(8), None, true),
         ] {
             let Operator::MarkApply(op) = &mut plan.operator else {
                 unreachable!()
@@ -143,22 +148,17 @@ mod tests {
             let Childrens::Twins { left, right } = plan.childrens.as_mut() else {
                 unreachable!()
             };
-            left.physical_option = Some(PhysicalOption::new(
-                PlanImpl::Values,
-                SortOption::None,
-                RowCountOption::Estimated {
-                    rows: left_rows,
-                    ndv: None,
-                },
-            ));
-            right.physical_option = Some(PhysicalOption::new(
-                PlanImpl::Values,
-                SortOption::None,
-                RowCountOption::Estimated {
-                    rows: right_rows,
-                    ndv: None,
-                },
-            ));
+            let estimated = |rows: Option<usize>| {
+                rows.map(|rows| {
+                    PhysicalOption::new(
+                        PlanImpl::Values,
+                        SortOption::None,
+                        RowCountOption::Estimated { rows, ndv: None },
+                    )
+                })
+            };
+            left.physical_option = estimated(left_rows);
+            right.physical_option = estimated(right_rows);
             assert_eq!(
                 MaterializeMarkApply.apply(&mut plan, &mut arena, None)?,
                 materialize
@@ -192,11 +192,6 @@ mod tests {
             unreachable!()
         };
         op.predicates[0] = predicate;
-        let Childrens::Twins { right, .. } = plan.childrens.as_mut() else {
-            unreachable!()
-        };
-        right.physical_option = None;
-        assert!(!MaterializeMarkApply.apply(&mut plan, &mut arena, None)?);
         Ok(())
     }
 }
