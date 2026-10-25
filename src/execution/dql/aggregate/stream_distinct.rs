@@ -141,7 +141,7 @@ mod tests {
             .before_batch(
                 "Expression Remapper",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::EvaluatorBind],
+                &[NormalizationRuleImpl::EvaluatorBind],
             )
             .build()
             .instantiate(plan)

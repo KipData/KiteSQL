@@ -183,12 +183,12 @@ mod tests {
             .before_batch(
                 "Collapse Project",
                 HepBatchStrategy::fix_point_topdown(10),
-                vec![NormalizationRuleImpl::EliminateProject],
+                &[NormalizationRuleImpl::EliminateProject],
             )
             .before_batch(
                 "test_combine_filter",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::CombineFilter],
+                &[NormalizationRuleImpl::CombineFilter],
             )
             .build();
         let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
@@ -218,7 +218,7 @@ mod tests {
             .before_batch(
                 "test_collapse_group_by_agg",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::CollapseGroupByAgg],
+                &[NormalizationRuleImpl::CollapseGroupByAgg],
             )
             .build();
 

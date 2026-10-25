@@ -423,7 +423,7 @@ mod tests {
             .before_batch(
                 "test_propagate_join_constants",
                 HepBatchStrategy::fix_point_topdown(30),
-                vec![
+                &[
                     NormalizationRuleImpl::PropagateFilterConstants,
                     NormalizationRuleImpl::PropagateJoinConstants,
                     NormalizationRuleImpl::PushPredicateThroughJoin,

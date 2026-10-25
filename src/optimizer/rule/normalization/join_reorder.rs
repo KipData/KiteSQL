@@ -1354,7 +1354,7 @@ mod tests {
             .after_batch(
                 "column statistics",
                 HepBatchStrategy::fix_point_topdown(1),
-                vec![NormalizationRuleImpl::GreedyJoinReorder],
+                &[NormalizationRuleImpl::GreedyJoinReorder],
             )
             .build();
         let plan = pipeline

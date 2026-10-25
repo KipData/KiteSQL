@@ -92,11 +92,11 @@ impl HepBatch {
     pub fn new(
         name: &'static str,
         strategy: HepBatchStrategy,
-        rules: Vec<NormalizationRuleImpl>,
+        rules: &[NormalizationRuleImpl],
     ) -> Self {
         let mut steps = Vec::new();
 
-        for rule in rules {
+        for &rule in rules {
             match rule.pass_kind() {
                 NormalizationPassKind::WholeTreePass(kind) => match steps.last_mut() {
                     Some(HepBatchStep::WholeTree(pass)) if pass.kind == kind => {

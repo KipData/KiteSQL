@@ -1015,7 +1015,7 @@ mod tests {
                 .before_batch(
                     "Transpose",
                     strategy,
-                    vec![NormalizationRuleImpl::LimitProjectTranspose],
+                    &[NormalizationRuleImpl::LimitProjectTranspose],
                 )
                 .build();
             let mut plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
@@ -1103,7 +1103,7 @@ mod tests {
             .before_batch(
                 "Push Predicate",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushPredicateThroughJoin],
+                &[NormalizationRuleImpl::PushPredicateThroughJoin],
             )
             .build();
         let mut plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;

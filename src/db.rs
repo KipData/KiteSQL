@@ -445,22 +445,22 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .before_batch(
             "Column Pruning",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::ColumnPruning],
+            &[NormalizationRuleImpl::ColumnPruning],
         )
         .before_batch(
             "Simplify Filter",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![NormalizationRuleImpl::SimplifyFilter],
+            &[NormalizationRuleImpl::SimplifyFilter],
         )
         .before_batch(
             "Constant Calculation",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::ConstantCalculation],
+            &[NormalizationRuleImpl::ConstantCalculation],
         )
         .before_batch(
             "Predicate Pushdown",
             HepBatchStrategy::fix_point_topdown(30),
-            vec![
+            &[
                 NormalizationRuleImpl::PropagateFilterConstants,
                 NormalizationRuleImpl::PropagateJoinConstants,
                 NormalizationRuleImpl::PushPredicateThroughJoin,
@@ -470,7 +470,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .before_batch(
             "Limit Pushdown",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![
+            &[
                 NormalizationRuleImpl::LimitProjectTranspose,
                 NormalizationRuleImpl::PushLimitThroughJoin,
             ],
@@ -478,7 +478,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .before_batch(
             "TopK",
             HepBatchStrategy::fix_point_topdown(1),
-            vec![
+            &[
                 NormalizationRuleImpl::MinMaxToTopK,
                 NormalizationRuleImpl::TopK,
             ],
@@ -486,12 +486,12 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .before_batch(
             "Collapse Project",
             HepBatchStrategy::fix_point_bottomup(10),
-            vec![NormalizationRuleImpl::EliminateProject],
+            &[NormalizationRuleImpl::EliminateProject],
         )
         .before_batch(
             "Combine Operators",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![
+            &[
                 NormalizationRuleImpl::CollapseGroupByAgg,
                 NormalizationRuleImpl::CombineFilter,
             ],
@@ -499,22 +499,22 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .before_batch(
             "Predicate Into Scan",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![NormalizationRuleImpl::PushPredicateIntoScan],
+            &[NormalizationRuleImpl::PushPredicateIntoScan],
         )
         .before_batch(
             "Guard Mark Apply",
             HepBatchStrategy::fix_point_topdown(1),
-            vec![NormalizationRuleImpl::GuardMarkApply],
+            &[NormalizationRuleImpl::GuardMarkApply],
         )
         .after_batch(
             "Greedy Join Reorder",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::GreedyJoinReorder],
+            &[NormalizationRuleImpl::GreedyJoinReorder],
         )
         .after_batch(
             "Parameterize Mark Apply",
             HepBatchStrategy::fix_point_topdown(1),
-            vec![
+            &[
                 NormalizationRuleImpl::ParameterizeMarkApply,
                 NormalizationRuleImpl::ParameterizeInnerJoin,
             ],
@@ -524,39 +524,39 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .after_batch(
             "Eliminate Index Filter",
             HepBatchStrategy::fix_point_topdown(1),
-            vec![NormalizationRuleImpl::EliminateIndexFilter],
+            &[NormalizationRuleImpl::EliminateIndexFilter],
         )
         .after_batch(
             "Materialize Mark Apply",
             HepBatchStrategy::fix_point_bottomup(1),
-            vec![NormalizationRuleImpl::MaterializeMarkApply],
+            &[NormalizationRuleImpl::MaterializeMarkApply],
         )
         .after_batch(
             "Orient Nested Loop Join",
             HepBatchStrategy::fix_point_bottomup(1),
-            vec![NormalizationRuleImpl::OrientNestedLoopJoin],
+            &[NormalizationRuleImpl::OrientNestedLoopJoin],
         )
         .after_batch(
             "Collapse Project",
             HepBatchStrategy::fix_point_bottomup(10),
-            vec![NormalizationRuleImpl::EliminateProject],
+            &[NormalizationRuleImpl::EliminateProject],
         )
         .after_batch(
             "Expression Remapper",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::EvaluatorBind],
+            &[NormalizationRuleImpl::EvaluatorBind],
         )
         .after_batch(
             "Limit Into Scan",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![NormalizationRuleImpl::PushLimitIntoTableScan],
+            &[NormalizationRuleImpl::PushLimitIntoTableScan],
         )
         .after_batch(
             "Move Project Inputs",
             HepBatchStrategy::fix_point_bottomup(1),
-            vec![NormalizationRuleImpl::ProjectMove],
+            &[NormalizationRuleImpl::ProjectMove],
         )
-        .implementations(vec![
+        .implementations(&[
             // DQL
             ImplementationRuleImpl::SimpleAggregate,
             ImplementationRuleImpl::GroupByAggregate,

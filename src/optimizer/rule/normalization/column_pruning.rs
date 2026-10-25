@@ -872,7 +872,7 @@ mod tests {
             .before_batch(
                 "column_pruning",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::ColumnPruning],
+                &[NormalizationRuleImpl::ColumnPruning],
             )
             .build()
             .instantiate(plan)
@@ -1024,7 +1024,7 @@ mod tests {
             .before_batch(
                 "test_column_pruning",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::ColumnPruning],
+                &[NormalizationRuleImpl::ColumnPruning],
             )
             .build();
         let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;

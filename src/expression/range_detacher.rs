@@ -1355,7 +1355,7 @@ mod test {
             .before_batch(
                 "test_simplify_filter",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::SimplifyFilter],
+                &[NormalizationRuleImpl::SimplifyFilter],
             )
             .build();
         let best_plan = pipeline.instantiate(plan).find_best(None, arena)?;

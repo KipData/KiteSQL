@@ -472,9 +472,9 @@ struct ImplementationRuleIndex {
 }
 
 impl ImplementationRuleIndex {
-    fn new(implementations: Vec<ImplementationRuleImpl>) -> Self {
+    fn new(implementations: &[ImplementationRuleImpl]) -> Self {
         let mut groups = array::from_fn(|_| Vec::new());
-        for implementation in implementations {
+        for &implementation in implementations {
             groups[implementation.root_tag() as usize].push(implementation);
         }
         Self { groups }
@@ -745,7 +745,7 @@ mod tests {
                 ndv: None,
             },
         ));
-        let implementations = ImplementationRuleIndex::new(vec![ImplementationRuleImpl::Filter]);
+        let implementations = ImplementationRuleIndex::new(&[ImplementationRuleImpl::Filter]);
         assert!(implementations
             .direct_physical_option(&plan.operator)
             .is_none());
@@ -771,7 +771,7 @@ mod tests {
         ));
         let right = LogicalPlan::new(Operator::Dummy, Childrens::None);
         let mut plan = MarkApplyOperator::build_exists(plan, right, marker, vec![]);
-        let implementations = ImplementationRuleIndex::new(vec![ImplementationRuleImpl::MarkApply]);
+        let implementations = ImplementationRuleIndex::new(&[ImplementationRuleImpl::MarkApply]);
         plan.physical_option = implementations.direct_physical_option(&plan.operator);
         assert_eq!(plan.estimated_rows(), Some(12));
         let Operator::MarkApply(op) = &mut plan.operator else {
@@ -794,7 +794,7 @@ mod tests {
         let batch = HepBatch::new(
             "Combine Filters",
             HepBatchStrategy::fix_point_bottomup(1),
-            vec![NormalizationRuleImpl::CombineFilter],
+            &[NormalizationRuleImpl::CombineFilter],
         );
         let mut applied_rules = Vec::new();
         let mut topdown = filter_chain(3, &mut arena);
@@ -847,7 +847,7 @@ mod tests {
                 .before_batch(
                     "Combine Filters",
                     strategy,
-                    vec![NormalizationRuleImpl::CombineFilter],
+                    &[NormalizationRuleImpl::CombineFilter],
                 )
                 .build();
             let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
@@ -879,7 +879,7 @@ mod tests {
                 .before_batch(
                     "Combine Filters",
                     strategy,
-                    vec![NormalizationRuleImpl::CombineFilter],
+                    &[NormalizationRuleImpl::CombineFilter],
                 )
                 .build();
             let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
@@ -913,7 +913,7 @@ mod tests {
                 .before_batch(
                     "Limit Project Transpose",
                     strategy,
-                    vec![NormalizationRuleImpl::LimitProjectTranspose],
+                    &[NormalizationRuleImpl::LimitProjectTranspose],
                 )
                 .build();
             let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
@@ -944,7 +944,7 @@ mod tests {
                 .before_batch(
                     "Limit Project Transpose",
                     HepBatchStrategy::fix_point_bottomup(iterations),
-                    vec![NormalizationRuleImpl::LimitProjectTranspose],
+                    &[NormalizationRuleImpl::LimitProjectTranspose],
                 )
                 .build();
             let result = pipeline.instantiate(plan).find_best(None, &mut arena)?;
@@ -1006,12 +1006,12 @@ mod tests {
             .before_batch(
                 "Simplify Filter",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::SimplifyFilter],
+                &[NormalizationRuleImpl::SimplifyFilter],
             )
             .before_batch(
                 "Predicate Pushdown",
                 HepBatchStrategy::fix_point_topdown(10),
-                vec![
+                &[
                     NormalizationRuleImpl::PushPredicateThroughJoin,
                     NormalizationRuleImpl::PushJoinPredicateIntoScan,
                     NormalizationRuleImpl::PushPredicateIntoScan,
@@ -1020,9 +1020,9 @@ mod tests {
             .after_batch(
                 "Eliminate Index Filter",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::EliminateIndexFilter],
+                &[NormalizationRuleImpl::EliminateIndexFilter],
             )
-            .implementations(vec![
+            .implementations(&[
                 ImplementationRuleImpl::Projection,
                 ImplementationRuleImpl::Filter,
                 ImplementationRuleImpl::HashJoin,
@@ -1090,14 +1090,14 @@ impl HepOptimizerPipeline {
         HepOptimizerPipelineBuilder {
             before_batches: vec![],
             after_batches: vec![],
-            implementations: vec![],
+            implementation_index: ImplementationRuleIndex::new(&[]),
         }
     }
 
     pub fn new(
         before_batches: Vec<HepBatch>,
         after_batches: Vec<HepBatch>,
-        implementations: Vec<ImplementationRuleImpl>,
+        implementations: &[ImplementationRuleImpl],
     ) -> Self {
         Self {
             before_batches,
@@ -1119,7 +1119,7 @@ impl HepOptimizerPipeline {
 pub struct HepOptimizerPipelineBuilder {
     before_batches: Vec<HepBatch>,
     after_batches: Vec<HepBatch>,
-    implementations: Vec<ImplementationRuleImpl>,
+    implementation_index: ImplementationRuleIndex,
 }
 
 impl HepOptimizerPipelineBuilder {
@@ -1127,7 +1127,7 @@ impl HepOptimizerPipelineBuilder {
         mut self,
         name: &'static str,
         strategy: HepBatchStrategy,
-        rules: Vec<NormalizationRuleImpl>,
+        rules: &[NormalizationRuleImpl],
     ) -> Self {
         self.before_batches
             .push(HepBatch::new(name, strategy, rules));
@@ -1138,23 +1138,23 @@ impl HepOptimizerPipelineBuilder {
         mut self,
         name: &'static str,
         strategy: HepBatchStrategy,
-        rules: Vec<NormalizationRuleImpl>,
+        rules: &[NormalizationRuleImpl],
     ) -> Self {
         self.after_batches
             .push(HepBatch::new(name, strategy, rules));
         self
     }
 
-    pub fn implementations(mut self, implementations: Vec<ImplementationRuleImpl>) -> Self {
-        self.implementations = implementations;
+    pub fn implementations(mut self, implementations: &[ImplementationRuleImpl]) -> Self {
+        self.implementation_index = ImplementationRuleIndex::new(implementations);
         self
     }
 
     pub fn build(self) -> HepOptimizerPipeline {
-        HepOptimizerPipeline::new(
-            self.before_batches,
-            self.after_batches,
-            self.implementations,
-        )
+        HepOptimizerPipeline {
+            before_batches: self.before_batches,
+            after_batches: self.after_batches,
+            implementation_index: self.implementation_index,
+        }
     }
 }

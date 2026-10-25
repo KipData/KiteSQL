@@ -136,7 +136,7 @@ mod test {
         plan: LogicalPlan,
         name: &'static str,
         strategy: HepBatchStrategy,
-        rules: Vec<NormalizationRuleImpl>,
+        rules: &[NormalizationRuleImpl],
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
@@ -160,7 +160,7 @@ mod test {
             .before_batch(
                 "test_simplification",
                 HepBatchStrategy::once_topdown(),
-                vec![
+                &[
                     NormalizationRuleImpl::SimplifyFilter,
                     NormalizationRuleImpl::ConstantCalculation,
                 ],
@@ -214,7 +214,7 @@ mod test {
             plan,
             "test_constant_cast_elimination",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::ConstantCalculation],
+            &[NormalizationRuleImpl::ConstantCalculation],
             &mut arena,
         )?;
 
@@ -313,7 +313,7 @@ mod test {
                 plan,
                 "test_simplify_filter",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::SimplifyFilter],
+                &[NormalizationRuleImpl::SimplifyFilter],
                 &mut arena,
             )?;
 
@@ -385,7 +385,7 @@ mod test {
             plan,
             "test_simplify_filter",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::SimplifyFilter],
+            &[NormalizationRuleImpl::SimplifyFilter],
             &mut arena,
         )?;
 
@@ -439,7 +439,7 @@ mod test {
             plan,
             "test_non_comparison_does_not_apply_pending_rearrangement",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::SimplifyFilter],
+            &[NormalizationRuleImpl::SimplifyFilter],
             &mut arena,
         )?;
         let filter = best_plan.childrens.pop_only();
@@ -481,7 +481,7 @@ mod test {
             plan.clone(),
             "test_simplify_filter",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::SimplifyFilter],
+            &[NormalizationRuleImpl::SimplifyFilter],
             arena,
         )?;
 

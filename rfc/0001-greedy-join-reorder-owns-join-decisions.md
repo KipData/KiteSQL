@@ -362,8 +362,6 @@ hash 输入或改写为 probe 时，不会丢失上层依赖的有序性、也�
 
 - 开启 `materialize` 的 MarkApply 的 `rescan_work`；以及 NLJ 内侧含子查询类 MarkApply 时，
   Greedy 按其参数化 / 物化前的估算决定方向的偏差（3.10）。
-- 常量传播：目前没有等价类 / 传递闭包，`pa.id = 1 AND pa.id = pb.a_id` 推不出 `pb.a_id = 1`（已用 explain 实测）。
-  它是独立的改写规则，加入后 Greedy 的叶子会多出静态 range，也多出可用于凑齐 probe 索引的常量等值条件，与本 RFC 的设计不冲突。
 - 非唯一索引 probe：执行器需支持每个外侧行输出多行，且每行 reset 内侧开销较大，按具体 case 评估；
   届时 `rows_per_lookup` 由索引 NDV 估算，10 个候选上限才真正起作用。
 - I/O 建模。

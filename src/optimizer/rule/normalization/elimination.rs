@@ -1209,7 +1209,7 @@ mod tests {
             .before_batch(
                 "test_collapse_project",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::EliminateProject],
+                &[NormalizationRuleImpl::EliminateProject],
             )
             .build();
         let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
@@ -1243,7 +1243,7 @@ mod tests {
             .before_batch(
                 "test_collapse_project_with_alias",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::EliminateProject],
+                &[NormalizationRuleImpl::EliminateProject],
             )
             .build();
         let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;

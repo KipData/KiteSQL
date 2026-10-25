@@ -572,7 +572,7 @@ mod tests {
         let loader = StatisticMetaLoader::new(&cache);
         assert_eq!(estimate_filter_rows(&plan, &arena, &loader)?, Some(10));
         let pipeline = HepOptimizerPipeline::builder()
-            .implementations(vec![ImplementationRuleImpl::Filter])
+            .implementations(&[ImplementationRuleImpl::Filter])
             .build();
         let mut plan = pipeline
             .instantiate(plan)

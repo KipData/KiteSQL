@@ -155,7 +155,7 @@ mod tests {
             .before_batch(
                 "test_limit_project_transpose",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::LimitProjectTranspose],
+                &[NormalizationRuleImpl::LimitProjectTranspose],
             )
             .build();
         let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
@@ -187,7 +187,7 @@ mod tests {
             .before_batch(
                 "test_push_limit_through_join",
                 HepBatchStrategy::once_topdown(),
-                vec![
+                &[
                     NormalizationRuleImpl::LimitProjectTranspose,
                     NormalizationRuleImpl::PushLimitThroughJoin,
                 ],
@@ -221,7 +221,7 @@ mod tests {
             .before_batch(
                 "test_push_limit_into_table_scan",
                 HepBatchStrategy::once_topdown(),
-                vec![
+                &[
                     NormalizationRuleImpl::LimitProjectTranspose,
                     NormalizationRuleImpl::PushLimitIntoTableScan,
                 ],
