@@ -23,7 +23,7 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
 use std::collections::HashMap;
@@ -37,7 +37,7 @@ pub struct HashAggExecutor<'a> {
     output: Option<HashAggOutput>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -64,7 +64,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.output = None;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -104,7 +113,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
             return Ok(());
         };
 
-        write_aggregate_output(arena.result_tuple_mut(), accs, group_keys)?;
+        write_aggregate_output(arena.output_tuple_mut(), accs, group_keys)?;
         arena.resume();
         Ok(())
     }
@@ -204,9 +213,9 @@ mod test {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "Expression Remapper".to_string(),
+                "Expression Remapper",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::EvaluatorBind],
+                &[NormalizationRuleImpl::EvaluatorBind],
             )
             .build();
         let plan = pipeline
@@ -225,7 +234,10 @@ mod test {
 
         assert_eq!(tuples.len(), 2);
 
-        let vec_values = tuples.into_iter().map(|tuple| tuple.values).collect_vec();
+        let vec_values = tuples
+            .into_iter()
+            .map(|mut tuple| tuple.take_values())
+            .collect_vec();
 
         assert!(vec_values.contains(&build_integers(vec![Some(3), Some(0)])));
         assert!(vec_values.contains(&build_integers(vec![Some(5), Some(1)])));

@@ -17,7 +17,7 @@ use crate::expression::range_detacher::Range;
 use crate::planner::MetaArena;
 use crate::serdes::stable_hash::{StableHasher, CM_SKETCH_HASH_KEYS};
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::borrow::Borrow;
@@ -373,7 +373,7 @@ impl<K> ReferenceSerialization for CountMinSketch<K> {
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

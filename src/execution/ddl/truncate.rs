@@ -18,13 +18,13 @@ use crate::execution::{
 };
 use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 
 pub struct Truncate<'a> {
     op: &'a TruncateOperator,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Truncate<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Truncate<'a> {
     type Input = &'a TruncateOperator;
 
     fn into_executor(
@@ -38,7 +38,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Truncate<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,

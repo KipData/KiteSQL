@@ -23,7 +23,7 @@ analyze table t1;
 query T
 explain select a.c2, b.c2 from t1 a join t1 b on a.id + 3 = b.id where a.id = 3 and b.id = 6;
 ----
-Projection [a.c2, b.c2] [Project => (Sort Option: Follow)] Inner Join Where ((a.id + 3) = b.id) [NestLoopJoin => (Sort Option: None)] TableScan t1 -> [t1.id, t1.c2] [IndexScan By pk_index => 3 => (Sort Option: OrderBy: (t1.id Asc Nulls Last) ignore_prefix_len: 0)] Filter ((t1.id) as (b.id) = 6), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c2] [IndexScan By pk_index => 6 => (Sort Option: OrderBy: (t1.id Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [a.c2, b.c2] [Project => (Sort Option: Follow)] Inner Join Where ((a.id + 3) = b.id) [NestLoopJoin => (Sort Option: None)] Projection [(t1.id) as (a.id), (t1.c2) as (a.c2)] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c2] [IndexScan By pk_index => 3 => (Sort Option: OrderBy: (t1.id Asc Nulls Last) ignore_prefix_len: 0)] Projection [(t1.id) as (b.id), (t1.c2) as (b.c2)] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c2] [IndexScan By pk_index => 6 => (Sort Option: OrderBy: (t1.id Asc Nulls Last) ignore_prefix_len: 0)]
 
 query II
 select a.c2, b.c2 from t1 a join t1 b on a.id + 3 = b.id where a.id = 3 and b.id = 6;

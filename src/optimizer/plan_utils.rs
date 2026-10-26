@@ -12,8 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::catalog::{ColumnRef, TableName};
+use crate::errors::DatabaseError;
+use crate::expression::visitor::ExprVisitor;
+use crate::expression::{AliasType, ScalarExpression};
+use crate::planner::operator::project::ProjectOperator;
+use crate::planner::operator::table_scan::TableScanOperator;
+use crate::planner::operator::visitor::{ChildrenVisit, OperatorVisitor};
+use crate::planner::operator::{Operator, PhysicalOption, RowCountOption};
+use crate::planner::{Childrens, LogicalPlan, MetaArena, PlanArena};
+use crate::types::ColumnId;
 use std::mem;
 
 #[allow(dead_code)]
@@ -85,6 +93,31 @@ pub fn children(plan: &LogicalPlan) -> Vec<&LogicalPlan> {
     }
 }
 
+pub(crate) fn predicate_scan_mut<'plan>(
+    plan: &'plan mut LogicalPlan,
+    arena: &PlanArena,
+) -> Option<(
+    &'plan mut TableScanOperator,
+    &'plan mut Option<PhysicalOption>,
+)> {
+    match (&mut plan.operator, plan.childrens.as_mut()) {
+        (Operator::TableScan(scan), _) if scan.limit == (None, None) => {
+            Some((scan, &mut plan.physical_option))
+        }
+        (Operator::Sort(_), Childrens::Only(input)) => predicate_scan_mut(input, arena),
+        (Operator::ScalarQueryInit(init), Childrens::Twins { left, .. })
+            if init.param_bindings.is_empty()
+                && matches!(
+                    arena.expression(init.value),
+                    ScalarExpression::InitValue { .. }
+                ) =>
+        {
+            predicate_scan_mut(left, arena)
+        }
+        _ => None,
+    }
+}
+
 pub fn replace_with_only_child(plan: &mut LogicalPlan) -> bool {
     if let Childrens::Only(child) = take_childrens(plan) {
         *plan = *child;
@@ -94,18 +127,11 @@ pub fn replace_with_only_child(plan: &mut LogicalPlan) -> bool {
     }
 }
 
-#[allow(dead_code)]
-pub fn replace_child_with_only_child(plan: &mut LogicalPlan, child_idx: usize) -> bool {
-    if let Some(child_plan) = child_mut(plan, child_idx) {
-        return replace_with_only_child(child_plan);
-    }
-    false
-}
-
 pub fn wrap_child_with(plan: &mut LogicalPlan, child_idx: usize, operator: Operator) -> bool {
     if let Some(slot) = child_mut(plan, child_idx) {
         let previous = mem::replace(slot, LogicalPlan::new(operator, Childrens::None));
         *slot.childrens = Childrens::Only(Box::new(previous));
+        plan.reset_output_schema_cache();
         true
     } else {
         false
@@ -114,6 +140,136 @@ pub fn wrap_child_with(plan: &mut LogicalPlan, child_idx: usize, operator: Opera
 
 fn take_childrens(plan: &mut LogicalPlan) -> Childrens {
     mem::replace(&mut *plan.childrens, Childrens::None)
+}
+
+struct ScanColumnVisitor<'plan, 'arena, A> {
+    column: Option<ColumnRef>,
+    source: Option<(&'plan TableName, ColumnId)>,
+    arena: &'arena A,
+}
+
+impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'plan, '_, A> {
+    fn visit_plan(&mut self, plan: &'plan LogicalPlan) -> Result<(), DatabaseError> {
+        if self.column.is_none() {
+            return Ok(());
+        }
+        self.visit_operator(
+            &plan.operator,
+            plan.physical_option.as_ref(),
+            &mut ChildrenVisit::empty(),
+        )?;
+        let follow = match &plan.operator {
+            Operator::Project(_) | Operator::Filter(_) => true,
+            Operator::Join(_) | Operator::Aggregate(_) | Operator::Limit(_) | Operator::TopK(_) => {
+                false
+            }
+            _ => plan
+                .physical_option
+                .as_ref()
+                .is_some_and(|option| matches!(option.row_count, RowCountOption::Follow)),
+        };
+        if follow && self.column.is_some() {
+            self.visit_children(&plan.childrens)?;
+        }
+        Ok(())
+    }
+
+    fn visit_children(&mut self, childrens: &'plan Childrens) -> Result<(), DatabaseError> {
+        match childrens {
+            Childrens::Only(input) | Childrens::Twins { left: input, .. } => self.visit_plan(input),
+            Childrens::None => Ok(()),
+        }
+    }
+
+    fn visit_table_scan(&mut self, scan: &'plan TableScanOperator) -> Result<(), DatabaseError> {
+        if scan.limit == (None, None) {
+            if let Some(source) = self.column.and_then(|column| {
+                scan.columns
+                    .iter()
+                    .find(|source| self.arena.same_column(**source, column))
+            }) {
+                self.source = self
+                    .arena
+                    .column(*source)
+                    .id()
+                    .map(|id| (&scan.table_name, id));
+            }
+        }
+        self.column = None;
+        Ok(())
+    }
+
+    fn visit_project(
+        &mut self,
+        project: &'plan ProjectOperator,
+        _children: &mut ChildrenVisit<'plan>,
+    ) -> Result<(), DatabaseError> {
+        let Some(column) = self.column.take() else {
+            return Ok(());
+        };
+        let arena = self.arena;
+        for &candidate in &project.exprs {
+            let source = match arena.expression(candidate) {
+                ScalarExpression::Alias {
+                    expr,
+                    alias: AliasType::Name(_),
+                } if arena.column(column).id().is_none()
+                    && arena.column(column).table_name().is_none()
+                    && candidate.output_name(arena) == arena.column(column).name() =>
+                {
+                    *expr
+                }
+                ScalarExpression::Alias {
+                    expr,
+                    alias: AliasType::Expr(alias),
+                } if matches!(arena.expression(*alias), ScalarExpression::ColumnRef { column: target, .. }
+                        if arena.same_column(*target, column)) =>
+                {
+                    *expr
+                }
+                ScalarExpression::ColumnRef { column: target, .. }
+                    if arena.same_column(*target, column) =>
+                {
+                    candidate
+                }
+                _ => continue,
+            };
+            return ExprVisitor::visit(self, source, arena);
+        }
+        Ok(())
+    }
+}
+
+impl<A: MetaArena> ExprVisitor<A> for ScanColumnVisitor<'_, '_, A> {
+    fn visit_expression(
+        &mut self,
+        expr: &ScalarExpression,
+        _arena: &A,
+    ) -> Result<bool, DatabaseError> {
+        Ok(matches!(
+            expr,
+            ScalarExpression::Alias { .. } | ScalarExpression::ColumnRef { .. }
+        ))
+    }
+
+    fn visit_column_ref(&mut self, column: &ColumnRef, _: usize) -> Result<(), DatabaseError> {
+        self.column = Some(*column);
+        Ok(())
+    }
+}
+
+pub(crate) fn scan_column<'plan>(
+    plan: &'plan LogicalPlan,
+    column: ColumnRef,
+    arena: &PlanArena,
+) -> Result<Option<(&'plan TableName, ColumnId)>, DatabaseError> {
+    let mut visitor = ScanColumnVisitor {
+        column: Some(column),
+        source: None,
+        arena,
+    };
+    visitor.visit_plan(plan)?;
+    Ok(visitor.source)
 }
 
 // GRCOV_EXCL_START
@@ -192,20 +348,10 @@ mod tests {
         let mut parent = LogicalPlan::new(
             Operator::Dummy,
             Childrens::Twins {
-                left: Box::new(LogicalPlan::new(
-                    Operator::ShowView,
-                    Childrens::Only(Box::new(leaf(Operator::ShowTable))),
-                )),
+                left: Box::new(leaf(Operator::ShowTable)),
                 right: Box::new(leaf(Operator::Dummy)),
             },
         );
-        assert!(replace_child_with_only_child(&mut parent, 0));
-        assert!(matches!(
-            child(&parent, 0).unwrap().operator,
-            Operator::ShowTable
-        ));
-        assert!(!replace_child_with_only_child(&mut parent, 1));
-        assert!(!replace_child_with_only_child(&mut parent, 2));
 
         assert!(wrap_child_with(&mut parent, 1, Operator::ShowView));
         let wrapped = child(&parent, 1).unwrap();

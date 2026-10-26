@@ -19,7 +19,7 @@ use crate::execution::{
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 
 pub struct ScalarSubquery {
@@ -28,7 +28,7 @@ pub struct ScalarSubquery {
     returned: bool,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
     type Input = (&'a ScalarSubqueryOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -48,7 +48,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.returned = false;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -67,7 +76,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
         self.returned = true;
 
         if !has_next {
-            let output = arena.result_tuple_mut();
+            let output = arena.output_tuple_mut();
             output.pk = None;
             output.values.clear();
             output

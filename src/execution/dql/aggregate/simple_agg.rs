@@ -22,14 +22,14 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 pub struct SimpleAggExecutor<'a> {
     agg_calls: &'a [ExprRef],
     input: ExecId,
     returned: bool,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -48,7 +48,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.returned = false;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -81,7 +90,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'a> {
             }
         }
 
-        let output = arena.result_tuple_mut();
+        let output = arena.output_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.reserve(accs.len());

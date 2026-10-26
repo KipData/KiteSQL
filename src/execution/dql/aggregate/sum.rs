@@ -21,6 +21,46 @@ use crate::types::LogicalType;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+/// Text in a numeric aggregate is read as its longest numeric prefix (0 without one), as SQLite does.
+pub(crate) fn text_as_number(value: &DataValue) -> Cow<'_, DataValue> {
+    match value {
+        DataValue::Utf8 { value: text, .. } => {
+            Cow::Owned(DataValue::Float64(numeric_prefix(text).into()))
+        }
+        _ => Cow::Borrowed(value),
+    }
+}
+
+fn numeric_prefix(text: &str) -> f64 {
+    let text = text.trim_start();
+    let bytes = text.as_bytes();
+    let digits = |mut i: usize| {
+        while bytes.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
+        }
+        i
+    };
+    let start = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
+    let mut end = digits(start);
+    let mut has_digits = end > start;
+    if bytes.get(end) == Some(&b'.') {
+        let fraction = digits(end + 1);
+        has_digits |= fraction > end + 1;
+        end = fraction;
+    }
+    if !has_digits {
+        return 0.0;
+    }
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let sign = end + 1 + usize::from(matches!(bytes.get(end + 1), Some(b'+' | b'-')));
+        let exponent = digits(sign);
+        if exponent > sign {
+            end = exponent;
+        }
+    }
+    text[..end].parse().unwrap_or(0.0)
+}
+
 pub struct SumAccumulator {
     result: DataValue,
     evaluator: BinaryEvaluatorRef,
@@ -41,12 +81,13 @@ impl SumAccumulator {
 impl Accumulator for SumAccumulator {
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError> {
         if !value.is_null() {
+            let value = text_as_number(value);
             if self.result.is_null() {
-                self.result = value.clone();
+                self.result = value.into_owned();
             } else {
                 self.result = self
                     .evaluator
-                    .binary_eval(Cow::Borrowed(&self.result), value)?;
+                    .binary_eval(Cow::Borrowed(&self.result), &value)?;
             }
         }
 
@@ -99,6 +140,22 @@ impl Accumulator for DistinctSumAccumulator {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_reads_its_numeric_prefix() {
+        for (text, expected) in [
+            ("10", 10.0),
+            (" -1.5e2x", -150.0),
+            ("+.5", 0.5),
+            ("3.", 3.0),
+            ("7e", 7.0),
+            ("true", 0.0),
+            (".", 0.0),
+            ("", 0.0),
+        ] {
+            assert_eq!(numeric_prefix(text), expected, "{text:?}");
+        }
+    }
 
     #[test]
     fn sum_results() -> Result<(), DatabaseError> {

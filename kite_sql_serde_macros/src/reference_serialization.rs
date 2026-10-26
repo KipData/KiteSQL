@@ -148,7 +148,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         Ok(())
                     }
 
-                    fn decode<Tx: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
+                    fn decode<Tx: crate::storage::StorageTransaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
                         reader: &mut R,
                         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, Tx>>,
                         reference_tables: &crate::serdes::ReferenceTables,
@@ -229,7 +229,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         Ok(())
                     }
 
-                    fn decode<Tx: crate::storage::Transaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
+                    fn decode<Tx: crate::storage::StorageTransaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
                         reader: &mut R,
                         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, Tx>>,
                         reference_tables: &crate::serdes::ReferenceTables,

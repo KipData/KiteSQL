@@ -14,13 +14,14 @@
 
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
-use crate::expression::{AliasType, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
-use crate::optimizer::rule::normalization::combine_operators::{
-    CollapseGroupByAgg, CollapseProject, CombineFilter,
-};
+use crate::optimizer::rule::normalization::combine_operators::{CollapseGroupByAgg, CombineFilter};
 use crate::optimizer::rule::normalization::compilation_in_advance::EvaluatorBind;
+use crate::optimizer::rule::normalization::constant_propagation::{
+    PropagateFilterConstants, PropagateJoinConstants,
+};
 use crate::planner::operator::Operator;
 use crate::planner::MetaArena;
 
@@ -34,13 +35,20 @@ use crate::optimizer::rule::normalization::pushdown_predicates::{
 use crate::optimizer::rule::normalization::simplification::ConstantCalculation;
 use crate::optimizer::rule::normalization::simplification::SimplifyFilter;
 use crate::optimizer::rule::normalization::top_k::TopK;
-use crate::planner::{ExprRef, LogicalPlan};
+use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use std::collections::HashSet;
 mod column_pruning;
 mod combine_operators;
 mod compilation_in_advance;
+mod constant_propagation;
 mod elimination;
+mod guard_mark_apply;
+mod join_reorder;
+mod materialize_mark_apply;
 mod min_max_top_k;
+use guard_mark_apply::GuardMarkApply;
+use join_reorder::GreedyJoinReorder;
+use materialize_mark_apply::MaterializeMarkApply;
 mod parameterized_index;
 mod pushdown_limit;
 mod pushdown_predicates;
@@ -48,8 +56,8 @@ mod simplification;
 mod top_k;
 pub(crate) use compilation_in_advance::evaluator_bind_current;
 pub(crate) use elimination::{
-    apply_annotated_post_rules, apply_scan_order_hint, EliminateIndexFilter, OrderHintKind,
-    ScanOrderHint,
+    apply_annotated_post_rules, apply_scan_order_hint, EliminateIndexFilter, EliminateProject,
+    OrderHintKind, ScanOrderHint,
 };
 pub(crate) use parameterized_index::{ParameterizeInnerJoin, ParameterizeMarkApply};
 pub(crate) use simplification::constant_calculation_current;
@@ -58,7 +66,7 @@ pub(crate) use simplification::constant_calculation_current;
 pub enum NormalizationRuleImpl {
     ColumnPruning,
     // Combine operators
-    CollapseProject,
+    EliminateProject,
     CollapseGroupByAgg,
     CombineFilter,
     // PushDown limit
@@ -66,6 +74,8 @@ pub enum NormalizationRuleImpl {
     PushLimitThroughJoin,
     PushLimitIntoTableScan,
     // PushDown predicates
+    PropagateFilterConstants,
+    PropagateJoinConstants,
     PushPredicateThroughJoin,
     PushJoinPredicateIntoScan,
     // Tips: need to be used with `SimplifyFilter`
@@ -80,6 +90,9 @@ pub enum NormalizationRuleImpl {
     ParameterizeMarkApply,
     ParameterizeInnerJoin,
     EliminateIndexFilter,
+    GreedyJoinReorder,
+    MaterializeMarkApply,
+    GuardMarkApply,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -108,6 +121,8 @@ impl NormalizationRuleRootTag {
         match operator {
             Operator::Aggregate(_) => Some(Self::Aggregate),
             Operator::MarkApply(_) => Some(Self::MarkApply),
+            // Built after the rules that could rewrite it; nothing normalizes it further.
+            Operator::IndexProbeJoin(_) => None,
             Operator::ScalarQueryInit(_) => Some(Self::Any),
             Operator::Filter(_) => Some(Self::Filter),
             Operator::Join(_) => Some(Self::Join),
@@ -169,23 +184,28 @@ impl NormalizationRuleImpl {
     pub fn root_tag(&self) -> NormalizationRuleRootTag {
         match self {
             NormalizationRuleImpl::ColumnPruning => NormalizationRuleRootTag::Any,
-            NormalizationRuleImpl::CollapseProject => NormalizationRuleRootTag::Project,
+            NormalizationRuleImpl::EliminateProject => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::CollapseGroupByAgg => NormalizationRuleRootTag::Aggregate,
+            NormalizationRuleImpl::GuardMarkApply => NormalizationRuleRootTag::Project,
             NormalizationRuleImpl::CombineFilter => NormalizationRuleRootTag::Filter,
             NormalizationRuleImpl::LimitProjectTranspose
             | NormalizationRuleImpl::PushLimitThroughJoin
             | NormalizationRuleImpl::PushLimitIntoTableScan
             | NormalizationRuleImpl::TopK => NormalizationRuleRootTag::Limit,
-            NormalizationRuleImpl::PushPredicateThroughJoin
+            NormalizationRuleImpl::PropagateFilterConstants
+            | NormalizationRuleImpl::PushPredicateThroughJoin
             | NormalizationRuleImpl::PushPredicateIntoScan
             | NormalizationRuleImpl::SimplifyFilter => NormalizationRuleRootTag::Filter,
-            NormalizationRuleImpl::PushJoinPredicateIntoScan => NormalizationRuleRootTag::Join,
+            NormalizationRuleImpl::PropagateJoinConstants
+            | NormalizationRuleImpl::PushJoinPredicateIntoScan => NormalizationRuleRootTag::Join,
             NormalizationRuleImpl::ConstantCalculation => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::MinMaxToTopK => NormalizationRuleRootTag::Aggregate,
             NormalizationRuleImpl::EliminateIndexFilter => NormalizationRuleRootTag::Filter,
-            NormalizationRuleImpl::ParameterizeInnerJoin => NormalizationRuleRootTag::Join,
-            NormalizationRuleImpl::ParameterizeMarkApply => NormalizationRuleRootTag::MarkApply,
+            NormalizationRuleImpl::ParameterizeInnerJoin
+            | NormalizationRuleImpl::GreedyJoinReorder => NormalizationRuleRootTag::Join,
+            NormalizationRuleImpl::ParameterizeMarkApply
+            | NormalizationRuleImpl::MaterializeMarkApply => NormalizationRuleRootTag::MarkApply,
         }
     }
 }
@@ -194,54 +214,64 @@ impl NormalizationRule for NormalizationRuleImpl {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         match self {
-            NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, arena),
-            NormalizationRuleImpl::CollapseProject => CollapseProject.apply(plan, arena),
-            NormalizationRuleImpl::CollapseGroupByAgg => CollapseGroupByAgg.apply(plan, arena),
-            NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan, arena),
-            NormalizationRuleImpl::LimitProjectTranspose => {
-                LimitProjectTranspose.apply(plan, arena)
+            NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, arena, loader),
+            NormalizationRuleImpl::GreedyJoinReorder => {
+                GreedyJoinReorder.apply(plan, arena, loader)
             }
-            NormalizationRuleImpl::PushLimitThroughJoin => PushLimitThroughJoin.apply(plan, arena),
-            NormalizationRuleImpl::PushLimitIntoTableScan => PushLimitIntoScan.apply(plan, arena),
+            NormalizationRuleImpl::GuardMarkApply => GuardMarkApply.apply(plan, arena, loader),
+            NormalizationRuleImpl::EliminateProject => EliminateProject.apply(plan, arena, loader),
+            NormalizationRuleImpl::CollapseGroupByAgg => {
+                CollapseGroupByAgg.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::CombineFilter => CombineFilter.apply(plan, arena, loader),
+            NormalizationRuleImpl::LimitProjectTranspose => {
+                LimitProjectTranspose.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::PushLimitThroughJoin => {
+                PushLimitThroughJoin.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::PushLimitIntoTableScan => {
+                PushLimitIntoScan.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::PropagateFilterConstants => {
+                PropagateFilterConstants.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::PropagateJoinConstants => {
+                PropagateJoinConstants.apply(plan, arena, loader)
+            }
             NormalizationRuleImpl::PushPredicateThroughJoin => {
-                PushPredicateThroughJoin.apply(plan, arena)
+                PushPredicateThroughJoin.apply(plan, arena, loader)
             }
             NormalizationRuleImpl::PushJoinPredicateIntoScan => {
-                PushJoinPredicateIntoScan.apply(plan, arena)
+                PushJoinPredicateIntoScan.apply(plan, arena, loader)
             }
-            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan, arena),
+            NormalizationRuleImpl::SimplifyFilter => SimplifyFilter.apply(plan, arena, loader),
             NormalizationRuleImpl::PushPredicateIntoScan => {
-                PushPredicateIntoScan.apply(plan, arena)
+                PushPredicateIntoScan.apply(plan, arena, loader)
             }
-            NormalizationRuleImpl::ConstantCalculation => ConstantCalculation.apply(plan, arena),
-            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan, arena),
-            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan, arena),
-            NormalizationRuleImpl::TopK => TopK.apply(plan, arena),
-            NormalizationRuleImpl::EliminateIndexFilter => EliminateIndexFilter.apply(plan, arena),
+            NormalizationRuleImpl::ConstantCalculation => {
+                ConstantCalculation.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::EvaluatorBind => EvaluatorBind.apply(plan, arena, loader),
+            NormalizationRuleImpl::MinMaxToTopK => MinMaxToTopK.apply(plan, arena, loader),
+            NormalizationRuleImpl::TopK => TopK.apply(plan, arena, loader),
+            NormalizationRuleImpl::EliminateIndexFilter => {
+                EliminateIndexFilter.apply(plan, arena, loader)
+            }
             NormalizationRuleImpl::ParameterizeInnerJoin => {
-                ParameterizeInnerJoin.apply(plan, arena)
+                ParameterizeInnerJoin.apply(plan, arena, loader)
             }
             NormalizationRuleImpl::ParameterizeMarkApply => {
-                ParameterizeMarkApply.apply(plan, arena)
+                ParameterizeMarkApply.apply(plan, arena, loader)
+            }
+            NormalizationRuleImpl::MaterializeMarkApply => {
+                MaterializeMarkApply.apply(plan, arena, loader)
             }
         }
-    }
-}
-
-pub(crate) fn strip_alias(expr: ExprRef, arena: &crate::planner::PlanArena<'_>) -> ExprRef {
-    match arena.expression(expr) {
-        ScalarExpression::Alias {
-            expr,
-            alias: AliasType::Name(_),
-        } => strip_alias(*expr, arena),
-        ScalarExpression::Alias {
-            alias: AliasType::Expr(alias_expr),
-            ..
-        } => strip_alias(*alias_expr, arena),
-        _ => expr,
     }
 }
 
@@ -277,11 +307,11 @@ impl<'positions, 'visited> PositionRemapper<'positions, 'visited> {
     }
 }
 
-impl ExprVisitorMut for PositionRemapper<'_, '_> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for PositionRemapper<'_, '_> {
     fn visit_expression_ref(
         &mut self,
         expr: &mut ExprRef,
-        _arena: &mut (dyn MetaArena + '_),
+        _arena: &mut A,
     ) -> Result<bool, DatabaseError> {
         Ok(self.visited.insert(*expr))
     }
@@ -290,39 +320,27 @@ impl ExprVisitorMut for PositionRemapper<'_, '_> {
         &mut self,
         _column: &mut crate::catalog::ColumnRef,
         position: &mut usize,
-        _arena: &mut (dyn MetaArena + '_),
+        _arena: &mut A,
     ) -> Result<(), DatabaseError> {
         remap_position(position, self.removed_positions);
         Ok(())
     }
-
-    fn visit_alias(
-        &mut self,
-        expr: &mut ExprRef,
-        alias: &mut AliasType,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
-        match alias {
-            AliasType::Expr(alias_expr) => self.visit(alias_expr, arena),
-            AliasType::Name(_) => self.visit(expr, arena),
-        }
-    }
 }
 
-pub(crate) fn remap_expr_positions(
+pub(crate) fn remap_expr_positions<A: MetaArena + ?Sized>(
     mut expr: ExprRef,
     removed_positions: &[usize],
     visited: &mut HashSet<ExprRef>,
-    arena: &mut crate::planner::PlanArena<'_>,
+    arena: &mut A,
 ) -> Result<(), DatabaseError> {
     PositionRemapper::new(removed_positions, visited).visit(&mut expr, arena)
 }
 
-pub(crate) fn remap_exprs_positions<'a>(
+pub(crate) fn remap_exprs_positions<'a, A: MetaArena + ?Sized>(
     exprs: impl IntoIterator<Item = &'a mut ExprRef>,
     removed_positions: &[usize],
     visited: &mut HashSet<ExprRef>,
-    arena: &mut crate::planner::PlanArena<'_>,
+    arena: &mut A,
 ) -> Result<(), DatabaseError> {
     let mut remapper = PositionRemapper::new(removed_positions, visited);
     for expr in exprs {

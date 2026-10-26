@@ -21,9 +21,9 @@ use crate::iter_ext::Itertools;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::index::Index;
-use crate::types::tuple::{Schema, Tuple};
+use crate::types::tuple::{Schema, Tuple, TupleImpl};
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
@@ -37,7 +37,7 @@ pub struct Insert<'a> {
     is_mapping_by_name: bool,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Insert<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Insert<'a> {
     type Input = (&'a InsertOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -91,7 +91,7 @@ impl Insert<'_> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -121,16 +121,22 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 .iter()
                 .map(|column| plan_arena.column(*column).datatype().serializable())
                 .collect_vec();
-            let mut tuple = Tuple::new(None, Vec::with_capacity(table_snapshot.columns_len));
+            let mut tuple = TupleImpl::from(Tuple::new(
+                None,
+                Vec::with_capacity(table_snapshot.columns_len),
+            ));
 
             while arena.next_tuple(input, plan_arena)? {
                 let mut tuple_map = HashMap::with_capacity(self.input_schema.len());
-                for (i, value) in arena.result_tuple_mut().values.drain(..).enumerate() {
+                let mut i = 0;
+                arena.result_mut().drain_values(|value| {
                     let column = plan_arena.column(self.input_schema[i]);
                     tuple_map.insert(Self::column_key(column, self.is_mapping_by_name), value);
-                }
+                    i += 1;
+                });
 
-                tuple.values.clear();
+                let row = tuple.output_mut();
+                row.values.clear();
                 for column in table_snapshot.columns.iter() {
                     let column = plan_arena.column(*column);
                     let value = match tuple_map
@@ -144,19 +150,18 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                     if value.is_null() && !column.nullable() {
                         return Err(DatabaseError::not_null_column(column.name().to_string()));
                     }
-                    tuple.values.push(value)
+                    row.values.push(value)
                 }
-                tuple.pk = Some(Tuple::primary_projection(
+                row.pk = Some(Tuple::primary_projection(
                     table_snapshot.primary_key_indices,
-                    &tuple.values,
+                    row.values.as_slice(),
                 ));
                 for (index_meta, exprs) in table_snapshot.index_metas.iter() {
                     let index_meta = plan_arena.index(*index_meta);
-                    let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+                    let tuple_id = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
                     arena.rewrite(exprs, plan_arena, Some(&tuple))?;
                     let mut state = arena.local_state(plan_arena);
-                    let (values, transaction, table_codec) =
-                        state.index_values_transaction_codec_mut();
+                    let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                     let index = Index::new(index_meta.id, values, index_meta.ty);
                     transaction.add_index(table_codec, self.table_name, index, tuple_id)?;
                 }
@@ -172,7 +177,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 inserted_count += 1;
             }
         }
-        arena.produce_tuple(TupleBuilder::build_result(inserted_count.to_string()));
+        arena.produce(TupleBuilder::build_result(inserted_count.to_string()).into());
         arena.resume();
         Ok(())
     }

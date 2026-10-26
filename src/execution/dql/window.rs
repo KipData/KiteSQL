@@ -21,8 +21,8 @@ use crate::planner::operator::sort::SortField;
 use crate::planner::operator::window::WindowOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
+use crate::storage::StorageTransaction;
+use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 
 mod function;
@@ -44,8 +44,8 @@ enum Boundary {
 
 #[derive(Default)]
 struct WindowState {
-    buffered: Vec<(usize, Tuple)>,
-    pending: Option<(Tuple, Boundary)>,
+    buffered: Vec<(usize, TupleImpl)>,
+    pending: Option<(TupleImpl, Boundary)>,
     sort_values: Vec<DataValue>,
     started: bool,
     partition_rows: usize,
@@ -54,6 +54,14 @@ struct WindowState {
 }
 
 impl WindowState {
+    fn clear(&mut self) {
+        self.buffered.clear();
+        self.pending = None;
+        self.sort_values.clear();
+        self.started = false;
+        self.begin_partition();
+    }
+
     fn begin_partition(&mut self) {
         self.partition_rows = 0;
         self.peer_start = 0;
@@ -76,7 +84,7 @@ pub struct Window<'a> {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Window<'a> {
     type Input = (&'a WindowOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -124,7 +132,7 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Window<'a> {
 impl<'a> Window<'a> {
     fn update_keys(
         &mut self,
-        tuple: &Tuple,
+        tuple: &TupleImpl,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<Boundary>, DatabaseError> {
         let mut boundary = (!self.state.started).then_some(Boundary::Partition);
@@ -158,10 +166,9 @@ impl<'a> Window<'a> {
         if self.state.buffered.is_empty() {
             return Ok(());
         }
-        let output_offset = self.state.buffered[0].1.values.len();
+        let output_offset = self.state.buffered[0].1.len();
         for (_, row) in &mut self.state.buffered {
-            row.values
-                .resize(output_offset + self.functions.len(), DataValue::Null);
+            row.resize(output_offset + self.functions.len(), DataValue::Null);
         }
         let len = self.state.buffered.len();
         for (slot, function) in self.functions.iter_mut().enumerate() {
@@ -180,7 +187,7 @@ impl<'a> Window<'a> {
 
     fn eval(
         &mut self,
-        tuple: Tuple,
+        tuple: TupleImpl,
         boundary: Option<Boundary>,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
@@ -218,7 +225,18 @@ impl<'a> Window<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.state.clear();
+        self.input_exhausted = false;
+        self.reset_functions()?;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -228,7 +246,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window<'a> {
         loop {
             if output_ready {
                 if let Some((_, tuple)) = self.state.buffered.pop() {
-                    arena.produce_tuple(tuple);
+                    arena.produce(tuple);
                     return Ok(());
                 }
             }
@@ -240,7 +258,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Window<'a> {
             let (tuple, boundary) = if let Some((tuple, boundary)) = self.state.pending.take() {
                 (tuple, Some(boundary))
             } else if arena.next_tuple(self.input, plan_arena)? {
-                (arena.materialize_tuple(), None)
+                (arena.take_tuple(), None)
             } else {
                 self.eval_functions(plan_arena)?;
                 self.input_exhausted = true;
@@ -287,8 +305,55 @@ mod tests {
         }
     }
 
-    fn tuple(values: &[i32]) -> Tuple {
-        Tuple::new(None, values.iter().copied().map(DataValue::from).collect())
+    fn tuple(values: &[i32]) -> TupleImpl {
+        crate::types::tuple::Tuple::new(None, values.iter().copied().map(DataValue::from).collect())
+            .into()
+    }
+
+    #[test]
+    fn clear_restores_window_state_and_keeps_buffer_capacity() {
+        let mut state = WindowState {
+            buffered: Vec::with_capacity(8),
+            pending: Some((tuple(&[2, 20]), Boundary::Peer)),
+            sort_values: Vec::with_capacity(4),
+            started: true,
+            partition_rows: 5,
+            peer_start: 3,
+            peer_index: 2,
+        };
+        state.buffered.push((0, tuple(&[1, 10])));
+        state.sort_values.push(DataValue::Int32(10));
+        let buffered = (state.buffered.as_ptr(), state.buffered.capacity());
+        let keys = (state.sort_values.as_ptr(), state.sort_values.capacity());
+        for _ in 0..2 {
+            state.clear();
+            assert!(state.buffered.is_empty());
+            assert!(state.pending.is_none());
+            assert!(state.sort_values.is_empty());
+            assert!(!state.started);
+            assert_eq!(
+                (state.partition_rows, state.peer_start, state.peer_index),
+                (0, 0, 0)
+            );
+            assert_eq!(
+                (state.buffered.as_ptr(), state.buffered.capacity()),
+                buffered
+            );
+            assert_eq!(
+                (state.sort_values.as_ptr(), state.sort_values.capacity()),
+                keys
+            );
+        }
+        state.buffered.push((0, tuple(&[3, 30])));
+        state.sort_values.push(DataValue::Int32(30));
+        assert_eq!(
+            (state.buffered.as_ptr(), state.buffered.capacity()),
+            buffered
+        );
+        assert_eq!(
+            (state.sort_values.as_ptr(), state.sort_values.capacity()),
+            keys
+        );
     }
 
     #[test]
@@ -317,7 +382,7 @@ mod tests {
         for (value, expected) in [(10, [1_i64, 1]), (10, [2, 1]), (20, [3, 3])] {
             window.eval(tuple(&[1, value]), None, &plan_arena)?;
             let row = window.state.buffered.pop().unwrap().1;
-            assert_eq!(row.values[2..], expected.map(DataValue::from));
+            assert!(row.iter().skip(2).eq(&expected.map(DataValue::from)));
         }
         Ok(())
     }

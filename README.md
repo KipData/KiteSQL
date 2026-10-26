@@ -19,7 +19,7 @@
 <p align="center">
     <a href="https://github.com/KipData/KiteSQL/actions/workflows/ci.yml"><img src="https://github.com/KipData/KiteSQL/actions/workflows/ci.yml/badge.svg" alt="CI"></img></a>
     <a href="https://codecov.io/github/KipData/KiteSQL"><img src="https://codecov.io/github/KipData/KiteSQL/branch/main/graph/badge.svg" alt="Codecov"></img></a>
-    <a href="https://deepwiki.com/KipData/KiteSQL"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></img></a>
+    <a href="https://deepwiki.com/KipData/KiteSQL"><img src="https://img.shields.io/badge/DeepWiki-Ask_AI-1f6feb" alt="Ask DeepWiki"></img></a>
     <a href="https://discord.gg/dU8eVGpJ8h"><img src="https://img.shields.io/badge/Discord-Join_us-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
     <a href="https://crates.io/crates/kite_sql/"><img src="https://img.shields.io/crates/v/kite_sql.svg"></a>
     <a href="https://github.com/KipData/KiteSQL" target="_blank">
@@ -131,14 +131,13 @@ print(list(db.run("select * from demo")))
 ## TPC-C
 `make tpcc` runs the benchmark (`--backend rocksdb|lmdb`); `make tpcc-dual` cross-checks every statement against SQLite.
 
-720-second single-thread run on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), every backend pinned to the same P-core. Latencies are p90 in µs, including commit.
+720-second single-thread run on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), every backend pinned to the same P-core and run without fsync on commit. Latencies are p90 in µs, including commit.
 
 | Backend | TpmC | New-Order | Payment | Order-Status | Delivery | Stock-Level |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 159616 | 315 | 81 | 44 | 435 | 332 |
-| KiteSQL RocksDB | 48035 | 459 | 258 | 200 | 11055 | 704 |
-| SQLite balanced | 67102 | 283 | 67 | 48 | 338 | 473 |
-| SQLite practical | 67153 | 336 | 66 | 41 | 427 | 339 |
+| KiteSQL LMDB | 165956 | 303 | 75 | 43 | 436 | 318 |
+| KiteSQL RocksDB | 50739 | 392 | 188 | 198 | 11743 | 812 |
+| SQLite (WAL, `synchronous=OFF`) | 191484 | 274 | 41 | 33 | 343 | 268 |
 
 👉 [Details and how to reproduce](tpcc/README.md)
 

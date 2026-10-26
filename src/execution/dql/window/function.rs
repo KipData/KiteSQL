@@ -18,7 +18,7 @@ use crate::expression::agg::AggKind;
 use crate::expression::window::WindowFunctionKind;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::ops::Range;
@@ -30,7 +30,7 @@ pub(super) trait WindowFunction {
 
     fn evaluate(
         &mut self,
-        rows: &mut [(usize, Tuple)],
+        rows: &mut [(usize, TupleImpl)],
         peer: Range<usize>,
         peer_start: usize,
         peer_index: usize,
@@ -44,7 +44,7 @@ struct RowNumber;
 impl WindowFunction for RowNumber {
     fn evaluate(
         &mut self,
-        rows: &mut [(usize, Tuple)],
+        rows: &mut [(usize, TupleImpl)],
         peer: Range<usize>,
         _peer_start: usize,
         _peer_index: usize,
@@ -52,7 +52,7 @@ impl WindowFunction for RowNumber {
         _arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         for (row_index, row) in &mut rows[peer] {
-            row.values[output_position] = DataValue::Int64((*row_index + 1) as i64);
+            row[output_position] = DataValue::Int64((*row_index + 1) as i64);
         }
         Ok(())
     }
@@ -65,7 +65,7 @@ struct Rank {
 impl WindowFunction for Rank {
     fn evaluate(
         &mut self,
-        rows: &mut [(usize, Tuple)],
+        rows: &mut [(usize, TupleImpl)],
         peer: Range<usize>,
         peer_start: usize,
         peer_index: usize,
@@ -78,7 +78,7 @@ impl WindowFunction for Rank {
             peer_start + 1
         };
         for (_, row) in &mut rows[peer] {
-            row.values[output_position] = DataValue::Int64(rank as i64);
+            row[output_position] = DataValue::Int64(rank as i64);
         }
         Ok(())
     }
@@ -99,7 +99,7 @@ impl WindowFunction for Aggregate {
 
     fn evaluate(
         &mut self,
-        rows: &mut [(usize, Tuple)],
+        rows: &mut [(usize, TupleImpl)],
         peer: Range<usize>,
         _peer_start: usize,
         _peer_index: usize,
@@ -116,7 +116,7 @@ impl WindowFunction for Aggregate {
         accumulator.evaluate()?;
         let result = accumulator.result();
         for (_, row) in &mut rows[peer] {
-            row.values[output_position] = result.clone();
+            row[output_position] = result.clone();
         }
         Ok(())
     }

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::serdes::DatabaseError;
-use crate::serdes::Transaction;
+use crate::serdes::StorageTransaction;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ macro_rules! implement_ptr_serialization {
                     .encode(writer, is_direct, reference_tables, arena)
             }
 
-            fn decode<T: Transaction, R: Read, A: $crate::planner::MetaArena + ?Sized>(
+            fn decode<T: StorageTransaction, R: Read, A: $crate::planner::MetaArena + ?Sized>(
                 reader: &mut R,
                 drive: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
                 reference_tables: &ReferenceTables,

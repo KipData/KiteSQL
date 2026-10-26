@@ -18,10 +18,10 @@ use crate::planner::PlanArena;
 
 use crate::errors::DatabaseError;
 use crate::expression::function::scala::ScalarFunction;
-use crate::expression::{AliasType, BinaryOperator, ScalarExpression, TrimWhereField};
+use crate::expression::{BinaryOperator, ScalarExpression, TrimWhereField};
 use crate::planner::MetaArena;
 use crate::types::evaluator::binary_create;
-use crate::types::tuple::TupleLike;
+use crate::types::tuple::{Input, InputRef};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
 use std::borrow::Cow;
@@ -43,7 +43,7 @@ macro_rules! eval_to_num {
 }
 
 impl ScalarExpression {
-    pub fn eval<'a, T: TupleLike + ?Sized>(
+    pub fn eval<'a, T: Input + ?Sized>(
         &'a self,
         arena: &'a (dyn MetaArena + '_),
         tuple: Option<&'a T>,
@@ -67,17 +67,14 @@ impl ScalarExpression {
                 let Some(tuple) = tuple else {
                     return Ok(Cow::Owned(DataValue::Null));
                 };
-                Ok(Cow::Borrowed(tuple.value_at(*position)))
+                Ok(tuple.column(*position))
             }
-            ScalarExpression::Alias { expr, alias } => {
+            // `AliasType::Expr` only carries the output identity.
+            ScalarExpression::Alias { expr, .. } => {
                 let Some(tuple) = tuple else {
                     return Ok(Cow::Owned(DataValue::Null));
                 };
-                if let AliasType::Expr(inner_expr) = alias {
-                    arena.expression(*inner_expr).eval(arena, Some(tuple))
-                } else {
-                    arena.expression(*expr).eval(arena, Some(tuple))
-                }
+                arena.expression(*expr).eval(arena, Some(tuple))
             }
             ScalarExpression::TypeCast {
                 expr, evaluator, ..
@@ -280,7 +277,7 @@ impl ScalarExpression {
             }
             ScalarExpression::ScalaFunction(ScalarFunction { inner, args, .. }) => {
                 let value = match tuple {
-                    Some(tuple) => inner.eval(args, arena, Some(&tuple))?,
+                    Some(tuple) => inner.eval(args, arena, Some(&InputRef(tuple)))?,
                     None => inner.eval(args, arena, None)?,
                 };
                 value.cast(inner.return_type()).map(Cow::Owned)
@@ -419,6 +416,7 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expression::AliasType;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{ExecMetaArena, ExprRef, TableArenaCell};
 

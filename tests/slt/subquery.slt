@@ -37,6 +37,29 @@ select x.a from (select -a as a from t1) as x;
 -1
 -3
 
+# A derived table does not see sources bound earlier in the same FROM.
+query IIIII rowsort
+select * from t1 x, (select a, b from t1) y;
+----
+0 1 2 1 2
+0 1 2 3 4
+1 3 4 1 2
+1 3 4 3 4
+
+query I rowsort
+select y.* from t1 x, (select id from t1) y;
+----
+0
+0
+1
+1
+
+statement error
+select * from t1 x, (select a from t1 where t1.a = x.a) y;
+
+statement error LATERAL derived tables are not supported
+select * from t1 x, lateral (select a from t1) y;
+
 query III
 select * from t1 where a <= (select 4) and a > (select 1)
 ----
@@ -827,7 +850,7 @@ insert into corr_rows values (1,10),(2,20),(3,30),(4,null),(5,20);
 query T
 explain select id,(select 7) from corr_rows where b<(select 25);
 ----
-Projection [corr_rows.id, InitValue(1:0)] [Project => (Sort Option: Follow)] ScalarQueryInit InitValue(1:0) Filter (corr_rows.b < InitValue(1:1)), Is Having: false [Filter => (Sort Option: Follow)] ScalarQueryInit InitValue(1:1) TableScan corr_rows -> [corr_rows.id, corr_rows.b] [SeqScan => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [25] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [7] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)]
+Projection [corr_rows.id, InitValue(1:<slt:ignore>)] [Project => (Sort Option: Follow)] ScalarQueryInit InitValue(1:<slt:ignore>) Filter (corr_rows.b < InitValue(1:<slt:ignore>)), Is Having: false [Filter => (Sort Option: Follow)] ScalarQueryInit InitValue(1:<slt:ignore>) TableScan corr_rows -> [corr_rows.id, corr_rows.b] [SeqScan => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [25] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)] ScalarSubquery [ScalarSubquery => (Sort Option: Follow)] Projection [7] [Project => (Sort Option: Follow)] Dummy [Dummy => (Sort Option: None)]
 
 query II rowsort
 select id,(select 7) from corr_rows where b<(select 25);
@@ -1080,6 +1103,25 @@ select id,b in (select b from corr_rows where id=2) as matched,b not in (select 
 3 false false
 4 NULL NULL
 
+# Each row compares its own value with the same cached, nested RHS.
+query ITTT
+select id,b in (select b from corr_rows where b in (select b from corr_rows where id=2)),b<any(select b from corr_rows where b is not null),b<all(select b from corr_rows where b is not null) from corr_rows order by id;
+----
+1 false true false
+2 true true false
+3 false false false
+4 NULL NULL NULL
+5 true true false
+
+query ITT
+select id,b in (select b from corr_rows where false),b<>all(select b from corr_rows where false) from corr_rows order by id;
+----
+1 false true
+2 false true
+3 false true
+4 false true
+5 false true
+
 statement error correlated quantified subqueries in SELECT are not supported yet
 select b in (select x.b from corr_rows x where x.id<corr_rows.id) from corr_rows;
 
@@ -1106,6 +1148,169 @@ true
 
 statement error
 select '20' + cast(1 as bigint);
+
+# Projection output aliases must map back to the indexed source column.
+statement ok
+create index corr_b on corr_rows(b);
+
+query I
+select id from corr_rows where b in (select x.b as probe_key from corr_rows x where x.id<3) order by id;
+----
+1
+2
+5
+
+# A computed key is not a probe of its source column.
+query I
+select id from corr_rows where -b in (select -x.b as probe_key from corr_rows x where x.id<3) order by id;
+----
+1
+2
+5
+
+# Probing below LIMIT/OFFSET would change the original RHS set.
+query I
+select id from corr_rows where b in (select x.b as probe_key from corr_rows x order by x.id limit 1) order by id;
+----
+1
+
+query I
+select id from corr_rows where b in (select x.b as probe_key from corr_rows x order by x.id limit 1 offset 1) order by id;
+----
+2
+5
+
+# Numeric guards keep NULL rows that still depend on the IN result.
+query I
+select id from corr_rows where b>15 or id in (select x.id from corr_rows x where x.id=4) order by id;
+----
+2
+3
+4
+5
+
+# A marker visible in SELECT must remain real even when the OR branch is true.
+query IT
+select id,b in (select x.b from corr_rows x where x.id=1) as matched from corr_rows where b>15 or matched order by id;
+----
+1 true
+2 false
+3 false
+5 false
+
+# Mark definitions are attached at their first consumer, not their SELECT declaration.
+query ITT
+select id,b in (select x.b from corr_rows x where x.id=1) as first_match,b in (select x.b from corr_rows x where x.id=2) as second_match from corr_rows where second_match or first_match order by id;
+----
+1 true false
+2 false true
+5 false true
+
+query IT
+select id,b not in (select x.b from corr_rows x where x.id=1) as unmatched from corr_rows where unmatched order by id;
+----
+2 true
+3 true
+5 true
+
+query IT
+select id,b=all(select x.b from corr_rows x where x.id=1) as matched from corr_rows where matched is null or matched order by id;
+----
+1 true
+4 NULL
+
+# The outer marker consumes an earlier SELECT marker; neither is produced twice.
+query ITT
+select id,b in (select x.b from corr_rows x where x.id=1) as first_match,first_match in (select true) as second_match from corr_rows where second_match order by id;
+----
+1 true true
+
+# A marker exposed by a derived table is read above the filter, so it cannot be guarded.
+query IT
+select id,m from (select id,b in (select x.b from corr_rows x where x.id=1) as m from corr_rows) where id>0 or m order by id;
+----
+1 true
+2 false
+3 false
+4 NULL
+5 false
+
+statement error aggregate functions are not allowed in WHERE
+select count(*) in (select x.id from corr_rows x) as matched from corr_rows where matched;
+
+statement ok
+create table guard_bad_cast(id int primary key, txt varchar);
+
+statement ok
+insert into guard_bad_cast values(1,'not an integer');
+
+# A shared numeric guard protects every marker in a consecutive Apply segment.
+query I
+select id from corr_rows where id<0 and (b in (select cast(txt as int) from guard_bad_cast) or b in (select cast(txt as int) from guard_bad_cast));
+----
+
+# An outer filter merged through a derived table also guards the inner Apply.
+query I
+select id from (select id,b from corr_rows where b in (select cast(txt as int) from guard_bad_cast)) x where x.id<0;
+----
+
+# Sort between the projection and the filter does not hide the guard.
+query I
+select id from corr_rows where id<0 and b in (select cast(txt as int) from guard_bad_cast) order by id;
+----
+
+query I
+select id from corr_rows where id>0 or (b in (select cast(txt as int) from guard_bad_cast) and b in (select cast(txt as int) from guard_bad_cast)) order by id;
+----
+1
+2
+3
+4
+5
+
+statement error invalid digit found in string
+select id from corr_rows where id>0 and b in (select cast(txt as int) from guard_bad_cast);
+
+statement error invalid digit found in string
+select id from corr_rows where b>0 or id in (select cast(txt as int) from guard_bad_cast);
+
+# A scalar index probe must use the comparison's common type, not the raw
+# integer literal or narrower outer column. NULL remains three-valued.
+statement ok
+create table probe_key(id int primary key, k bigint unique);
+
+statement ok
+insert into probe_key values (1, 2), (2, 3), (3, 4), (4, NULL);
+
+query III
+select 2 in (select k from probe_key), 2 not in (select k from probe_key), 9 in (select k from probe_key);
+----
+true false NULL
+
+query I rowsort
+select id from corr_rows where id in (select k from probe_key);
+----
+2
+3
+4
+
+# Casting the indexed side would invalidate a direct lookup. These use the
+# normal comparison path rather than truncate, parse, or overflow a probe.
+query III
+select 2.0 in (select k from probe_key), 2.5 in (select k from probe_key), '2' in (select k from probe_key);
+----
+true NULL true
+
+query III
+select 1099511627776 in (select id from corr_rows), 1.5 in (select id from corr_rows), 'hello' in (select id from corr_rows);
+----
+false false false
+
+statement ok
+drop table probe_key;
+
+statement ok
+drop table guard_bad_cast;
 
 statement ok
 drop table corr_lookup;

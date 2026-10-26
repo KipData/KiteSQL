@@ -20,14 +20,14 @@ use crate::execution::{
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 
 pub struct ChangeColumn<'a> {
     op: &'a ChangeColumnOperator,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for ChangeColumn<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for ChangeColumn<'a> {
     type Input = &'a ChangeColumnOperator;
 
     fn into_executor(
@@ -41,7 +41,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for ChangeColumn<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -128,9 +128,9 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
                     })
                 },
                 |tuple| {
-                    let value = std::mem::replace(&mut tuple.values[column_index], DataValue::Null);
-                    tuple.values[column_index] = value.cast(&target_data_type)?;
-                    if needs_not_null_validation && tuple.values[column_index].is_null() {
+                    let value = std::mem::replace(&mut tuple[column_index], DataValue::Null);
+                    tuple[column_index] = value.cast(&target_data_type)?;
+                    if needs_not_null_validation && tuple[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));
                     }
                     Ok(())
@@ -154,7 +154,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
                         .map(|column| plan_arena.column(*column).datatype().serializable())
                 },
                 |tuple| {
-                    if tuple.values[column_index].is_null() {
+                    if tuple[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));
                     }
                     Ok(())

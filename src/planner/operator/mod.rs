@@ -33,6 +33,7 @@ pub mod drop_table;
 pub mod drop_view;
 pub mod filter;
 pub mod function_scan;
+pub mod index_probe_join;
 pub mod insert;
 pub mod join;
 pub mod limit;
@@ -64,6 +65,7 @@ use self::{
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::visitor::{walk_expr, ExprVisitor};
+use crate::expression::AliasType;
 use crate::planner::operator::alter_table::change_column::DefaultChange as ColumnDefaultChange;
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::operator::analyze::AnalyzeOperator;
@@ -80,6 +82,7 @@ use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::operator::drop_table::DropTableOperator;
 use crate::planner::operator::drop_view::DropViewOperator;
 use crate::planner::operator::function_scan::FunctionScanOperator;
+use crate::planner::operator::index_probe_join::IndexProbeJoinOperator;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::set_membership::SetMembershipOperator;
@@ -89,10 +92,11 @@ use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::values::ValuesOperator;
-use crate::planner::operator::visitor::OperatorVisitor;
-use crate::planner::{fmt_explain_list, Explain, ExprRef, MetaArena};
+use crate::planner::operator::visitor::{walk_plan, ChildrenVisit, OperatorVisitor};
+use crate::planner::{fmt_explain_list, Explain, ExprRef, LogicalPlan, MetaArena};
 use crate::types::index::{IndexInfo, IndexMetaRef};
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum Operator {
@@ -119,6 +123,7 @@ pub enum Operator {
     Union(UnionOperator),
     RecursiveCte(RecursiveCteOperator),
     RecursiveScan(RecursiveScanOperator),
+    IndexProbeJoin(IndexProbeJoinOperator),
     // DML
     Insert(InsertOperator),
     Update(UpdateOperator),
@@ -156,19 +161,319 @@ pub enum SortOption {
     None,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
+pub enum RowCountOption {
+    Follow,
+    Unknown,
+    Estimated { rows: usize, ndv: Option<usize> },
+}
+
+// Relative CPU units: a row costs four units, an operator/hash operation one.
+// This is the same scale as row = 1 and operator = 0.25; I/O is not modeled.
+pub(crate) const CPU_ROW_WORK: usize = 4;
+pub(crate) const CPU_OPERATOR_WORK: usize = 1;
+// Rows assumed for a table without statistics (RFC 0001 §3.9).
+pub(crate) const DEFAULT_TABLE_ROWS: usize = 1000;
+// Rebuilding the inner executor for each outer row of an index probe.
+pub(crate) const PROBE_RESET_WORK: usize = CPU_ROW_WORK;
+// Hashing, inserting and later freeing one build row. Calibrated on LMDB, where a hash join
+// costs ~7 scanned rows per build/probe pair (RFC 0001 §4.2).
+pub(crate) const HASH_BUILD_WORK: usize = 6 * CPU_ROW_WORK;
+
+pub(crate) fn rows_work(rows: usize, width: usize) -> usize {
+    rows.saturating_mul(CPU_ROW_WORK.saturating_add(width.saturating_mul(CPU_OPERATOR_WORK)))
+}
+
+fn hash_build_work(build: &InputCost) -> usize {
+    rows_work(build.rows, build.width).saturating_add(build.rows.saturating_mul(HASH_BUILD_WORK))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InputCost {
+    pub(crate) rows: usize,
+    pub(crate) width: usize,
+    pub(crate) work: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JoinImpl {
+    Hash,
+    NestLoop { full: bool },
+    IndexProbe { lookup_work: usize },
+}
+
+impl JoinImpl {
+    pub(crate) fn work(
+        self,
+        left: &InputCost,
+        right: &InputCost,
+        out_rows: usize,
+        out_width: usize,
+    ) -> usize {
+        let join = match self {
+            // Build rows are stored whole; each probe row costs one hash lookup.
+            JoinImpl::Hash => right
+                .work
+                .saturating_add(hash_build_work(left))
+                .saturating_add(right.rows.saturating_mul(CPU_OPERATOR_WORK)),
+            // The inner input is re-run and compared for every outer row.
+            JoinImpl::NestLoop { full } => left
+                .rows
+                .saturating_mul(
+                    right
+                        .work
+                        .saturating_add(right.rows.saturating_mul(CPU_OPERATOR_WORK)),
+                )
+                .saturating_add(if full { right.work } else { 0 }),
+            JoinImpl::IndexProbe { lookup_work } => left.rows.saturating_mul(lookup_work),
+        };
+        left.work
+            .saturating_add(join)
+            .saturating_add(rows_work(out_rows, out_width))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlanCost {
+    pub(crate) rows: Option<usize>,
+    pub(crate) width: usize,
+    pub(crate) startup: Option<usize>,
+    pub(crate) total: Option<usize>,
+}
+
+impl PlanCost {
+    pub(crate) fn input(&self) -> Option<InputCost> {
+        Some(InputCost {
+            rows: self.rows?,
+            width: self.width,
+            work: self.total?,
+        })
+    }
+}
+
+/// The inputs' costs, shaped like `Childrens`; `None` marks an input that cannot be priced.
+pub(crate) enum ChildCosts {
+    None,
+    Only(Option<PlanCost>),
+    Twins(Option<PlanCost>, Option<PlanCost>),
+}
+
+fn input(cost: &Option<PlanCost>) -> Option<InputCost> {
+    cost.as_ref()?.input()
+}
+
+fn startup(cost: &Option<PlanCost>) -> Option<usize> {
+    cost.as_ref()?.startup
+}
+
+#[derive(Debug, Clone)]
 pub struct PhysicalOption {
     pub plan: PlanImpl,
     pub(crate) sort_option: SortOption,
+    pub(crate) row_count: RowCountOption,
+    pub(crate) lookup_work: Option<usize>,
+    pub(crate) join_decided: bool,
 }
 
 impl PhysicalOption {
-    pub fn new(plan: PlanImpl, sort_option: SortOption) -> Self {
-        Self { plan, sort_option }
+    pub fn new(plan: PlanImpl, sort_option: SortOption, row_count: RowCountOption) -> Self {
+        Self {
+            plan,
+            sort_option,
+            row_count,
+            lookup_work: None,
+            join_decided: false,
+        }
     }
 
     pub fn sort_option(&self) -> &SortOption {
         &self.sort_option
+    }
+
+    fn index_probe_work(
+        &self,
+        left: &Option<PlanCost>,
+        right: &Option<PlanCost>,
+        rows: usize,
+        cost: &PlanCost,
+    ) -> Option<usize> {
+        let right_cost = (*right)?;
+        let probed = InputCost {
+            rows: 1,
+            width: right_cost.width,
+            work: right_cost.startup?,
+        };
+        let lookup_work = self.lookup_work.unwrap_or_else(|| {
+            probed
+                .work
+                .saturating_add(PROBE_RESET_WORK)
+                .saturating_add(rows_work(probed.rows, probed.width))
+        });
+        Some(JoinImpl::IndexProbe { lookup_work }.work(&input(left)?, &probed, rows, cost.width))
+    }
+
+    /// Join formulas: RFC 0001 §4.2 (`rfc/0001-greedy-join-reorder-owns-join-decisions.md`);
+    /// probe `lookup_work`: §4.3.
+    pub(crate) fn calculate_work(
+        &self,
+        operator: &Operator,
+        children: &ChildCosts,
+        rows: Option<usize>,
+        cost: &PlanCost,
+    ) -> Option<usize> {
+        match (&self.plan, operator, children) {
+            (PlanImpl::Filter, Operator::Filter(_), ChildCosts::Only(child))
+            | (PlanImpl::Project, Operator::Project(_), ChildCosts::Only(child)) => {
+                Some(input(child)?.work)
+            }
+            (PlanImpl::MarkApply, Operator::MarkApply(op), ChildCosts::Twins(left, right))
+                if op.parameterized_probe().is_some() && !op.materialize =>
+            {
+                self.index_probe_work(left, right, rows?, cost)
+            }
+            (
+                PlanImpl::IndexProbeJoin,
+                Operator::IndexProbeJoin(_),
+                ChildCosts::Twins(left, right),
+            ) => self.index_probe_work(left, right, rows?, cost),
+            (PlanImpl::HashJoin, Operator::Join(_), ChildCosts::Twins(left, right)) => {
+                Some(JoinImpl::Hash.work(&input(left)?, &input(right)?, rows?, cost.width))
+            }
+            (PlanImpl::NestLoopJoin, Operator::Join(join), ChildCosts::Twins(left, right)) => {
+                let (outer, inner) = if join.join_type == join::JoinType::RightOuter {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
+                Some(
+                    JoinImpl::NestLoop {
+                        full: join.join_type == join::JoinType::Full,
+                    }
+                    .work(&input(outer)?, &input(inner)?, rows?, cost.width),
+                )
+            }
+            _ => Some(cost.startup?.saturating_add(rows_work(rows?, cost.width))),
+        }
+    }
+
+    pub(crate) fn calculate_startup_work(
+        &self,
+        operator: &Operator,
+        children: &ChildCosts,
+    ) -> Option<usize> {
+        let work = |child: &Option<PlanCost>| Some(input(child)?.work);
+        match (&self.plan, operator, children) {
+            (
+                PlanImpl::SeqScan | PlanImpl::IndexScan(_) | PlanImpl::Values | PlanImpl::Dummy,
+                _,
+                ChildCosts::None,
+            ) => Some(0),
+            (
+                PlanImpl::Project
+                | PlanImpl::Filter
+                | PlanImpl::Limit
+                | PlanImpl::StreamAggregate
+                | PlanImpl::StreamDistinct,
+                _,
+                ChildCosts::Only(child),
+            ) => startup(child),
+            (PlanImpl::HashJoin, _, ChildCosts::Twins(left, right)) => {
+                input(left).and_then(|build| {
+                    Some(
+                        build
+                            .work
+                            .saturating_add(hash_build_work(&build))
+                            .saturating_add(startup(right)?),
+                    )
+                })
+            }
+            (PlanImpl::NestLoopJoin, _, ChildCosts::Twins(left, right)) => startup(left)
+                .and_then(|left| startup(right).map(|right| left.saturating_add(right))),
+            (PlanImpl::Sort | PlanImpl::TopK | PlanImpl::Window, _, ChildCosts::Only(child)) => {
+                let keys = match operator {
+                    Operator::Sort(op) => op.sort_fields.len(),
+                    Operator::TopK(op) => op.sort_fields.len(),
+                    Operator::Window(op) => op.sort_fields.len(),
+                    _ => unreachable!(),
+                };
+                work(child).and_then(|read| {
+                    let rows = child.as_ref()?.rows?;
+                    let comparisons = if rows <= 1 {
+                        0
+                    } else {
+                        ((rows as f64) * (rows as f64).log2()).ceil() as usize
+                    };
+                    Some(
+                        read.saturating_add(
+                            comparisons.saturating_mul(
+                                2usize
+                                    .saturating_mul(keys)
+                                    .saturating_mul(CPU_OPERATOR_WORK),
+                            ),
+                        ),
+                    )
+                })
+            }
+            (
+                PlanImpl::SimpleAggregate | PlanImpl::HashAggregate,
+                Operator::Aggregate(op),
+                ChildCosts::Only(child),
+            ) => {
+                let per_row = op
+                    .agg_calls
+                    .len()
+                    .saturating_mul(CPU_OPERATOR_WORK)
+                    .saturating_add(if matches!(self.plan, PlanImpl::HashAggregate) {
+                        CPU_ROW_WORK.saturating_add(
+                            op.groupby_exprs.len().saturating_mul(CPU_OPERATOR_WORK),
+                        )
+                    } else {
+                        0
+                    });
+                work(child).and_then(|read| {
+                    Some(read.saturating_add(child.as_ref()?.rows?.saturating_mul(per_row)))
+                })
+            }
+            (PlanImpl::MarkApply, Operator::MarkApply(op), ChildCosts::Twins(left, right)) => {
+                startup(left).and_then(|left| {
+                    let right = if op.materialize {
+                        work(right)
+                    } else {
+                        startup(right)
+                    }?;
+                    Some(left.saturating_add(right))
+                })
+            }
+            (
+                PlanImpl::IndexProbeJoin,
+                Operator::IndexProbeJoin(_),
+                ChildCosts::Twins(left, right),
+            ) => startup(left)
+                .and_then(|left| startup(right).map(|right| left.saturating_add(right))),
+            (PlanImpl::ScalarQueryInit, _, ChildCosts::Twins(left, right)) => {
+                startup(left).and_then(|left| work(right).map(|right| left.saturating_add(right)))
+            }
+            _ => None,
+        }
+    }
+}
+
+// Probe lookup work and Greedy's join decision are pass-local, not plan semantics or wire data.
+impl PartialEq for PhysicalOption {
+    fn eq(&self, other: &Self) -> bool {
+        self.plan == other.plan
+            && self.sort_option == other.sort_option
+            && self.row_count == other.row_count
+    }
+}
+
+impl Eq for PhysicalOption {}
+
+impl Hash for PhysicalOption {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.plan.hash(state);
+        self.sort_option.hash(state);
+        self.row_count.hash(state);
     }
 }
 
@@ -209,12 +514,14 @@ pub enum PlanImpl {
     CopyToFile,
     Analyze,
     Window,
+    // Appended to keep the serialized indices of earlier variants stable.
+    IndexProbeJoin,
 }
 
 impl Explain for ColumnRef {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         let column = arena.column(*self);
@@ -227,9 +534,9 @@ impl Explain for ColumnRef {
 }
 
 impl Explain for IndexMetaRef {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         f.write_str(&arena.index(*self).name)
@@ -241,7 +548,7 @@ macro_rules! impl_display_explain {
         $(
             $(#[$meta])*
             impl Explain for $ty {
-                fn fmt(&self, _arena: &(dyn MetaArena + '_), f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                fn fmt<A: MetaArena + ?Sized>(&self, _arena: &A, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                     std::fmt::Display::fmt(self, f)
                 }
             }
@@ -251,6 +558,7 @@ macro_rules! impl_display_explain {
 
 impl_display_explain!(
     MarkApplyOperator,
+    IndexProbeJoinOperator,
     ScalarSubqueryOperator,
     FunctionScanOperator,
     LimitOperator,
@@ -270,9 +578,9 @@ impl_display_explain!(
 );
 
 impl Explain for Operator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         match self {
@@ -280,6 +588,7 @@ impl Explain for Operator {
             Operator::Aggregate(op) => Explain::fmt(op, arena, f),
             Operator::ScalarQueryInit(op) => Explain::fmt(op, arena, f),
             Operator::MarkApply(op) => Explain::fmt(op, arena, f),
+            Operator::IndexProbeJoin(op) => Explain::fmt(op, arena, f),
             Operator::Filter(op) => Explain::fmt(op, arena, f),
             Operator::Join(op) => Explain::fmt(op, arena, f),
             Operator::Project(op) => Explain::fmt(op, arena, f),
@@ -321,9 +630,87 @@ impl Explain for Operator {
     }
 }
 
+/// Where a referenced-column visit starts: one operator, or a plan and all its inputs.
+pub(crate) enum ColumnVisitRoot<'a> {
+    Operator(&'a Operator),
+    Plan(&'a LogicalPlan),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum CommandType {
+    DQL,
+    DML,
+    DDL,
+    Analyze,
+}
+
+impl CommandType {
+    /// Only queries leave storage untouched.
+    pub fn is_read_only(self) -> bool {
+        matches!(self, CommandType::DQL)
+    }
+}
+
 impl Operator {
+    /// Classifies a plan by its root, matching `command_type` of SQL statements.
+    pub fn command_type(&self) -> CommandType {
+        match self {
+            Operator::Dummy
+            | Operator::Aggregate(_)
+            | Operator::ScalarQueryInit(_)
+            | Operator::MarkApply(_)
+            | Operator::Filter(_)
+            | Operator::Join(_)
+            | Operator::Project(_)
+            | Operator::ScalarSubquery(_)
+            | Operator::TableScan(_)
+            | Operator::FunctionScan(_)
+            | Operator::Sort(_)
+            | Operator::Limit(_)
+            | Operator::TopK(_)
+            | Operator::Values(_)
+            | Operator::ShowTable
+            | Operator::ShowView
+            | Operator::Explain
+            | Operator::Describe(_)
+            | Operator::SetMembership(_)
+            | Operator::Union(_)
+            | Operator::RecursiveCte(_)
+            | Operator::RecursiveScan(_)
+            | Operator::IndexProbeJoin(_)
+            | Operator::Window(_) => CommandType::DQL,
+            #[cfg(feature = "copy")]
+            Operator::CopyToFile(_) => CommandType::DQL,
+            Operator::Insert(_)
+            | Operator::Update(_)
+            | Operator::Delete(_)
+            | Operator::Truncate(_) => CommandType::DML,
+            #[cfg(feature = "copy")]
+            Operator::CopyFromFile(_) => CommandType::DML,
+            Operator::Analyze(_) => CommandType::Analyze,
+            Operator::AddColumn(_)
+            | Operator::ChangeColumn(_)
+            | Operator::DropColumn(_)
+            | Operator::CreateTable(_)
+            | Operator::CreateIndex(_)
+            | Operator::CreateView(_)
+            | Operator::DropTable(_)
+            | Operator::DropView(_)
+            | Operator::DropIndex(_) => CommandType::DDL,
+        }
+    }
+
     pub fn visit_referenced_columns<A: MetaArena + ?Sized>(
         &self,
+        arena: &A,
+        f: &mut impl FnMut(&A, &ColumnRef) -> bool,
+    ) -> Result<bool, DatabaseError> {
+        Self::referenced_columns(ColumnVisitRoot::Operator(self), arena, f)
+    }
+
+    /// Calls `f` for each referenced column until it returns false; returns whether it ran to the end.
+    pub(crate) fn referenced_columns<A: MetaArena + ?Sized>(
+        root: ColumnVisitRoot<'_>,
         arena: &A,
         f: &mut impl FnMut(&A, &ColumnRef) -> bool,
     ) -> Result<bool, DatabaseError> {
@@ -345,11 +732,28 @@ impl Operator {
                 Ok(())
             }
 
-            fn visit_column_ref(&mut self, column: &ColumnRef) -> Result<(), DatabaseError> {
+            fn visit_column_ref(
+                &mut self,
+                column: &ColumnRef,
+                _position: usize,
+            ) -> Result<(), DatabaseError> {
                 if self.keep_going {
                     self.keep_going = (self.f)(self.arena, column);
                 }
                 Ok(())
+            }
+
+            // The alias target column is still owned by the plan.
+            fn visit_alias(
+                &mut self,
+                expr: ExprRef,
+                alias: &AliasType,
+                arena: &A,
+            ) -> Result<(), DatabaseError> {
+                if let AliasType::Expr(alias_expr) = alias {
+                    self.visit(*alias_expr, arena)?;
+                }
+                self.visit(expr, arena)
             }
         }
 
@@ -358,9 +762,17 @@ impl Operator {
             A: MetaArena + ?Sized,
             F: FnMut(&A, &ColumnRef) -> bool,
         {
+            fn visit_plan(&mut self, plan: &'operator LogicalPlan) -> Result<(), DatabaseError> {
+                if self.keep_going {
+                    walk_plan(self, plan)?;
+                }
+                Ok(())
+            }
+
             fn visit_aggregate(
                 &mut self,
                 op: &'operator AggregateOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for expr in op.agg_calls.iter().chain(&op.groupby_exprs) {
                     ExprVisitor::visit(self, *expr, self.arena)?;
@@ -371,6 +783,7 @@ impl Operator {
             fn visit_scalar_query_init(
                 &mut self,
                 op: &'operator ScalarQueryInitOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for (_, expr) in &op.param_bindings {
                     ExprVisitor::visit(self, *expr, self.arena)?;
@@ -381,6 +794,7 @@ impl Operator {
             fn visit_mark_apply(
                 &mut self,
                 op: &'operator MarkApplyOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for expr in &op.predicates {
                     ExprVisitor::visit(self, *expr, self.arena)?;
@@ -388,14 +802,25 @@ impl Operator {
                 if let Some(expr) = &op.parameterized_probe {
                     ExprVisitor::visit(self, *expr, self.arena)?;
                 }
+                if let Some(expr) = op.guard {
+                    ExprVisitor::visit(self, expr, self.arena)?;
+                }
                 Ok(())
             }
 
-            fn visit_filter(&mut self, op: &'operator FilterOperator) -> Result<(), DatabaseError> {
+            fn visit_filter(
+                &mut self,
+                op: &'operator FilterOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 ExprVisitor::visit(self, op.predicate, self.arena)
             }
 
-            fn visit_join(&mut self, op: &'operator JoinOperator) -> Result<(), DatabaseError> {
+            fn visit_join(
+                &mut self,
+                op: &'operator JoinOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 if let JoinCondition::On { on, filter } = &op.on {
                     for (left_expr, right_expr) in on {
                         ExprVisitor::visit(self, *left_expr, self.arena)?;
@@ -411,6 +836,7 @@ impl Operator {
             fn visit_project(
                 &mut self,
                 op: &'operator ProjectOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for expr in &op.exprs {
                     ExprVisitor::visit(self, *expr, self.arena)?;
@@ -422,8 +848,8 @@ impl Operator {
                 &mut self,
                 op: &'operator TableScanOperator,
             ) -> Result<(), DatabaseError> {
-                for column in &op.columns {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op.columns.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -438,7 +864,11 @@ impl Operator {
                 Ok(())
             }
 
-            fn visit_sort(&mut self, op: &'operator SortOperator) -> Result<(), DatabaseError> {
+            fn visit_sort(
+                &mut self,
+                op: &'operator SortOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 for field in &op.sort_fields {
                     ExprVisitor::visit(self, field.expr, self.arena)?;
                 }
@@ -448,6 +878,7 @@ impl Operator {
             fn visit_window(
                 &mut self,
                 op: &'operator window::WindowOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
                 for expr in op
                     .sort_fields
@@ -460,7 +891,11 @@ impl Operator {
                 Ok(())
             }
 
-            fn visit_top_k(&mut self, op: &'operator TopKOperator) -> Result<(), DatabaseError> {
+            fn visit_top_k(
+                &mut self,
+                op: &'operator TopKOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 for field in &op.sort_fields {
                     ExprVisitor::visit(self, field.expr, self.arena)?;
                 }
@@ -468,15 +903,24 @@ impl Operator {
             }
 
             fn visit_values(&mut self, op: &'operator ValuesOperator) -> Result<(), DatabaseError> {
-                for column in &op.schema_ref {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op.schema_ref.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
 
-            fn visit_union(&mut self, op: &'operator UnionOperator) -> Result<(), DatabaseError> {
-                for column in op.left_schema_ref.iter().chain(&op._right_schema_ref) {
-                    ExprVisitor::visit_column_ref(self, column)?;
+            fn visit_union(
+                &mut self,
+                op: &'operator UnionOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
+                for (position, column) in op
+                    .left_schema_ref
+                    .iter()
+                    .chain(&op._right_schema_ref)
+                    .enumerate()
+                {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -484,9 +928,10 @@ impl Operator {
             fn visit_recursive_cte(
                 &mut self,
                 op: &'operator RecursiveCteOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
-                for column in &op.schema_ref {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op.schema_ref.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -495,8 +940,8 @@ impl Operator {
                 &mut self,
                 op: &'operator RecursiveScanOperator,
             ) -> Result<(), DatabaseError> {
-                for column in &op.schema_ref {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op.schema_ref.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
@@ -504,21 +949,35 @@ impl Operator {
             fn visit_set_membership(
                 &mut self,
                 op: &'operator SetMembershipOperator,
+                _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
-                for column in op.left_schema_ref.iter().chain(&op._right_schema_ref) {
-                    ExprVisitor::visit_column_ref(self, column)?;
+                for (position, column) in op
+                    .left_schema_ref
+                    .iter()
+                    .chain(&op._right_schema_ref)
+                    .enumerate()
+                {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
 
-            fn visit_delete(&mut self, op: &'operator DeleteOperator) -> Result<(), DatabaseError> {
-                for column in &op.primary_keys {
-                    ExprVisitor::visit_column_ref(self, column)?;
+            fn visit_delete(
+                &mut self,
+                op: &'operator DeleteOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
+                for (position, column) in op.primary_keys.iter().enumerate() {
+                    ExprVisitor::visit_column_ref(self, column, position)?;
                 }
                 Ok(())
             }
 
-            fn visit_update(&mut self, op: &'operator UpdateOperator) -> Result<(), DatabaseError> {
+            fn visit_update(
+                &mut self,
+                op: &'operator UpdateOperator,
+                _children: &mut ChildrenVisit<'operator>,
+            ) -> Result<(), DatabaseError> {
                 for (_, expr) in &op.value_exprs {
                     ExprVisitor::visit(self, *expr, self.arena)?;
                 }
@@ -563,7 +1022,12 @@ impl Operator {
             f,
             keep_going: true,
         };
-        visitor.visit_operator(self)?;
+        match root {
+            ColumnVisitRoot::Operator(operator) => {
+                visitor.visit_operator(operator, None, &mut ChildrenVisit::empty())?
+            }
+            ColumnVisitRoot::Plan(plan) => visitor.visit_plan(plan)?,
+        }
         Ok(visitor.keep_going)
     }
 
@@ -595,9 +1059,9 @@ impl Operator {
 }
 
 impl Explain for PlanImpl {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         match self {
@@ -608,6 +1072,7 @@ impl Explain for PlanImpl {
             PlanImpl::StreamDistinct => f.write_str("StreamDistinct"),
             PlanImpl::ScalarQueryInit => f.write_str("ScalarQueryInit"),
             PlanImpl::MarkApply => f.write_str("MarkApply"),
+            PlanImpl::IndexProbeJoin => f.write_str("IndexProbeJoin"),
             PlanImpl::Filter => f.write_str("Filter"),
             PlanImpl::HashJoin => f.write_str("HashJoin"),
             PlanImpl::NestLoopJoin => f.write_str("NestLoopJoin"),
@@ -641,9 +1106,9 @@ impl Explain for PlanImpl {
 }
 
 impl Explain for SortOption {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         match self {
@@ -662,9 +1127,9 @@ impl Explain for SortOption {
 }
 
 impl Explain for PhysicalOption {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         write!(
@@ -699,6 +1164,59 @@ mod tests {
     use crate::types::index::{IndexInfo, IndexMeta, IndexMetaRef, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
+
+    #[test]
+    fn rows_work_charges_rows_without_columns() {
+        assert_eq!(rows_work(3, 0), 3 * CPU_ROW_WORK);
+        assert_eq!(rows_work(3, 2), 3 * (CPU_ROW_WORK + 2));
+        assert_eq!(rows_work(usize::MAX, 1), usize::MAX);
+    }
+
+    #[test]
+    fn join_work_includes_inputs_and_prefers_cheap_sides() {
+        let small = InputCost {
+            rows: 10,
+            width: 1,
+            work: 50,
+        };
+        let large = InputCost {
+            rows: 1000,
+            width: 1,
+            work: 5000,
+        };
+        let output = rows_work(100, 2);
+        // Both inputs read once, the build side stored and hashed, every probe row looked up once.
+        assert_eq!(
+            JoinImpl::Hash.work(&small, &large, 100, 2),
+            50 + 5000 + rows_work(10, 1) + 10 * HASH_BUILD_WORK + 1000 + output
+        );
+        assert!(
+            JoinImpl::Hash.work(&small, &large, 100, 2)
+                < JoinImpl::Hash.work(&large, &small, 100, 2)
+        );
+        // The inner input is re-run and compared for every outer row.
+        let nest_loop = JoinImpl::NestLoop { full: false };
+        assert_eq!(
+            nest_loop.work(&small, &large, 100, 2),
+            50 + 10 * (5000 + 1000) + output
+        );
+        assert!(nest_loop.work(&small, &large, 100, 2) < nest_loop.work(&large, &small, 100, 2));
+        // A full join reads the inner input once more for its unmatched rows.
+        assert_eq!(
+            JoinImpl::NestLoop { full: true }.work(&small, &large, 100, 2),
+            nest_loop.work(&small, &large, 100, 2) + 5000
+        );
+        // The probed input is never read whole: a few outer rows beat hashing a large input.
+        let probe = JoinImpl::IndexProbe { lookup_work: 30 };
+        assert_eq!(probe.work(&small, &large, 100, 2), 50 + 10 * 30 + output);
+        assert!(probe.work(&small, &large, 100, 2) < JoinImpl::Hash.work(&small, &large, 100, 2));
+        let huge = InputCost {
+            rows: usize::MAX,
+            width: 1,
+            work: usize::MAX,
+        };
+        assert_eq!(nest_loop.work(&huge, &small, 0, 2), usize::MAX);
+    }
 
     fn column_catalog(name: &str) -> ColumnCatalog {
         ColumnCatalog::new(
@@ -760,7 +1278,8 @@ mod tests {
         assert_eq!(SortOption::Follow.explain(&arena).to_string(), "Follow");
         assert_eq!(SortOption::None.explain(&arena).to_string(), "None");
 
-        let physical = PhysicalOption::new(PlanImpl::TopK, sort_option.clone());
+        let physical =
+            PhysicalOption::new(PlanImpl::TopK, sort_option.clone(), RowCountOption::Unknown);
         assert_eq!(
             physical.explain(&arena).to_string(),
             "TopK => (Sort Option: OrderBy: (1 Desc Nulls First) ignore_prefix_len: 2)"
@@ -780,6 +1299,7 @@ mod tests {
             (PlanImpl::StreamDistinct, "StreamDistinct"),
             (PlanImpl::ScalarQueryInit, "ScalarQueryInit"),
             (PlanImpl::MarkApply, "MarkApply"),
+            (PlanImpl::IndexProbeJoin, "IndexProbeJoin"),
             (PlanImpl::Filter, "Filter"),
             (PlanImpl::HashJoin, "HashJoin"),
             (PlanImpl::NestLoopJoin, "NestLoopJoin"),
@@ -909,9 +1429,10 @@ mod tests {
         assert_eq!(referenced_columns(&join, &mut arena)?, vec![a, b, c]);
         assert!(!join.all_referenced_columns(&arena, |column| *column == a)?);
 
-        let project = Operator::Project(ProjectOperator {
-            exprs: vec![column_expr(b, 1, &mut arena), column_expr(c, 2, &mut arena)],
-        });
+        let project = Operator::Project(ProjectOperator::new(vec![
+            column_expr(b, 1, &mut arena),
+            column_expr(c, 2, &mut arena),
+        ]));
         assert_eq!(referenced_columns(&project, &mut arena)?, vec![b, c]);
 
         let update = Operator::Update(UpdateOperator {
@@ -1024,6 +1545,8 @@ mod tests {
                 table_name: "users".into(),
                 index_metas: vec![IndexMetaRef::new(1)],
                 histogram_buckets: Some(8),
+                hll_precision: None,
+                statistics_relative_error: None,
             }),
         ];
         for operator in no_reference_operators {
@@ -1267,6 +1790,8 @@ mod tests {
                     table_name: "users".into(),
                     index_metas: vec![index],
                     histogram_buckets: Some(128),
+                    hll_precision: None,
+                    statistics_relative_error: None,
                 }),
                 "Analyze users -> [idx_users_id]",
             ),

@@ -68,7 +68,7 @@ impl TpccTransaction for OrderStat {
                     (3, DataValue::from(args.c_last.clone())),
                 ],
                 &mut |tuple| {
-                    name_cnt = tuple.values[0].i32().unwrap() as usize;
+                    name_cnt = tuple[0].i32().unwrap() as usize;
                     Ok(())
                 },
             )?;
@@ -87,10 +87,10 @@ impl TpccTransaction for OrderStat {
             let mut c_middle = String::new();
             let mut c_last = String::new();
             tx.with_query_nth(&mut statements[1], &params, target, &mut |tuple| {
-                c_balance = tuple.values[0].decimal().unwrap();
-                c_first = tuple.values[1].utf8().unwrap().to_string();
-                c_middle = tuple.values[2].utf8().unwrap().to_string();
-                c_last = tuple.values[3].utf8().unwrap().to_string();
+                c_balance = tuple[0].decimal().unwrap();
+                c_first = tuple[1].utf8().unwrap().to_string();
+                c_middle = tuple[2].utf8().unwrap().to_string();
+                c_last = tuple[3].utf8().unwrap().to_string();
                 Ok(())
             })?;
             (c_balance, c_first, c_middle, c_last)
@@ -108,10 +108,10 @@ impl TpccTransaction for OrderStat {
                     (3, DataValue::Int32(args.c_id as i32)),
                 ],
                 &mut |tuple| {
-                    c_balance = tuple.values[0].decimal().unwrap();
-                    c_first = tuple.values[1].utf8().unwrap().to_string();
-                    c_middle = tuple.values[2].utf8().unwrap().to_string();
-                    c_last = tuple.values[3].utf8().unwrap().to_string();
+                    c_balance = tuple[0].decimal().unwrap();
+                    c_first = tuple[1].utf8().unwrap().to_string();
+                    c_middle = tuple[2].utf8().unwrap().to_string();
+                    c_last = tuple[3].utf8().unwrap().to_string();
                     Ok(())
                 },
             )?;
@@ -128,7 +128,7 @@ impl TpccTransaction for OrderStat {
         ];
         let mut o_id = 0;
         tx.with_query_one(&mut statements[3], &params, &mut |tuple| {
-            o_id = tuple.values[0].i32().unwrap();
+            o_id = tuple[0].i32().unwrap();
             Ok(())
         })?;
         // "SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = ? AND ol_d_id = ? AND ol_o_id = ?"
@@ -138,11 +138,11 @@ impl TpccTransaction for OrderStat {
             (3, DataValue::Int32(o_id)),
         ];
         tx.with_query_one(&mut statements[4], &params, &mut |_| Ok(()))?;
-        // let ol_i_id = tuple.values[0].i32();
-        // let ol_supply_w_id = tuple.values[1].i16();
-        // let ol_quantity = tuple.values[2].i8();
-        // let ol_amount = tuple.values[3].decimal();
-        // let ol_delivery_d = tuple.values[4].datetime();
+        // let ol_i_id = tuple[0].i32();
+        // let ol_supply_w_id = tuple[1].i16();
+        // let ol_quantity = tuple[2].i8();
+        // let ol_amount = tuple[3].decimal();
+        // let ol_delivery_d = tuple[4].datetime();
 
         Ok(())
     }

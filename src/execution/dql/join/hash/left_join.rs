@@ -14,19 +14,19 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::{
-    filter, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
+    filter, join_rows, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
 };
 use crate::execution::dql::join::hash_join::BuildState;
-use crate::execution::dql::join::RowBitmap;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::tuple::{SplitTupleRef, Tuple};
+use crate::types::bitset::BitSet;
+use crate::types::tuple::{SplitTupleRef, TupleImpl};
 use crate::types::value::DataValue;
 
 pub(crate) struct LeftJoinState {
     pub(crate) left_schema_len: usize,
     pub(crate) right_schema_len: usize,
-    pub(crate) bits: RowBitmap,
+    pub(crate) bits: BitSet,
 }
 
 impl JoinProbeState for LeftJoinState {
@@ -36,7 +36,7 @@ impl JoinProbeState for LeftJoinState {
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
         if probe_state.is_keys_has_null {
             probe_state.finished = true;
             return Ok(None);
@@ -48,26 +48,20 @@ impl JoinProbeState for LeftJoinState {
         };
 
         while probe_state.index < build_state.tuples.len() {
-            let (i, Tuple { values, pk }) = &build_state.tuples[probe_state.index];
+            let (i, build_tuple) = &build_state.tuples[probe_state.index];
             probe_state.index += 1;
 
             if let Some(filter_expr) = filter_expr {
-                let full_values =
-                    SplitTupleRef::from_slices(values, &probe_state.probe_tuple.values);
+                let full_values = SplitTupleRef::new(build_tuple, &probe_state.probe_tuple);
                 if !filter(&full_values, filter_expr, plan_arena)? {
                     continue;
                 }
             }
-            let full_values = Vec::from_iter(
-                values
-                    .iter()
-                    .chain(probe_state.probe_tuple.values.iter())
-                    .cloned(),
-            );
             self.bits.insert(*i);
-            return Ok(Some(Tuple::new(
-                pk.as_ref().or(probe_state.probe_tuple.pk.as_ref()).cloned(),
-                full_values,
+            return Ok(Some(join_rows(
+                build_tuple,
+                &mut probe_state.probe_tuple,
+                false,
             )));
         }
 
@@ -80,7 +74,7 @@ impl JoinProbeState for LeftJoinState {
         left_drop_state: &mut LeftDropState,
         _filter_expr: Option<&ExprRef>,
         _plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
         let full_schema_len = self.right_schema_len + self.left_schema_len;
 
         loop {
@@ -89,7 +83,7 @@ impl JoinProbeState for LeftJoinState {
                     if self.bits.contains(i) {
                         continue;
                     }
-                    left_tuple.values.resize(full_schema_len, DataValue::Null);
+                    left_tuple.resize(full_schema_len, DataValue::Null);
                     return Ok(Some(left_tuple));
                 }
                 left_drop_state.current = None;

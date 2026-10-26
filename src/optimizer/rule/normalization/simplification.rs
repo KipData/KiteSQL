@@ -16,19 +16,27 @@ use crate::errors::DatabaseError;
 use crate::expression::simplify::{ConstantCalculator, Simplify};
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
+use crate::planner::operator::visitor_mut::{
+    ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
+};
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::PlanArena;
+use crate::planner::{Childrens, LogicalPlan, MetaArena};
 
 #[derive(Copy, Clone)]
 pub struct ConstantCalculation;
 
-pub(crate) fn constant_calculation_current(
+pub(crate) fn constant_calculation_current<A: MetaArena + ?Sized>(
     plan: &mut LogicalPlan,
-    arena: &mut crate::planner::PlanArena,
+    arena: &mut A,
 ) -> Result<(), DatabaseError> {
     let mut calculator = ConstantCalculator::new(arena);
-    OperatorExprVisitorMut::new(&mut calculator, arena).visit_operator(&mut plan.operator, None)
+    OperatorExprVisitorMut::new(&mut calculator, arena).visit_operator(
+        &mut plan.operator,
+        None,
+        &mut ChildrenVisitMut::empty(),
+    )
 }
 
 impl ConstantCalculation {
@@ -54,7 +62,8 @@ impl NormalizationRule for ConstantCalculation {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         Self::_apply(plan, arena)?;
         Ok(true)
@@ -82,7 +91,8 @@ impl NormalizationRule for SimplifyFilter {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         if let Operator::Filter(filter_op) = &mut plan.operator {
             if filter_op.is_optimized {
@@ -110,25 +120,27 @@ mod test {
 
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::{Range, RangeDetacher};
+    use crate::expression::simplify::Simplify;
+    use crate::expression::visitor_mut::ExprVisitorMut;
     use crate::expression::{BinaryOperator, ScalarExpression, UnaryOperator};
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
     use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::Operator;
-    use crate::planner::{LogicalPlan, PlanArena};
+    use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
     use crate::types::value::DataValue;
     use crate::types::{ColumnId, LogicalType};
     use std::collections::Bound;
 
     fn run_with_single_batch(
         plan: LogicalPlan,
-        name: &str,
+        name: &'static str,
         strategy: HepBatchStrategy,
-        rules: Vec<NormalizationRuleImpl>,
+        rules: &[NormalizationRuleImpl],
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
-            .before_batch(name.to_string(), strategy, rules)
+            .before_batch(name, strategy, rules)
             .build()
             .instantiate(plan)
             .find_best(None, arena)
@@ -146,9 +158,9 @@ mod test {
 
         let best_plan = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_simplification".to_string(),
+                "test_simplification",
                 HepBatchStrategy::once_topdown(),
-                vec![
+                &[
                     NormalizationRuleImpl::SimplifyFilter,
                     NormalizationRuleImpl::ConstantCalculation,
                 ],
@@ -202,7 +214,7 @@ mod test {
             plan,
             "test_constant_cast_elimination",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::ConstantCalculation],
+            &[NormalizationRuleImpl::ConstantCalculation],
             &mut arena,
         )?;
 
@@ -234,10 +246,6 @@ mod test {
 
     #[test]
     fn test_constant_is_null_elimination() -> Result<(), DatabaseError> {
-        use crate::expression::simplify::Simplify;
-        use crate::expression::visitor_mut::ExprVisitorMut;
-        use crate::planner::TableArenaCell;
-
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         for (value, negated, expected) in [
@@ -305,7 +313,7 @@ mod test {
                 plan,
                 "test_simplify_filter",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::SimplifyFilter],
+                &[NormalizationRuleImpl::SimplifyFilter],
                 &mut arena,
             )?;
 
@@ -377,7 +385,7 @@ mod test {
             plan,
             "test_simplify_filter",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::SimplifyFilter],
+            &[NormalizationRuleImpl::SimplifyFilter],
             &mut arena,
         )?;
 
@@ -431,7 +439,7 @@ mod test {
             plan,
             "test_non_comparison_does_not_apply_pending_rearrangement",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::SimplifyFilter],
+            &[NormalizationRuleImpl::SimplifyFilter],
             &mut arena,
         )?;
         let filter = best_plan.childrens.pop_only();
@@ -473,7 +481,7 @@ mod test {
             plan.clone(),
             "test_simplify_filter",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::SimplifyFilter],
+            &[NormalizationRuleImpl::SimplifyFilter],
             arena,
         )?;
 
@@ -651,6 +659,64 @@ mod test {
             })
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn constant_in_expansion_uses_original_list_length() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        for (list, kept) in [
+            ("1,2,3,4,5", false),
+            ("1,2,3,4,5,6", true),
+            ("1,1,1,1,1,NULL", true),
+            ("NULL,NULL,NULL,NULL,NULL,NULL", true),
+        ] {
+            for negated in ["", "not "] {
+                let mut arena = PlanArena::new(&table_state.table_arena);
+                let plan = table_state.plan_with_arena(
+                    format!("select * from t1 where c1 {negated}in ({list})"),
+                    &mut arena,
+                )?;
+                let Operator::Filter(filter) = plan.childrens.pop_only().operator else {
+                    unreachable!();
+                };
+                let mut predicate = filter.predicate;
+                Simplify.visit(&mut predicate, &mut arena)?;
+                assert_eq!(
+                    matches!(arena.expression(predicate), ScalarExpression::In { .. }),
+                    kept,
+                    "{negated}IN ({list})"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_large_in_keeps_pairwise_expansion() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        for predicate in [
+            "c1 in (1,2,3,4,5,2147483648)",
+            "c1 in (1,2,3,4,5,c1)",
+            "(c1 + 1) in (1,2,3,4,5,6)",
+            "cast(c1 as double) in (1.0,2.0,3.0,4.0,5.0,6.0)",
+        ] {
+            let mut arena = PlanArena::new(&table_state.table_arena);
+            let plan = table_state
+                .plan_with_arena(format!("select * from t1 where {predicate}"), &mut arena)?;
+            let Operator::Filter(filter) = plan.childrens.pop_only().operator else {
+                unreachable!();
+            };
+            let mut expression = filter.predicate;
+            Simplify.visit(&mut expression, &mut arena)?;
+            assert!(
+                matches!(
+                    arena.expression(expression),
+                    ScalarExpression::Binary { .. }
+                ),
+                "{predicate}"
+            );
+        }
         Ok(())
     }
 

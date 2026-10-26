@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod bitset;
 pub mod evaluator;
 pub mod index;
 pub mod serialize;
@@ -152,6 +153,27 @@ impl LogicalType {
             LogicalType::TimeStamp(_, _) => Some(8),
             LogicalType::Tuple(_) => unreachable!(),
         }
+    }
+
+    pub fn fixed_encoded_len(&self) -> Option<usize> {
+        let payload = match self {
+            LogicalType::Boolean | LogicalType::Tinyint | LogicalType::UTinyint => 1,
+            LogicalType::Smallint | LogicalType::USmallint => 2,
+            LogicalType::Integer
+            | LogicalType::UInteger
+            | LogicalType::Float
+            | LogicalType::Date => 4,
+            LogicalType::Bigint
+            | LogicalType::UBigint
+            | LogicalType::Double
+            | LogicalType::DateTime => 8,
+            LogicalType::Time(_) => 12,
+            LogicalType::TimeStamp(..) => 17,
+            #[cfg(feature = "decimal")]
+            LogicalType::Decimal(..) => 16,
+            _ => return None,
+        };
+        Some(1 + payload) // One-byte variant tag.
     }
 
     pub fn numeric() -> Vec<LogicalType> {
@@ -494,6 +516,49 @@ pub(crate) mod test {
     use rust_decimal::Decimal;
     use std::borrow::Cow;
     use std::io::{Cursor, Seek, SeekFrom};
+
+    #[test]
+    #[cfg(feature = "spill")]
+    fn fixed_encoded_len_matches_values() -> Result<(), DatabaseError> {
+        use crate::execution::spill::SpillCodec;
+        use crate::types::value::DataValue;
+
+        for ty in [
+            LogicalType::Boolean,
+            LogicalType::Tinyint,
+            LogicalType::UTinyint,
+            LogicalType::Smallint,
+            LogicalType::USmallint,
+            LogicalType::Integer,
+            LogicalType::UInteger,
+            LogicalType::Bigint,
+            LogicalType::UBigint,
+            LogicalType::Float,
+            LogicalType::Double,
+            LogicalType::Date,
+            LogicalType::DateTime,
+            LogicalType::Time(Some(3)),
+            LogicalType::TimeStamp(Some(6), true),
+            #[cfg(feature = "decimal")]
+            LogicalType::Decimal(None, None),
+        ] {
+            assert_eq!(
+                ty.fixed_encoded_len(),
+                Some(DataValue::init(&ty).encoded_len()?),
+                "{ty:?}"
+            );
+        }
+        for ty in [
+            LogicalType::SqlNull,
+            LogicalType::Varchar(None, CharLengthUnits::Characters),
+            LogicalType::Char(2, CharLengthUnits::Octets),
+            LogicalType::Varbinary(None),
+            LogicalType::Tuple(vec![LogicalType::Integer]),
+        ] {
+            assert_eq!(ty.fixed_encoded_len(), None);
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_char_length_units_display() {

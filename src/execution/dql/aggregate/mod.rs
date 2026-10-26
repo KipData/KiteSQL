@@ -14,18 +14,22 @@
 
 mod avg;
 mod count;
+mod group_concat;
 pub mod hash_agg;
 mod min_max;
 pub mod simple_agg;
 pub mod stream_agg;
 pub mod stream_distinct;
 mod sum;
+mod total;
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::avg::AvgAccumulator;
 use crate::execution::dql::aggregate::count::{CountAccumulator, DistinctCountAccumulator};
+use crate::execution::dql::aggregate::group_concat::GroupConcatAccumulator;
 use crate::execution::dql::aggregate::min_max::MinMaxAccumulator;
 use crate::execution::dql::aggregate::sum::{DistinctSumAccumulator, SumAccumulator};
+use crate::execution::dql::aggregate::total::TotalAccumulator;
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
@@ -65,6 +69,8 @@ pub(crate) fn create_accumulator(
         (AggKind::Min, _) => Box::new(MinMaxAccumulator::new(false)),
         (AggKind::Max, _) => Box::new(MinMaxAccumulator::new(true)),
         (AggKind::Avg, distinct) => Box::new(AvgAccumulator::new(distinct)),
+        (AggKind::Total, distinct) => Box::new(TotalAccumulator::new(distinct)),
+        (AggKind::GroupConcat, distinct) => Box::new(GroupConcatAccumulator::new(distinct)),
     })
 }
 

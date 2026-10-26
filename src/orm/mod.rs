@@ -6,7 +6,7 @@ use crate::binder::{
 };
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableName};
 use crate::db::{
-    BindSource, DBTransaction, Database, DatabaseIter, OrmIter, ResultIter, TransactionIter,
+    BindSource, Database, DatabaseIter, OrmIter, ResultIter, Transaction, TransactionIter,
 };
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
@@ -17,8 +17,8 @@ use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::sort::SortField;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena};
-use crate::storage::{Storage, Transaction};
-use crate::types::tuple::{SchemaView, Tuple};
+use crate::storage::{Storage, StorageTransaction};
+use crate::types::tuple::{SchemaView, TupleImpl};
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
@@ -71,7 +71,7 @@ impl OrmField {
     }
 }
 
-/// One row returned by [`Database::describe`] or [`DBTransaction::describe`].
+/// One row returned by [`Database::describe`] or [`Transaction::describe`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeColumn {
     pub field: String,
@@ -83,7 +83,10 @@ pub struct DescribeColumn {
 }
 
 impl FromQueryRow for DescribeColumn {
-    fn from_query_row(_: &SchemaView<'_, '_>, tuple: &mut Tuple) -> Result<Self, DatabaseError> {
+    fn from_query_row(
+        _: &SchemaView<'_, '_>,
+        tuple: &mut TupleImpl,
+    ) -> Result<Self, DatabaseError> {
         let field = describe_text_value(take_projected_value(tuple, 0));
         let data_type = describe_text_value(take_projected_value(tuple, 1));
         let len = describe_text_value(take_projected_value(tuple, 2));
@@ -219,7 +222,7 @@ impl<M, T> FieldSort<M, T> {
 #[doc(hidden)]
 pub trait BindOrmScalar<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
@@ -230,7 +233,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmScalar<'bind, 'parent, 'arena, T, A> for Field<M, V>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
@@ -243,7 +246,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> BindOrmScalar<'bind, 'parent, 'arena, T, A> for ScalarExpression
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
@@ -257,7 +260,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> BindOrmScalar<'bind, 'parent, 'arena, T, A>
     for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar(
@@ -271,7 +274,7 @@ where
 #[doc(hidden)]
 pub trait BindOrmSort<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -282,7 +285,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmSort<'bind, 'parent, 'arena, T, A> for Field<M, V>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -296,7 +299,7 @@ where
 impl<'bind, 'parent, 'arena, T, A, M, V> BindOrmSort<'bind, 'parent, 'arena, T, A>
     for FieldSort<M, V>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -312,7 +315,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A> for ScalarExpression
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -325,7 +328,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A> for SortField
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -339,7 +342,7 @@ where
 impl<'bind, 'parent, 'arena, T, A> BindOrmSort<'bind, 'parent, 'arena, T, A>
     for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_sort<'scope>(
@@ -379,7 +382,7 @@ impl WindowSpec {
 
 impl<'bind, 'parent, 'arena, T, A> From<CtxExpression<'bind, 'parent, 'arena, T, A>> for ExprRef
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn from(expr: CtxExpression<'bind, 'parent, 'arena, T, A>) -> Self {
@@ -417,7 +420,7 @@ where
 #[doc(hidden)]
 pub trait BindOrmScalarList<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn bind_scalar_list(
@@ -432,7 +435,7 @@ macro_rules! impl_bind_orm_scalar_list {
             impl<'bind, 'parent, 'arena, Tx, Args, $($name),+> BindOrmScalarList<'bind, 'parent, 'arena, Tx, Args>
                 for ($($name,)+)
             where
-                Tx: Transaction,
+                Tx: StorageTransaction,
                 Args: AsRef<[(usize, LogicalType)]>,
                 $($name: BindOrmScalar<'bind, 'parent, 'arena, Tx, Args>,)+
             {
@@ -484,7 +487,7 @@ macro_rules! impl_quantified_subquery_methods {
 #[allow(clippy::type_complexity)]
 struct ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: NonNull<Binder<'bind, 'parent, T, A>>,
@@ -494,7 +497,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> Clone for ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn clone(&self) -> Self {
@@ -504,14 +507,14 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> Copy for ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
 }
 
 impl<'bind, 'parent, 'arena, T, A> ExprBindScopeHandle<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn new<'ctx>(scope: &ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>) -> Self {
@@ -688,7 +691,7 @@ where
 /// internal scope handle is private.
 pub struct CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     expr: ExprRef,
@@ -697,7 +700,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub fn into_scalar(self) -> ExprRef {
@@ -968,7 +971,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> fmt::Debug for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -978,7 +981,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> Clone for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn clone(&self) -> Self {
@@ -991,7 +994,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> PartialEq for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn eq(&self, other: &Self) -> bool {
@@ -1001,14 +1004,14 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> Eq for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
 }
 
 impl<'bind, 'parent, 'arena, T, A> Hash for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -1018,7 +1021,7 @@ where
 
 impl<'bind, 'parent, 'arena, T, A> IntoOrmExpression for CtxExpression<'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn into_orm_expression(self) -> OrmExpression {
@@ -1026,7 +1029,11 @@ where
     }
 }
 
-fn bind_orm_context<'a, E, F>(executor: E, build: F) -> Result<E::Iter, DatabaseError>
+fn bind_orm_context<'a, E, F>(
+    executor: E,
+    read_only: bool,
+    build: F,
+) -> Result<E::Iter, DatabaseError>
 where
     E: BindSource<'a>,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
@@ -1041,7 +1048,7 @@ where
     ) -> Result<LogicalPlan, DatabaseError>,
 {
     static EMPTY_BIND_PARAMS: &[(usize, LogicalType)] = &[];
-    executor.execute(|state, tx| {
+    executor.execute(read_only, |state, tx| {
         state.build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
             let mut context = OrmContext { binder, arena };
             build(&mut context)
@@ -1072,12 +1079,12 @@ where
 
 /// Binder-backed ORM query context.
 ///
-/// This context is created by [`Database::bind`] or [`DBTransaction::bind`]. Query construction inside
+/// This context is created by [`Database::bind`] or [`Transaction::bind`]. Query construction inside
 /// the closure binds directly into [`ScalarExpression`] and [`LogicalPlan`]
 /// values; it does not build an ORM expression tree first.
 pub struct OrmContext<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
@@ -1087,7 +1094,7 @@ where
 /// Narrow expression binding scope borrowed from an [`OrmContext`].
 pub struct ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
@@ -1096,7 +1103,7 @@ where
 
 pub struct UpdateBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'ctx mut Binder<'bind, 'parent, T, A>,
@@ -1107,7 +1114,7 @@ where
 
 impl<'ctx, 'bind, 'parent, 'arena, T, A> OrmContext<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub fn from<'scope, M: Model>(
@@ -1328,7 +1335,7 @@ where
 
 impl<'ctx, 'bind, 'parent, 'arena, T, A> ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn handle(&self) -> ExprBindScopeHandle<'bind, 'parent, 'arena, T, A> {
@@ -1856,7 +1863,7 @@ where
 
 impl<'ctx, 'bind, 'parent, 'arena, T, A> UpdateBindScope<'ctx, 'bind, 'parent, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub fn set_value<M, V, D>(&mut self, field: Field<M, V>, value: D) -> Result<(), DatabaseError>
@@ -1952,7 +1959,7 @@ where
 impl<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
     BindPlanFrom<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
@@ -2062,7 +2069,7 @@ where
                 bind_orm_source(&mut right_binder, source, Some(join_type), self.arena)?;
             (right_plan, right_binder.context)
         };
-        self.binder.extend(right_context);
+        self.binder.extend(right_context, self.arena)?;
         let on = with_query_bind_step!(self.binder, QueryBindStep::From, {
             let mut scope = self.expr_scope();
             let handle = scope.handle();
@@ -2405,7 +2412,7 @@ where
 impl<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
     BindPlanSelectList<'scope_ctx, 'bind, 'parent, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
@@ -2574,7 +2581,7 @@ pub trait Projection: FromQueryRow {
         relation: &str,
     ) -> Result<Vec<ExprRef>, DatabaseError>
     where
-        T: Transaction,
+        T: StorageTransaction,
         A: AsRef<[(usize, LogicalType)]>;
 }
 
@@ -2592,7 +2599,7 @@ fn bind_orm_source<'bind, 'parent, 'arena, T, A>(
     arena: &mut PlanArena<'arena>,
 ) -> Result<LogicalPlan, DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     let alias = orm_table_alias(&source);
@@ -2606,7 +2613,7 @@ fn bind_orm_target_column<'bind, 'parent, 'arena, T, A>(
     arena: &mut PlanArena<'arena>,
 ) -> Result<ColumnRef, DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     match binder.bind_column_ref_by_name(None, column_name, Some(source_name), arena)? {
@@ -2624,7 +2631,7 @@ fn bind_orm_insert_plan<'bind, 'parent, 'arena, T, A>(
     arena: &mut PlanArena<'arena>,
 ) -> Result<LogicalPlan, DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     let table_name: TableName = table_name.into();
@@ -2692,14 +2699,14 @@ fn bind_orm_insert_model<'bind, 'parent, 'arena, T, A, M>(
     arena: &mut PlanArena<'arena>,
 ) -> Result<LogicalPlan, DatabaseError>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
     let table_name: TableName = M::table_name().into();
     let source = binder
         .context
-        .source_and_bind(table_name.clone(), None, None, false)?
+        .source_and_bind(table_name.clone(), None, None, false, arena)?
         .ok_or(DatabaseError::TableNotFound)?;
     let params = params.into_iter().collect::<BTreeMap<_, _>>();
     let mut schema_ref = Vec::with_capacity(M::fields().len());
@@ -2810,7 +2817,7 @@ pub trait FromDataValue: Sized {
 /// ```
 pub trait FromQueryTuple: Sized {
     /// Decodes one projected tuple into `Self`.
-    fn from_query_tuple(tuple: &mut Tuple) -> Result<Self, DatabaseError>;
+    fn from_query_tuple(tuple: &mut TupleImpl) -> Result<Self, DatabaseError>;
 }
 
 /// Conversion trait from a query result row into a Rust value.
@@ -2820,7 +2827,7 @@ pub trait FromQueryRow: Sized {
     /// Decodes one result row into `Self`.
     fn from_query_row(
         schema: &SchemaView<'_, '_>,
-        tuple: &mut Tuple,
+        tuple: &mut TupleImpl,
     ) -> Result<Self, DatabaseError>;
 }
 
@@ -2994,7 +3001,7 @@ pub trait DecimalType {}
 
 #[doc(hidden)]
 pub fn take_value_at<T: FromDataValue>(
-    tuple: &mut Tuple,
+    tuple: &mut TupleImpl,
     index: Option<usize>,
     field_name: &str,
 ) -> Result<T, DatabaseError> {
@@ -3002,7 +3009,7 @@ pub fn take_value_at<T: FromDataValue>(
         name: field_name.to_string(),
         span: None,
     })?;
-    let value = tuple.values.get_mut(idx).ok_or(DatabaseError::MisMatch(
+    let value = tuple.get_mut(idx).ok_or(DatabaseError::MisMatch(
         "the query result schema",
         "the query result tuple",
     ))?;
@@ -3246,9 +3253,9 @@ macro_rules! impl_from_query_tuple {
                 $($name: FromDataValue,)+
             {
                 #[allow(non_snake_case)]
-                fn from_query_tuple(tuple: &mut Tuple) -> Result<Self, DatabaseError> {
+                fn from_query_tuple(tuple: &mut TupleImpl) -> Result<Self, DatabaseError> {
                     let expected_len = [$(stringify!($name)),+].len();
-                    if tuple.values.len() != expected_len {
+                    if tuple.len() != expected_len {
                         return Err(DatabaseError::MisMatch(
                             "the expected tuple projection width",
                             "the query result",
@@ -3360,9 +3367,8 @@ fn invalid_from_data_value<T>(value: &DataValue) -> DatabaseError {
     ))
 }
 
-fn take_projected_value(tuple: &mut Tuple, index: usize) -> Option<DataValue> {
+fn take_projected_value(tuple: &mut TupleImpl, index: usize) -> Option<DataValue> {
     tuple
-        .values
         .get_mut(index)
         .map(|value| std::mem::replace(value, DataValue::Null))
 }
@@ -3378,8 +3384,8 @@ fn extract_projected_data_value<T: FromDataValue>(
     convert_projected_value::<T>(value)
 }
 
-fn extract_value_from_tuple<T: FromDataValue>(tuple: &mut Tuple) -> Result<T, DatabaseError> {
-    let value = if tuple.values.len() == 1 {
+fn extract_value_from_tuple<T: FromDataValue>(tuple: &mut TupleImpl) -> Result<T, DatabaseError> {
+    let value = if tuple.len() == 1 {
         take_projected_value(tuple, 0).expect("checked one projected expression")
     } else {
         return Err(DatabaseError::MisMatch(
@@ -3391,13 +3397,13 @@ fn extract_value_from_tuple<T: FromDataValue>(tuple: &mut Tuple) -> Result<T, Da
     convert_projected_value::<T>(value)
 }
 
-fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut Tuple) -> Result<T, DatabaseError> {
+fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut TupleImpl) -> Result<T, DatabaseError> {
     T::from_query_tuple(tuple)
 }
 
 fn orm_analyze<'a, E: BindSource<'a>, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
-        .execute(|state, tx| {
+        .execute(false, |state, tx| {
             state.build_plan(&[], tx, |binder, arena| {
                 binder.bind_analyze(M::table_name().into(), arena)
             })
@@ -3411,7 +3417,7 @@ fn orm_insert<'a, E: BindSource<'a>, M: Model>(
 ) -> Result<(), DatabaseError> {
     let params = model.params();
     executor
-        .execute(|state, tx| {
+        .execute(false, |state, tx| {
             state.build_plan(&[], tx, |binder, arena| {
                 bind_orm_insert_model::<_, _, M>(binder, params, arena)
             })
@@ -3425,7 +3431,7 @@ fn orm_get<'a, E: BindSource<'a>, M: Model>(
 ) -> Result<Option<M>, DatabaseError> {
     let primary_key = M::primary_key_field();
     let key = key.to_data_value();
-    extract_optional_model(bind_orm_context(executor, |ctx| {
+    extract_optional_model(bind_orm_context(executor, true, |ctx| {
         let plan: LogicalPlan = ctx
             .from::<M>()?
             .filter(|expr| {
@@ -3443,7 +3449,7 @@ fn orm_get<'a, E: BindSource<'a>, M: Model>(
 fn orm_list<'a, E: BindSource<'a>, M: Model>(
     executor: E,
 ) -> Result<OrmIter<E::Iter, M>, DatabaseError> {
-    Ok(bind_orm_context(executor, |ctx| {
+    Ok(bind_orm_context(executor, true, |ctx| {
         let plan: LogicalPlan = ctx.from::<M>()?.finish()?;
         Ok(plan)
     })?
@@ -3455,7 +3461,7 @@ fn orm_list<'a, E: BindSource<'a>, M: Model>(
 mod tests {
     use super::*;
     use crate::expression::BinaryOperator;
-    use crate::types::tuple::{Schema, SchemaView};
+    use crate::types::tuple::{Schema, SchemaView, Tuple};
     use std::sync::Arc;
 
     #[derive(Debug, PartialEq, Eq)]
@@ -3515,7 +3521,7 @@ mod tests {
     impl FromQueryRow for OrmUnitUser {
         fn from_query_row(
             schema: &SchemaView<'_, '_>,
-            tuple: &mut Tuple,
+            tuple: &mut TupleImpl,
         ) -> Result<Self, DatabaseError> {
             Ok(Self {
                 id: take_value_at(tuple, schema.position("id"), "id")?,
@@ -3603,7 +3609,7 @@ mod tests {
     impl FromQueryRow for OrmUnitOrder {
         fn from_query_row(
             schema: &SchemaView<'_, '_>,
-            tuple: &mut Tuple,
+            tuple: &mut TupleImpl,
         ) -> Result<Self, DatabaseError> {
             Ok(Self {
                 id: take_value_at(tuple, schema.position("id"), "id")?,
@@ -3718,7 +3724,7 @@ mod tests {
         let arena = PlanArena::new(&table_arena);
         let schema: Schema = Vec::new();
         let schema_view = SchemaView::new(&schema, &arena);
-        let mut tuple = Tuple::new(
+        let mut tuple: TupleImpl = Tuple::new(
             None,
             vec![
                 DataValue::from("id".to_string()),
@@ -3728,7 +3734,8 @@ mod tests {
                 DataValue::from("PRI".to_string()),
                 DataValue::Null,
             ],
-        );
+        )
+        .into();
 
         let column = DescribeColumn::from_query_row(&schema_view, &mut tuple)?;
         assert_eq!(
@@ -3742,10 +3749,7 @@ mod tests {
                 default: "NULL".to_string(),
             }
         );
-        assert!(tuple
-            .values
-            .iter()
-            .all(|value| matches!(value, DataValue::Null)));
+        assert!(tuple.iter().all(|value| matches!(value, DataValue::Null)));
         assert_eq!(describe_text_value(None), "");
 
         Ok(())
@@ -3810,29 +3814,29 @@ mod tests {
     #[test]
     fn tuple_projection_helpers_cast_extract_and_report_width_mismatch() -> Result<(), DatabaseError>
     {
-        let mut tuple = Tuple::new(
+        let mut tuple: TupleImpl = Tuple::new(
             None,
             vec![DataValue::Int8(7), DataValue::from("seven".to_string())],
-        );
+        )
+        .into();
         assert_eq!(take_value_at::<i32>(&mut tuple, Some(0), "id")?, 7);
-        assert!(matches!(tuple.values[0], DataValue::Null));
+        assert!(matches!(tuple[0], DataValue::Null));
         assert!(matches!(
             take_value_at::<i32>(&mut tuple, None, "missing"),
             Err(DatabaseError::ColumnNotFound { .. })
         ));
 
-        let mut tuple = Tuple::new(
+        let mut tuple: TupleImpl = Tuple::new(
             None,
             vec![DataValue::Int32(1), DataValue::from("one".to_string())],
-        );
+        )
+        .into();
         let projected = <(i32, String) as FromQueryTuple>::from_query_tuple(&mut tuple)?;
         assert_eq!(projected, (1, "one".to_string()));
-        assert!(tuple
-            .values
-            .iter()
-            .all(|value| matches!(value, DataValue::Null)));
+        assert!(tuple.iter().all(|value| matches!(value, DataValue::Null)));
 
-        let mut too_wide = Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(2)]);
+        let mut too_wide: TupleImpl =
+            Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(2)]).into();
         assert!(matches!(
             extract_value_from_tuple::<i32>(&mut too_wide),
             Err(DatabaseError::MisMatch(
@@ -3841,7 +3845,7 @@ mod tests {
             ))
         ));
 
-        let mut too_narrow = Tuple::new(None, vec![DataValue::Int32(1)]);
+        let mut too_narrow: TupleImpl = Tuple::new(None, vec![DataValue::Int32(1)]).into();
         assert!(matches!(
             <(i32, i32) as FromQueryTuple>::from_query_tuple(&mut too_narrow),
             Err(DatabaseError::MisMatch(
@@ -3886,7 +3890,7 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].name, expected);
         }
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         let tx_plan = tx.prepare(&types, |ctx| {
             ctx.from::<OrmUnitUser>()?
                 .filter(|e| e.column(OrmUnitUser::id())?.eq(e.param(1)?))?
@@ -3903,7 +3907,9 @@ mod tests {
 
     #[test]
     fn database_and_transaction_orm_helpers_bind_expected_plans() -> Result<(), DatabaseError> {
-        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
+        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test")
+            .histogram_buckets(100)
+            .build_in_memory()?;
         database
             .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")?;
         database.create_view("orm_unit_user_names", |ctx| {
@@ -3960,7 +3966,7 @@ mod tests {
             .iter()
             .any(|column| column.field == "name"));
 
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         tx.insert(&OrmUnitUser {
             id: 4,
             name: "Dora".to_string(),
@@ -4077,8 +4083,9 @@ mod tests {
             concat!(
                 "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
                 "Sort By 1 Asc Nulls Last [Sort => (Sort Option: OrderBy: (1 Asc Nulls Last) ignore_prefix_len: 0)] ",
-                "Filter (((orm_unit_users.id = 3) || ((orm_unit_users.id = 2) || (orm_unit_users.id = 1))) && (orm_unit_users.id != 3)), Is Having: false ",
-                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)]"
+                "Filter (orm_unit_users.id != 3), Is Having: false ",
+                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.id] ",
+                "[IndexScan By pk_index => 1, 2, 3 Covered => (Sort Option: OrderBy: (orm_unit_users.id Asc Nulls Last) ignore_prefix_len: 0)]"
             ),
             "{list_plan}"
         );
@@ -4204,10 +4211,7 @@ mod tests {
         let mut iter =
             database.run("select id,name,age from orm_unit_users where id>3 order by id")?;
         let mut rows = Vec::new();
-        while iter
-            .next_tuple(|_, row| rows.push(row.values.clone()))?
-            .is_some()
-        {}
+        while iter.next_tuple(|_, row| rows.push(row.clone()))?.is_some() {}
         iter.done()?;
         assert_eq!(
             rows,
@@ -4438,9 +4442,9 @@ mod tests {
             inner_using_plan,
             concat!(
                 "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
-                "InnerJoinApply ",
-                "TableScan orm_unit_users -> [orm_unit_users.id] [SeqScan => (Sort Option: None)] ",
-                "TableScan orm_unit_orders -> [orm_unit_orders.id] [IndexScan By pk_index => Probe ? => (Sort Option: OrderBy: (orm_unit_orders.id Asc Nulls Last) ignore_prefix_len: 0)]"
+                "IndexProbeJoin [IndexProbeJoin => (Sort Option: Follow)] ",
+                "TableScan orm_unit_orders -> [orm_unit_orders.id] [SeqScan => (Sort Option: None)] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id] [IndexScan By pk_index => Probe ? Covered => (Sort Option: OrderBy: (orm_unit_users.id Asc Nulls Last) ignore_prefix_len: 0)]"
             ),
             "{inner_using_plan}"
         );

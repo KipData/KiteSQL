@@ -19,10 +19,10 @@ use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_analyze(
         &mut self,
         table_name: TableName,
@@ -30,7 +30,7 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     ) -> Result<LogicalPlan, DatabaseError> {
         let table = self
             .context
-            .source_and_bind(table_name.clone(), None, None, true)?
+            .source_and_bind(table_name.clone(), None, None, true, arena)?
             .and_then(|source| {
                 if let Source::Table(table) = source {
                     Some(table)
@@ -47,6 +47,8 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
                 table_name,
                 index_metas,
                 histogram_buckets: None,
+                hll_precision: None,
+                statistics_relative_error: None,
             }),
             Childrens::Only(Box::new(scan_op)),
         ))

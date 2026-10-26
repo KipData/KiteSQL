@@ -30,22 +30,22 @@ use crate::types::evaluator::{BinaryEvaluatorRef, CastEvaluatorRef, UnaryEvaluat
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
-pub(super) fn eq_ignore_colref_pos(
+pub(super) fn eq_ignore_colref_pos<A: MetaArena + ?Sized>(
     lhs: ExprRef,
     rhs: ExprRef,
-    arena: &(dyn MetaArena + '_),
+    arena: &A,
 ) -> bool {
     EqIgnoreColRefPosVisitor::equals(lhs, rhs, arena)
 }
 
-struct EqIgnoreColRefPosVisitor<'a, 'arena> {
+struct EqIgnoreColRefPosVisitor<'a, A: ?Sized> {
     rhs: ExprRef,
-    arena: &'a (dyn MetaArena + 'arena),
+    arena: &'a A,
     equal: bool,
 }
 
-impl<'a, 'arena> EqIgnoreColRefPosVisitor<'a, 'arena> {
-    fn equals(lhs: ExprRef, rhs: ExprRef, arena: &'a (dyn MetaArena + 'arena)) -> bool {
+impl<'a, A: MetaArena + ?Sized> EqIgnoreColRefPosVisitor<'a, A> {
+    fn equals(lhs: ExprRef, rhs: ExprRef, arena: &'a A) -> bool {
         let mut visitor = Self {
             rhs,
             arena,
@@ -75,8 +75,8 @@ impl<'a, 'arena> EqIgnoreColRefPosVisitor<'a, 'arena> {
     }
 }
 
-impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
-    fn visit(&mut self, lhs: ExprRef, arena: &(dyn MetaArena + '_)) -> Result<(), DatabaseError> {
+impl<A: MetaArena + ?Sized> ExprVisitor<A> for EqIgnoreColRefPosVisitor<'_, A> {
+    fn visit(&mut self, lhs: ExprRef, arena: &A) -> Result<(), DatabaseError> {
         let lhs = lhs.unpack_alias(arena);
         self.rhs = self.rhs.unpack_alias(arena);
         if lhs == self.rhs {
@@ -89,7 +89,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         &mut self,
         id: ScalarQueryRef,
         ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = matches!(self.rhs(), ScalarExpression::OuterParam { id: rhs, ty: rhs_ty } if id == *rhs && ty == rhs_ty);
         Ok(())
@@ -99,7 +99,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         &mut self,
         id: ScalarQueryRef,
         ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = matches!(self.rhs(), ScalarExpression::OuterValue { id: rhs, ty: rhs_ty } if id == *rhs && ty == rhs_ty);
         Ok(())
@@ -109,7 +109,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         &mut self,
         id: ScalarQueryRef,
         ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::InitValue {
@@ -126,7 +126,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         Ok(())
     }
 
-    fn visit_column_ref(&mut self, lhs: &ColumnRef) -> Result<(), DatabaseError> {
+    fn visit_column_ref(&mut self, lhs: &ColumnRef, _: usize) -> Result<(), DatabaseError> {
         self.equal = matches!(
             self.rhs(),
             ScalarExpression::ColumnRef { column: rhs, .. }
@@ -140,7 +140,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_expr: ExprRef,
         lhs_ty: &LogicalType,
         lhs_evaluator: Option<&CastEvaluatorRef>,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::TypeCast {
@@ -161,7 +161,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         &mut self,
         lhs_negated: bool,
         lhs_expr: ExprRef,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::IsNull {
@@ -179,7 +179,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_expr: ExprRef,
         lhs_evaluator: Option<&UnaryEvaluatorRef>,
         lhs_ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::Unary {
@@ -205,7 +205,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_right: ExprRef,
         lhs_evaluator: Option<&BinaryEvaluatorRef>,
         lhs_ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::Binary {
@@ -232,7 +232,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_kind: &AggKind,
         lhs_args: &[ExprRef],
         lhs_ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::AggCall {
@@ -251,11 +251,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         Ok(())
     }
 
-    fn visit_window(
-        &mut self,
-        lhs: &WindowCall,
-        _arena: &(dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
+    fn visit_window(&mut self, lhs: &WindowCall, _arena: &A) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::WindowCall(rhs) => {
                 lhs.function.kind == rhs.function.kind
@@ -281,7 +277,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_negated: bool,
         lhs_expr: ExprRef,
         lhs_args: &[ExprRef],
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::In {
@@ -305,7 +301,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_expr: ExprRef,
         lhs_left: ExprRef,
         lhs_right: ExprRef,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::Between {
@@ -330,7 +326,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_expr: ExprRef,
         lhs_for: Option<ExprRef>,
         lhs_from: Option<ExprRef>,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::SubString {
@@ -351,7 +347,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         &mut self,
         lhs_expr: ExprRef,
         lhs_in: ExprRef,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::Position {
@@ -371,7 +367,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_expr: ExprRef,
         lhs_what: Option<ExprRef>,
         lhs_where: Option<&TrimWhereField>,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::Trim {
@@ -393,11 +389,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         Ok(())
     }
 
-    fn visit_tuple(
-        &mut self,
-        lhs: &[ExprRef],
-        _arena: &(dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
+    fn visit_tuple(&mut self, lhs: &[ExprRef], _arena: &A) -> Result<(), DatabaseError> {
         self.equal =
             matches!(self.rhs(), ScalarExpression::Tuple(rhs) if self.refs_equal(lhs, rhs));
         Ok(())
@@ -406,7 +398,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
     fn visit_scala_function(
         &mut self,
         lhs: &ScalarFunction,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = matches!(
             self.rhs(),
@@ -419,7 +411,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
     fn visit_table_function(
         &mut self,
         lhs: &TableFunction,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = matches!(
             self.rhs(),
@@ -435,7 +427,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_left: ExprRef,
         lhs_right: ExprRef,
         lhs_ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::If {
@@ -459,7 +451,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_left: ExprRef,
         lhs_right: ExprRef,
         lhs_ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::IfNull {
@@ -481,7 +473,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_left: ExprRef,
         lhs_right: ExprRef,
         lhs_ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::NullIf {
@@ -502,7 +494,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         &mut self,
         lhs_exprs: &[ExprRef],
         lhs_ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::Coalesce {
@@ -520,7 +512,7 @@ impl ExprVisitor<dyn MetaArena + '_> for EqIgnoreColRefPosVisitor<'_, '_> {
         lhs_pairs: &[(ExprRef, ExprRef)],
         lhs_else: Option<ExprRef>,
         lhs_ty: &LogicalType,
-        _arena: &(dyn MetaArena + '_),
+        _arena: &A,
     ) -> Result<(), DatabaseError> {
         self.equal = match self.rhs() {
             ScalarExpression::CaseWhen {

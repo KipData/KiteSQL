@@ -14,11 +14,11 @@
 
 use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::rule::BestPhysicalOption;
+use crate::optimizer::core::rule::{keep_best_physical_option, BestPhysicalOption};
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
-use crate::single_mapping;
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
+use crate::planner::{LogicalPlan, PlanArena};
 use std::sync::LazyLock;
 
 static MARK_APPLY_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -28,8 +28,34 @@ static MARK_APPLY_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
 #[derive(Clone)]
 pub struct MarkApplyImplementation;
 
-single_mapping!(
-    MarkApplyImplementation,
-    MARK_APPLY_PATTERN,
-    PhysicalOption::new(PlanImpl::MarkApply, SortOption::Follow)
-);
+impl MatchPattern for MarkApplyImplementation {
+    fn pattern(&self) -> &Pattern {
+        &MARK_APPLY_PATTERN
+    }
+}
+
+impl ImplementationRule for MarkApplyImplementation {
+    fn update_best_option(
+        &self,
+        plan: &LogicalPlan,
+        _: &PlanArena,
+        _: &StatisticMetaLoader<'_>,
+        _: &mut crate::optimizer::core::rule::HintState,
+        best_physical_option: &mut BestPhysicalOption,
+    ) -> Result<(), DatabaseError> {
+        if !matches!(plan.operator, Operator::MarkApply(_)) {
+            return Ok(());
+        }
+        // A mark adds one value to each left row.
+        keep_best_physical_option(
+            best_physical_option,
+            PhysicalOption::new(
+                PlanImpl::MarkApply,
+                SortOption::Follow,
+                RowCountOption::Follow,
+            ),
+            None,
+        );
+        Ok(())
+    }
+}

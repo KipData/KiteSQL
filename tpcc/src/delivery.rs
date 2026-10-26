@@ -55,7 +55,7 @@ impl TpccTransaction for Delivery {
                     (2, DataValue::Int16(args.w_id as i16)),
                 ],
                 &mut |tuple| {
-                    no_o_id = tuple.values[0].i32().unwrap();
+                    no_o_id = tuple[0].i32().unwrap();
                     Ok(())
                 },
             )?;
@@ -82,7 +82,7 @@ impl TpccTransaction for Delivery {
                     (3, DataValue::Int16(args.w_id as i16)),
                 ],
                 &mut |tuple| {
-                    c_id = tuple.values[0].i32().unwrap();
+                    c_id = tuple[0].i32().unwrap();
                     Ok(())
                 },
             )?;
@@ -116,7 +116,7 @@ impl TpccTransaction for Delivery {
                     (3, DataValue::Int16(args.w_id as i16)),
                 ],
                 &mut |tuple| {
-                    ol_total = tuple.values[0].decimal().unwrap();
+                    ol_total = tuple[0].decimal().unwrap();
                     Ok(())
                 },
             )?;

@@ -18,7 +18,7 @@ use crate::expression::visitor::{walk_expr, ExprVisitor};
 use crate::expression::visitor_mut::{walk_mut_expr, ExprVisitorMut};
 use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 use crate::{
     expression::ScalarExpression,
@@ -41,7 +41,7 @@ impl ExprVisitor<dyn MetaArena + '_> for AggregateCallCollector<'_> {
     }
 }
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub fn bind_aggregate(
         &mut self,
         children: LogicalPlan,
@@ -360,10 +360,10 @@ impl<'a> AggregateOutputBinder<'a> {
         }
     }
 
-    fn output_ref(
+    fn output_ref<A: MetaArena + ?Sized>(
         &mut self,
         expr: ExprRef,
-        arena: &mut dyn MetaArena,
+        arena: &mut A,
     ) -> Result<Option<ScalarExpression>, DatabaseError> {
         let output_count = self.agg_calls.len() + self.group_by_exprs.len();
         self.agg_calls
@@ -395,12 +395,8 @@ impl<'a> AggregateOutputBinder<'a> {
     }
 }
 
-impl ExprVisitorMut for AggregateOutputBinder<'_> {
-    fn visit(
-        &mut self,
-        expr: &mut ExprRef,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for AggregateOutputBinder<'_> {
+    fn visit(&mut self, expr: &mut ExprRef, arena: &mut A) -> Result<(), DatabaseError> {
         if let ScalarExpression::Alias {
             alias: crate::expression::AliasType::Name(_),
             ..
@@ -510,10 +506,10 @@ mod tests {
             alias: AliasType::Name("g".to_string()),
         });
 
-        let constant = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
+        let identity = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
         let mut target = arena.alloc_expression(ScalarExpression::Alias {
-            expr: constant,
-            alias: AliasType::Expr(group_expr),
+            expr: group_expr,
+            alias: AliasType::Expr(identity),
         });
 
         {

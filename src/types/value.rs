@@ -15,6 +15,7 @@
 use super::LogicalType;
 use crate::errors::DatabaseError;
 use crate::iter_ext::Itertools;
+use crate::planner::ScalarQueryRef;
 use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};
 use crate::types::evaluator::cast::cast_create;
 use crate::types::CharLengthUnits;
@@ -135,6 +136,10 @@ pub enum DataValue {
     /// A typed placeholder used only while preparing a plan.
     Parameter {
         id: usize,
+        ty: LogicalType,
+    },
+    InitValue {
+        id: ScalarQueryRef,
         ty: LogicalType,
     },
     Null,
@@ -363,6 +368,17 @@ impl PartialEq for DataValue {
                 },
             ) => left == right && left_ty == right_ty,
             (Parameter { .. }, _) => false,
+            (
+                InitValue {
+                    id: left,
+                    ty: left_ty,
+                },
+                InitValue {
+                    id: right,
+                    ty: right_ty,
+                },
+            ) => left == right && left_ty == right_ty,
+            (InitValue { .. }, _) => false,
             (Boolean(v1), Boolean(v2)) => v1.eq(v2),
             (Boolean(_), _) => false,
             (Float32(v1), Float32(v2)) => v1.eq(v2),
@@ -456,7 +472,7 @@ impl PartialOrd for DataValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         use DataValue::*;
         match (self, other) {
-            (Parameter { .. }, _) => None,
+            (Parameter { .. }, _) | (InitValue { .. }, _) => None,
             (Boolean(v1), Boolean(v2)) => v1.partial_cmp(v2),
             (Boolean(_), _) => None,
             (Float32(v1), Float32(v2)) => v1.partial_cmp(v2),
@@ -525,6 +541,11 @@ impl Hash for DataValue {
         match self {
             Parameter { id, ty } => {
                 19u8.hash(state);
+                id.hash(state);
+                ty.hash(state);
+            }
+            InitValue { id, ty } => {
+                20u8.hash(state);
                 id.hash(state);
                 ty.hash(state);
             }
@@ -676,30 +697,46 @@ impl DataValue {
         digits.parse().ok()
     }
 
-    pub(crate) fn bind_parameters<'p, F>(&mut self, get: &F) -> Result<(), DatabaseError>
+    pub(crate) fn bind_parameters<'p, F, G>(
+        &mut self,
+        params: &F,
+        init_values: &G,
+    ) -> Result<bool, DatabaseError>
     where
         F: Fn(usize) -> Option<&'p DataValue>,
+        G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
     {
         match self {
             DataValue::Parameter { id, ty } => {
-                let Some(input) = get(*id) else {
+                let Some(input) = params(*id) else {
                     return Err(DatabaseError::parameter_not_found(format!("${id}")));
                 };
                 *self = input.clone().cast(ty)?;
+                Ok(false)
+            }
+            DataValue::InitValue { id, ty } => {
+                let Some(input) = init_values(*id) else {
+                    return Err(DatabaseError::InvalidValue(format!(
+                        "scalar query {id} is not initialized"
+                    )));
+                };
+                *self = input.clone().cast(ty)?;
+                Ok(self.is_null())
             }
             DataValue::Tuple(values) => {
+                let mut has_null = false;
                 for value in values {
-                    value.bind_parameters(get)?;
+                    has_null |= value.bind_parameters(params, init_values)?;
                 }
+                Ok(has_null)
             }
-            _ => {}
+            _ => Ok(false),
         }
-        Ok(())
     }
 
     pub(crate) fn has_parameter(&self) -> bool {
         match self {
-            DataValue::Parameter { .. } => true,
+            DataValue::Parameter { .. } | DataValue::InitValue { .. } => true,
             DataValue::Tuple(values) => values.iter().any(Self::has_parameter),
             _ => false,
         }
@@ -707,7 +744,7 @@ impl DataValue {
 
     pub(crate) fn serialized_len_hint(&self) -> usize {
         match self {
-            DataValue::Parameter { .. } => 0,
+            DataValue::Parameter { .. } | DataValue::InitValue { .. } => 0,
             DataValue::Null => 0,
             DataValue::Boolean(_) | DataValue::Int8(_) | DataValue::UInt8(_) => 1,
             DataValue::Int16(_) | DataValue::UInt16(_) => 2,
@@ -885,6 +922,14 @@ impl DataValue {
     }
 
     #[inline]
+    pub fn has_null(&self) -> bool {
+        match self {
+            DataValue::Tuple(values) => values.iter().any(DataValue::has_null),
+            value => value.is_null(),
+        }
+    }
+
+    #[inline]
     pub fn init(logic_type: &LogicalType) -> DataValue {
         match logic_type {
             LogicalType::SqlNull => DataValue::Null,
@@ -984,7 +1029,7 @@ impl DataValue {
     #[inline]
     pub fn logical_type(&self) -> LogicalType {
         match self {
-            DataValue::Parameter { ty, .. } => ty.clone(),
+            DataValue::Parameter { ty, .. } | DataValue::InitValue { ty, .. } => ty.clone(),
             DataValue::Null => LogicalType::SqlNull,
             DataValue::Boolean(_) => LogicalType::Boolean,
             DataValue::Float32(_) => LogicalType::Float,
@@ -1073,7 +1118,14 @@ impl DataValue {
     #[inline]
     fn decode_string<R: Read>(reader: &mut R) -> std::io::Result<Vec<u8>> {
         let mut result = Vec::new();
+        Self::read_memcomparable_string(reader, |group| result.extend_from_slice(group))?;
+        Ok(result)
+    }
 
+    fn read_memcomparable_string<R: Read>(
+        reader: &mut R,
+        mut append: impl FnMut(&[u8]),
+    ) -> std::io::Result<()> {
         loop {
             let mut group = [0u8; ENCODE_GROUP_SIZE];
             reader.read_exact(&mut group)?;
@@ -1092,14 +1144,40 @@ impl DataValue {
             }
 
             let data_len = ENCODE_GROUP_SIZE - pad_count;
-            result.extend_from_slice(&group[..data_len]);
+            append(&group[..data_len]);
 
             if pad_count != 0 {
-                break;
+                return Ok(());
             }
         }
+    }
 
-        Ok(result)
+    fn skip_memcomparable_string<R: Read>(reader: &mut R) -> std::io::Result<()> {
+        Self::read_memcomparable_string(reader, |_| {})
+    }
+
+    fn skip_memcomparable_decimal<R: Read>(reader: &mut R) -> Result<(), DatabaseError> {
+        let flag = reader.read_u8()?;
+        match flag {
+            0x08 | 0x14 | 0x16 | 0x22 => {
+                reader.read_u8()?;
+            }
+            0x09..=0x13 | 0x17..=0x21 => {}
+            0x15 => return Ok(()),
+            _ => {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "invalid decimal exponent: {flag}"
+                )))
+            }
+        }
+        let negative = (0x07..0x15).contains(&flag);
+        loop {
+            let byte = reader.read_u8()?;
+            let byte = if negative { !byte } else { byte };
+            if byte & 1 == 0 {
+                return Ok(());
+            }
+        }
     }
 
     #[inline]
@@ -1125,7 +1203,7 @@ impl DataValue {
         b.push_byte(not_null_tag);
 
         match self {
-            DataValue::Parameter { .. } => {
+            DataValue::Parameter { .. } | DataValue::InitValue { .. } => {
                 return Err(DatabaseError::InvalidValue(
                     "unbound parameter reached storage encoding".to_string(),
                 ));
@@ -1187,6 +1265,44 @@ impl DataValue {
         b: &mut B,
     ) -> Result<(), DatabaseError> {
         self.memcomparable_encode_with_null_order(b, false)
+    }
+
+    pub(crate) fn memcomparable_skip<R: Read>(
+        reader: &mut R,
+        ty: &LogicalType,
+    ) -> Result<(), DatabaseError> {
+        if reader.read_u8()? == NULL_TAG {
+            return Ok(());
+        }
+        let size = match ty {
+            LogicalType::SqlNull => return Ok(()),
+            LogicalType::Boolean | LogicalType::Tinyint | LogicalType::UTinyint => 1,
+            LogicalType::Smallint | LogicalType::USmallint => 2,
+            LogicalType::Integer
+            | LogicalType::UInteger
+            | LogicalType::Float
+            | LogicalType::Date
+            | LogicalType::Time(_) => 4,
+            LogicalType::Bigint
+            | LogicalType::UBigint
+            | LogicalType::Double
+            | LogicalType::DateTime
+            | LogicalType::TimeStamp(..) => 8,
+            LogicalType::Char(..) | LogicalType::Varchar(..) | LogicalType::Varbinary(_) => {
+                Self::skip_memcomparable_string(reader)?;
+                return Ok(());
+            }
+            LogicalType::Decimal(..) => return Self::skip_memcomparable_decimal(reader),
+            LogicalType::Tuple(types) => {
+                for ty in types {
+                    Self::memcomparable_skip(reader, ty)?;
+                }
+                return Ok(());
+            }
+        };
+        let mut discard = [0u8; 8];
+        reader.read_exact(&mut discard[..size])?;
+        Ok(())
     }
 
     pub fn memcomparable_decode<R: Read>(
@@ -1500,6 +1616,9 @@ impl DataValue {
         match (self, to) {
             (DataValue::Parameter { id, .. }, ty) => {
                 Ok(DataValue::Parameter { id, ty: ty.clone() })
+            }
+            (DataValue::InitValue { id, .. }, ty) => {
+                Ok(DataValue::InitValue { id, ty: ty.clone() })
             }
             (DataValue::Null, _) => Ok(DataValue::Null),
             (value, _) => {
@@ -1823,6 +1942,7 @@ impl fmt::Display for DataValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             DataValue::Parameter { id, .. } => write!(f, "${id}")?,
+            DataValue::InitValue { id, .. } => write!(f, "InitValue({id})")?,
             DataValue::Boolean(e) => write!(f, "{e}")?,
             DataValue::Float32(e) => format_float_option!(f, e)?,
             DataValue::Float64(e) => format_float_option!(f, e)?,
@@ -1900,6 +2020,7 @@ impl fmt::Debug for DataValue {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             DataValue::Parameter { ty, .. } => write!(f, "Parameter({self}: {ty})"),
+            DataValue::InitValue { ty, .. } => write!(f, "{self}: {ty}"),
             DataValue::Boolean(_) => write!(f, "Boolean({self})"),
             DataValue::Float32(_) => write!(f, "Float32({self})"),
             DataValue::Float64(_) => write!(f, "Float64({self})"),
@@ -2349,6 +2470,121 @@ mod test {
             .unwrap(),
             DataValue::Null
         );
+    }
+
+    #[test]
+    fn memcomparable_skip_stops_at_the_value_boundary() -> Result<(), DatabaseError> {
+        // Fixed-width scalars, at their initial value.
+        let mut cases: Vec<_> = [
+            LogicalType::Boolean,
+            LogicalType::Tinyint,
+            LogicalType::Smallint,
+            LogicalType::Integer,
+            LogicalType::Bigint,
+            LogicalType::UTinyint,
+            LogicalType::USmallint,
+            LogicalType::UInteger,
+            LogicalType::UBigint,
+            LogicalType::Float,
+            LogicalType::Double,
+            LogicalType::Date,
+            LogicalType::DateTime,
+            LogicalType::Time(Some(3)),
+            LogicalType::TimeStamp(Some(6), true),
+        ]
+        .into_iter()
+        .map(|ty| (DataValue::init(&ty), ty))
+        .collect();
+        // Variable payloads around the 8-byte group boundary.
+        for length in [0, 7, 8, 9, 65] {
+            cases.push((
+                DataValue::Binary {
+                    value: vec![0xff; length],
+                    len: None,
+                },
+                LogicalType::Varbinary(None),
+            ));
+        }
+        cases.extend([
+            (
+                DataValue::Utf8 {
+                    value: "汉字abcdefgh".into(),
+                    ty: Utf8Type::Variable(None),
+                    unit: CharLengthUnits::Characters,
+                },
+                LogicalType::Varchar(None, CharLengthUnits::Characters),
+            ),
+            (
+                DataValue::Utf8 {
+                    value: "0123456789abcdef".into(),
+                    ty: Utf8Type::Fixed(16),
+                    unit: CharLengthUnits::Octets,
+                },
+                LogicalType::Char(16, CharLengthUnits::Octets),
+            ),
+            (
+                DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Null]),
+                LogicalType::Tuple(vec![
+                    LogicalType::Integer,
+                    LogicalType::Varchar(None, CharLengthUnits::Characters),
+                ]),
+            ),
+        ]);
+        #[cfg(feature = "decimal")]
+        for text in ["0", "-0.001", "79228162514264337593543950335"] {
+            cases.push((
+                DataValue::Decimal(text.parse::<Decimal>().unwrap()),
+                LogicalType::Decimal(None, None),
+            ));
+        }
+
+        for (value, ty) in cases {
+            for value in [value, DataValue::Null] {
+                let mut bytes = Vec::new();
+                value.memcomparable_encode(&mut bytes)?;
+                let boundary = bytes.len();
+                DataValue::Int32(99).memcomparable_encode(&mut bytes)?;
+                let mut reader = Cursor::new(bytes.as_slice());
+                DataValue::memcomparable_skip(&mut reader, &ty)?;
+                assert_eq!(reader.position() as usize, boundary, "{ty:?}");
+                assert_eq!(
+                    DataValue::memcomparable_decode(&mut reader, &LogicalType::Integer)?,
+                    DataValue::Int32(99)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn memcomparable_skip_rejects_truncation_and_invalid_markers() {
+        assert!(DataValue::memcomparable_skip(
+            &mut Cursor::new(&[0, 1, 2][..]),
+            &LogicalType::Integer
+        )
+        .is_err());
+        assert!(
+            DataValue::memcomparable_skip(&mut Cursor::new(&[][..]), &LogicalType::Integer)
+                .is_err()
+        );
+        for bytes in [
+            vec![0, 1, 2],
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 246],
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 255],
+        ] {
+            assert!(DataValue::memcomparable_skip(
+                &mut Cursor::new(bytes.as_slice()),
+                &LogicalType::Varbinary(None)
+            )
+            .is_err());
+        }
+        for bytes in [vec![0, 7], vec![0, 0x22], vec![0, 0x18, 1]] {
+            assert!(DataValue::memcomparable_skip(
+                &mut Cursor::new(bytes.as_slice()),
+                &LogicalType::Decimal(None, None)
+            )
+            .is_err());
+        }
     }
 
     #[test]

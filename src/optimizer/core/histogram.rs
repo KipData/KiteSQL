@@ -28,19 +28,27 @@ use ordered_float::OrderedFloat;
 use std::borrow::Cow;
 use std::cmp;
 use std::collections::Bound;
-use std::mem;
 use std::sync::OnceLock;
 
 const ANALYZE_STATISTICS_CONFIDENCE: f64 = 0.95;
-pub(crate) const ANALYZE_STATISTICS_RELATIVE_ERROR: f64 = 0.001;
+// Relative error of the KLL quantile and Count-Min sketches when
+// `DataBaseBuilder::statistics_relative_error` is unset.
+pub(crate) const DEFAULT_STATISTICS_RELATIVE_ERROR: f64 = 0.001;
+// HyperLogLog precision used for NDV when `DataBaseBuilder::hll_precision` is
+// unset: 2^14 registers (16 KiB per sketch, ~0.81% standard error).
+pub(crate) const DEFAULT_HLL_PRECISION: u8 = 14;
+
+pub struct HistogramMetaBuilder {
+    null_count: usize,
+    values_len: usize,
+    hll: HyperLogLog<DataValue>,
+}
 
 pub struct HistogramBuilder {
     index_id: IndexId,
-    null_count: usize,
-    values_len: usize,
+    meta: HistogramMetaBuilder,
     quantile: KllSketchBuilder,
     sketch: CountMinSketch<DataValue>,
-    hll: HyperLogLog<DataValue>,
     top_n: ColumnTopN,
 }
 
@@ -54,7 +62,6 @@ struct BoundComparator {
 
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
 pub struct HistogramMeta {
-    index_id: IndexId,
     number_of_distinct_value: usize,
     null_count: usize,
     values_len: usize,
@@ -68,6 +75,7 @@ pub struct HistogramMeta {
 // Equal depth histogram
 #[derive(Debug)]
 pub struct Histogram {
+    index_id: IndexId,
     meta: HistogramMeta,
     buckets: Vec<Bucket>,
     comparator: OnceLock<BoundComparator>,
@@ -76,6 +84,7 @@ pub struct Histogram {
 impl Clone for Histogram {
     fn clone(&self) -> Self {
         Self {
+            index_id: self.index_id,
             meta: self.meta.clone(),
             buckets: self.buckets.clone(),
             comparator: OnceLock::new(),
@@ -85,7 +94,7 @@ impl Clone for Histogram {
 
 impl PartialEq for Histogram {
     fn eq(&self, other: &Self) -> bool {
-        self.meta == other.meta && self.buckets == other.buckets
+        self.index_id == other.index_id && self.meta == other.meta && self.buckets == other.buckets
     }
 }
 
@@ -97,37 +106,78 @@ pub struct Bucket {
     // repeat: u64,
 }
 
-impl HistogramBuilder {
-    pub fn new(index_meta: &IndexMeta, relative_error: f64) -> Result<Self, DatabaseError> {
+impl HistogramMetaBuilder {
+    pub fn new(hll_precision: u8) -> Result<Self, DatabaseError> {
         Ok(Self {
-            index_id: index_meta.id,
             null_count: 0,
             values_len: 0,
+            hll: HyperLogLog::with_precision(hll_precision)?,
+        })
+    }
+
+    pub fn append(&mut self, value: &DataValue) -> bool {
+        if value.is_null() {
+            self.null_count += 1;
+            false
+        } else {
+            self.values_len += 1;
+            self.hll.add(value);
+            true
+        }
+    }
+
+    pub fn build(self) -> HistogramMeta {
+        HistogramMeta {
+            number_of_distinct_value: if self.values_len == 0 {
+                0
+            } else {
+                self.hll.estimate().clamp(1, self.values_len)
+            },
+            null_count: self.null_count,
+            values_len: self.values_len,
+            buckets_len: 0,
+            correlation: 0.0,
+        }
+    }
+}
+
+impl HistogramBuilder {
+    pub fn new(
+        index_meta: &IndexMeta,
+        relative_error: f64,
+        hll_precision: u8,
+    ) -> Result<Self, DatabaseError> {
+        Ok(Self {
+            index_id: index_meta.id,
+            meta: HistogramMetaBuilder::new(hll_precision)?,
+            // TODO: derive the KLL rank error from the histogram bucket count
+            // (e.g. 1 / (2 * buckets)) instead of sharing `relative_error` with the
+            // Count-Min sketch; 100 buckets only need ~0.5% rank error, not 0.1%.
             quantile: KllSketchBuilder::with_relative_error(relative_error)?,
             sketch: CountMinSketch::with_relative_error(
                 ANALYZE_STATISTICS_CONFIDENCE,
                 relative_error,
             )?,
-            hll: HyperLogLog::with_relative_error(relative_error)?,
             top_n: ColumnTopN::default(),
         })
     }
 
     pub fn append(&mut self, value: DataValue) -> Result<(), DatabaseError> {
-        if value.is_null() {
-            self.null_count += 1;
-        } else {
+        if self.meta.append(&value) {
             self.sketch.increment(&value);
-            self.hll.add(&value);
             self.top_n
                 .add_with_size(ANALYZE_STATISTICS_TOP_N_SIZE, value.clone(), 1);
             self.quantile.insert(value)?;
-            self.values_len += 1;
         }
 
         Ok(())
     }
 
+    // TODO: shrink the Count-Min sketch to the observed row count before returning it.
+    // Its width is fixed by `relative_error` (2048 x 5 counters, ~80 KiB at 0.001)
+    // and persisted per index even for tiny tables; since the width is a power of
+    // two, rows can be folded in half (summing both halves) down to about
+    // `next_power_of_two(values_len)` without losing accuracy on large tables.
     pub fn build(
         self,
         number_of_buckets: usize,
@@ -138,19 +188,17 @@ impl HistogramBuilder {
             ));
         }
 
-        let values_len = self.values_len;
+        let values_len = self.meta.values_len;
         if number_of_buckets > values_len {
             return Err(DatabaseError::TooManyBuckets(number_of_buckets, values_len));
         }
 
         let HistogramBuilder {
             index_id,
-            null_count,
+            meta,
             quantile,
             mut sketch,
-            hll,
             top_n,
-            ..
         } = self;
         let mut buckets = Vec::with_capacity(number_of_buckets);
         let quantile = quantile.build()?;
@@ -178,20 +226,16 @@ impl HistogramBuilder {
                 count: (upper_rank - lower_rank + 1) as u64,
             });
         }
-        sketch.add(&DataValue::Null, self.null_count);
-        let number_of_distinct_value = hll.estimate().clamp(1, values_len);
+        let mut meta = meta.build();
+        sketch.add(&DataValue::Null, meta.null_count);
+        meta.buckets_len = buckets.len();
+        meta.correlation = correlation;
         let top_n = top_n.finish_with_size(ANALYZE_STATISTICS_TOP_N_SIZE);
 
         Ok((
             Histogram {
-                meta: HistogramMeta {
-                    index_id,
-                    number_of_distinct_value,
-                    null_count,
-                    values_len,
-                    buckets_len: buckets.len(),
-                    correlation,
-                },
+                index_id,
+                meta,
                 buckets,
                 comparator: OnceLock::new(),
             },
@@ -282,7 +326,11 @@ fn is_above(
 }
 
 impl Histogram {
-    pub fn from_parts(meta: HistogramMeta, buckets: Vec<Bucket>) -> Result<Self, DatabaseError> {
+    pub fn from_parts(
+        index_id: IndexId,
+        meta: HistogramMeta,
+        buckets: Vec<Bucket>,
+    ) -> Result<Self, DatabaseError> {
         if meta.buckets_len != buckets.len() {
             return Err(DatabaseError::InvalidValue(format!(
                 "histogram bucket count mismatch: meta={}, actual={}",
@@ -292,14 +340,15 @@ impl Histogram {
         }
 
         Ok(Self {
+            index_id,
             meta,
             buckets,
             comparator: OnceLock::new(),
         })
     }
 
-    pub fn into_parts(self) -> (HistogramMeta, Vec<Bucket>) {
-        (self.meta, self.buckets)
+    pub fn into_parts(self) -> (IndexId, HistogramMeta, Vec<Bucket>) {
+        (self.index_id, self.meta, self.buckets)
     }
 
     fn comparator(&self) -> Result<&BoundComparator, DatabaseError> {
@@ -331,7 +380,7 @@ impl Histogram {
     }
 
     pub fn index_id(&self) -> IndexId {
-        self.meta.index_id
+        self.index_id
     }
 
     pub fn values_len(&self) -> usize {
@@ -422,6 +471,7 @@ impl Histogram {
         ranges: &[Range],
         sketch: &CountMinSketch<DataValue>,
         top_n: &ColumnTopN,
+        buf: &mut Vec<u8>,
     ) -> Result<usize, DatabaseError> {
         if self.buckets.is_empty() || ranges.is_empty() {
             return Ok(0);
@@ -444,31 +494,24 @@ impl Histogram {
         let mut count = 0;
         let mut binary_i = 0;
         let mut bucket_i = 0;
-        let mut bucket_idxs = Vec::new();
-        let mut buf = Vec::new();
 
         while bucket_i < self.buckets.len() && binary_i < ranges.len() {
             let is_dummy = self._collect_count(
                 ranges,
                 &mut binary_i,
                 &mut bucket_i,
-                &mut bucket_idxs,
                 &mut count,
                 sketch,
                 top_n,
                 comparator,
-                &mut buf,
+                buf,
             )?;
             if is_dummy {
                 return Ok(0);
             }
         }
 
-        Ok(bucket_idxs
-            .iter()
-            .map(|idx| self.buckets[*idx].count as usize)
-            .sum::<usize>()
-            + count)
+        Ok(count)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -477,7 +520,6 @@ impl Histogram {
         ranges: &[Range],
         binary_i: &mut usize,
         bucket_i: &mut usize,
-        bucket_idxs: &mut Vec<usize>,
         count: &mut usize,
         sketch: &CountMinSketch<DataValue>,
         top_n: &ColumnTopN,
@@ -505,7 +547,9 @@ impl Histogram {
                     && (is_under(comparator, &bucket.upper, max, false)?
                         || is_eq(&bucket.upper, max))
                 {
-                    bucket_idxs.push(mem::replace(bucket_i, *bucket_i + 1));
+                    // A fully covered bucket counts its rows, without the NULLs added above.
+                    *count += bucket.count as usize;
+                    *bucket_i += 1;
                 } else if is_above(comparator, &bucket.lower, max, false)? {
                     *binary_i += 1;
                 } else if is_under(comparator, &bucket.upper, min, true)? {
@@ -670,8 +714,8 @@ fn scope_lower_includes_null(min: &Bound<DataValue>) -> bool {
 }
 
 impl HistogramMeta {
-    pub fn index_id(&self) -> IndexId {
-        self.index_id
+    pub fn null_count(&self) -> usize {
+        self.null_count
     }
 
     pub fn values_len(&self) -> usize {
@@ -694,13 +738,44 @@ mod tests {
     use crate::expression::range_detacher::Range;
     use crate::optimizer::core::cm_sketch::CountMinSketch;
     use crate::optimizer::core::histogram::{
-        Bucket, HistogramBuilder, ANALYZE_STATISTICS_RELATIVE_ERROR,
+        Bucket, HistogramBuilder, HistogramMetaBuilder, DEFAULT_HLL_PRECISION,
+        DEFAULT_STATISTICS_RELATIVE_ERROR,
     };
     use crate::optimizer::core::top_n::ColumnTopN;
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
+
+    #[test]
+    fn column_meta_counts_values_without_histogram_buckets() -> Result<(), DatabaseError> {
+        let empty = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?.build();
+        assert_eq!(empty.values_len(), 0);
+        assert_eq!(empty.null_count(), 0);
+        assert_eq!(empty.distinct_values_len(), 0);
+        assert_eq!(empty.buckets_len(), 0);
+        let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
+        for value in [
+            DataValue::Null,
+            DataValue::Int32(1),
+            DataValue::Int32(1),
+            DataValue::Int32(2),
+        ] {
+            builder.append(&value);
+        }
+        let meta = builder.build();
+        assert_eq!(meta.values_len(), 3);
+        assert_eq!(meta.null_count(), 1);
+        assert_eq!(meta.distinct_values_len(), 2);
+        assert_eq!(meta.buckets_len(), 0);
+        let mut builder = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
+        builder.append(&DataValue::Null);
+        let meta = builder.build();
+        assert_eq!(meta.values_len(), 0);
+        assert_eq!(meta.null_count(), 1);
+        assert_eq!(meta.distinct_values_len(), 0);
+        Ok(())
+    }
 
     fn index_meta() -> IndexMeta {
         IndexMeta {
@@ -716,7 +791,11 @@ mod tests {
 
     #[test]
     fn test_sort_tuples_on_histogram() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         builder.append(DataValue::Int32(0))?;
         builder.append(DataValue::Int32(1))?;
@@ -782,7 +861,11 @@ mod tests {
 
     #[test]
     fn test_rev_sort_tuples_on_histogram() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         builder.append(DataValue::Int32(14))?;
         builder.append(DataValue::Int32(13))?;
@@ -846,7 +929,11 @@ mod tests {
 
     #[test]
     fn test_non_average_on_histogram() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         builder.append(DataValue::Int32(14))?;
         builder.append(DataValue::Int32(13))?;
@@ -905,7 +992,11 @@ mod tests {
 
     #[test]
     fn parameterized_tuple_ranges_accumulate_prefix_selectivity() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
         for value in 0..100 {
             builder.append(DataValue::Tuple(vec![DataValue::Int32(value); 4]))?;
         }
@@ -923,12 +1014,22 @@ mod tests {
             max: Bound::Excluded(DataValue::Tuple(upper)),
         };
         assert_eq!(
-            histogram.collect_count(&[scope(prefix.clone(), prefix.clone())], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(prefix.clone(), prefix.clone())],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             100
         );
         let longer = vec![parameter(1), parameter(2), parameter(3)];
         assert_eq!(
-            histogram.collect_count(&[scope(longer.clone(), longer)], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(longer.clone(), longer)],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             10
         );
         let mut lower = prefix.clone();
@@ -936,16 +1037,31 @@ mod tests {
         let mut upper = prefix.clone();
         upper.push(parameter(4));
         assert_eq!(
-            histogram.collect_count(&[scope(lower.clone(), prefix)], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(lower.clone(), prefix)],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             25
         );
         assert_eq!(
-            histogram.collect_count(&[scope(lower.clone(), upper.clone())], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(lower.clone(), upper.clone())],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             2
         );
         let full = DataValue::Tuple(vec![parameter(1), parameter(2), parameter(3), parameter(4)]);
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(full.clone())], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(full.clone())],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             1
         );
         assert_eq!(
@@ -955,7 +1071,8 @@ mod tests {
                     max: Bound::Included(full),
                 }],
                 &sketch,
-                &top_n
+                &top_n,
+                &mut Vec::new()
             )?,
             0
         );
@@ -963,7 +1080,7 @@ mod tests {
         lower.push(parameter(5));
         upper.push(parameter(5));
         assert_eq!(
-            histogram.collect_count(&[scope(lower, upper)], &sketch, &top_n)?,
+            histogram.collect_count(&[scope(lower, upper)], &sketch, &top_n, &mut Vec::new())?,
             2
         );
         histogram.buckets[0].upper = DataValue::Tuple(vec![
@@ -972,7 +1089,12 @@ mod tests {
         ]);
         let nested = vec![DataValue::Tuple(vec![parameter(1), parameter(2)])];
         assert_eq!(
-            histogram.collect_count(&[scope(nested.clone(), nested)], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[scope(nested.clone(), nested)],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             100
         );
         Ok(())
@@ -1170,7 +1292,11 @@ mod tests {
 
     #[test]
     fn parameterized_range_count_uses_shape_and_ndv() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
         for value in 0..1_000 {
             builder.append(DataValue::Int32(value % 100))?;
         }
@@ -1204,7 +1330,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                histogram.collect_count(&[range], &sketch, &top_n)?,
+                histogram.collect_count(&[range], &sketch, &top_n, &mut Vec::new())?,
                 expected
             );
         }
@@ -1213,7 +1339,11 @@ mod tests {
 
     #[test]
     fn test_collect_count() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         builder.append(DataValue::Int32(14))?;
         builder.append(DataValue::Int32(13))?;
@@ -1248,6 +1378,7 @@ mod tests {
             ],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_1, 9);
@@ -1259,6 +1390,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_2, 11);
@@ -1270,6 +1402,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_3, 7);
@@ -1281,6 +1414,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_4, 12);
@@ -1292,6 +1426,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_5, 8);
@@ -1303,6 +1438,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_6, 12);
@@ -1314,6 +1450,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_7, 13);
@@ -1325,6 +1462,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_8, 13);
@@ -1336,6 +1474,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_9, 13);
@@ -1347,6 +1486,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_10, 2);
@@ -1358,6 +1498,7 @@ mod tests {
             }],
             &sketch,
             &top_n,
+            &mut Vec::new(),
         )?;
 
         assert_eq!(count_11, 2);
@@ -1367,7 +1508,11 @@ mod tests {
 
     #[test]
     fn test_builder_uses_hll_for_distinct_values() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for _ in 0..50 {
             builder.append(DataValue::Int32(1))?;
@@ -1386,7 +1531,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_uses_cm_sketch_when_error_is_small() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for _ in 0..70 {
             builder.append(DataValue::Int32(1))?;
@@ -1399,7 +1548,12 @@ mod tests {
         let top_n = ColumnTopN::default();
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(1))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(1))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             70
         );
 
@@ -1408,7 +1562,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_uses_top_n_when_value_is_cached() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for _ in 0..70 {
             builder.append(DataValue::Int32(1))?;
@@ -1421,7 +1579,12 @@ mod tests {
         sketch.add(&DataValue::Int32(1), 1000);
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(1))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(1))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             70
         );
 
@@ -1430,7 +1593,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_falls_back_to_average_when_cm_error_is_large() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for value in 0..10_000 {
             builder.append(DataValue::Int32(value))?;
@@ -1445,7 +1612,12 @@ mod tests {
         assert!(estimated_count.saturating_sub(error_bound) <= average_count);
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(7))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             average_count
         );
 
@@ -1454,7 +1626,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_uses_cm_sketch_for_clear_heavy_hitter() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for _ in 0..1_000 {
             builder.append(DataValue::Int32(7))?;
@@ -1472,7 +1648,12 @@ mod tests {
         assert!(estimated_count.saturating_sub(error_bound) > average_count);
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(7))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             estimated_count
         );
 
@@ -1481,7 +1662,11 @@ mod tests {
 
     #[test]
     fn test_eq_count_falls_back_when_top_n_error_is_large() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for value in 0..10_000 {
             builder.append(DataValue::Int32(value))?;
@@ -1502,7 +1687,12 @@ mod tests {
         assert!(expected < entry.count());
 
         assert_eq!(
-            histogram.collect_count(&[Range::Eq(DataValue::Int32(7))], &sketch, &top_n)?,
+            histogram.collect_count(
+                &[Range::Eq(DataValue::Int32(7))],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
             expected
         );
 
@@ -1511,7 +1701,11 @@ mod tests {
 
     #[test]
     fn test_collect_count_ignores_tuple_prefix_endpoint_count() -> Result<(), DatabaseError> {
-        let mut builder = HistogramBuilder::new(&index_meta(), ANALYZE_STATISTICS_RELATIVE_ERROR)?;
+        let mut builder = HistogramBuilder::new(
+            &index_meta(),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
 
         for value in 0..15 {
             builder.append(DataValue::Tuple(vec![
@@ -1525,13 +1719,13 @@ mod tests {
             min: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(0)])),
             max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(8)])),
         }];
-        let clean_count = histogram.collect_count(&ranges, &sketch, &top_n)?;
+        let clean_count = histogram.collect_count(&ranges, &sketch, &top_n, &mut Vec::new())?;
 
         sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(0)]));
         sketch.increment(&DataValue::Tuple(vec![DataValue::Int32(8)]));
 
         assert_eq!(
-            histogram.collect_count(&ranges, &sketch, &top_n)?,
+            histogram.collect_count(&ranges, &sketch, &top_n, &mut Vec::new())?,
             clean_count
         );
 
@@ -1547,7 +1741,7 @@ mod tests {
         };
         let mut sketch = CountMinSketch::with_relative_error(
             super::ANALYZE_STATISTICS_CONFIDENCE,
-            ANALYZE_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
         )?;
 
         let real_key = DataValue::Tuple(vec![DataValue::Int32(8), DataValue::Int32(8)]);

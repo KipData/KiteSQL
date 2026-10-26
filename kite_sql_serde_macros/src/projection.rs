@@ -107,7 +107,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 relation: &str,
             ) -> ::std::result::Result<::std::vec::Vec<::kite_sql::planner::ExprRef>, ::kite_sql::errors::DatabaseError>
             where
-                T: ::kite_sql::storage::Transaction,
+                T: ::kite_sql::storage::StorageTransaction,
                 A: AsRef<[(usize, ::kite_sql::types::LogicalType)]>,
             {
                 Ok(::std::vec![
@@ -121,7 +121,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         {
             fn from_query_row(
                 schema: &::kite_sql::types::tuple::SchemaView<'_, '_>,
-                tuple: &mut ::kite_sql::types::tuple::Tuple,
+                tuple: &mut ::kite_sql::types::tuple::TupleImpl,
             ) -> ::std::result::Result<Self, ::kite_sql::errors::DatabaseError> {
                 let mut __kite_orm_found_fields = 0usize;
                 #(#field_index_declarations)*

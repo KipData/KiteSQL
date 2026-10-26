@@ -94,10 +94,10 @@ impl TpccTransaction for NewOrd {
                     (4, DataValue::Int64(args.c_id as i64)),
                 ],
                 &mut |tuple| {
-                    c_discount = tuple.values[0].decimal().unwrap();
-                    c_last = tuple.values[1].utf8().unwrap().to_string();
-                    c_credit = tuple.values[2].utf8().unwrap().to_string();
-                    w_tax = tuple.values[3].decimal().unwrap();
+                    c_discount = tuple[0].decimal().unwrap();
+                    c_last = tuple[1].utf8().unwrap().to_string();
+                    c_credit = tuple[2].utf8().unwrap().to_string();
+                    w_tax = tuple[3].decimal().unwrap();
                     Ok(())
                 },
             )?;
@@ -116,9 +116,9 @@ impl TpccTransaction for NewOrd {
                     (3, DataValue::Int32(args.c_id as i32)),
                 ],
                 &mut |tuple| {
-                    c_discount = tuple.values[0].decimal().unwrap();
-                    c_last = tuple.values[1].utf8().unwrap().to_string();
-                    c_credit = tuple.values[2].utf8().unwrap().to_string();
+                    c_discount = tuple[0].decimal().unwrap();
+                    c_last = tuple[1].utf8().unwrap().to_string();
+                    c_credit = tuple[2].utf8().unwrap().to_string();
                     Ok(())
                 },
             )?;
@@ -128,7 +128,7 @@ impl TpccTransaction for NewOrd {
                 &mut statements[2],
                 &[(1, DataValue::Int16(args.w_id as i16))],
                 &mut |tuple| {
-                    w_tax = tuple.values[0].decimal().unwrap();
+                    w_tax = tuple[0].decimal().unwrap();
                     Ok(())
                 },
             )?;
@@ -145,8 +145,8 @@ impl TpccTransaction for NewOrd {
                 (2, DataValue::Int16(args.w_id as i16)),
             ],
             &mut |tuple| {
-                d_next_o_id = tuple.values[0].i32().unwrap();
-                d_tax = tuple.values[1].decimal().unwrap();
+                d_next_o_id = tuple[0].i32().unwrap();
+                d_tax = tuple[1].decimal().unwrap();
                 Ok(())
             },
         )?;
@@ -215,9 +215,9 @@ impl TpccTransaction for NewOrd {
             let mut i_name = String::new();
             let mut i_data = String::new();
             tx.with_query_one(&mut statements[7], &params, &mut |tuple| {
-                i_price = tuple.values[0].decimal().unwrap();
-                i_name = tuple.values[1].utf8().unwrap().to_string();
-                i_data = tuple.values[2].utf8().unwrap().to_string();
+                i_price = tuple[0].decimal().unwrap();
+                i_name = tuple[1].utf8().unwrap().to_string();
+                i_data = tuple[2].utf8().unwrap().to_string();
                 Ok(())
             })?;
 
@@ -242,18 +242,18 @@ impl TpccTransaction for NewOrd {
             let mut s_dist_09 = String::new();
             let mut s_dist_10 = String::new();
             tx.with_query_one(&mut statements[8], &params, &mut |tuple| {
-                s_quantity = tuple.values[0].i16().unwrap();
-                s_data = tuple.values[1].utf8().unwrap().to_string();
-                s_dist_01 = tuple.values[2].utf8().unwrap().to_string();
-                s_dist_02 = tuple.values[3].utf8().unwrap().to_string();
-                s_dist_03 = tuple.values[4].utf8().unwrap().to_string();
-                s_dist_04 = tuple.values[5].utf8().unwrap().to_string();
-                s_dist_05 = tuple.values[6].utf8().unwrap().to_string();
-                s_dist_06 = tuple.values[7].utf8().unwrap().to_string();
-                s_dist_07 = tuple.values[8].utf8().unwrap().to_string();
-                s_dist_08 = tuple.values[9].utf8().unwrap().to_string();
-                s_dist_09 = tuple.values[10].utf8().unwrap().to_string();
-                s_dist_10 = tuple.values[11].utf8().unwrap().to_string();
+                s_quantity = tuple[0].i16().unwrap();
+                s_data = tuple[1].utf8().unwrap().to_string();
+                s_dist_01 = tuple[2].utf8().unwrap().to_string();
+                s_dist_02 = tuple[3].utf8().unwrap().to_string();
+                s_dist_03 = tuple[4].utf8().unwrap().to_string();
+                s_dist_04 = tuple[5].utf8().unwrap().to_string();
+                s_dist_05 = tuple[6].utf8().unwrap().to_string();
+                s_dist_06 = tuple[7].utf8().unwrap().to_string();
+                s_dist_07 = tuple[8].utf8().unwrap().to_string();
+                s_dist_08 = tuple[9].utf8().unwrap().to_string();
+                s_dist_09 = tuple[10].utf8().unwrap().to_string();
+                s_dist_10 = tuple[11].utf8().unwrap().to_string();
                 Ok(())
             })?;
 

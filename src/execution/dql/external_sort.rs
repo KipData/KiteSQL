@@ -21,7 +21,7 @@ use crate::execution::{
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use std::fs::File;
 use std::io::BufReader;
 use std::mem;
@@ -49,7 +49,7 @@ pub struct ExternalSort<'a> {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
     type Input = (&'a SortOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -68,7 +68,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.rows = None;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -81,7 +90,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
                     return Ok(());
                 };
                 plan_arena.restore_outer_values(row.outer_values);
-                arena.produce_tuple(row.tuple);
+                arena.produce(row.tuple);
                 return Ok(());
             }
 
@@ -91,10 +100,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
             // pass. By default R <= 1,024 and B is about 1 MiB; one oversized row makes this a
             // soft bound.
             let sort_fields = self.sort_fields;
-            let mut rows = SpillVec::new().on_flush(move |rows| sort_segment(sort_fields, rows));
+            let mut rows = SpillVec::new().on_flush(move |_, rows| sort_segment(sort_fields, rows));
             let mut runs = Vec::new();
             while arena.next_tuple(self.input, plan_arena)? {
-                let tuple = arena.materialize_tuple();
+                let tuple = arena.take_tuple();
                 let row = SortRow::new(sort_fields, tuple, plan_arena)?;
                 if let Some(segment) = rows.push(row)? {
                     runs.push(Run::new(segment, 1));
@@ -154,7 +163,7 @@ struct RunCursor<'source> {
 
 impl<'source> RunCursor<'source> {
     fn new(source: &'source SpillReader<SortRow>, run: &Run) -> Result<Self, DatabaseError> {
-        let mut reader = source.open_segment_reader()?;
+        let mut reader = source.open_segment_reader(None)?;
         reader.reset(run.first_segment)?;
         let mut cursor = Self {
             remaining_segments: run.segment_count - 1,
@@ -289,7 +298,7 @@ mod test {
     use crate::expression::ScalarExpression;
     use crate::planner::operator::sort::SortField;
     use crate::planner::{ExecMetaArena, MetaArena};
-    use crate::types::tuple::Tuple;
+    use crate::types::tuple::{Tuple, TupleLike};
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::{CharLengthUnits, LogicalType};
     use std::cmp::Ordering;
@@ -315,17 +324,17 @@ mod test {
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let mut rows = SpillVec::new()
             .limit(4, usize::MAX)
-            .on_flush(|rows| sort_segment(&sort_fields, rows));
+            .on_flush(|_, rows| sort_segment(&sort_fields, rows));
         for value in [DataValue::Int32(2), DataValue::Null, DataValue::Int32(1)] {
             let _ = rows.push(SortRow::new(
                 &sort_fields,
-                Tuple::new(None, vec![value]),
+                Tuple::new(None, vec![value]).into(),
                 &mut plan_arena,
             )?)?;
         }
 
         let values = finish_sort(rows, Vec::new(), &sort_fields, 2)?
-            .map(|row| row.map(|row| row.tuple.values[0].clone()))
+            .map(|row| row.map(|row| row.tuple.value_at(0).clone()))
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(
             values,
@@ -366,7 +375,7 @@ mod test {
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let mut rows = SpillVec::new()
             .limit(2, usize::MAX)
-            .on_flush(|rows| sort_segment(&sort_fields, rows));
+            .on_flush(|_, rows| sort_segment(&sort_fields, rows));
         let mut runs = Vec::new();
         for (sequence, value) in values.into_iter().enumerate() {
             let tuple = Tuple::new(
@@ -382,7 +391,7 @@ mod test {
                     unit: CharLengthUnits::Characters,
                 },
             );
-            let row = SortRow::new(&sort_fields, tuple, &mut plan_arena)?;
+            let row = SortRow::new(&sort_fields, tuple.into(), &mut plan_arena)?;
             if let Some(segment) = rows.push(row)? {
                 runs.push(Run::new(segment, 1));
             }
@@ -392,7 +401,7 @@ mod test {
             .map(|row| {
                 row.map(|row| {
                     assert_eq!(row.outer_values.len(), 1);
-                    let sequence = row.tuple.values[1].i32().unwrap();
+                    let sequence = row.tuple.value_at(1).i32().unwrap();
                     assert_eq!(row.outer_values[0].0.pos, sequence as usize);
                     assert_eq!(
                         row.outer_values[0].1.utf8(),
@@ -404,7 +413,7 @@ mod test {
             .collect::<Result<Vec<_>, _>>()?;
         let positions = tuples
             .iter()
-            .map(|tuple| tuple.values[1].clone())
+            .map(|tuple| tuple.value_at(1).clone())
             .collect::<Vec<_>>();
         assert_eq!(
             positions,
@@ -420,8 +429,8 @@ mod test {
                 DataValue::Int32(6),
             ]
         );
-        assert_eq!(tuples[0].pk, Some(DataValue::Int32(1)));
-        assert_eq!(tuples[1].pk, Some(DataValue::Int32(5)));
+        assert_eq!(tuples[0].pk().cloned(), Some(DataValue::Int32(1)));
+        assert_eq!(tuples[1].pk().cloned(), Some(DataValue::Int32(5)));
         Ok(())
     }
 
@@ -461,7 +470,7 @@ mod test {
         ];
 
         let mut plan_arena = ExecMetaArena::new(plan_arena);
-        let mut rows = SpillVec::new().on_flush(|rows| sort_segment(&sort_fields, rows));
+        let mut rows = SpillVec::new().on_flush(|_, rows| sort_segment(&sort_fields, rows));
         let mut runs = Vec::new();
         for position in 0..ROW_COUNT {
             let sequence = (position * 7919) % ROW_COUNT;
@@ -472,7 +481,9 @@ mod test {
             };
             let sequence = DataValue::Int32(sequence as i32);
             let tuple = Tuple::new(Some(sequence.clone()), vec![key, sequence]);
-            if let Some(segment) = rows.push(SortRow::new(&sort_fields, tuple, &mut plan_arena)?)? {
+            if let Some(segment) =
+                rows.push(SortRow::new(&sort_fields, tuple.into(), &mut plan_arena)?)?
+            {
                 runs.push(Run::new(segment, 1));
             }
         }
@@ -494,8 +505,8 @@ mod test {
         let actual = tuples
             .iter()
             .map(|tuple| {
-                assert_eq!(tuple.pk.as_ref(), tuple.values.get(1));
-                tuple.values[1].clone()
+                assert_eq!(tuple.pk(), Some(tuple.value_at(1)));
+                tuple.value_at(1).clone()
             })
             .collect::<Vec<_>>();
         assert_eq!(

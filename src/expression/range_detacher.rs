@@ -18,6 +18,7 @@ use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::iter_ext::Itertools;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
+use crate::planner::ScalarQueryRef;
 use crate::types::index::IndexMetaRef;
 use crate::types::value::{DataValue, DataValueRef};
 use crate::types::{ColumnId, LogicalType};
@@ -198,25 +199,36 @@ fn build_tree<'a, T: Borrow<DataValue> + 'a, I: EqRangeInput<T> + ?Sized>(
 }
 
 impl Range {
-    pub(crate) fn bind_parameters<'p, F>(&mut self, get: &F) -> Result<(), DatabaseError>
+    pub(crate) fn bind_parameters<'p, F, G>(
+        &mut self,
+        params: &F,
+        init_values: &G,
+    ) -> Result<(), DatabaseError>
     where
         F: Fn(usize) -> Option<&'p DataValue>,
+        G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
     {
-        match self {
+        let has_null = match self {
             Self::Scope { min, max } => {
+                let mut has_null = false;
                 for bound in [min, max] {
                     if let Bound::Included(value) | Bound::Excluded(value) = bound {
-                        value.bind_parameters(get)?;
+                        has_null |= value.bind_parameters(params, init_values)?;
                     }
                 }
+                has_null
             }
-            Self::Eq(value) => value.bind_parameters(get)?,
+            Self::Eq(value) => value.bind_parameters(params, init_values)?,
             Self::SortedRanges(ranges) => {
                 for range in ranges {
-                    range.bind_parameters(get)?;
+                    range.bind_parameters(params, init_values)?;
                 }
+                false
             }
-            Self::Dummy => {}
+            Self::Dummy => false,
+        };
+        if has_null {
+            *self = Self::Dummy;
         }
         Ok(())
     }
@@ -427,13 +439,13 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                     left_expr
                         .unpack_bound_col(self.arena, false)
                         .map(|(column, _)| column),
-                    right_expr.unpack_val(self.arena),
+                    self.range_val(right_expr, op),
                 ) {
                     return self
                         .new_range(op, col, val, false)
                         .map(|range| range.map(DetachedPredicate::consumed));
                 } else if let (Some(val), Some(col)) = (
-                    left_expr.unpack_val(self.arena),
+                    self.range_val(left_expr, op),
                     right_expr
                         .unpack_bound_col(self.arena, false)
                         .map(|(column, _)| column),
@@ -505,6 +517,50 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
                     _ => None,
                 }
             }
+            ScalarExpression::In {
+                negated,
+                expr,
+                args,
+                ..
+            } => {
+                let Some((column, ty)) = expr
+                    .in_point_column(self.arena)
+                    .filter(|_| !args.is_empty())
+                else {
+                    return Ok(None);
+                };
+                if !self.matches_column(column) {
+                    return Ok(None);
+                }
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    let Some(value) = arg.in_point(ty, self.arena) else {
+                        return Ok(None);
+                    };
+                    if value.is_null() {
+                        // NOT IN with NULL cannot be true in a Filter; positive
+                        // IN ignores NULL points but must not match NULL rows.
+                        if negated {
+                            return Ok(Some(DetachedPredicate::consumed(Range::Dummy)));
+                        }
+                    } else {
+                        values.push(value.clone());
+                    }
+                }
+                // Keep NOT IN residual, as with the old NotEq expansion.
+                if negated {
+                    return Ok(None);
+                }
+                // `in_point` keeps every value in the column's type, so they are comparable.
+                values.sort_unstable_by(|left, right| left.partial_cmp(right).unwrap());
+                values.dedup();
+                let range = match values.len() {
+                    0 => Range::Dummy,
+                    1 => Range::Eq(values.pop().unwrap()),
+                    _ => Range::SortedRanges(values.into_iter().map(Range::Eq).collect()),
+                };
+                Some(DetachedPredicate::consumed(range))
+            }
             ScalarExpression::Alias { expr, .. } | ScalarExpression::TypeCast { expr, .. } => {
                 self.detach(expr)?
             }
@@ -557,7 +613,6 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
             | ScalarExpression::ColumnRef { .. } => None,
             // FIXME: support [RangeDetacher::_detach]
             ScalarExpression::Unary { .. }
-            | ScalarExpression::In { .. }
             | ScalarExpression::Between { .. }
             | ScalarExpression::SubString { .. }
             | ScalarExpression::Position { .. }
@@ -573,6 +628,19 @@ impl<'a, M: RangeColumnMatcher, A: MetaArena + ?Sized> RangeDetacher<'a, M, A> {
             | ScalarExpression::WindowCall(_) => None,
             ScalarExpression::TableFunction(_) | ScalarExpression::Empty => unreachable!(),
         })
+    }
+
+    fn range_val(&self, expr: ExprRef, op: BinaryOperator) -> Option<DataValue> {
+        expr.unpack_val(self.arena)
+            .or_else(|| match self.arena.expression(expr) {
+                ScalarExpression::InitValue { id, ty } if op != BinaryOperator::Spaceship => {
+                    Some(DataValue::InitValue {
+                        id: *id,
+                        ty: ty.clone(),
+                    })
+                }
+                _ => None,
+            })
     }
 
     #[allow(clippy::result_large_err)]
@@ -1302,7 +1370,7 @@ mod test {
     use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena};
+    use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena, TableArenaCell};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::ops::Bound;
@@ -1313,9 +1381,9 @@ mod test {
     ) -> Result<Option<FilterOperator>, DatabaseError> {
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_simplify_filter".to_string(),
+                "test_simplify_filter",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::SimplifyFilter],
+                &[NormalizationRuleImpl::SimplifyFilter],
             )
             .build();
         let best_plan = pipeline.instantiate(plan).find_best(None, arena)?;
@@ -1368,6 +1436,165 @@ mod test {
             evaluator: None,
             ty: LogicalType::Boolean,
         })
+    }
+
+    fn point_list(
+        arena: &mut PlanArena,
+        column: ColumnRef,
+        values: &[DataValue],
+        negated: bool,
+    ) -> ExprRef {
+        let expr = arena.alloc_expression(ScalarExpression::column_expr(column, 0));
+        let args = values
+            .iter()
+            .map(|value| arena.alloc_expression(ScalarExpression::Constant(value.clone())))
+            .collect();
+        arena.alloc_expression(ScalarExpression::In {
+            negated,
+            expr,
+            args,
+            evaluator: None,
+        })
+    }
+
+    #[test]
+    fn detach_in_deduplicates_points_and_never_selects_null() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let name: TableName = "points".into();
+        let column = test_column(&mut arena, &name, 0, "c1", true)?;
+        for (values, expected) in [
+            (
+                vec![
+                    DataValue::Int32(3),
+                    DataValue::Null,
+                    DataValue::Int32(1),
+                    DataValue::Int32(3),
+                ],
+                Range::SortedRanges(vec![
+                    Range::Eq(DataValue::Int32(1)),
+                    Range::Eq(DataValue::Int32(3)),
+                ]),
+            ),
+            (
+                vec![DataValue::Null, DataValue::Int32(1)],
+                Range::Eq(DataValue::Int32(1)),
+            ),
+            (vec![DataValue::Null], Range::Dummy),
+        ] {
+            let predicate = point_list(&mut arena, column, &values, false);
+            let detached = RangeDetacher::new(name.as_ref(), &0, &mut arena)
+                .detach(predicate)?
+                .unwrap();
+            assert_eq!(detached.range, expected);
+            assert_eq!(detached.residual, None);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn detach_not_in_keeps_residual_unless_null_proves_no_match() -> Result<(), DatabaseError> {
+        for nullable in [false, true] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let name: TableName = "points".into();
+            let column = test_column(&mut arena, &name, 0, "c1", nullable)?;
+            let predicate = point_list(
+                &mut arena,
+                column,
+                &[
+                    DataValue::Int32(3),
+                    DataValue::Int32(1),
+                    DataValue::Int32(3),
+                ],
+                true,
+            );
+            assert_eq!(
+                RangeDetacher::new(name.as_ref(), &0, &mut arena).detach(predicate)?,
+                None
+            );
+            let predicate = point_list(
+                &mut arena,
+                column,
+                &[DataValue::Int32(1), DataValue::Null],
+                true,
+            );
+            assert_eq!(
+                RangeDetacher::new(name.as_ref(), &0, &mut arena)
+                    .detach(predicate)?
+                    .unwrap()
+                    .range,
+                Range::Dummy
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn in_detachment_keeps_other_column_residual_and_intersects_bounds() -> Result<(), DatabaseError>
+    {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let name: TableName = "points".into();
+        let column = test_column(&mut arena, &name, 0, "c1", true)?;
+        let other = test_column(&mut arena, &name, 1, "c2", true)?;
+        let points = point_list(
+            &mut arena,
+            column,
+            &[
+                DataValue::Int32(1),
+                DataValue::Int32(3),
+                DataValue::Int32(5),
+            ],
+            false,
+        );
+        let lower = cmp_predicate(&mut arena, column, BinaryOperator::Gt, 2);
+        let limited = and_predicate(&mut arena, points, lower);
+        let residual = cmp_predicate(&mut arena, other, BinaryOperator::Eq, 7);
+        let combined = and_predicate(&mut arena, limited, residual);
+        let detached = RangeDetacher::new(name.as_ref(), &0, &mut arena)
+            .detach(combined)?
+            .unwrap();
+        assert_eq!(
+            detached.range,
+            Range::SortedRanges(vec![
+                Range::Eq(DataValue::Int32(3)),
+                Range::Eq(DataValue::Int32(5))
+            ])
+        );
+        assert_eq!(detached.residual, Some(residual));
+        assert_eq!(
+            RangeDetacher::new(name.as_ref(), &1, &mut arena).detach(points)?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_point_lists_are_not_detached() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let name: TableName = "points".into();
+        let column = test_column(&mut arena, &name, 0, "c1", true)?;
+        for values in [
+            vec![DataValue::Int64(2147483648)],
+            vec![DataValue::Parameter {
+                id: 0,
+                ty: LogicalType::Integer,
+            }],
+        ] {
+            let predicate = point_list(&mut arena, column, &values, false);
+            assert_eq!(
+                RangeDetacher::new(name.as_ref(), &0, &mut arena).detach(predicate)?,
+                None
+            );
+        }
+        let predicate = point_list(&mut arena, column, &[], false);
+        assert_eq!(
+            RangeDetacher::new(name.as_ref(), &0, &mut arena).detach(predicate)?,
+            None
+        );
+        Ok(())
     }
 
     #[test]
@@ -2750,6 +2977,59 @@ mod test {
     }
 
     #[test]
+    fn init_value_ranges_bind_and_drop_null_points() -> Result<(), DatabaseError> {
+        use crate::planner::{MetaArena, ScalarQueryRef, TableArena};
+
+        let mut arena = TableArena::default();
+        let first = arena.alloc_scalar_query_ref(false);
+        let second = arena.alloc_scalar_query_ref(false);
+        let init = |id| DataValue::InitValue {
+            id,
+            ty: LogicalType::Bigint,
+        };
+        let seven = DataValue::Int32(7);
+        let null = DataValue::Null;
+        let get = |id: ScalarQueryRef| match id.pos {
+            0 => Some(&seven),
+            1 => Some(&null),
+            _ => None,
+        };
+
+        let mut point = Range::Eq(DataValue::Tuple(vec![DataValue::Int32(1), init(first)]));
+        assert!(point.has_parameter());
+        point.bind_parameters(&|_| None, &get)?;
+        assert!(!point.has_parameter());
+        assert_eq!(
+            point,
+            Range::Eq(DataValue::Tuple(vec![
+                DataValue::Int32(1),
+                DataValue::Int64(7)
+            ]))
+        );
+
+        let mut null_point = Range::Eq(DataValue::Tuple(vec![DataValue::Null, init(second)]));
+        null_point.bind_parameters(&|_| None, &get)?;
+        assert_eq!(null_point, Range::Dummy);
+
+        let mut ranges = Range::SortedRanges(vec![
+            Range::Eq(init(first)),
+            Range::Scope {
+                min: Bound::Excluded(init(second)),
+                max: Bound::Excluded(DataValue::Null),
+            },
+        ]);
+        ranges.bind_parameters(&|_| None, &get)?;
+        assert_eq!(
+            ranges,
+            Range::SortedRanges(vec![Range::Eq(DataValue::Int64(7)), Range::Dummy])
+        );
+
+        let mut unset = Range::Eq(init(first));
+        assert!(unset.bind_parameters(&|_| None, &|_| None).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn parameterized_range_union_keeps_residual_until_values_are_bound() -> Result<(), DatabaseError>
     {
         let parameter = |id| DataValue::Parameter {
@@ -2775,11 +3055,14 @@ mod test {
         let mut ranges = Range::SortedRanges(vec![left, right]);
         let low = DataValue::Int32(8);
         let high = DataValue::Int32(3);
-        ranges.bind_parameters(&|id| match id {
-            1 => Some(&low),
-            2 => Some(&high),
-            _ => None,
-        })?;
+        ranges.bind_parameters(
+            &|id| match id {
+                1 => Some(&low),
+                2 => Some(&high),
+                _ => None,
+            },
+            &|_| None,
+        )?;
         assert!(!ranges.has_parameter());
         assert_eq!(
             ranges,

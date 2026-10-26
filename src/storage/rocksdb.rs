@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::storage::{
-    CheckpointableStorage, InnerIter, Storage, Transaction, TransactionIsolationLevel,
+    CheckpointableStorage, InnerIter, Storage, StorageTransaction, TransactionIsolationLevel,
 };
 #[cfg(feature = "unsafe_txdb_checkpoint")]
 use librocksdb_sys as ffi;
@@ -446,6 +446,7 @@ impl Storage for OptimisticRocksStorage {
     fn transaction_with_isolation(
         &self,
         isolation: TransactionIsolationLevel,
+        _read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
         let tx = if self.config.sync {
@@ -502,6 +503,7 @@ impl Storage for RocksStorage {
     fn transaction_with_isolation(
         &self,
         isolation: TransactionIsolationLevel,
+        _read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
         let tx = if self.config.sync {
@@ -636,7 +638,7 @@ fn build_read_options<D: rocksdb::DBAccess>(
 #[macro_export]
 macro_rules! impl_transaction {
     ($tx:ident, $iter:ident) => {
-        impl<'storage> Transaction for $tx<'storage> {
+        impl<'storage> StorageTransaction for $tx<'storage> {
             type BorrowedBytes<'a>
                 = DBPinnableSlice<'a>
             where
@@ -899,7 +901,7 @@ mod test {
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
         IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, InnerIter, IterBounds,
-        PrimaryKeyIndexImpl, Storage, Transaction,
+        PrimaryKeyIndexImpl, Storage, StorageTransaction,
     };
     use crate::types::index::IndexType;
     use crate::types::tuple::Tuple;
@@ -1044,7 +1046,8 @@ mod test {
             &Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
-            ),
+            )
+            .into(),
             &[
                 LogicalType::Integer.serializable(),
                 LogicalType::Boolean.serializable(),
@@ -1057,7 +1060,8 @@ mod test {
             &Tuple::new(
                 Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],
-            ),
+            )
+            .into(),
             &[
                 LogicalType::Integer.serializable(),
                 LogicalType::Boolean.serializable(),
@@ -1390,6 +1394,37 @@ mod test {
             first_tuple.values,
             vec![DataValue::Int32(0), DataValue::Int32(0)]
         );
+        drop(iter);
+
+        // An identity prefix projection still skips the remaining key fields;
+        // omitted mapping must not widen the output back to the full index.
+        let prefix_deserializers = [
+            plan_arena.column(b_cover_column).datatype().serializable(),
+            plan_arena
+                .column(a_cover_column)
+                .datatype()
+                .skip_serializable(),
+        ];
+        let mut iter = transaction.read_by_index(
+            kite_sql.state.table_cache(),
+            &plan_arena,
+            "t1".to_string().into(),
+            (None, None),
+            &[b_cover_column],
+            composite_index,
+            &[Range::Scope {
+                min: Bound::Unbounded,
+                max: Bound::Unbounded,
+            }][..],
+            false,
+            Some(&prefix_deserializers),
+            None,
+        )?;
+        for value in [0, 1, 2, 4] {
+            let tuple = crate::storage::next_tuple_for_test(&mut iter)?.unwrap();
+            assert_eq!(tuple.values, vec![DataValue::Int32(value)]);
+        }
+        assert!(crate::storage::next_tuple_for_test(&mut iter)?.is_none());
         drop(iter);
 
         let target_pk = DataValue::Int32(3);

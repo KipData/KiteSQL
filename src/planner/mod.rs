@@ -20,12 +20,13 @@ mod scalar_query_ref;
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprCloner;
+use crate::planner::operator::join::JoinType;
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::set_membership::SetMembershipOperator;
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
-use crate::planner::operator::{Operator, PhysicalOption};
+use crate::planner::operator::{ChildCosts, Operator, PhysicalOption, PlanCost, RowCountOption};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -36,9 +37,9 @@ pub(crate) use plan_keeper::{PlanInput, PlanKeeper};
 pub use scalar_query_ref::ScalarQueryRef;
 
 pub(crate) trait Explain {
-    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result;
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result;
 
-    fn explain<'a, 'p>(&'a self, arena: &'a (dyn MetaArena + 'p)) -> ExplainDisplay<'a, 'p, Self>
+    fn explain<'a, A: MetaArena + ?Sized>(&'a self, arena: &'a A) -> ExplainDisplay<'a, Self, A>
     where
         Self: Sized,
     {
@@ -46,21 +47,21 @@ pub(crate) trait Explain {
     }
 }
 
-pub(crate) struct ExplainDisplay<'a, 'p, T: ?Sized> {
+pub(crate) struct ExplainDisplay<'a, T: ?Sized, A: ?Sized> {
     value: &'a T,
-    arena: &'a (dyn MetaArena + 'p),
+    arena: &'a A,
 }
 
-impl<T: Explain + ?Sized> fmt::Display for ExplainDisplay<'_, '_, T> {
+impl<T: Explain + ?Sized, A: MetaArena + ?Sized> fmt::Display for ExplainDisplay<'_, T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.value.fmt(self.arena, f)
     }
 }
 
-pub(crate) fn fmt_explain_list<T: Explain>(
+pub(crate) fn fmt_explain_list<T: Explain, A: MetaArena + ?Sized>(
     values: &[T],
     separator: &str,
-    arena: &(dyn MetaArena + '_),
+    arena: &A,
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
     for (index, value) in values.iter().enumerate() {
@@ -172,9 +173,9 @@ impl LogicalPlan {
         }
     }
 
-    pub(crate) fn clone_plan(
+    pub(crate) fn clone_plan<A: MetaArena + ?Sized>(
         &self,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut plan = self.clone();
         OperatorExprVisitorMut::new(&mut ExprCloner, arena).visit_plan(&mut plan)?;
@@ -183,6 +184,65 @@ impl LogicalPlan {
 
     pub(crate) fn take(&mut self) -> Self {
         std::mem::replace(self, Self::new(Operator::Dummy, Childrens::None))
+    }
+
+    pub(crate) fn row_count_option(&self) -> Option<&PhysicalOption> {
+        let option = self.physical_option.as_ref()?;
+        match option.row_count {
+            RowCountOption::Estimated { .. } => Some(option),
+            RowCountOption::Unknown => None,
+            RowCountOption::Follow => match self.childrens.as_ref() {
+                Childrens::Only(child) => child.row_count_option(),
+                Childrens::Twins { left, .. } => left.row_count_option(),
+                Childrens::None => None,
+            },
+        }
+    }
+
+    pub(crate) fn estimated_rows(&self) -> Option<usize> {
+        match &self.physical_option.as_ref()?.row_count {
+            RowCountOption::Estimated { rows, .. } => Some(*rows),
+            RowCountOption::Unknown => match (&self.operator, self.childrens.as_ref()) {
+                (Operator::Join(op), Childrens::Twins { left, right })
+                    if op.join_type == JoinType::Cross && !op.limit_pushed =>
+                {
+                    Some(
+                        left.estimated_rows()?
+                            .saturating_mul(right.estimated_rows()?),
+                    )
+                }
+                _ => None,
+            },
+            RowCountOption::Follow => match self.childrens.as_ref() {
+                Childrens::Only(child) => child.estimated_rows(),
+                Childrens::Twins { left, .. } => left.estimated_rows(),
+                Childrens::None => None,
+            },
+        }
+    }
+
+    // Pass-local memoization for NLJ orientation. New physical options start
+    // empty; orientation preserves child rows/startup, so their cache is reusable.
+    pub(crate) fn price<A: MetaArena>(&mut self, arena: &mut A) -> Option<PlanCost> {
+        self.physical_option.as_ref()?;
+        let width = self.output_schema(arena).len();
+        let rows = self.estimated_rows();
+        let children = match self.childrens.as_mut() {
+            Childrens::None => ChildCosts::None,
+            Childrens::Only(child) => ChildCosts::Only(child.price(arena)),
+            Childrens::Twins { left, right } => {
+                ChildCosts::Twins(left.price(arena), right.price(arena))
+            }
+        };
+        let option = self.physical_option.as_ref()?;
+        let mut cost = PlanCost {
+            rows,
+            width,
+            startup: option.calculate_startup_work(&self.operator, &children),
+            total: None,
+        };
+        cost.total = option.calculate_work(&self.operator, &children, rows, &cost);
+        Some(cost)
     }
 
     pub fn referenced_table(&self) -> Vec<TableName> {
@@ -200,6 +260,14 @@ impl LogicalPlan {
         tables
     }
 
+    pub(crate) fn visit_referenced_columns<A: MetaArena + ?Sized>(
+        &self,
+        arena: &A,
+        f: &mut impl FnMut(&A, &crate::catalog::ColumnRef) -> bool,
+    ) -> Result<bool, DatabaseError> {
+        Operator::referenced_columns(operator::ColumnVisitRoot::Plan(self), arena, f)
+    }
+
     pub(crate) fn visit_column_refs<A, F>(
         &self,
         arena: &mut A,
@@ -209,14 +277,10 @@ impl LogicalPlan {
         A: MetaArena + ?Sized,
         F: FnMut(&crate::catalog::ColumnRef) + ?Sized,
     {
-        self.operator
-            .visit_referenced_columns(arena, &mut |_, column| {
-                f(column);
-                true
-            })?;
-        for child in self.childrens.iter() {
-            child.visit_column_refs(arena, f)?;
-        }
+        self.visit_referenced_columns(&*arena, &mut |_, column| {
+            f(column);
+            true
+        })?;
         Ok(())
     }
 
@@ -261,17 +325,18 @@ impl LogicalPlan {
             },
             Operator::Join(_) => match childrens {
                 Childrens::Twins { left, right } => {
-                    let mut schema = left.output_schema(arena).clone();
-                    schema.extend_from_slice(right.output_schema(arena));
+                    let left_schema = left.output_schema(arena);
+                    let right_schema = right.output_schema(arena);
+                    let mut schema = Vec::with_capacity(left_schema.len() + right_schema.len());
+                    schema.extend_from_slice(left_schema);
+                    schema.extend_from_slice(right_schema);
                     schema
                 }
                 _ => unreachable!(),
             },
-            Operator::MarkApply(op)
-                if matches!(op.kind, operator::mark_apply::MarkApplyKind::InnerJoin) =>
-            {
+            Operator::IndexProbeJoin(_) => {
                 let Childrens::Twins { left, right } = childrens else {
-                    unreachable!("inner apply requires two inputs")
+                    unreachable!("index probe join requires two inputs")
                 };
                 let mut schema = left.output_schema(arena).clone();
                 schema.extend_from_slice(right.output_schema(arena));
@@ -407,7 +472,7 @@ impl LogicalPlan {
 }
 
 impl Explain for LogicalPlan {
-    fn fmt(&self, arena: &(dyn MetaArena + '_), f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.operator.fmt(arena, f)?;
 
         if let Some(physical_option) = &self.physical_option {
@@ -483,7 +548,7 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
         )
     }
 
-    fn decode<T: crate::storage::Transaction, R: std::io::Read, A: MetaArena + ?Sized>(
+    fn decode<T: crate::storage::StorageTransaction, R: std::io::Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &crate::serdes::ReferenceTables,
@@ -524,10 +589,20 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::expression::ScalarExpression;
+    use crate::optimizer::core::rule::NormalizationRule;
+    use crate::optimizer::heuristic::batch::HepBatchStrategy;
+    use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
+    use crate::optimizer::rule::normalization::NormalizationRuleImpl;
     use crate::planner::operator::describe::DescribeOperator;
+    use crate::planner::operator::filter::FilterOperator;
+    use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::limit::LimitOperator;
+    use crate::planner::operator::project::ProjectOperator;
+    use crate::planner::operator::sort::{SortField, SortOperator};
     use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::{PlanImpl, SortOption};
+    use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -558,6 +633,170 @@ mod tests {
             .iter()
             .map(|column| arena.column(*column).name().to_string())
             .collect()
+    }
+
+    #[test]
+    fn row_count_follows_input_and_stops_at_unknown() {
+        let mut input = table_scan("users", Vec::new());
+        input.physical_option = Some(PhysicalOption::new(
+            PlanImpl::SeqScan,
+            SortOption::None,
+            RowCountOption::Estimated {
+                rows: 12,
+                ndv: None,
+            },
+        ));
+        let mut plan = LogicalPlan::new(Operator::Dummy, Childrens::Only(Box::new(input)));
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Project,
+            SortOption::Follow,
+            RowCountOption::Follow,
+        ));
+        assert_eq!(plan.estimated_rows(), Some(12));
+        plan.physical_option.as_mut().unwrap().row_count = RowCountOption::Unknown;
+        assert_eq!(plan.estimated_rows(), None);
+        plan.physical_option.as_mut().unwrap().row_count =
+            RowCountOption::Estimated { rows: 0, ndv: None };
+        assert_eq!(plan.estimated_rows(), Some(0));
+        plan.physical_option = None;
+        assert_eq!(plan.estimated_rows(), None);
+    }
+
+    #[test]
+    fn filter_and_projection_work_preserve_input_without_blocking() -> Result<(), DatabaseError> {
+        for output_rows in [0, 8, 98] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let predicate =
+                arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+            let mut scan = table_scan("input", vec![]);
+            scan.physical_option = Some(PhysicalOption::new(
+                PlanImpl::SeqScan,
+                SortOption::None,
+                RowCountOption::Estimated {
+                    rows: 98,
+                    ndv: None,
+                },
+            ));
+            let mut filter = FilterOperator::build(predicate, scan, false);
+            filter.physical_option = Some(PhysicalOption::new(
+                PlanImpl::Filter,
+                SortOption::Follow,
+                RowCountOption::Estimated {
+                    rows: output_rows,
+                    ndv: None,
+                },
+            ));
+            assert_eq!(filter.estimated_rows(), Some(output_rows));
+            assert_eq!(
+                filter.price(&mut arena).and_then(|cost| cost.startup),
+                Some(0)
+            );
+            assert_eq!(
+                filter
+                    .price(&mut arena)
+                    .and_then(|cost| cost.input())
+                    .map(|cost| cost.work),
+                Some(392)
+            );
+            let mut project = LogicalPlan::new(
+                Operator::Project(ProjectOperator::new(vec![])),
+                Childrens::Only(Box::new(filter)),
+            );
+            project.physical_option = Some(PhysicalOption::new(
+                PlanImpl::Project,
+                SortOption::Follow,
+                RowCountOption::Follow,
+            ));
+            assert_eq!(
+                project.price(&mut arena).and_then(|cost| cost.startup),
+                Some(0)
+            );
+            assert_eq!(
+                project
+                    .price(&mut arena)
+                    .and_then(|cost| cost.input())
+                    .map(|cost| cost.work),
+                Some(392)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn blocking_operator_consumes_complete_filtered_input_work() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let id = column("id", LogicalType::Integer, &mut arena);
+        let key = arena.alloc_expression(ScalarExpression::column_expr(id, 0));
+        let predicate =
+            arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+        let mut scan = table_scan("input", vec![id]);
+        scan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::SeqScan,
+            SortOption::None,
+            RowCountOption::Estimated {
+                rows: 98,
+                ndv: None,
+            },
+        ));
+        let mut filter = FilterOperator::build(predicate, scan, false);
+        filter.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Filter,
+            SortOption::Follow,
+            RowCountOption::Estimated { rows: 8, ndv: None },
+        ));
+        let mut sort = LogicalPlan::new(
+            Operator::Sort(SortOperator {
+                sort_fields: vec![SortField {
+                    expr: key,
+                    asc: true,
+                    nulls_first: false,
+                }],
+            }),
+            Childrens::Only(Box::new(filter)),
+        );
+        sort.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Sort,
+            SortOption::None,
+            RowCountOption::Follow,
+        ));
+        // 98 one-column input rows (5 each) + 24 comparisons * 2 operator units,
+        // then 8 output rows.
+        assert_eq!(
+            sort.price(&mut arena).and_then(|cost| cost.startup),
+            Some(538)
+        );
+        assert_eq!(
+            sort.price(&mut arena)
+                .and_then(|cost| cost.input())
+                .map(|cost| cost.work),
+            Some(578)
+        );
+        let mut unknown = table_scan("unknown", vec![]);
+        unknown.physical_option = Some(PhysicalOption::new(
+            PlanImpl::SeqScan,
+            SortOption::None,
+            RowCountOption::Unknown,
+        ));
+        let mut filter = FilterOperator::build(predicate, unknown, false);
+        filter.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Filter,
+            SortOption::Follow,
+            RowCountOption::Estimated { rows: 8, ndv: None },
+        ));
+        assert_eq!(
+            filter.price(&mut arena).and_then(|cost| cost.startup),
+            Some(0)
+        );
+        assert_eq!(
+            filter
+                .price(&mut arena)
+                .and_then(|cost| cost.input())
+                .map(|cost| cost.work),
+            None
+        );
+        Ok(())
     }
 
     #[test]
@@ -598,7 +837,11 @@ mod tests {
         let id = column("id", LogicalType::Integer, &mut arena);
         let scan = table_scan("users", vec![id]);
         let mut plan = LimitOperator::build(Some(2), Some(5), scan);
-        plan.physical_option = Some(PhysicalOption::new(PlanImpl::Limit, SortOption::Follow));
+        plan.physical_option = Some(PhysicalOption::new(
+            PlanImpl::Limit,
+            SortOption::Follow,
+            RowCountOption::Unknown,
+        ));
 
         let tables = plan
             .referenced_table()
@@ -650,6 +893,169 @@ mod tests {
         plan.reset_output_schema_cache_recursive();
         let recomputed = plan.output_schema(&mut arena).clone();
         assert_eq!(schema_names(&recomputed, &arena), vec!["name"]);
+    }
+
+    #[test]
+    fn transpose_invalidates_changed_child_before_schema_is_read() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let a = column("a", LogicalType::Integer, &mut arena);
+        let b = column("b", LogicalType::Integer, &mut arena);
+        let expr = arena.alloc_expression(ScalarExpression::column_expr(a, 0));
+        let project = LogicalPlan::new(
+            Operator::Project(ProjectOperator::new(vec![expr])),
+            Childrens::Only(Box::new(table_scan("t", vec![a, b]))),
+        );
+        let mut plan = LimitOperator::build(None, Some(1), project);
+        plan.populate_output_schema_recursive(&mut arena);
+        assert_eq!(plan.childrens.only().output_schema.as_ref().unwrap(), &[a]);
+
+        assert!(NormalizationRuleImpl::LimitProjectTranspose.apply(&mut plan, &mut arena, None)?);
+        let Childrens::Only(limit) = plan.childrens.as_mut() else {
+            panic!("expected a limit below the projection");
+        };
+        assert!(limit.output_schema.is_none());
+        assert_eq!(
+            limit.childrens.only().output_schema.as_ref().unwrap(),
+            &[a, b]
+        );
+        assert_eq!(limit.output_schema(&mut arena), &[a, b]);
+        assert_eq!(plan.output_schema(&mut arena), &[a]);
+        Ok(())
+    }
+
+    #[test]
+    fn local_rewrite_invalidates_ancestors_but_preserves_untouched_caches(
+    ) -> Result<(), DatabaseError> {
+        for strategy in [
+            HepBatchStrategy::once_topdown(),
+            HepBatchStrategy::once_bottomup(),
+        ] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let a = column("a", LogicalType::Integer, &mut arena);
+            let b = column("b", LogicalType::Integer, &mut arena);
+            let c = column("c", LogicalType::Integer, &mut arena);
+            let expr = arena.alloc_expression(ScalarExpression::column_expr(a, 0));
+            let project = LogicalPlan::new(
+                Operator::Project(ProjectOperator::new(vec![expr])),
+                Childrens::Only(Box::new(table_scan("left", vec![a, b]))),
+            );
+            let mut plan = JoinOperator::build(
+                LimitOperator::build(None, Some(1), project),
+                table_scan("right", vec![c]),
+                JoinCondition::None,
+                JoinType::Cross,
+                false,
+            );
+            plan.populate_output_schema_recursive(&mut arena);
+            assert_eq!(plan.output_schema.as_ref().unwrap(), &[a, c]);
+            let pipeline = HepOptimizerPipeline::builder()
+                .before_batch(
+                    "Transpose",
+                    strategy,
+                    &[NormalizationRuleImpl::LimitProjectTranspose],
+                )
+                .build();
+            let mut plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
+            assert!(plan.output_schema.is_none());
+            let Childrens::Twins { left, right } = plan.childrens.as_mut() else {
+                panic!("expected a join");
+            };
+            assert!(left.output_schema.is_none());
+            assert_eq!(right.output_schema.as_ref().unwrap(), &[c]);
+            let Childrens::Only(limit) = left.childrens.as_mut() else {
+                panic!("expected a limit below the projection");
+            };
+            assert!(limit.output_schema.is_none());
+            assert_eq!(
+                limit.childrens.only().output_schema.as_ref().unwrap(),
+                &[a, b]
+            );
+            assert_eq!(limit.output_schema(&mut arena), &[a, b]);
+            assert_eq!(plan.output_schema(&mut arena), &[a, c]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn wrap_child_invalidates_parent_without_clearing_input() {
+        use crate::optimizer::plan_utils::wrap_child_with;
+
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let a = column("a", LogicalType::Integer, &mut arena);
+        let b = column("b", LogicalType::Integer, &mut arena);
+        let expr = arena.alloc_expression(ScalarExpression::column_expr(a, 0));
+        let mut plan = LimitOperator::build(None, Some(1), table_scan("t", vec![a, b]));
+        plan.populate_output_schema_recursive(&mut arena);
+
+        assert!(wrap_child_with(
+            &mut plan,
+            0,
+            Operator::Project(ProjectOperator::new(vec![expr])),
+        ));
+        assert!(plan.output_schema.is_none());
+        assert!(plan
+            .childrens
+            .only()
+            .childrens
+            .only()
+            .output_schema
+            .is_some());
+        assert_eq!(plan.output_schema(&mut arena), &[a]);
+    }
+
+    #[test]
+    fn predicate_pushdown_preserves_untouched_subtree_caches() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let a = column("a", LogicalType::Integer, &mut arena);
+        let b = column("b", LogicalType::Integer, &mut arena);
+        let c = column("c", LogicalType::Integer, &mut arena);
+        let left = JoinOperator::build(
+            table_scan("a", vec![a]),
+            table_scan("b", vec![b]),
+            JoinCondition::None,
+            JoinType::Cross,
+            false,
+        );
+        let join = JoinOperator::build(
+            left,
+            table_scan("c", vec![c]),
+            JoinCondition::None,
+            JoinType::Cross,
+            false,
+        );
+        let c_expr = arena.alloc_expression(ScalarExpression::column_expr(c, 2));
+        let zero = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(0)));
+        let predicate = arena.alloc_expression(ScalarExpression::Binary {
+            op: crate::expression::BinaryOperator::Gt,
+            left_expr: c_expr,
+            right_expr: zero,
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        });
+        let mut plan = FilterOperator::build(predicate, join, false);
+        plan.populate_output_schema_recursive(&mut arena);
+        let pipeline = HepOptimizerPipeline::builder()
+            .before_batch(
+                "Push Predicate",
+                HepBatchStrategy::once_topdown(),
+                &[NormalizationRuleImpl::PushPredicateThroughJoin],
+            )
+            .build();
+        let mut plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
+        assert!(matches!(plan.operator, Operator::Join(_)));
+        assert!(plan.output_schema.is_none());
+        let (left, right) = plan.childrens.twins();
+        assert_eq!(left.output_schema.as_ref().unwrap(), &[a, b]);
+        assert!(left.childrens.twins().0.output_schema.is_some());
+        assert!(left.childrens.twins().1.output_schema.is_some());
+        assert!(matches!(right.operator, Operator::Filter(_)));
+        assert_eq!(right.childrens.only().output_schema.as_ref().unwrap(), &[c]);
+        assert_eq!(plan.output_schema(&mut arena), &[a, b, c]);
+        Ok(())
     }
 
     #[test]

@@ -16,11 +16,11 @@ use crate::errors::DatabaseError;
 use crate::storage::table_codec::Bytes;
 use crate::storage::{
     bounds_contain, bytes_bound_as_slice, owned_bound, InnerIter, KeyValueRef, Storage,
-    Transaction, TransactionIsolationLevel,
+    StorageTransaction, TransactionIsolationLevel,
 };
 use lmdb::{
-    Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RwTransaction,
-    Transaction as _, WriteFlags,
+    Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RoTransaction,
+    RwTransaction, Transaction as _, WriteFlags,
 };
 use std::collections::Bound;
 use std::fmt::{self, Display, Formatter};
@@ -99,7 +99,9 @@ impl LmdbStorage {
 
         let mut builder = Environment::new();
         builder.set_map_size(config.map_size);
-        builder.set_flags(config.flags);
+        // Read transactions may outlive the statement call (result iterators) and
+        // several may be open on one thread, so they must not be bound to TLS slots.
+        builder.set_flags(config.flags | EnvironmentFlags::NO_TLS);
         if let Some(max_readers) = config.max_readers {
             builder.set_max_readers(max_readers);
         }
@@ -128,10 +130,14 @@ impl Storage for LmdbStorage {
     fn transaction_with_isolation(
         &self,
         isolation: TransactionIsolationLevel,
+        read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
-        let tx = self.env.begin_rw_txn()?;
-
+        let tx = if read_only {
+            LmdbTxn::Ro(self.env.begin_ro_txn()?)
+        } else {
+            LmdbTxn::Rw(self.env.begin_rw_txn()?)
+        };
         Ok(LmdbTransaction {
             tx,
             db: self.db,
@@ -162,9 +168,47 @@ impl Storage for LmdbStorage {
 }
 
 pub struct LmdbTransaction<'env> {
-    tx: RwTransaction<'env>,
+    tx: LmdbTxn<'env>,
     db: Database,
     statements: u64,
+}
+
+/// Read transactions do not take LMDB's single-writer lock.
+enum LmdbTxn<'env> {
+    Ro(RoTransaction<'env>),
+    Rw(RwTransaction<'env>),
+}
+
+impl<'env> LmdbTxn<'env> {
+    fn raw(&self) -> *mut lmdb_sys::MDB_txn {
+        match self {
+            LmdbTxn::Ro(tx) => tx.txn(),
+            LmdbTxn::Rw(tx) => tx.txn(),
+        }
+    }
+
+    fn get(&self, db: Database, key: &[u8]) -> Result<&[u8], lmdb::Error> {
+        match self {
+            LmdbTxn::Ro(tx) => tx.get(db, &key),
+            LmdbTxn::Rw(tx) => tx.get(db, &key),
+        }
+    }
+
+    fn open_ro_cursor(&self, db: Database) -> Result<RoCursor<'_>, lmdb::Error> {
+        match self {
+            LmdbTxn::Ro(tx) => tx.open_ro_cursor(db),
+            LmdbTxn::Rw(tx) => tx.open_ro_cursor(db),
+        }
+    }
+
+    fn writable(&mut self) -> Result<&mut RwTransaction<'env>, DatabaseError> {
+        match self {
+            LmdbTxn::Ro(_) => Err(DatabaseError::UnsupportedStmt(
+                "cannot write in a read-only transaction".into(),
+            )),
+            LmdbTxn::Rw(tx) => Ok(tx),
+        }
+    }
 }
 
 pub struct LmdbIter<'txn> {
@@ -276,7 +320,7 @@ fn cursor_get<'txn, C: Cursor<'txn>>(
     }
 }
 
-impl Transaction for LmdbTransaction<'_> {
+impl StorageTransaction for LmdbTransaction<'_> {
     type BorrowedBytes<'a>
         = &'a [u8]
     where
@@ -300,7 +344,7 @@ impl Transaction for LmdbTransaction<'_> {
         const STATEMENT_BITS: u32 = 20;
         self.statements += 1;
         // SAFETY: `self.tx` is a live transaction handle owned by this value.
-        let txn_id = unsafe { lmdb_sys::mdb_txn_id(self.tx.txn()) } as u64;
+        let txn_id = unsafe { lmdb_sys::mdb_txn_id(self.tx.raw()) } as u64;
         if self.statements >= 1 << STATEMENT_BITS || txn_id >= 1 << (u64::BITS - STATEMENT_BITS) {
             return Err(DatabaseError::InvalidValue(
                 "statement stamps exhausted".into(),
@@ -313,7 +357,7 @@ impl Transaction for LmdbTransaction<'_> {
         &'a self,
         key: &[u8],
     ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
-        match self.tx.get(self.db, &key) {
+        match self.tx.get(self.db, key) {
             Ok(value) => Ok(Some(value)),
             Err(lmdb::Error::NotFound) => Ok(None),
             Err(err) => Err(err.into()),
@@ -338,12 +382,13 @@ impl Transaction for LmdbTransaction<'_> {
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), DatabaseError> {
         self.tx
+            .writable()?
             .put(self.db, &key, &value, lmdb::WriteFlags::empty())?;
         Ok(())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError> {
-        match self.tx.del(self.db, &key, None) {
+        match self.tx.writable()?.del(self.db, &key, None) {
             Ok(()) | Err(lmdb::Error::NotFound) => Ok(()),
             Err(err) => Err(err.into()),
         }
@@ -372,7 +417,7 @@ impl Transaction for LmdbTransaction<'_> {
     }
 
     fn remove_range(&mut self, min: Bound<&[u8]>, max: Bound<&[u8]>) -> Result<(), DatabaseError> {
-        let mut cursor = self.tx.open_rw_cursor(self.db)?;
+        let mut cursor = self.tx.writable()?.open_rw_cursor(self.db)?;
         let mut scan = Scan::new(min, max, false);
         while scan.next(&cursor)?.is_some() {
             cursor.del(WriteFlags::empty())?;
@@ -381,7 +426,10 @@ impl Transaction for LmdbTransaction<'_> {
     }
 
     fn commit(self) -> Result<(), DatabaseError> {
-        self.tx.commit()?;
+        match self.tx {
+            LmdbTxn::Ro(tx) => tx.commit()?,
+            LmdbTxn::Rw(tx) => tx.commit()?,
+        }
         Ok(())
     }
 }
@@ -414,7 +462,7 @@ mod tests {
 
         let mut iter = kite_sql.run("select b from t1 where a = 2").unwrap();
         let tuple = iter.next_tuple(|_, tuple| tuple.clone()).unwrap().unwrap();
-        assert_eq!(tuple.values[0].to_string(), "20");
+        assert_eq!(tuple[0].to_string(), "20");
         iter.done().unwrap();
     }
 
@@ -441,6 +489,60 @@ mod tests {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let db = DataBaseBuilder::path(temp_dir.path()).build_lmdb().unwrap();
         crate::storage::check_explicit_transaction_does_not_rescan_own_writes(db).unwrap();
+    }
+
+    #[test]
+    fn read_transactions_skip_the_writer_lock() {
+        use crate::storage::{Storage, StorageTransaction};
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = LmdbStorage::new(temp_dir.path().join("kite_sql.lmdb")).unwrap();
+        let isolation = storage.default_transaction_isolation();
+
+        // A writer holds LMDB's single write lock; readers still open on the same thread.
+        let mut writer = storage.transaction().unwrap();
+        writer.set(b"k", b"v").unwrap();
+        let mut reader = storage.transaction_with_isolation(isolation, true).unwrap();
+        let second = storage.transaction_with_isolation(isolation, true).unwrap();
+        assert!(reader.get_borrowed(b"k").unwrap().is_none());
+        assert!(second.get_borrowed(b"k").unwrap().is_none());
+        assert!(reader.set(b"k", b"x").is_err());
+        assert!(reader.remove(b"k").is_err());
+        writer.commit().unwrap();
+        drop((reader, second));
+
+        let reader = storage.transaction_with_isolation(isolation, true).unwrap();
+        assert_eq!(reader.get_borrowed(b"k").unwrap(), Some(&b"v"[..]));
+    }
+
+    #[test]
+    fn read_statements_and_plans_use_read_transactions() {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut db = DataBaseBuilder::path(temp_dir.path()).build_lmdb().unwrap();
+        db.ddl("create table t (a int primary key)").unwrap();
+        db.run("insert into t values (1)").unwrap().done().unwrap();
+
+        // An open write transaction does not block reads.
+        let mut writer = db.new_transaction(false).unwrap();
+        writer
+            .run("insert into t values (2)")
+            .unwrap()
+            .done()
+            .unwrap();
+        let select = db.prepare_sql("select count(*) from t", &[]).unwrap();
+        let insert = db.prepare_sql("insert into t values (3)", &[]).unwrap();
+        assert!(select.read_only && !insert.read_only);
+        let mut first = db.run("select a from t").unwrap();
+        let mut second = db.execute(&select, []).unwrap();
+        let count = second.next_tuple(|_, t| t[0].to_string()).unwrap();
+        assert_eq!(count.as_deref(), Some("1"));
+        assert!(first.next_tuple(|_, _| ()).unwrap().is_some());
+        // An explicit read-only transaction reads beside the writer and rejects writes.
+        let mut reader = db.new_transaction(true).unwrap();
+        assert!(reader.run("select a from t").unwrap().done().is_ok());
+        assert!(reader.run("insert into t values (4)").is_err());
+        assert!(reader.execute(&insert, []).is_err());
+        drop((first, second, reader));
+        writer.commit().unwrap();
     }
 
     #[test]

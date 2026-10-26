@@ -22,10 +22,10 @@ use crate::planner::operator::alter_table::change_column::{
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_add_column(
         &mut self,
         table_name: TableName,

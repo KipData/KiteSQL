@@ -75,7 +75,7 @@ impl<'a> TupleBuilder<'a> {
 
         tuple.pk = self
             .pk_indices
-            .map(|indices| Tuple::primary_projection(indices, &tuple.values));
+            .map(|indices| Tuple::primary_projection(indices, tuple.values.as_slice()));
 
         Ok(())
     }

@@ -90,12 +90,12 @@ impl TpccTransaction for Payment {
             &mut statements[1],
             &[(1, DataValue::Int16(args.w_id as i16))],
             &mut |tuple| {
-                w_street_1 = tuple.values[0].utf8().unwrap().to_string();
-                w_street_2 = tuple.values[1].utf8().unwrap().to_string();
-                w_city = tuple.values[2].utf8().unwrap().to_string();
-                w_state = tuple.values[3].utf8().unwrap().to_string();
-                w_zip = tuple.values[4].utf8().unwrap().to_string();
-                w_name = tuple.values[5].utf8().unwrap().to_string();
+                w_street_1 = tuple[0].utf8().unwrap().to_string();
+                w_street_2 = tuple[1].utf8().unwrap().to_string();
+                w_city = tuple[2].utf8().unwrap().to_string();
+                w_state = tuple[3].utf8().unwrap().to_string();
+                w_zip = tuple[4].utf8().unwrap().to_string();
+                w_name = tuple[5].utf8().unwrap().to_string();
                 Ok(())
             },
         )?;
@@ -124,12 +124,12 @@ impl TpccTransaction for Payment {
                 (2, DataValue::Int8(args.d_id as i8)),
             ],
             &mut |tuple| {
-                d_street_1 = tuple.values[0].utf8().unwrap().to_string();
-                d_street_2 = tuple.values[1].utf8().unwrap().to_string();
-                d_city = tuple.values[2].utf8().unwrap().to_string();
-                d_state = tuple.values[3].utf8().unwrap().to_string();
-                d_zip = tuple.values[4].utf8().unwrap().to_string();
-                d_name = tuple.values[5].utf8().unwrap().to_string();
+                d_street_1 = tuple[0].utf8().unwrap().to_string();
+                d_street_2 = tuple[1].utf8().unwrap().to_string();
+                d_city = tuple[2].utf8().unwrap().to_string();
+                d_state = tuple[3].utf8().unwrap().to_string();
+                d_zip = tuple[4].utf8().unwrap().to_string();
+                d_name = tuple[5].utf8().unwrap().to_string();
                 Ok(())
             },
         )?;
@@ -146,7 +146,7 @@ impl TpccTransaction for Payment {
                     (3, DataValue::from(args.c_last.clone())),
                 ],
                 &mut |tuple| {
-                    name_cnt = tuple.values[0].i32().unwrap();
+                    name_cnt = tuple[0].i32().unwrap();
                     Ok(())
                 },
             )?;
@@ -161,7 +161,7 @@ impl TpccTransaction for Payment {
             }
             let target = name_cnt as usize / 2 - 1;
             tx.with_query_nth(&mut statements[5], &params, target, &mut |tuple| {
-                c_id = tuple.values[0].i32().unwrap();
+                c_id = tuple[0].i32().unwrap();
                 Ok(())
             })?;
         }
@@ -188,20 +188,20 @@ impl TpccTransaction for Payment {
                 (3, DataValue::Int32(c_id)),
             ],
             &mut |tuple| {
-                c_first = tuple.values[0].utf8().unwrap().to_string();
-                c_middle = tuple.values[1].utf8().unwrap().to_string();
-                c_last = tuple.values[2].utf8().unwrap().to_string();
-                c_street_1 = tuple.values[3].utf8().unwrap().to_string();
-                c_street_2 = tuple.values[4].utf8().unwrap().to_string();
-                c_city = tuple.values[5].utf8().unwrap().to_string();
-                c_state = tuple.values[6].utf8().unwrap().to_string();
-                c_zip = tuple.values[7].utf8().unwrap().to_string();
-                c_phone = tuple.values[8].utf8().unwrap().to_string();
-                c_credit = tuple.values[9].utf8().map(ToString::to_string);
-                c_credit_lim = tuple.values[10].i64().unwrap();
-                c_discount = tuple.values[11].decimal().unwrap();
-                c_balance = tuple.values[12].decimal().unwrap();
-                c_since = tuple.values[13].datetime().unwrap();
+                c_first = tuple[0].utf8().unwrap().to_string();
+                c_middle = tuple[1].utf8().unwrap().to_string();
+                c_last = tuple[2].utf8().unwrap().to_string();
+                c_street_1 = tuple[3].utf8().unwrap().to_string();
+                c_street_2 = tuple[4].utf8().unwrap().to_string();
+                c_city = tuple[5].utf8().unwrap().to_string();
+                c_state = tuple[6].utf8().unwrap().to_string();
+                c_zip = tuple[7].utf8().unwrap().to_string();
+                c_phone = tuple[8].utf8().unwrap().to_string();
+                c_credit = tuple[9].utf8().map(ToString::to_string);
+                c_credit_lim = tuple[10].i64().unwrap();
+                c_discount = tuple[11].decimal().unwrap();
+                c_balance = tuple[12].decimal().unwrap();
+                c_since = tuple[13].datetime().unwrap();
                 Ok(())
             },
         )?;
@@ -219,7 +219,7 @@ impl TpccTransaction for Payment {
                         (3, DataValue::Int32(c_id)),
                     ],
                     &mut |tuple| {
-                        c_data = tuple.values[0].utf8().unwrap().to_string();
+                        c_data = tuple[0].utf8().unwrap().to_string();
                         Ok(())
                     },
                 )?;

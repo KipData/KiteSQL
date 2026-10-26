@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::Bytes;
 use crate::storage::{
-    bytes_bound_as_slice, owned_bound, EmptyStorageMetrics, InnerIter, Storage, Transaction,
+    bytes_bound_as_slice, owned_bound, EmptyStorageMetrics, InnerIter, Storage, StorageTransaction,
     TransactionIsolationLevel,
 };
 use std::cell::{Cell, Ref, RefCell};
@@ -45,6 +45,7 @@ impl Storage for MemoryStorage {
     fn transaction_with_isolation(
         &self,
         isolation: TransactionIsolationLevel,
+        _read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
         Ok(MemoryTransaction {
@@ -147,7 +148,7 @@ impl InnerIter for MemoryIter<'_> {
     }
 }
 
-impl Transaction for MemoryTransaction {
+impl StorageTransaction for MemoryTransaction {
     type BorrowedBytes<'a>
         = MemoryValue<'a>
     where
@@ -275,7 +276,8 @@ mod wasm_tests {
             &Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
-            ),
+            )
+            .into(),
             &[
                 LogicalType::Integer.serializable(),
                 LogicalType::Boolean.serializable(),
@@ -288,7 +290,8 @@ mod wasm_tests {
             &Tuple::new(
                 Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],
-            ),
+            )
+            .into(),
             &[
                 LogicalType::Integer.serializable(),
                 LogicalType::Boolean.serializable(),
@@ -440,7 +443,8 @@ mod native_tests {
             &Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
-            ),
+            )
+            .into(),
             &[
                 LogicalType::Integer.serializable(),
                 LogicalType::Boolean.serializable(),
@@ -453,7 +457,8 @@ mod native_tests {
             &Tuple::new(
                 Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],
-            ),
+            )
+            .into(),
             &[
                 LogicalType::Integer.serializable(),
                 LogicalType::Boolean.serializable(),

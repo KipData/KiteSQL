@@ -26,16 +26,16 @@ use std::borrow::Cow;
 pub struct ConstantCalculator;
 
 impl ConstantCalculator {
-    pub fn new(_arena: &(dyn MetaArena + '_)) -> Self {
+    pub fn new<A: MetaArena + ?Sized>(_arena: &A) -> Self {
         Self
     }
 }
 
-impl ExprVisitorMut for ConstantCalculator {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for ConstantCalculator {
     fn visit_expression(
         &mut self,
         expr: &mut ScalarExpression,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<bool, DatabaseError> {
         match expr {
             ScalarExpression::Unary {
@@ -107,14 +107,16 @@ impl ExprVisitorMut for ConstantCalculator {
     }
 }
 
+const IN_EXPANSION_LIMIT: usize = 5;
+
 #[derive(Debug, Default)]
 pub struct Simplify;
 
-impl ExprVisitorMut for Simplify {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for Simplify {
     fn visit_expression(
         &mut self,
         expr: &mut ScalarExpression,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<bool, DatabaseError> {
         match expr {
             ScalarExpression::Unary {
@@ -197,6 +199,15 @@ impl ExprVisitorMut for Simplify {
             } => {
                 if args.is_empty() {
                     return Ok(false);
+                }
+                // Keep point lists compact without changing pairwise coercion or
+                // repeated evaluation of non-column operands in the old rewrite.
+                if args.len() > IN_EXPANSION_LIMIT
+                    && arg_expr.in_point_column(arena).is_some_and(|(_, ty)| {
+                        args.iter().all(|arg| arg.in_point(ty, arena).is_some())
+                    })
+                {
+                    return Ok(true);
                 }
 
                 let (op_1, op_2) = if *negated {
@@ -302,9 +313,9 @@ impl Simplify {
         }
     }
 
-    fn take_range_comparison(
+    fn take_range_comparison<A: MetaArena + ?Sized>(
         expr: ExprRef,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
     ) -> Option<ScalarExpression> {
         match arena.expression(expr) {
             expression @ ScalarExpression::Binary { op, .. }
@@ -316,9 +327,9 @@ impl Simplify {
         }
     }
 
-    fn take_negated_range_comparison(
+    fn take_negated_range_comparison<A: MetaArena + ?Sized>(
         expr: ExprRef,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
     ) -> Option<ScalarExpression> {
         let mut expression = arena.expression(expr).clone();
         match &mut expression {
@@ -330,17 +341,17 @@ impl Simplify {
         }
     }
 
-    fn boolean_constant(expr: ExprRef, arena: &(dyn MetaArena + '_)) -> Option<bool> {
+    fn boolean_constant<A: MetaArena + ?Sized>(expr: ExprRef, arena: &A) -> Option<bool> {
         match arena.expression(expr) {
             ScalarExpression::Constant(DataValue::Boolean(value)) => Some(*value),
             _ => None,
         }
     }
 
-    fn take_range_comparison_with_polarity(
+    fn take_range_comparison_with_polarity<A: MetaArena + ?Sized>(
         expr: ExprRef,
         positive: bool,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
     ) -> Option<ScalarExpression> {
         if positive {
             Self::take_range_comparison(expr, arena)
@@ -349,11 +360,11 @@ impl Simplify {
         }
     }
 
-    fn take_bool_normalized_range_comparison(
+    fn take_bool_normalized_range_comparison<A: MetaArena + ?Sized>(
         op: BinaryOperator,
         left_expr: ExprRef,
         right_expr: ExprRef,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
     ) -> Option<ScalarExpression> {
         let is_eq = matches!(op, BinaryOperator::Eq);
         if !matches!(op, BinaryOperator::Eq | BinaryOperator::NotEq) {
@@ -412,11 +423,11 @@ impl Simplify {
     /// (float and decimal arithmetic round), never `*`/`/` (sign-dependent and
     /// not invertible for integers), and any overflow while folding aborts.
     /// Returns `None` when nothing could be peeled.
-    fn isolate_column(
+    fn isolate_column<A: MetaArena + ?Sized>(
         mut expr: ExprRef,
         mut op: BinaryOperator,
         value_expr: ExprRef,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
     ) -> Option<(ExprRef, BinaryOperator, DataValue)> {
         let mut value = value_expr.unpack_val(arena)?;
         if value.has_parameter() {
@@ -502,6 +513,39 @@ impl Simplify {
 }
 
 impl ExprRef {
+    pub(crate) fn in_point_column<A: MetaArena + ?Sized>(
+        mut self,
+        arena: &A,
+    ) -> Option<(ColumnRef, &LogicalType)> {
+        while let ScalarExpression::Alias { expr, .. } = arena.expression(self) {
+            self = *expr;
+        }
+        let ScalarExpression::ColumnRef { column, .. } = arena.expression(self) else {
+            return None;
+        };
+        let ty = arena.column(*column).datatype();
+        (!matches!(
+            ty,
+            LogicalType::Tuple(_) | LogicalType::Float | LogicalType::Double
+        ))
+        .then_some((*column, ty))
+    }
+
+    pub(crate) fn in_point<'v, A: MetaArena + ?Sized>(
+        self,
+        ty: &LogicalType,
+        arena: &'v A,
+    ) -> Option<&'v DataValue> {
+        match arena.expression(self) {
+            ScalarExpression::Constant(value)
+                if !value.has_parameter() && (value.is_null() || value.logical_type() == *ty) =>
+            {
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn unpack_val<A: MetaArena + ?Sized>(self, arena: &A) -> Option<DataValue> {
         match arena.expression(self) {
             ScalarExpression::Constant(val) => Some(val.clone()),

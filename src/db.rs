@@ -35,6 +35,7 @@ use crate::function::lower::Lower;
 use crate::function::numbers::Numbers;
 use crate::function::octet_length::OctetLength;
 use crate::function::upper::Upper;
+use crate::optimizer::core::hll;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::HepBatchStrategy;
 use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
@@ -53,12 +54,13 @@ use crate::storage::memory::MemoryStorage;
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{
-    CheckpointableStorage, StatisticsMetaCache, Storage, TableCache, Transaction,
+    CheckpointableStorage, StatisticsMetaCache, Storage, StorageTransaction, TableCache,
     TransactionIsolationLevel, ViewCache,
 };
-use crate::types::tuple::{Schema, SchemaView, Tuple};
+use crate::types::tuple::{Schema, SchemaView, TupleImpl};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
+use ordered_float::OrderedFloat;
 #[cfg(any(feature = "parser", feature = "orm"))]
 pub use prepared::PreparedPlan;
 use std::collections::{HashMap, HashSet};
@@ -68,6 +70,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Output schema, execution-time arena, and executor of a built statement.
+pub(crate) type Execution<'a, A, T> = (Schema, ExecMetaArena<A>, Executor<'a, T>);
 pub(crate) type ScalaFunctions = HashMap<FunctionSummary, Arc<dyn ScalarFunctionImpl>>;
 pub(crate) type TableFunctions = HashMap<FunctionSummary, TableFunctionCatalog>;
 
@@ -80,12 +84,15 @@ pub enum CatalogKind {
 
 pub(crate) trait BindSource<'a> {
     type Iter: ResultIter;
-    type Transaction: Transaction;
+    type Transaction: StorageTransaction;
 
     type Storage: Storage;
 
+    /// `read_only` lets a fresh transaction use the storage's read path; executors
+    /// that already hold a transaction ignore it.
     fn execute<P: Into<PlanInput<'a>>, A: MetaArena + 'a, F>(
         self,
+        read_only: bool,
         build: F,
     ) -> Result<Self::Iter, DatabaseError>
     where
@@ -112,6 +119,8 @@ pub struct DataBaseBuilder {
     ))]
     path: PathBuf,
     histogram_buckets: Option<usize>,
+    hll_precision: Option<u8>,
+    statistics_relative_error: Option<f64>,
     parser_recursion_limit: Option<usize>,
     transaction_isolation: Option<TransactionIsolationLevel>,
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -144,6 +153,8 @@ impl DataBaseBuilder {
             ))]
             path,
             histogram_buckets: None,
+            hll_precision: None,
+            statistics_relative_error: None,
             parser_recursion_limit: None,
             transaction_isolation: None,
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -156,6 +167,26 @@ impl DataBaseBuilder {
     /// Sets the default histogram bucket count used by `ANALYZE`.
     pub fn histogram_buckets(mut self, buckets: usize) -> Self {
         self.histogram_buckets = Some(buckets);
+        self
+    }
+
+    /// Sets the HyperLogLog precision `p` used by `ANALYZE` to estimate column NDV.
+    ///
+    /// Each sketch has `2^p` registers (one byte each) with a standard error of
+    /// about `1.04 / sqrt(2^p)`. Valid range is 4..=26; unset uses 14
+    /// (16 KiB, ~0.81% error).
+    pub fn hll_precision(mut self, precision: u8) -> Self {
+        self.hll_precision = Some(precision);
+        self
+    }
+
+    /// Sets the relative error `ε` of the quantile (KLL) and frequency
+    /// (Count-Min) sketches built by `ANALYZE`.
+    ///
+    /// Sketch size grows roughly as `1 / ε` (Count-Min width is
+    /// `next_power_of_two(2 / ε)`). Must be in `(0, 1)`; unset uses 0.001.
+    pub fn statistics_relative_error(mut self, relative_error: f64) -> Self {
+        self.statistics_relative_error = Some(relative_error);
         self
     }
 
@@ -250,6 +281,8 @@ impl DataBaseBuilder {
         Self::_build::<T>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -263,6 +296,8 @@ impl DataBaseBuilder {
         Self::_build::<MemoryStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -276,6 +311,8 @@ impl DataBaseBuilder {
         Self::_build::<RocksStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -290,6 +327,8 @@ impl DataBaseBuilder {
         Self::_build::<MemoryStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -303,6 +342,8 @@ impl DataBaseBuilder {
         Self::_build::<LmdbStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -317,6 +358,8 @@ impl DataBaseBuilder {
         Self::_build::<OptimisticRocksStorage>(
             storage,
             self.histogram_buckets,
+            self.hll_precision,
+            self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
         )
@@ -325,6 +368,8 @@ impl DataBaseBuilder {
     fn _build<T: Storage>(
         storage: T,
         histogram_buckets: Option<usize>,
+        hll_precision: Option<u8>,
+        statistics_relative_error: Option<f64>,
         parser_recursion_limit: Option<usize>,
         transaction_isolation: Option<TransactionIsolationLevel>,
     ) -> Result<Database<T>, DatabaseError> {
@@ -332,6 +377,23 @@ impl DataBaseBuilder {
             return Err(DatabaseError::InvalidValue(
                 "histogram buckets must be >= 1".to_string(),
             ));
+        }
+        // Reject out-of-range values when the database opens, not at the first ANALYZE.
+        if let Some(precision) = hll_precision {
+            if !(hll::MIN_PRECISION..=hll::MAX_PRECISION).contains(&precision) {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "hll precision must be between {} and {}, got {precision}",
+                    hll::MIN_PRECISION,
+                    hll::MAX_PRECISION
+                )));
+            }
+        }
+        if let Some(relative_error) = statistics_relative_error {
+            if !(relative_error > 0.0 && relative_error < 1.0) {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "statistics relative error must be in (0, 1), got {relative_error}"
+                )));
+            }
         }
         if matches!(parser_recursion_limit, Some(0)) {
             return Err(DatabaseError::InvalidValue(
@@ -341,7 +403,7 @@ impl DataBaseBuilder {
         let transaction_isolation =
             transaction_isolation.unwrap_or_else(|| storage.default_transaction_isolation());
         storage.validate_transaction_isolation(transaction_isolation)?;
-        let meta_cache = HashMap::default();
+        let meta_cache = StatisticsMetaCache::default();
         let table_cache = HashMap::default();
         let view_cache = HashMap::default();
         let table_arena = TableArenaCell::default();
@@ -355,6 +417,8 @@ impl DataBaseBuilder {
             table_arena,
             optimizer_pipeline: optimizer_pipeline(),
             histogram_buckets,
+            hll_precision,
+            statistics_relative_error: statistics_relative_error.map(OrderedFloat),
             parser_recursion_limit,
             _p: Default::default(),
         };
@@ -384,62 +448,78 @@ impl DataBaseBuilder {
 fn optimizer_pipeline() -> HepOptimizerPipeline {
     HepOptimizerPipeline::builder()
         .before_batch(
-            "Column Pruning".to_string(),
+            "Column Pruning",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::ColumnPruning],
+            &[NormalizationRuleImpl::ColumnPruning],
         )
         .before_batch(
-            "Simplify Filter".to_string(),
+            "Simplify Filter",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![NormalizationRuleImpl::SimplifyFilter],
+            &[NormalizationRuleImpl::SimplifyFilter],
         )
         .before_batch(
-            "Constant Calculation".to_string(),
+            "Constant Calculation",
             HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::ConstantCalculation],
+            &[NormalizationRuleImpl::ConstantCalculation],
         )
         .before_batch(
-            "Predicate Pushdown".to_string(),
+            "Predicate Pushdown",
             HepBatchStrategy::fix_point_topdown(30),
-            vec![
+            &[
+                NormalizationRuleImpl::PropagateFilterConstants,
+                NormalizationRuleImpl::PropagateJoinConstants,
                 NormalizationRuleImpl::PushPredicateThroughJoin,
                 NormalizationRuleImpl::PushJoinPredicateIntoScan,
             ],
         )
         .before_batch(
-            "Limit Pushdown".to_string(),
+            "Limit Pushdown",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![
+            &[
                 NormalizationRuleImpl::LimitProjectTranspose,
                 NormalizationRuleImpl::PushLimitThroughJoin,
             ],
         )
         .before_batch(
-            "TopK".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![
+            "TopK",
+            HepBatchStrategy::fix_point_topdown(1),
+            &[
                 NormalizationRuleImpl::MinMaxToTopK,
                 NormalizationRuleImpl::TopK,
             ],
         )
         .before_batch(
-            "Combine Operators".to_string(),
+            "Collapse Project",
+            HepBatchStrategy::fix_point_bottomup(10),
+            &[NormalizationRuleImpl::EliminateProject],
+        )
+        .before_batch(
+            "Combine Operators",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![
-                NormalizationRuleImpl::CollapseProject,
+            &[
                 NormalizationRuleImpl::CollapseGroupByAgg,
                 NormalizationRuleImpl::CombineFilter,
             ],
         )
         .before_batch(
-            "Predicate Into Scan".to_string(),
+            "Predicate Into Scan",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![NormalizationRuleImpl::PushPredicateIntoScan],
+            &[NormalizationRuleImpl::PushPredicateIntoScan],
+        )
+        .before_batch(
+            "Guard Mark Apply",
+            HepBatchStrategy::fix_point_topdown(1),
+            &[NormalizationRuleImpl::GuardMarkApply],
         )
         .after_batch(
-            "Parameterize Mark Apply".to_string(),
+            "Greedy Join Reorder",
             HepBatchStrategy::once_topdown(),
-            vec![
+            &[NormalizationRuleImpl::GreedyJoinReorder],
+        )
+        .after_batch(
+            "Parameterize Mark Apply",
+            HepBatchStrategy::fix_point_topdown(1),
+            &[
                 NormalizationRuleImpl::ParameterizeMarkApply,
                 NormalizationRuleImpl::ParameterizeInnerJoin,
             ],
@@ -447,21 +527,31 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         // Only discard predicates after parameterization has chosen the final
         // lookup. A Probe must not inherit residuals from a replaced static range.
         .after_batch(
-            "Eliminate Index Filter".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::EliminateIndexFilter],
+            "Eliminate Index Filter",
+            HepBatchStrategy::fix_point_topdown(1),
+            &[NormalizationRuleImpl::EliminateIndexFilter],
         )
         .after_batch(
-            "Expression Remapper".to_string(),
-            HepBatchStrategy::once_topdown(),
-            vec![NormalizationRuleImpl::EvaluatorBind],
+            "Materialize Mark Apply",
+            HepBatchStrategy::fix_point_bottomup(1),
+            &[NormalizationRuleImpl::MaterializeMarkApply],
         )
         .after_batch(
-            "Limit Into Scan".to_string(),
+            "Collapse Project",
+            HepBatchStrategy::fix_point_bottomup(10),
+            &[NormalizationRuleImpl::EliminateProject],
+        )
+        .after_batch(
+            "Expression Remapper",
+            HepBatchStrategy::once_topdown(),
+            &[NormalizationRuleImpl::EvaluatorBind],
+        )
+        .after_batch(
+            "Limit Into Scan",
             HepBatchStrategy::fix_point_topdown(10),
-            vec![NormalizationRuleImpl::PushLimitIntoTableScan],
+            &[NormalizationRuleImpl::PushLimitIntoTableScan],
         )
-        .implementations(vec![
+        .implementations(&[
             // DQL
             ImplementationRuleImpl::SimpleAggregate,
             ImplementationRuleImpl::GroupByAggregate,
@@ -470,6 +560,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             ImplementationRuleImpl::HashJoin,
             ImplementationRuleImpl::Limit,
             ImplementationRuleImpl::Projection,
+            ImplementationRuleImpl::MarkApply,
             ImplementationRuleImpl::ScalarSubquery,
             ImplementationRuleImpl::SeqScan,
             ImplementationRuleImpl::IndexScan,
@@ -498,7 +589,7 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
         .build()
 }
 
-fn statement_stamp<T: Transaction>(
+fn statement_stamp<T: StorageTransaction>(
     transaction: &mut T,
     plan: &LogicalPlan,
 ) -> Result<u64, DatabaseError> {
@@ -528,6 +619,8 @@ pub(crate) struct State<S> {
     table_arena: TableArenaCell,
     optimizer_pipeline: HepOptimizerPipeline,
     histogram_buckets: Option<usize>,
+    hll_precision: Option<u8>,
+    statistics_relative_error: Option<OrderedFloat<f64>>,
     #[cfg_attr(not(feature = "parser"), allow(dead_code))]
     parser_recursion_limit: Option<usize>,
     _p: PhantomData<S>,
@@ -610,7 +703,7 @@ impl<S: Storage> State<S> {
         Ok(())
     }
 
-    pub(crate) fn build_plan<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>, F>(
+    pub(crate) fn build_plan<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>, F>(
         &'a self,
         params: A,
         transaction: &T,
@@ -645,6 +738,12 @@ impl<S: Storage> State<S> {
             if op.histogram_buckets.is_none() {
                 op.histogram_buckets = self.histogram_buckets;
             }
+            if op.hll_precision.is_none() {
+                op.hll_precision = self.hll_precision;
+            }
+            if op.statistics_relative_error.is_none() {
+                op.statistics_relative_error = self.statistics_relative_error;
+            }
         }
         plan.populate_output_schema_recursive(&mut arena);
 
@@ -656,14 +755,7 @@ impl<S: Storage> State<S> {
         transaction: &'a mut S::TransactionType<'txn>,
         plan: PlanInput<'a>,
         mut plan_arena: A,
-    ) -> Result<
-        (
-            Schema,
-            ExecMetaArena<A>,
-            Executor<'a, S::TransactionType<'txn>>,
-        ),
-        DatabaseError,
-    >
+    ) -> Result<Execution<'a, A, S::TransactionType<'txn>>, DatabaseError>
     where
         S: 'txn,
     {
@@ -691,14 +783,7 @@ impl<S: Storage> State<S> {
         transaction: &'a mut S::TransactionType<'txn>,
         params: A,
         build: F,
-    ) -> Result<
-        (
-            Schema,
-            ExecMetaArena<PlanArena<'a>>,
-            Executor<'a, S::TransactionType<'txn>>,
-        ),
-        DatabaseError,
-    >
+    ) -> Result<Execution<'a, PlanArena<'a>, S::TransactionType<'txn>>, DatabaseError>
     where
         S: 'txn,
         A: AsRef<[(usize, LogicalType)]>,
@@ -717,6 +802,8 @@ impl<S: Storage> State<S> {
             table_arena,
             optimizer_pipeline,
             histogram_buckets,
+            hll_precision,
+            statistics_relative_error,
             ..
         } = self;
         let mut plan_arena = PlanArena::new(table_arena);
@@ -740,6 +827,12 @@ impl<S: Storage> State<S> {
         if let Operator::Analyze(op) = &mut plan.operator {
             if op.histogram_buckets.is_none() {
                 op.histogram_buckets = *histogram_buckets;
+            }
+            if op.hll_precision.is_none() {
+                op.hll_precision = *hll_precision;
+            }
+            if op.statistics_relative_error.is_none() {
+                op.statistics_relative_error = *statistics_relative_error;
             }
         }
 
@@ -787,17 +880,13 @@ impl DDLApply {
                 let table = table.transplant_to_table_arena(plan_arena)?;
                 state.table_cache.insert(name.clone(), table);
                 if clear_statistics {
-                    state
-                        .meta_cache
-                        .retain(|(cached_table_name, _), _| cached_table_name != &name);
+                    state.meta_cache.remove_table(&name);
                 }
                 catalog_changed = true;
             }
             DDLApply::DropTable { name } => {
                 state.table_cache.remove(&name);
-                state
-                    .meta_cache
-                    .retain(|(cached_table_name, _), _| cached_table_name != &name);
+                state.meta_cache.remove_table(&name);
                 catalog_changed = true;
             }
             DDLApply::UpsertView { view } => {
@@ -810,18 +899,31 @@ impl DDLApply {
                 state.view_cache.remove(&name);
                 catalog_changed = true;
             }
-            DDLApply::UpsertStatisticsMeta {
+            DDLApply::UpsertIndexStatistics {
                 table_name,
                 index_id,
                 meta,
             } => {
-                state.meta_cache.insert((table_name, index_id), meta);
+                state
+                    .meta_cache
+                    .indexes
+                    .insert((table_name, index_id), meta);
             }
-            DDLApply::RemoveStatisticsMeta {
+            DDLApply::RemoveIndexStatistics {
                 table_name,
                 index_id,
             } => {
-                state.meta_cache.remove(&(table_name, index_id));
+                state.meta_cache.indexes.remove(&(table_name, index_id));
+            }
+            DDLApply::UpsertColumnStatistics {
+                table_name,
+                column_id,
+                meta,
+            } => {
+                state
+                    .meta_cache
+                    .columns
+                    .insert((table_name, column_id), meta);
             }
         }
         Ok(catalog_changed)
@@ -864,7 +966,7 @@ impl<S: Storage> Database<S> {
     {
         let transaction = Box::into_raw(Box::new(
             self.storage
-                .transaction_with_isolation(self.transaction_isolation)?,
+                .transaction_with_isolation(self.transaction_isolation, false)?,
         ));
         let state = std::ptr::from_mut(&mut self.state);
         let (schema, plan_arena, executor) =
@@ -923,7 +1025,10 @@ impl<S: Storage> Database<S> {
                 Ok(())
             }
             CatalogKind::Table(name) => {
-                let transaction = self.storage.transaction()?;
+                let transaction = self.storage.transaction_with_isolation(
+                    self.storage.default_transaction_isolation(),
+                    true,
+                )?;
                 let mut table_codec = TableCodec::default();
                 let table = transaction
                     .load_table(
@@ -932,23 +1037,56 @@ impl<S: Storage> Database<S> {
                         name.clone(),
                     )?
                     .ok_or(DatabaseError::TableNotFound)?;
+                let mut indexes = Vec::new();
+                let mut columns = Vec::new();
                 for index in table.indexes() {
                     let index_id = self.state.table_arena.borrow().index(*index).id;
-                    if let Some(meta) = transaction.statistics_meta(
+                    if let Some(meta) = transaction.index_statistics(
                         &mut table_codec,
                         name.as_ref(),
                         index_id,
                         self.state.table_arena.borrow_mut(),
                     )? {
-                        self.state.meta_cache.insert((name.clone(), index_id), meta);
+                        indexes.push((index_id, meta));
                     }
                 }
+                for column in table.columns() {
+                    let column_id = {
+                        let table_arena = self.state.table_arena.borrow();
+                        let column = table_arena.column(*column);
+                        column
+                            .id()
+                            .ok_or_else(|| DatabaseError::invalid_column(column.name()))?
+                    };
+                    if let Some(meta) = transaction.column_statistics(
+                        &mut table_codec,
+                        name.as_ref(),
+                        column_id,
+                        self.state.table_arena.borrow_mut(),
+                    )? {
+                        columns.push((column_id, meta));
+                    }
+                }
+                self.state.meta_cache.remove_table(&name);
+                self.state.meta_cache.indexes.extend(
+                    indexes
+                        .into_iter()
+                        .map(|(id, meta)| ((name.clone(), id), meta)),
+                );
+                self.state.meta_cache.columns.extend(
+                    columns
+                        .into_iter()
+                        .map(|(id, meta)| ((name.clone(), id), meta)),
+                );
                 self.state.table_cache.insert(name, table);
                 self.state.recycle_table_arena()?;
                 Ok(())
             }
             CatalogKind::View(name) => {
-                let transaction = self.storage.transaction()?;
+                let transaction = self.storage.transaction_with_isolation(
+                    self.storage.default_transaction_isolation(),
+                    true,
+                )?;
                 let mut table_codec = TableCodec::default();
                 let view = transaction
                     .load_view(
@@ -970,15 +1108,18 @@ impl<S: Storage> Database<S> {
     /// Opens a new explicit transaction.
     ///
     /// Statements executed through the returned transaction share the same
-    /// transactional context until [`DBTransaction::commit`] is called.
-    pub fn new_transaction(&self) -> Result<DBTransaction<'_, S>, DatabaseError> {
+    /// transactional context until [`Transaction::commit`] is called.
+    /// A `read_only` transaction rejects statements that write; on LMDB it runs
+    /// alongside the single writer instead of waiting for it.
+    pub fn new_transaction(&self, read_only: bool) -> Result<Transaction<'_, S>, DatabaseError> {
         let transaction = self
             .storage
-            .transaction_with_isolation(self.transaction_isolation)?;
+            .transaction_with_isolation(self.transaction_isolation, read_only)?;
 
-        Ok(DBTransaction {
+        Ok(Transaction {
             inner: transaction,
             state: &self.state,
+            read_only,
         })
     }
 
@@ -1007,6 +1148,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
 
     fn execute<P: Into<PlanInput<'a>>, A: MetaArena + 'a, F>(
         self,
+        read_only: bool,
         build: F,
     ) -> Result<Self::Iter, DatabaseError>
     where
@@ -1014,7 +1156,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
     {
         let transaction = Box::into_raw(Box::new(
             self.storage
-                .transaction_with_isolation(self.transaction_isolation)?,
+                .transaction_with_isolation(self.transaction_isolation, read_only)?,
         ));
         let result = (|| {
             let transaction = unsafe { &mut *transaction };
@@ -1049,7 +1191,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
     {
         let mut transaction = self
             .storage
-            .transaction_with_isolation(self.transaction_isolation)?;
+            .transaction_with_isolation(self.transaction_isolation, true)?;
         transaction.begin_statement_scope()?;
         let (plan, mut arena) = self.state.build_plan(params, &transaction, build)?;
         Ok(plan.explain(&mut arena, 0))
@@ -1077,7 +1219,7 @@ pub trait ResultIter {
     /// Advances to the next row and runs `f` while the executor row slot is borrowed.
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError>;
 
     /// Finishes consuming the iterator and flushes any remaining work.
@@ -1171,7 +1313,7 @@ impl<S: Storage> DatabaseIter<'_, S> {
     #[inline]
     pub fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         unsafe { (*self.inner).next_tuple(f) }
     }
@@ -1195,7 +1337,7 @@ impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
 
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         DatabaseIter::next_tuple(self, f)
     }
@@ -1206,12 +1348,13 @@ impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
 }
 
 /// Explicit transaction handle created by [`Database::new_transaction`].
-pub struct DBTransaction<'a, S: Storage + 'a> {
+pub struct Transaction<'a, S: Storage + 'a> {
     pub(crate) inner: S::TransactionType<'a>,
     pub(crate) state: &'a State<S>,
+    read_only: bool,
 }
 
-impl<'txn, S: Storage> DBTransaction<'txn, S> {
+impl<'txn, S: Storage> Transaction<'txn, S> {
     /// Commits the current transaction.
     pub fn commit(self) -> Result<(), DatabaseError> {
         self.inner.commit()?;
@@ -1220,7 +1363,7 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
     }
 }
 
-impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
+impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut Transaction<'txn, S> {
     type Iter = TransactionIter<'a, S::TransactionType<'txn>>;
     type Transaction = S::TransactionType<'txn>;
 
@@ -1228,6 +1371,7 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
 
     fn execute<P: Into<PlanInput<'a>>, A: MetaArena + 'a, F>(
         self,
+        _read_only: bool,
         build: F,
     ) -> Result<Self::Iter, DatabaseError>
     where
@@ -1235,10 +1379,16 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
     {
         self.inner.begin_statement_scope()?;
         let (plan, arena) = build(self.state, &self.inner)?;
+        let plan = plan.into();
+        if self.read_only && !plan.root().operator.command_type().is_read_only() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "cannot write in a read-only transaction".into(),
+            ));
+        }
         let transaction = std::ptr::from_mut(&mut self.inner);
         let (schema, arena, executor) =
             self.state
-                .execute(unsafe { &mut *transaction }, plan.into(), arena)?;
+                .execute(unsafe { &mut *transaction }, plan, arena)?;
         Ok(TransactionIter::new(
             schema,
             arena.boxed(),
@@ -1262,13 +1412,13 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut DBTransaction<'txn, S> {
     }
 }
 
-struct TransactionGuard<'a, T: Transaction + 'a> {
+struct TransactionGuard<'a, T: StorageTransaction + 'a> {
     executor: Option<Executor<'a, T>>,
     transaction: *mut T,
     statement_scope_active: bool,
 }
 
-impl<T: Transaction> TransactionGuard<'_, T> {
+impl<T: StorageTransaction> TransactionGuard<'_, T> {
     #[inline]
     fn finish_statement_scope(
         &mut self,
@@ -1286,14 +1436,18 @@ impl<T: Transaction> TransactionGuard<'_, T> {
     }
 }
 
-impl<T: Transaction> Drop for TransactionGuard<'_, T> {
+impl<T: StorageTransaction> Drop for TransactionGuard<'_, T> {
     fn drop(&mut self) {
         let _ = self.finish_statement_scope(&mut Vec::new());
     }
 }
 
 /// Raw result iterator returned by transaction execution APIs.
-pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn MetaArena + 'a>> {
+pub struct TransactionIter<
+    'a,
+    T: StorageTransaction + 'a,
+    A: MetaArena + 'a = Box<dyn MetaArena + 'a>,
+> {
     // Drop execution before the metadata arena it borrows from.
     guard: TransactionGuard<'a, T>,
     plan_arena: ExecMetaArena<A>,
@@ -1301,7 +1455,7 @@ pub struct TransactionIter<'a, T: Transaction + 'a, A: MetaArena + 'a = Box<dyn 
     ddl_apply: Vec<DDLApply>,
 }
 
-impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
+impl<'a, T: StorageTransaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     pub(crate) fn new(
         schema: Schema,
         plan_arena: ExecMetaArena<A>,
@@ -1334,7 +1488,7 @@ impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     #[inline]
     pub fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         let Some(executor) = self.guard.executor.as_mut() else {
             return Ok(None);
@@ -1364,7 +1518,7 @@ impl<'a, T: Transaction + 'a, A: MetaArena + 'a> TransactionIter<'a, T, A> {
     }
 }
 
-impl<'a, T: Transaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
+impl<'a, T: StorageTransaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
     fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         let Self {
@@ -1378,14 +1532,14 @@ impl<'a, T: Transaction + 'a> TransactionIter<'a, T, PlanArena<'a>> {
     }
 }
 
-impl<T: Transaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
+impl<T: StorageTransaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         TransactionIter::schema(self, f)
     }
 
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut Tuple) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         TransactionIter::next_tuple(self, f)
     }
@@ -1400,16 +1554,22 @@ impl<T: Transaction, A: MetaArena> ResultIter for TransactionIter<'_, T, A> {
 pub(crate) mod test {
     use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc};
-    use crate::db::{CatalogKind, DataBaseBuilder, DatabaseError, ResultIter};
-    use crate::expression::ScalarExpression;
-    use crate::planner::operator::join::JoinCondition;
+    use crate::db::{optimizer_pipeline, CatalogKind, DataBaseBuilder, DatabaseError, ResultIter};
+    use crate::execution::dql::projection::Projection;
+    use crate::execution::{empty_context, execute_input};
+    use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
+    use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
+    use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
+    use crate::planner::operator::project::ProjectOperator;
+    use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
-    use crate::planner::PlanArena;
+    use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::{
-        table_codec::TableCodec, Storage, TableCache, Transaction, TransactionIsolationLevel,
+        table_codec::TableCodec, StatisticsMetaCache, Storage, StorageTransaction, TableCache,
+        TransactionIsolationLevel, ViewCache,
     };
-    use crate::types::tuple::Tuple;
+    use crate::types::tuple::{Tuple, TupleImpl};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use chrono::{Datelike, Local};
@@ -1425,6 +1585,166 @@ pub(crate) mod test {
     #[cfg(feature = "unsafe_txdb_checkpoint")]
     use std::time::Duration;
     use tempfile::TempDir;
+
+    fn literal_input(
+        name: &str,
+        values: &[i32],
+        position: usize,
+        arena: &mut PlanArena,
+    ) -> Result<(LogicalPlan, ExprRef), DatabaseError> {
+        let mut column = ColumnCatalog::new(
+            name.into(),
+            false,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        );
+        column.set_ref_table(name.into(), 0, false);
+        let column = arena.alloc_column(column);
+        let key = arena.alloc_expression(ScalarExpression::column_expr(column, position));
+        let rows = values
+            .iter()
+            .map(|value| {
+                arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(*value)))
+            })
+            .collect();
+        Ok((
+            LogicalPlan::new(
+                Operator::Values(ValuesOperator {
+                    rows,
+                    row_count: values.len(),
+                    schema_ref: vec![column],
+                }),
+                Childrens::None,
+            ),
+            key,
+        ))
+    }
+
+    #[test]
+    fn late_project_collapse_preserves_oriented_columns_and_aliases() -> Result<(), DatabaseError> {
+        for alias in [false, true] {
+            let tables = TableArenaCell::default();
+            let mut arena = PlanArena::new(&tables);
+            let (left, large) = literal_input("large", &[1, 2, 3, 4], 0, &mut arena)?;
+            let (right, small) = literal_input("small", &[99], 1, &mut arena)?;
+            let join =
+                JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
+            let output = if alias {
+                arena.alloc_expression(ScalarExpression::Alias {
+                    expr: large,
+                    alias: AliasType::Name("wanted".into()),
+                })
+            } else {
+                large
+            };
+            // Repeating the selected column must not lose an output slot.
+            let mut plan = LogicalPlan::new(
+                Operator::Project(ProjectOperator::new(vec![output, output, small])),
+                Childrens::Only(Box::new(join)),
+            );
+            let schema = plan.output_schema(&mut arena).clone();
+            let cache = StatisticsMetaCache::default();
+            let loader = StatisticMetaLoader::new(&cache);
+            let mut plan = optimizer_pipeline()
+                .instantiate(plan)
+                .find_best(Some(&loader), &mut arena)?;
+            plan.populate_output_schema_recursive(&mut arena);
+            assert_eq!(plan.output_schema(&mut arena), &schema);
+            let Childrens::Only(join) = plan.childrens.as_ref() else {
+                unreachable!()
+            };
+            assert!(
+                matches!(join.operator, Operator::Join(_)),
+                "restore Project should be collapsed"
+            );
+            let Childrens::Twins { left, right } = join.childrens.as_ref() else {
+                unreachable!()
+            };
+            assert_eq!(left.estimated_rows(), Some(1));
+            assert_eq!(right.estimated_rows(), Some(4));
+            let Operator::Project(project) = &plan.operator else {
+                unreachable!()
+            };
+            let Childrens::Only(input) = plan.childrens.as_ref() else {
+                unreachable!()
+            };
+            let storage = MemoryStorage::new();
+            let transaction = storage.transaction()?;
+            let table_cache = TableCache::default();
+            let view_cache = ViewCache::default();
+            let context = empty_context(&table_cache, &view_cache, &cache);
+            let mut executor =
+                execute_input::<_, Projection>((project, input), context, arena, &transaction);
+            for value in [1, 2, 3, 4] {
+                assert_eq!(
+                    executor.next_tuple()?.cloned().unwrap(),
+                    vec![
+                        DataValue::Int32(value),
+                        DataValue::Int32(value),
+                        DataValue::Int32(99)
+                    ]
+                );
+            }
+            assert!(executor.next_tuple()?.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn late_project_collapse_inlines_computed_output() -> Result<(), DatabaseError> {
+        let tables = TableArenaCell::default();
+        let mut arena = PlanArena::new(&tables);
+        let (left, large) = literal_input("large", &[1, 2, 3, 4], 0, &mut arena)?;
+        let (right, small) = literal_input("small", &[99], 1, &mut arena)?;
+        let join = JoinOperator::build(left, right, JoinCondition::None, JoinType::Cross, false);
+        let ten = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(10)));
+        let computed = arena.alloc_expression(ScalarExpression::Binary {
+            op: BinaryOperator::Plus,
+            left_expr: large,
+            right_expr: ten,
+            evaluator: None,
+            ty: LogicalType::Integer,
+        });
+        let mut plan = LogicalPlan::new(
+            Operator::Project(ProjectOperator::new(vec![computed, small])),
+            Childrens::Only(Box::new(join)),
+        );
+        let schema = plan.output_schema(&mut arena).clone();
+        let cache = StatisticsMetaCache::default();
+        let loader = StatisticMetaLoader::new(&cache);
+        let mut plan = optimizer_pipeline()
+            .instantiate(plan)
+            .find_best(Some(&loader), &mut arena)?;
+        plan.populate_output_schema_recursive(&mut arena);
+        assert_eq!(plan.output_schema(&mut arena), &schema);
+        let Childrens::Only(child) = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        assert!(
+            matches!(child.operator, Operator::Join(_)),
+            "computed expressions should be substituted into the output Project"
+        );
+        let Operator::Project(project) = &plan.operator else {
+            unreachable!()
+        };
+        let Childrens::Only(input) = plan.childrens.as_ref() else {
+            unreachable!()
+        };
+        let storage = MemoryStorage::new();
+        let transaction = storage.transaction()?;
+        let table_cache = TableCache::default();
+        let view_cache = ViewCache::default();
+        let context = empty_context(&table_cache, &view_cache, &cache);
+        let mut executor =
+            execute_input::<_, Projection>((project, input), context, arena, &transaction);
+        for value in [11, 12, 13, 14] {
+            assert_eq!(
+                executor.next_tuple()?.cloned().unwrap(),
+                vec![DataValue::Int32(value), DataValue::Int32(99)]
+            );
+        }
+        assert!(executor.next_tuple()?.is_none());
+        Ok(())
+    }
 
     fn assert_send_sync<T: Send + Sync>() {}
 
@@ -1455,13 +1775,13 @@ pub(crate) mod test {
                    cross join scalar_b b cross join scalar_nested c";
         let mut iter = db.run(sql)?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![
                 DataValue::Int32(11),
                 DataValue::Int32(22),
                 DataValue::Int32(33),
                 DataValue::Int32(44),
-            ])
+            ]
         );
         assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
@@ -1470,14 +1790,14 @@ pub(crate) mod test {
         db.ddl("create view scalar_new as select (select 55) as v")?;
         let mut iter = db.run("select a.v, b.v from scalar_a a cross join scalar_new b")?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(11), DataValue::Int32(55)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(11), DataValue::Int32(55)]
         );
         iter.done()?;
         Ok(())
     }
 
-    pub(crate) fn build_table<T: Transaction>(
+    pub(crate) fn build_table<T: StorageTransaction>(
         table_cache: &mut TableCache,
         transaction: &mut T,
         plan_arena: &mut PlanArena,
@@ -1514,28 +1834,21 @@ pub(crate) mod test {
         Ok(())
     }
 
-    fn tuple_owned(tuple: &Tuple) -> Tuple {
-        Tuple {
-            pk: tuple.pk.clone(),
-            values: tuple.values.clone(),
-        }
+    fn next_tuple_owned<I: ResultIter>(iter: &mut I) -> Result<Option<TupleImpl>, DatabaseError> {
+        iter.next_tuple(|_, tuple| tuple.clone())
     }
 
-    fn next_tuple_owned<I: ResultIter>(iter: &mut I) -> Result<Option<Tuple>, DatabaseError> {
-        iter.next_tuple(|_, tuple| tuple_owned(tuple))
-    }
-
-    fn next_values<I: ResultIter>(iter: &mut I) -> Result<Option<Vec<DataValue>>, DatabaseError> {
-        iter.next_tuple(|_, tuple| tuple.values.clone())
+    fn next_values<I: ResultIter>(iter: &mut I) -> Result<Option<TupleImpl>, DatabaseError> {
+        iter.next_tuple(|_, tuple| tuple.clone())
     }
 
     fn read_single_i32<I>(mut iter: I) -> Result<i32, DatabaseError>
     where
         I: ResultIter,
     {
-        let value = match iter.next_tuple(|_, tuple| match tuple.values.as_slice() {
-            [DataValue::Int32(value)] => *value,
-            other => panic!("expected a single Int32 column, got {other:?}"),
+        let value = match iter.next_tuple(|_, tuple| match (tuple.len(), tuple.get(0)) {
+            (1, Some(DataValue::Int32(value))) => *value,
+            _ => panic!("expected a single Int32 column, got {tuple:?}"),
         })? {
             Some(value) => value,
             None => panic!("expected one result row"),
@@ -1550,9 +1863,9 @@ pub(crate) mod test {
         sql: &str,
     ) -> Result<i32, DatabaseError> {
         let mut iter = database.run(sql)?;
-        let value = match iter.next_tuple(|_, tuple| match tuple.values.as_slice() {
-            [DataValue::Int32(value)] => *value,
-            other => panic!("expected a single Int32 column, got {other:?}"),
+        let value = match iter.next_tuple(|_, tuple| match (tuple.len(), tuple.get(0)) {
+            (1, Some(DataValue::Int32(value))) => *value,
+            _ => panic!("expected a single Int32 column, got {tuple:?}"),
         })? {
             Some(value) => value,
             None => panic!("expected one result row for query: {sql}"),
@@ -1774,7 +2087,7 @@ pub(crate) mod test {
             unreachable!("expected join filter");
         };
         let mut referenced_columns = Vec::new();
-        filter.all_referenced_columns(&source_plan_arena, |_, column| {
+        filter.all_referenced_columns(&source_plan_arena, |_, column, _| {
             referenced_columns.push(*column);
             true
         })?;
@@ -1867,7 +2180,10 @@ pub(crate) mod test {
         };
         assert_eq!(*left_position, 0);
         assert_eq!(*right_position, 0);
-        let (_, right_child) = join_plan.childrens.pop_twins();
+        let (_, mut right_child) = join_plan.childrens.pop_twins();
+        if matches!(right_child.operator, Operator::Project(_)) {
+            right_child = right_child.childrens.pop_only();
+        }
         let Operator::Filter(filter_op) = right_child.operator else {
             unreachable!("expected pushed-down filter on right child");
         };
@@ -1918,7 +2234,7 @@ pub(crate) mod test {
             let mut iter = kite_sql.execute(&statement, &[(1, DataValue::Int32(0))])?;
 
             let row = next_tuple_owned(&mut iter)?.unwrap();
-            let plan = row.values[0].utf8().unwrap();
+            let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
                 "Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
@@ -1945,7 +2261,7 @@ pub(crate) mod test {
                 ],
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();
-            let plan = row.values[0].utf8().unwrap();
+            let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
                 "Projection [(t1.a + $1), Max((t1.b + $2))] [Project => (Sort Option: Follow)] Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate => (Sort Option: None)] Filter (t1.b > 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
@@ -1964,7 +2280,7 @@ pub(crate) mod test {
                 ],
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();
-            let plan = row.values[0].utf8().unwrap();
+            let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
                 "Projection [l.a, l.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (l.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [(t1.a) as (l.a), (t1.b) as (l.b)] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => ($3, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
@@ -2085,8 +2401,8 @@ pub(crate) mod test {
 
         kite_sql.ddl("create table t1 (a int primary key, b int)")?;
 
-        let mut tx_1 = kite_sql.new_transaction()?;
-        let mut tx_2 = kite_sql.new_transaction()?;
+        let mut tx_1 = kite_sql.new_transaction(false)?;
+        let mut tx_2 = kite_sql.new_transaction(false)?;
 
         tx_1.run("insert into t1 values(0, 0)")?.done()?;
         tx_1.run("insert into t1 values(1, 1)")?.done()?;
@@ -2116,7 +2432,7 @@ pub(crate) mod test {
         tx_1.commit()?;
         tx_2.commit()?;
 
-        let mut tx_3 = kite_sql.new_transaction()?;
+        let mut tx_3 = kite_sql.new_transaction(false)?;
         let res = tx_3.run("create table t2 (a int primary key, b int)");
         assert!(res.is_err());
 
@@ -2130,7 +2446,7 @@ pub(crate) mod test {
 
         kite_sql.ddl("create table t_multi_tx (a int primary key, b int)")?;
 
-        let mut tx = kite_sql.new_transaction()?;
+        let mut tx = kite_sql.new_transaction(false)?;
         let mut iter = tx.run(
             "insert into t_multi_tx values(0, 0); insert into t_multi_tx values(1, 1); select * from t_multi_tx order by a",
         )?;
@@ -2163,7 +2479,7 @@ pub(crate) mod test {
 
         kite_sql.ddl("create table t_iter_drop (a int primary key, b int)")?;
 
-        let mut tx = kite_sql.new_transaction()?;
+        let mut tx = kite_sql.new_transaction(false)?;
         tx.run("insert into t_iter_drop values (0, 0), (1, 1)")?
             .done()?;
 
@@ -2212,8 +2528,8 @@ pub(crate) mod test {
         kite_sql.ddl("create table t_rc (a int primary key, b int)")?;
         kite_sql.run("insert into t_rc values (1, 10)")?.done()?;
 
-        let mut reader = kite_sql.new_transaction()?;
-        let mut writer = kite_sql.new_transaction()?;
+        let mut reader = kite_sql.new_transaction(false)?;
+        let mut writer = kite_sql.new_transaction(false)?;
 
         assert_eq!(
             read_single_i32(reader.run("select b from t_rc where a = 1")?)?,
@@ -2255,8 +2571,8 @@ pub(crate) mod test {
         kite_sql.ddl("create table t_rr (a int primary key, b int)")?;
         kite_sql.run("insert into t_rr values (1, 10)")?.done()?;
 
-        let mut reader = kite_sql.new_transaction()?;
-        let mut writer = kite_sql.new_transaction()?;
+        let mut reader = kite_sql.new_transaction(false)?;
+        let mut writer = kite_sql.new_transaction(false)?;
 
         assert_eq!(
             read_single_i32(reader.run("select b from t_rr where a = 1")?)?,
@@ -2282,8 +2598,8 @@ pub(crate) mod test {
 
         kite_sql.ddl("create table t1 (a int primary key, b int)")?;
 
-        let mut tx_1 = kite_sql.new_transaction()?;
-        let mut tx_2 = kite_sql.new_transaction()?;
+        let mut tx_1 = kite_sql.new_transaction(false)?;
+        let mut tx_2 = kite_sql.new_transaction(false)?;
 
         tx_1.run("insert into t1 values(0, 0)")?.done()?;
         tx_1.run("insert into t1 values(1, 1)")?.done()?;
@@ -2318,7 +2634,7 @@ pub(crate) mod test {
 
         assert!(tx_2.commit().is_err());
 
-        let mut tx_3 = kite_sql.new_transaction()?;
+        let mut tx_3 = kite_sql.new_transaction(false)?;
         let res = tx_3.run("create table t2 (a int primary key, b int)");
         assert!(res.is_err());
 
@@ -2339,6 +2655,34 @@ pub(crate) mod test {
     }
 
     #[test]
+    fn test_invalid_statistics_relative_error() {
+        for relative_error in [0.0, 1.0, -0.5, f64::NAN] {
+            let result = DataBaseBuilder::path(".")
+                .statistics_relative_error(relative_error)
+                .build_in_memory();
+            assert!(matches!(
+                result,
+                Err(DatabaseError::InvalidValue(message))
+                    if message == format!("statistics relative error must be in (0, 1), got {relative_error}")
+            ));
+        }
+    }
+
+    #[test]
+    fn test_invalid_hll_precision() {
+        for precision in [3, 27] {
+            let result = DataBaseBuilder::path(".")
+                .hll_precision(precision)
+                .build_in_memory();
+            assert!(matches!(
+                result,
+                Err(DatabaseError::InvalidValue(message))
+                    if message == format!("hll precision must be between 4 and 26, got {precision}")
+            ));
+        }
+    }
+
+    #[test]
     fn parser_recursion_limit_applies_to_sql_frontends() -> Result<(), DatabaseError> {
         let expression = format!("{}7{}", "(".repeat(8), ")".repeat(8));
         let sql = format!("select {expression}");
@@ -2355,30 +2699,30 @@ pub(crate) mod test {
         assert_eq!(read_single_i32(db.run("select * from deep_view")?)?, 7);
         db.run_mut(&sql, |iter| {
             assert_eq!(
-                iter.next_tuple(|_, row| row.values.clone())?,
-                Some(vec![DataValue::Int32(7)])
+                iter.next_tuple(|_, row| row.clone())?.unwrap(),
+                vec![DataValue::Int32(7)]
             );
             Ok(())
         })?;
         let prepared = db.prepare_sql(&sql, &[])?;
         let mut iter = db.execute(&prepared, [])?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(7)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(7)]
         );
         iter.done()?;
-        let mut tx = db.new_transaction()?;
+        let mut tx = db.new_transaction(false)?;
         let mut iter = tx.run(&sql)?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(7)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(7)]
         );
         iter.done()?;
         let prepared = tx.prepare_sql(&sql, &[])?;
         let mut iter = tx.execute(&prepared, [])?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(7)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(7)]
         );
         iter.done()?;
         tx.commit()?;
@@ -2481,12 +2825,12 @@ pub(crate) mod test {
         snapshot.load(CatalogKind::View("checkpoint_view".into()))?;
         let mut rows = snapshot.run("select id,v from checkpoint_rows order by id")?;
         assert_eq!(
-            rows.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(1), DataValue::Int32(10)])
+            rows.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(1), DataValue::Int32(10)]
         );
         assert_eq!(
-            rows.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int32(2), DataValue::Int32(20)])
+            rows.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int32(2), DataValue::Int32(20)]
         );
         assert!(rows.next_tuple(|_, _| ())?.is_none());
         rows.done()?;

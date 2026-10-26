@@ -15,15 +15,15 @@
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{TableIter, Transaction};
+use crate::storage::{StorageTransaction, TableIter};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 
-pub struct ShowTables<'a, T: Transaction + 'a> {
+pub struct ShowTables<'a, T: StorageTransaction + 'a> {
     pub(crate) metas: Option<TableIter<'a, T>>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowTables<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ShowTables<'a, T> {
     type Input = ();
 
     fn into_executor(
@@ -37,7 +37,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowTables<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.metas = None;
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -59,7 +68,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
             return Ok(());
         };
 
-        let output = arena.result_tuple_mut();
+        let output = arena.output_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {

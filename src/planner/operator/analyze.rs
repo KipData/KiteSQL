@@ -17,18 +17,21 @@ use crate::planner::MetaArena;
 use crate::planner::{fmt_explain_list, Explain};
 use crate::types::index::IndexMetaRef;
 use kite_sql_serde_macros::ReferenceSerialization;
+use ordered_float::OrderedFloat;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct AnalyzeOperator {
     pub table_name: TableName,
     pub index_metas: Vec<IndexMetaRef>,
     pub histogram_buckets: Option<usize>,
+    pub hll_precision: Option<u8>,
+    pub statistics_relative_error: Option<OrderedFloat<f64>>,
 }
 
 impl Explain for AnalyzeOperator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         write!(f, "Analyze {} -> [", self.table_name)?;

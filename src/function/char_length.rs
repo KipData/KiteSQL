@@ -18,7 +18,7 @@ use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::FunctionSummary;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::tuple::TupleLike;
+use crate::types::tuple::Input;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
@@ -46,7 +46,7 @@ impl ScalarFunctionImpl for CharLength {
         &self,
         exprs: &[ExprRef],
         arena: &(dyn MetaArena + '_),
-        tuples: Option<&dyn TupleLike>,
+        tuples: Option<&dyn Input>,
     ) -> Result<DataValue, DatabaseError> {
         let mut value = arena.expression(exprs[0]).eval(arena, tuples)?;
         // SQL: the length of NULL is NULL, not 0.

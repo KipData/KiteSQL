@@ -20,7 +20,7 @@ use crate::execution::{
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexType};
 use crate::types::tuple_builder::TupleBuilder;
 
@@ -29,7 +29,7 @@ pub struct Delete<'a> {
     input: Option<ExecId>,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
     type Input = (&'a DeleteOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -50,7 +50,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -89,14 +89,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
         let mut deleted_count = 0;
 
         while arena.next_tuple(input, plan_arena)? {
-            let tuple = arena.materialize_tuple();
-            let Some(tuple_id) = tuple.pk.as_ref() else {
+            let tuple = arena.take_tuple();
+            let Some(tuple_id) = tuple.pk() else {
                 continue;
             };
             for (index_id, index_ty, exprs) in index_templates.iter() {
                 arena.rewrite(exprs, plan_arena, Some(&tuple))?;
                 let mut state = arena.local_state(plan_arena);
-                let (values, transaction, table_codec) = state.index_values_transaction_codec_mut();
+                let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let index = Index::new(*index_id, values, *index_ty);
                 transaction.del_index(table_codec, self.table_name, &index, tuple_id)?;
             }
@@ -107,7 +107,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
             deleted_count += 1;
         }
 
-        arena.produce_tuple(TupleBuilder::build_result(deleted_count.to_string()));
+        arena.produce(TupleBuilder::build_result(deleted_count.to_string()).into());
         arena.resume();
         Ok(())
     }

@@ -12,18 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{DetachedPredicate, Range, RangeDetacher};
 use crate::expression::visitor_mut::{ExprVisitorMut, PositionShift};
 use crate::expression::{BinaryOperator, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
-use crate::optimizer::plan_utils::{replace_with_only_child, wrap_child_with};
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
+use crate::optimizer::plan_utils::{predicate_scan_mut, replace_with_only_child, wrap_child_with};
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::extract_join_keys;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
-use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef, IndexType};
+use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef};
+use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::ops::Bound;
@@ -82,9 +85,19 @@ fn classify_join_filters(
     let mut right_filter = None;
     let mut common_filter = None;
     split_conjunctive_predicates(predicate, arena, &mut |expr, arena| {
-        if expr.all_referenced_columns(arena, |_, column| left_columns.contains(column))? {
+        let (mut left, mut right) = (true, true);
+        expr.all_referenced_columns(arena, |_, column, position| {
+            let side_holds = |columns: &[ColumnRef], position: Option<usize>| {
+                position.and_then(|position| columns.get(position)) == Some(column)
+                    || columns.contains(column)
+            };
+            left = left && side_holds(left_columns, Some(position));
+            right = right && side_holds(right_columns, position.checked_sub(left_len));
+            left || right
+        })?;
+        if left {
             append_filter(&mut left_filter, expr, arena);
-        } else if expr.all_referenced_columns(arena, |_, column| right_columns.contains(column))? {
+        } else if right {
             append_filter(&mut right_filter, expr, arena);
         } else {
             append_filter(&mut common_filter, expr, arena);
@@ -133,163 +146,162 @@ impl NormalizationRule for PushPredicateThroughJoin {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
-        let mut applied = false;
-
-        let parent_replacement = {
-            let LogicalPlan {
-                operator,
-                childrens,
-                ..
-            } = plan;
-            let filter_op = match operator {
-                Operator::Filter(op) => op,
-                _ => return Ok(false),
-            };
-
-            let Childrens::Only(join_plan) = childrens.as_mut() else {
-                return Ok(false);
-            };
-            let join_plan = join_plan.as_mut();
-
-            let join_type = match &join_plan.operator {
-                Operator::Join(op) => op.join_type,
-                _ => return Ok(false),
-            };
-
-            if !matches!(
-                join_type,
-                JoinType::Inner | JoinType::Cross | JoinType::LeftOuter | JoinType::RightOuter
-            ) {
-                return Ok(false);
-            }
-
-            let (left_filter, mut right_filter, mut common_filter, left_len) =
-                classify_join_filters(filter_op.predicate, join_plan.childrens.as_mut(), arena)?;
-
-            if join_type == JoinType::Cross {
-                if let Some(predicate) = common_filter {
-                    let Childrens::Twins { left, right } = join_plan.childrens.as_mut() else {
-                        return Ok(false);
-                    };
-                    let left_schema = left.output_schema(arena).clone();
-                    let right_schema = right.output_schema(arena).clone();
-                    let mut keys = Vec::new();
-                    let mut residual = Vec::new();
-                    extract_join_keys(
-                        predicate,
-                        &mut keys,
-                        &mut residual,
-                        &left_schema,
-                        &right_schema,
-                        arena,
-                    )?;
-                    if !keys.is_empty() {
-                        for (_, right) in &mut keys {
-                            // WHERE uses joined positions; join keys use each input's local positions.
-                            *right = right.clone_expression(arena)?;
-                            PositionShift {
-                                delta: -(left_len as isize),
-                            }
-                            .visit(right, arena)?;
-                        }
-                        if let Operator::Join(op) = &mut join_plan.operator {
-                            op.join_type = JoinType::Inner;
-                            op.on = JoinCondition::On {
-                                on: keys,
-                                filter: None,
-                            };
-                        }
-                        common_filter = reduce_filters(residual, filter_op.having, arena)
-                            .map(|op| op.predicate);
-                        applied = true;
-                    }
-                }
-            }
-
-            let mut new_ops = (None, None, None);
-            match join_type {
-                JoinType::Inner | JoinType::Cross => {
-                    if let Some(left_filter_op) =
-                        reduce_filters(left_filter, filter_op.having, arena)
-                    {
-                        new_ops.0 = Some(Operator::Filter(left_filter_op));
-                    }
-
-                    if let Some(expr) = &mut right_filter {
-                        PositionShift {
-                            delta: -(left_len as isize),
-                        }
-                        .visit(expr, arena)?;
-                    }
-                    if let Some(right_filter_op) =
-                        reduce_filters(right_filter, filter_op.having, arena)
-                    {
-                        new_ops.1 = Some(Operator::Filter(right_filter_op));
-                    }
-                    new_ops.2 = reduce_filters(common_filter, filter_op.having, arena)
-                        .map(Operator::Filter);
-                }
-                JoinType::LeftOuter => {
-                    if let Some(left_filter_op) =
-                        reduce_filters(left_filter, filter_op.having, arena)
-                    {
-                        new_ops.0 = Some(Operator::Filter(left_filter_op));
-                    }
-                    new_ops.2 = reduce_filters(
-                        common_filter.into_iter().chain(right_filter),
-                        filter_op.having,
-                        arena,
-                    )
-                    .map(Operator::Filter);
-                }
-                JoinType::RightOuter => {
-                    if let Some(expr) = &mut right_filter {
-                        PositionShift {
-                            delta: -(left_len as isize),
-                        }
-                        .visit(expr, arena)?;
-                    }
-                    if let Some(right_filter_op) =
-                        reduce_filters(right_filter, filter_op.having, arena)
-                    {
-                        new_ops.1 = Some(Operator::Filter(right_filter_op));
-                    }
-                    new_ops.2 = reduce_filters(
-                        common_filter.into_iter().chain(left_filter),
-                        filter_op.having,
-                        arena,
-                    )
-                    .map(Operator::Filter);
-                }
-                _ => {}
-            }
-
-            if let Some(left_op) = new_ops.0 {
-                applied |= wrap_child_with(join_plan, 0, left_op);
-            }
-
-            if let Some(right_op) = new_ops.1 {
-                applied |= wrap_child_with(join_plan, 1, right_op);
-            }
-
-            new_ops.2
+        let Operator::Filter(filter_op) = &plan.operator else {
+            return Ok(false);
         };
-
-        match parent_replacement {
-            Some(common_op) => {
-                plan.operator = common_op;
+        let (predicate, having) = (filter_op.predicate, filter_op.having);
+        let Childrens::Only(join_plan) = plan.childrens.as_mut() else {
+            return Ok(false);
+        };
+        let Some((mut applied, common)) = push_through_join(join_plan, predicate, having, arena)?
+        else {
+            return Ok(false);
+        };
+        match common {
+            Some(common) => {
+                plan.operator = Operator::Filter(filter(common, having));
                 applied = true;
             }
             None if applied => {
                 applied |= replace_with_only_child(plan);
             }
-            _ => {}
+            None => {}
         }
-
         Ok(applied)
     }
+}
+
+fn filter(predicate: ExprRef, having: bool) -> FilterOperator {
+    FilterOperator {
+        predicate,
+        is_optimized: false,
+        having,
+    }
+}
+
+fn push_through_join(
+    join_plan: &mut LogicalPlan,
+    predicate: ExprRef,
+    having: bool,
+    arena: &mut PlanArena,
+) -> Result<Option<(bool, Option<ExprRef>)>, DatabaseError> {
+    let join_type = match &join_plan.operator {
+        Operator::Join(op) => op.join_type,
+        _ => return Ok(None),
+    };
+    if !matches!(
+        join_type,
+        JoinType::Inner | JoinType::Cross | JoinType::LeftOuter | JoinType::RightOuter
+    ) {
+        return Ok(None);
+    }
+    let mut applied = false;
+
+    let (left_filter, mut right_filter, mut common_filter, left_len) =
+        classify_join_filters(predicate, join_plan.childrens.as_mut(), arena)?;
+
+    if join_type == JoinType::Cross {
+        if let Some(predicate) = common_filter {
+            let Childrens::Twins { left, right } = join_plan.childrens.as_mut() else {
+                return Ok(None);
+            };
+            let left_schema = left.output_schema(arena).clone();
+            let right_schema = right.output_schema(arena).clone();
+            let mut keys = Vec::new();
+            let mut residual = Vec::new();
+            extract_join_keys(
+                predicate,
+                &mut keys,
+                &mut residual,
+                &left_schema,
+                &right_schema,
+                arena,
+            )?;
+            if !keys.is_empty() {
+                for (_, right) in &mut keys {
+                    // WHERE uses joined positions; join keys use each input's local positions.
+                    *right = right.clone_expression(arena)?;
+                    PositionShift {
+                        delta: -(left_len as isize),
+                    }
+                    .visit(right, arena)?;
+                }
+                if let Operator::Join(op) = &mut join_plan.operator {
+                    op.join_type = JoinType::Inner;
+                    op.on = JoinCondition::On {
+                        on: keys,
+                        filter: None,
+                    };
+                }
+                common_filter = reduce_filters(residual, having, arena).map(|op| op.predicate);
+                applied = true;
+            }
+        }
+    }
+
+    if let Some(expr) = &mut right_filter {
+        if matches!(
+            join_type,
+            JoinType::Inner | JoinType::Cross | JoinType::RightOuter
+        ) {
+            PositionShift {
+                delta: -(left_len as isize),
+            }
+            .visit(expr, arena)?;
+        }
+    }
+    let (left, right, common) = match join_type {
+        JoinType::Inner | JoinType::Cross => (left_filter, right_filter, common_filter),
+        JoinType::LeftOuter => (
+            left_filter,
+            None,
+            reduce_filters(common_filter.into_iter().chain(right_filter), having, arena)
+                .map(|op| op.predicate),
+        ),
+        JoinType::RightOuter => (
+            None,
+            right_filter,
+            reduce_filters(common_filter.into_iter().chain(left_filter), having, arena)
+                .map(|op| op.predicate),
+        ),
+        _ => unreachable!(),
+    };
+    if let Some(left) = left {
+        applied |= push_into_child(join_plan, 0, left, having, arena)?;
+    }
+    if let Some(right) = right {
+        applied |= push_into_child(join_plan, 1, right, having, arena)?;
+    }
+    Ok(Some((applied, common)))
+}
+
+/// Pushes `predicate` into the `child_idx` input of `join_plan`, through it when it is a join.
+fn push_into_child(
+    join_plan: &mut LogicalPlan,
+    child_idx: usize,
+    predicate: ExprRef,
+    having: bool,
+    arena: &mut PlanArena,
+) -> Result<bool, DatabaseError> {
+    let Childrens::Twins { left, right } = join_plan.childrens.as_mut() else {
+        return Ok(false);
+    };
+    let child = if child_idx == 0 { left } else { right };
+    let remaining = match push_through_join(child, predicate, having, arena)? {
+        Some((_, remaining)) => remaining,
+        None => Some(predicate),
+    };
+    if let Some(remaining) = remaining {
+        wrap_child_with(
+            join_plan,
+            child_idx,
+            Operator::Filter(filter(remaining, having)),
+        );
+    }
+    Ok(true)
 }
 
 pub struct PushPredicateIntoScan;
@@ -298,7 +310,8 @@ impl NormalizationRule for PushPredicateIntoScan {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let LogicalPlan {
             operator,
@@ -312,8 +325,7 @@ impl NormalizationRule for PushPredicateIntoScan {
         let Childrens::Only(child) = childrens.as_mut() else {
             return Ok(false);
         };
-        let child = child.as_mut();
-        let Operator::TableScan(scan_op) = &mut child.operator else {
+        let Some((scan_op, _)) = predicate_scan_mut(child, arena) else {
             return Ok(false);
         };
 
@@ -338,16 +350,11 @@ impl NormalizationRule for PushPredicateIntoScan {
             else {
                 return Err(DatabaseError::InvalidIndex);
             };
-            let index_type = arena.index(*meta).ty;
-            let detached = match index_type {
-                IndexType::PrimaryKey { is_multiple: false }
-                | IndexType::Unique
-                | IndexType::Normal => {
-                    RangeDetacher::for_index(*meta, 0, arena).detach(filter_op.predicate)?
-                }
-                IndexType::PrimaryKey { is_multiple: true } | IndexType::Composite => {
-                    Self::composite_range(filter_op, *meta, ignore_prefix_len, arena)?
-                }
+            // Uniqueness does not determine key width: UNIQUE indexes can be composite too.
+            let detached = if arena.index(*meta).column_ids.len() > 1 {
+                Self::composite_range(filter_op, *meta, ignore_prefix_len, arena)?
+            } else {
+                RangeDetacher::for_index(*meta, 0, arena).detach(filter_op.predicate)?
             };
             let Some(detached) = detached else {
                 *lookup = None;
@@ -358,47 +365,67 @@ impl NormalizationRule for PushPredicateIntoScan {
 
             *lookup = Some(IndexLookup::Static(detached.range));
             *residual_predicate = detached.residual;
-            *covered_deserializers = None;
-            *cover_mapping = None;
-
-            // try index covered
-            let mut mapping_slots = vec![usize::MAX; scan_op.columns.len()];
-            let mut needs_mapping = false;
-            let index_meta = arena.index(*meta);
-            let index_column_types = match &index_meta.value_ty {
-                LogicalType::Tuple(tys) => tys,
-                ty => slice::from_ref(ty),
-            };
-            let mut deserializers = Vec::with_capacity(index_meta.column_ids.len());
-
-            for (idx, column_id) in index_meta.column_ids.iter().enumerate() {
-                if let Some((scan_idx, column)) =
-                    scan_op.columns.iter().enumerate().find(|(_, column)| {
-                        arena
-                            .column(**column)
-                            .id()
-                            .map(|id| id == *column_id)
-                            .unwrap_or(false)
-                    })
-                {
-                    mapping_slots[scan_idx] = idx;
-                    needs_mapping |= scan_idx != idx;
-                    deserializers.push(arena.column(*column).datatype().serializable());
-                } else {
-                    deserializers.push(index_column_types[idx].skip_serializable());
-                }
-            }
-
-            if mapping_slots.iter().all(|slot| *slot != usize::MAX) {
-                *covered_deserializers = Some(deserializers);
-                if needs_mapping {
-                    *cover_mapping = Some(mapping_slots);
-                }
-            }
+            (*covered_deserializers, *cover_mapping) =
+                match index_covering(&scan_op.columns, *meta, arena) {
+                    Some((deserializers, mapping)) => (Some(deserializers), mapping),
+                    None => (None, None),
+                };
         }
 
         Ok(changed)
     }
+}
+
+/// Index-only read layout when `index` holds every scanned column: deserializers for the
+/// index columns, plus a scan-to-index slot mapping when their orders differ.
+pub(crate) fn index_covering(
+    columns: &[ColumnRef],
+    index: IndexMetaRef,
+    arena: &PlanArena,
+) -> Option<(Vec<TupleValueSerializableImpl>, Option<Vec<usize>>)> {
+    if !is_index_covers(columns, index, arena) {
+        return None;
+    }
+    let mut mapping_slots = vec![usize::MAX; columns.len()];
+    let mut needs_mapping = false;
+    let index_meta = arena.index(index);
+    let index_column_types = match &index_meta.value_ty {
+        LogicalType::Tuple(tys) => tys,
+        ty => slice::from_ref(ty),
+    };
+    let mut deserializers = Vec::with_capacity(index_meta.column_ids.len());
+
+    for (idx, column_id) in index_meta.column_ids.iter().enumerate() {
+        if let Some((scan_idx, column)) = columns.iter().enumerate().find(|(_, column)| {
+            arena
+                .column(**column)
+                .id()
+                .map(|id| id == *column_id)
+                .unwrap_or(false)
+        }) {
+            mapping_slots[scan_idx] = idx;
+            needs_mapping |= scan_idx != idx;
+            deserializers.push(arena.column(*column).datatype().serializable());
+        } else {
+            deserializers.push(index_column_types[idx].skip_serializable());
+        }
+    }
+
+    Some((deserializers, needs_mapping.then_some(mapping_slots)))
+}
+
+pub(crate) fn is_index_covers(
+    columns: &[ColumnRef],
+    index: IndexMetaRef,
+    arena: &PlanArena,
+) -> bool {
+    let index_meta = arena.index(index);
+    columns.iter().all(|column| {
+        arena
+            .column(*column)
+            .id()
+            .is_some_and(|id| index_meta.column_ids.contains(&id))
+    })
 }
 
 impl PushPredicateIntoScan {
@@ -477,7 +504,8 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (join_type, filter_expr) = {
             let Operator::Join(join_op) = &mut plan.operator else {
@@ -649,44 +677,203 @@ mod tests {
     }
 
     #[test]
+    fn single_pass_filter_classification_preserves_reference_semantics() -> Result<(), DatabaseError>
+    {
+        use crate::expression::AliasType;
+        use crate::planner::operator::values::ValuesOperator;
+
+        let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let table: TableName = "classification".to_string().into();
+        let left_column = build_test_column(&mut arena, &table, 1, "left")?;
+        let right_column = build_test_column(&mut arena, &table, 2, "right")?;
+        let unknown_column = build_test_column(&mut arena, &table, 3, "unknown")?;
+        let left = cmp_predicate(&mut arena, BinaryOperator::Eq, left_column, 0, 1);
+        let right = cmp_predicate(&mut arena, BinaryOperator::Eq, right_column, 1, 1);
+        let unknown = cmp_predicate(&mut arena, BinaryOperator::Eq, unknown_column, 2, 1);
+        let common = arena.alloc_expression(ScalarExpression::Binary {
+            op: BinaryOperator::Or,
+            left_expr: left,
+            right_expr: right,
+            evaluator: None,
+            ty: LogicalType::Boolean,
+        });
+        let constant = arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
+        let alias = arena.alloc_expression(ScalarExpression::Alias {
+            expr: right,
+            alias: AliasType::Expr(left),
+        });
+        for right_columns in [vec![right_column], vec![left_column, right_column]] {
+            let mut children = Childrens::Twins {
+                left: Box::new(LogicalPlan::new(
+                    Operator::Values(ValuesOperator::new(Vec::new(), 0, vec![left_column])),
+                    Childrens::None,
+                )),
+                right: Box::new(LogicalPlan::new(
+                    Operator::Values(ValuesOperator::new(Vec::new(), 0, right_columns.clone())),
+                    Childrens::None,
+                )),
+            };
+            for expr in [left, right, unknown, common, constant, alias] {
+                let expected = if expr
+                    .all_referenced_columns(&arena, |_, column, _| *column == left_column)?
+                {
+                    (Some(expr), None, None, 1)
+                } else if expr
+                    .all_referenced_columns(&arena, |_, column, _| right_columns.contains(column))?
+                {
+                    (None, Some(expr), None, 1)
+                } else {
+                    (None, None, Some(expr), 1)
+                };
+                assert_eq!(
+                    super::classify_join_filters(expr, &mut children, &mut arena)?,
+                    expected
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_push_predicate_into_scan() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
         let mut arena = PlanArena::new(&table_state.table_arena);
-        // 1 - c2 < 0 => c2 > 1
-        let plan =
-            table_state.plan_with_arena("select * from t1 where -(1 - c2) > 0", &mut arena)?;
+        // 1 - c2 < 0 => c2 > 1, directly and through scalar initialization.
+        for (sql, through_init) in [
+            ("select * from t1 where -(1 - c2) > 0", false),
+            (
+                "select * from t1 where -(1 - c2) > 0 and c1 = (select 1)",
+                true,
+            ),
+        ] {
+            let plan = table_state.plan_with_arena(sql, &mut arena)?;
+            let best_plan = apply_pipeline(
+                plan,
+                HepOptimizerPipeline::builder()
+                    .before_batch(
+                        "simplify_filter",
+                        HepBatchStrategy::once_topdown(),
+                        &[NormalizationRuleImpl::SimplifyFilter],
+                    )
+                    .before_batch(
+                        "test_push_predicate_into_scan",
+                        HepBatchStrategy::once_topdown(),
+                        &[NormalizationRuleImpl::PushPredicateIntoScan],
+                    ),
+                &mut arena,
+            )?;
 
-        let best_plan = apply_pipeline(
-            plan,
-            HepOptimizerPipeline::builder()
-                .before_batch(
-                    "simplify_filter".to_string(),
-                    HepBatchStrategy::once_topdown(),
-                    vec![NormalizationRuleImpl::SimplifyFilter],
-                )
-                .before_batch(
-                    "test_push_predicate_into_scan".to_string(),
-                    HepBatchStrategy::once_topdown(),
-                    vec![NormalizationRuleImpl::PushPredicateIntoScan],
-                ),
-            &mut arena,
-        )?;
-
-        let scan_op = best_plan.childrens.pop_only().childrens.pop_only();
-        if let Operator::TableScan(op) = &scan_op.operator {
-            let mock_range = Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(1)),
-                max: Bound::Unbounded,
+            let mut scan = best_plan.childrens.pop_only().childrens.pop_only();
+            if through_init {
+                assert!(matches!(scan.operator, Operator::ScalarQueryInit(_)));
+                scan = scan.childrens.pop_twins().0;
+            }
+            let Operator::TableScan(op) = &scan.operator else {
+                panic!("expected table scan")
             };
-
             assert_eq!(
                 op.index_infos[0].lookup,
-                Some(IndexLookup::Static(mock_range))
+                Some(IndexLookup::Static(Range::Scope {
+                    min: Bound::Excluded(DataValue::Int32(1)),
+                    max: Bound::Unbounded,
+                }))
             );
-        } else {
-            unreachable!("Should be a filter operator")
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_unique_composite_index_uses_tuple_ranges() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table()?;
+        let mut arena = PlanArena::new(&table_state.table_arena);
+        let table_name: TableName = "mock_table".to_string().into();
+        let c1 = build_test_column(&mut arena, &table_name, 1, "c1")?;
+        let c2 = build_test_column(&mut arena, &table_name, 2, "c2")?;
+        let meta = arena.alloc_index(IndexMeta {
+            id: 0,
+            column_ids: vec![1, 2],
+            table_name: table_name.clone(),
+            pk_ty: LogicalType::Integer,
+            value_ty: LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]),
+            name: "unique_c1_c2".to_string(),
+            ty: IndexType::Unique,
+        });
+        let first_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 2);
+        let second_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c2, 1, 3);
+        let full_eq = and_predicate(&mut arena, first_eq, second_eq);
+        let first_range = cmp_predicate(&mut arena, BinaryOperator::GtEq, c1, 0, 2);
+        for (predicate, expected, prefix_len) in [
+            (
+                first_range,
+                Range::Scope {
+                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                    max: Bound::Unbounded,
+                },
+                0,
+            ),
+            (
+                first_eq,
+                Range::Scope {
+                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                    max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                },
+                1,
+            ),
+            (
+                full_eq,
+                Range::Eq(DataValue::Tuple(vec![
+                    DataValue::Int32(2),
+                    DataValue::Int32(3),
+                ])),
+                2,
+            ),
+        ] {
+            let scan = LogicalPlan::new(
+                Operator::TableScan(TableScanOperator {
+                    table_name: table_name.clone(),
+                    columns: vec![c1, c2],
+                    limit: (None, None),
+                    index_infos: vec![IndexInfo {
+                        meta,
+                        sort_option: SortOption::OrderBy {
+                            fields: vec![],
+                            ignore_prefix_len: 0,
+                        },
+                        lookup: None,
+                        residual_predicate: None,
+                        covered_deserializers: None,
+                        cover_mapping: None,
+                        sort_elimination_hint: None,
+                        stream_aggregate_hint: None,
+                    }],
+                    with_pk: false,
+                }),
+                Childrens::None,
+            );
+            let plan = apply_pipeline(
+                FilterOperator::build(predicate, scan, false),
+                HepOptimizerPipeline::builder().before_batch(
+                    "unique_composite_range",
+                    HepBatchStrategy::fix_point_topdown(1),
+                    &[NormalizationRuleImpl::PushPredicateIntoScan],
+                ),
+                &mut arena,
+            )?;
+            let scan = plan.childrens.pop_only();
+            let Operator::TableScan(op) = scan.operator else {
+                unreachable!()
+            };
+            assert_eq!(
+                op.index_infos[0].lookup,
+                Some(IndexLookup::Static(expected))
+            );
+            assert_eq!(op.index_infos[0].residual_predicate, None);
+            assert!(matches!(op.index_infos[0].sort_option,
+                SortOption::OrderBy { ignore_prefix_len, .. } if ignore_prefix_len == prefix_len));
+            assert_eq!(arena.index(meta).ty, IndexType::Unique);
+        }
         Ok(())
     }
 
@@ -927,9 +1114,9 @@ mod tests {
         let best_plan = apply_pipeline(
             filter_plan,
             HepOptimizerPipeline::builder().before_batch(
-                "push_cover_mapping".to_string(),
+                "push_cover_mapping",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushPredicateIntoScan],
+                &[NormalizationRuleImpl::PushPredicateIntoScan],
             ),
             &mut arena,
         )?;
@@ -990,9 +1177,9 @@ mod tests {
         let best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "test_push_predicate_through_join".to_string(),
+                "test_push_predicate_through_join",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushPredicateThroughJoin],
+                &[NormalizationRuleImpl::PushPredicateThroughJoin],
             ),
             &mut arena,
         )?;
@@ -1040,9 +1227,9 @@ mod tests {
         let best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "test_push_predicate_through_join".to_string(),
+                "test_push_predicate_through_join",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushPredicateThroughJoin],
+                &[NormalizationRuleImpl::PushPredicateThroughJoin],
             ),
             &mut arena,
         )?;
@@ -1084,15 +1271,15 @@ mod tests {
         for predicate in ["c1 = c3 or c2 = c4", "c1 < c3", "c1 > 0 and c3 < 9"] {
             let mut arena = PlanArena::new(&tables.table_arena);
             let plan = tables.plan_with_arena(
-                &format!("select * from t1, t2 where {predicate}"),
+                format!("select * from t1, t2 where {predicate}"),
                 &mut arena,
             )?;
             let plan = apply_pipeline(
                 plan,
                 HepOptimizerPipeline::builder().before_batch(
-                    "cross join pushdown".into(),
+                    "cross join pushdown",
                     HepBatchStrategy::once_topdown(),
-                    vec![NormalizationRuleImpl::PushPredicateThroughJoin],
+                    &[NormalizationRuleImpl::PushPredicateThroughJoin],
                 ),
                 &mut arena,
             )?;
@@ -1123,9 +1310,9 @@ mod tests {
         let best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "test_push_predicate_through_join".to_string(),
+                "test_push_predicate_through_join",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushPredicateThroughJoin],
+                &[NormalizationRuleImpl::PushPredicateThroughJoin],
             ),
             &mut arena,
         )?;
@@ -1178,9 +1365,9 @@ mod tests {
         let mut best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "push_join_predicate_into_scan".to_string(),
+                "push_join_predicate_into_scan",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
+                &[NormalizationRuleImpl::PushJoinPredicateIntoScan],
             ),
             &mut arena,
         )?;
@@ -1254,9 +1441,9 @@ mod tests {
         let mut best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "push_join_predicate_into_scan".to_string(),
+                "push_join_predicate_into_scan",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
+                &[NormalizationRuleImpl::PushJoinPredicateIntoScan],
             ),
             &mut arena,
         )?;
@@ -1302,9 +1489,9 @@ mod tests {
         let mut best_plan = apply_pipeline(
             plan,
             HepOptimizerPipeline::builder().before_batch(
-                "push_join_predicate_into_scan".to_string(),
+                "push_join_predicate_into_scan",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::PushJoinPredicateIntoScan],
+                &[NormalizationRuleImpl::PushJoinPredicateIntoScan],
             ),
             &mut arena,
         )?;

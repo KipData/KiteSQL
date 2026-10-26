@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -26,7 +25,7 @@ use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
 
@@ -38,51 +37,12 @@ macro_rules! try_default {
     };
 }
 
-impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> {
-    fn find_column_in_schema<'schema>(
-        schema_ref: impl IntoIterator<Item = &'schema ColumnRef>,
-        arena: &PlanArena,
-        column_name: &str,
-    ) -> Option<(usize, ColumnRef)> {
-        schema_ref
-            .into_iter()
-            .enumerate()
-            .find(|(_, column)| arena.column(**column).name() == column_name)
-            .map(|(position, column)| (position, *column))
-    }
-
-    fn find_column_in_scope(
-        context: &BinderContext<'a, T>,
-        arena: &PlanArena,
-        column_name: &str,
-    ) -> Result<Option<ScalarExpression>, DatabaseError> {
-        let mut position_offset = 0;
-        let mut found = None;
-
-        for bound_source in &context.bind_table {
-            let source = &bound_source.source;
-
-            if let Some((position, column)) =
-                Self::find_column_in_schema(source.schema().iter(), arena, column_name)
-            {
-                if found.is_some() {
-                    return Err(DatabaseError::AmbiguousColumn(column_name.to_string()));
-                }
-                found = Some(ScalarExpression::column_expr(
-                    column,
-                    position_offset + position,
-                ));
-            }
-
-            position_offset += source.schema_len();
-        }
-
-        Ok(found)
-    }
+impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> {
     pub(crate) fn bind_temp_table(
         &mut self,
         expr: ScalarExpression,
         sub_query: LogicalPlan,
+        correlated: bool,
         arena: &mut PlanArena,
     ) -> Result<(ScalarExpression, LogicalPlan), DatabaseError> {
         let (exprs, is_tuple) = match expr {
@@ -94,16 +54,18 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
 
         for (position, expr) in exprs.into_iter().enumerate() {
             let (alias_expr, alias_ref) = self.bind_temp_table_alias(expr, position, arena);
-            let predicate_alias = arena.alloc_expression(alias_expr);
-            // The projection evaluates against the subquery-local tuple, while the
-            // predicate evaluates against the combined left/right tuple. Clone the
-            // complete expression graph so position rewrites in either context do
-            // not mutate the other one through shared ExprRefs.
-            let projection_alias = predicate_alias.clone_expression(arena)?;
+            // The projection evaluates against the subquery-local tuple, while a
+            // correlated predicate evaluates `expr` against the combined tuple.
+            // Clone the complete expression graph so position rewrites in either
+            // context do not mutate the other one through shared ExprRefs.
+            let projection_alias = arena.alloc_expression(alias_expr).clone_expression(arena)?;
             if !is_tuple {
                 let alias_plan = Self::build_project_plan(sub_query, vec![projection_alias]);
-                return Ok((arena.expression(predicate_alias).clone(), alias_plan));
+                // An uncorrelated predicate reads the column produced by the projection.
+                let predicate = if correlated { expr } else { alias_ref };
+                return Ok((arena.expression(predicate).clone(), alias_plan));
             }
+
             alias_exprs.push(projection_alias);
             alias_refs.push(alias_ref);
         }
@@ -316,7 +278,7 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             ));
         }
 
-        let (alias_expr, sub_query) = self.bind_temp_table(column, sub_query, arena)?;
+        let (alias_expr, sub_query) = self.bind_temp_table(column, sub_query, correlated, arena)?;
         let alias_expr = arena.alloc_expression(alias_expr);
         let predicate = ScalarExpression::Binary {
             op: compare_op,
@@ -366,7 +328,7 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
             {
                 let input = match self.context.using.get(column_name) {
                     Some(column) => Some(column.visible_expr(arena)?),
-                    None => Self::find_column_in_scope(&self.context, arena, column_name)?,
+                    None => self.context.resolve_column(column_name, None, arena)?,
                 };
                 if let Some(input) = input {
                     return Ok(input);
@@ -392,24 +354,20 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
         }
         if let Some(table) = table_name.or(bind_table_name) {
             let mut is_outer = false;
-            let (source, position_offset) =
-                match Self::resolve_source_columns_in_scope(&self.context, table) {
-                    Ok(source) => source,
-                    Err(err) => {
-                        if let Some(parent) = self.parent {
-                            self.context.mark_join_outer_ref();
-                            is_outer = true;
-                            Self::resolve_source_columns_in_scope(parent, table).map_err(|_| err)?
-                        } else {
-                            return Err(err);
-                        }
+            let expr = match self.context.resolve_column(column_name, Some(table), arena) {
+                Ok(expr) => expr,
+                Err(err @ DatabaseError::InvalidTable { .. }) => {
+                    if let Some(parent) = self.parent {
+                        self.context.mark_join_outer_ref();
+                        is_outer = true;
+                        parent.resolve_column(column_name, Some(table), arena)?
+                    } else {
+                        return Err(err);
                     }
-                };
-            let (position, column) =
-                Self::find_column_in_schema(source.schema().iter(), arena, column_name)
-                    .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
-
-            let expr = ScalarExpression::column_expr(column, position_offset + position);
+                }
+                Err(err) => return Err(err),
+            }
+            .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
             if is_outer && self.context.capture_scalar_outer {
                 return self.capture_scalar_outer(expr, arena);
             }
@@ -420,7 +378,7 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
                 |context: &BinderContext<'a, T>| -> Result<Option<ScalarExpression>, DatabaseError> {
                     match context.using.get(column_name) {
                         Some(using_column) => using_column.visible_expr(arena).map(Some),
-                        None => Self::find_column_in_scope(context, arena, column_name),
+                        None => context.resolve_column(column_name, None, arena),
                     }
                 };
             let mut got_column = find_visible_column(&self.context)?;
@@ -556,7 +514,13 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
                 if args.len() != 1 {
                     return Err(DatabaseError::MisMatch("number of sum() parameters", "1"));
                 }
-                args[0].return_type(arena).into_owned()
+                let ty = args[0].return_type(arena).into_owned();
+                // Text is summed by its numeric prefix, as in SQLite.
+                if matches!(ty, LogicalType::Varchar(..) | LogicalType::Char(..)) {
+                    LogicalType::Double
+                } else {
+                    ty
+                }
             }
             AggKind::Min => {
                 if args.len() != 1 {
@@ -575,6 +539,21 @@ impl<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_, T, A> 
                     return Err(DatabaseError::MisMatch("number of avg() parameters", "1"));
                 }
                 LogicalType::Double
+            }
+            AggKind::Total => {
+                if args.len() != 1 {
+                    return Err(DatabaseError::MisMatch("number of total() parameters", "1"));
+                }
+                LogicalType::Double
+            }
+            AggKind::GroupConcat => {
+                if args.len() != 1 {
+                    return Err(DatabaseError::MisMatch(
+                        "number of group_concat() parameters",
+                        "1",
+                    ));
+                }
+                LogicalType::Varchar(None, CharLengthUnits::Characters)
             }
         };
         Ok(ScalarExpression::AggCall {

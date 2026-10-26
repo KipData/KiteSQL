@@ -17,7 +17,7 @@ use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::BestPhysicalOption;
 use crate::optimizer::core::rule::{ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::single_mapping;
 use std::sync::LazyLock;
 
@@ -31,5 +31,9 @@ pub struct FunctionScanImplementation;
 single_mapping!(
     FunctionScanImplementation,
     FUNCTION_SCAN_PATTERN,
-    PhysicalOption::new(PlanImpl::FunctionScan, SortOption::None)
+    PhysicalOption::new(
+        PlanImpl::FunctionScan,
+        SortOption::None,
+        RowCountOption::Unknown
+    )
 );

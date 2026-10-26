@@ -88,7 +88,7 @@ let users = database.execute(&plan, [(1, DataValue::Int32(1))])?
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`DBTransaction::prepare` and `DBTransaction::execute` provide the same
+`Transaction::prepare` and `Transaction::execute` provide the same
 workflow within an explicit transaction. The plan must be executed against the
 database that created it; DDL and ANALYZE cannot be prepared.
 

@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 
 /// A definition's position in an Arena namespace, independent of execution-local slots.
@@ -45,7 +45,7 @@ impl ReferenceSerialization for ScalarQueryRef {
         self.is_outer_value.encode(writer, direct, tables, arena)
     }
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         tables: &ReferenceTables,

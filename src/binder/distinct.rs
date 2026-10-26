@@ -20,10 +20,10 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::operator::sort::SortField;
 use crate::planner::MetaArena;
 use crate::planner::{ExprRef, LogicalPlan};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub fn bind_distinct(
         &mut self,
         children: LogicalPlan,
@@ -84,7 +84,11 @@ impl<'a> DistinctOutputBinder<'a> {
         Self { select_list }
     }
 
-    fn output_ref(&mut self, expr: ExprRef, arena: &mut dyn MetaArena) -> Option<ScalarExpression> {
+    fn output_ref<A: MetaArena + ?Sized>(
+        &mut self,
+        expr: ExprRef,
+        arena: &mut A,
+    ) -> Option<ScalarExpression> {
         self.select_list
             .iter()
             .position(|candidate| {
@@ -100,12 +104,8 @@ impl<'a> DistinctOutputBinder<'a> {
     }
 }
 
-impl ExprVisitorMut for DistinctOutputBinder<'_> {
-    fn visit(
-        &mut self,
-        expr: &mut ExprRef,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for DistinctOutputBinder<'_> {
+    fn visit(&mut self, expr: &mut ExprRef, arena: &mut A) -> Result<(), DatabaseError> {
         let is_named_alias = matches!(
             arena.expression(*expr),
             ScalarExpression::Alias {
@@ -197,10 +197,10 @@ mod tests {
             alias: AliasType::Name("v".to_string()),
         });
 
-        let constant = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
+        let identity = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
         let mut target = arena.alloc_expression(ScalarExpression::Alias {
-            expr: constant,
-            alias: AliasType::Expr(expr),
+            expr,
+            alias: AliasType::Expr(identity),
         });
 
         {

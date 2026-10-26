@@ -16,7 +16,8 @@ use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption, RowCountOption, SortOption};
+use crate::planner::LogicalPlan;
 use std::sync::LazyLock;
 
 static JOIN_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -35,15 +36,20 @@ impl MatchPattern for JoinImplementation {
 impl ImplementationRule for JoinImplementation {
     fn update_best_option(
         &self,
-        op: &Operator,
+        plan: &LogicalPlan,
         _: &crate::planner::PlanArena,
         _: &StatisticMetaLoader<'_>,
+        _: &mut crate::optimizer::core::rule::HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
-        let Operator::Join(operator) = op else {
+        let Operator::Join(operator) = &plan.operator else {
             unreachable!()
         };
-        let physical_option = PhysicalOption::new(operator.plan_impl(), SortOption::None);
+        let physical_option = PhysicalOption::new(
+            operator.plan_impl(),
+            SortOption::None,
+            RowCountOption::Unknown,
+        );
         crate::optimizer::core::rule::keep_best_physical_option(
             best_physical_option,
             physical_option,

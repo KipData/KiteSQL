@@ -1,7 +1,7 @@
 use super::*;
 // GRCOV_EXCL_START
 #[cfg(test)]
-use crate::planner::operator::{PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{PhysicalOption, PlanImpl, RowCountOption, SortOption};
 // GRCOV_EXCL_STOP
 use crate::planner::{ExprRef, ParamArena, PlanInput};
 // GRCOV_EXCL_START
@@ -16,6 +16,7 @@ pub struct PreparedPlan<'db> {
     pub(crate) plan: LogicalPlan,
     pub(crate) arena: PlanArena<'db>,
     parameter_expressions: Vec<ExprRef>,
+    pub(crate) read_only: bool,
 }
 
 impl<'db> PreparedPlan<'db> {
@@ -40,7 +41,7 @@ impl<S: Storage> Database<S> {
             ));
         }
         let arena = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, |_, _| {
+        BindSource::execute(self, prepared.read_only, |_, _| {
             Ok((PlanInput::Borrowed(&prepared.plan), arena))
         })
     }
@@ -56,12 +57,12 @@ impl<S: Storage> Database<S> {
         let statement = self.state.parse_statement(sql)?;
         let transaction = self
             .storage
-            .transaction_with_isolation(self.transaction_isolation)?;
+            .transaction_with_isolation(self.transaction_isolation, true)?;
         self.state.prepare_plan(&statement, params, &transaction)
     }
 }
 
-impl<'db, S: Storage> DBTransaction<'db, S> {
+impl<'db, S: Storage> Transaction<'db, S> {
     /// Executes a prepared SQL or ORM plan inside this transaction.
     pub fn execute<'a>(
         &'a mut self,
@@ -74,7 +75,7 @@ impl<'db, S: Storage> DBTransaction<'db, S> {
             ));
         }
         let arena = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, |_, _| {
+        BindSource::execute(self, prepared.read_only, |_, _| {
             Ok((PlanInput::Borrowed(&prepared.plan), arena))
         })
     }
@@ -114,7 +115,12 @@ impl<S: Storage> State<S> {
         })
     }
 
-    pub(crate) fn prepare_plan_with<'a, T: Transaction, A: AsRef<[(usize, LogicalType)]>, F>(
+    pub(crate) fn prepare_plan_with<
+        'a,
+        T: StorageTransaction,
+        A: AsRef<[(usize, LogicalType)]>,
+        F,
+    >(
         &'a self,
         params: A,
         transaction: &T,
@@ -128,10 +134,12 @@ impl<S: Storage> State<S> {
     {
         let (plan, mut arena) = self.build_plan(params, transaction, build)?;
         let parameter_expressions = arena.parameter_expressions();
+        let read_only = plan.operator.command_type().is_read_only();
         Ok(PreparedPlan {
             plan,
             arena,
             parameter_expressions,
+            read_only,
         })
     }
 }
@@ -141,6 +149,7 @@ impl<S: Storage> State<S> {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::execution::dql::index_scan::IndexScan;
     use crate::expression::range_detacher::Range;
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::filter::FilterOperator;
@@ -170,17 +179,17 @@ mod tests {
                 );
             });
             assert_eq!(
-                iter.next_tuple(|_, row| row.values.clone())?,
-                Some(vec![DataValue::Int64(expected)])
+                iter.next_tuple(|_, row| row.clone())?.unwrap(),
+                vec![DataValue::Int64(expected)]
             );
             assert!(iter.next_tuple(|_, _| ())?.is_none());
             iter.done()?;
         }
-        let mut tx = db.new_transaction()?;
+        let mut tx = db.new_transaction(false)?;
         let mut iter = tx.execute(&plan, [(1, DataValue::Int64(7))])?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.values.clone())?,
-            Some(vec![DataValue::Int64(31)])
+            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            vec![DataValue::Int64(31)]
         );
         iter.done()?;
         tx.commit()?;
@@ -296,6 +305,7 @@ mod tests {
             scan.physical_option = Some(PhysicalOption::new(
                 PlanImpl::IndexScan(Box::new(index.clone())),
                 sort.clone(),
+                RowCountOption::Unknown,
             ));
             let filter = FilterOperator {
                 predicate,
@@ -313,7 +323,7 @@ mod tests {
             let Childrens::Only(scan) = plan.childrens.as_ref() else {
                 panic!("expected scan")
             };
-            let Operator::TableScan(scan_op) = &scan.operator else {
+            let Operator::TableScan(_) = &scan.operator else {
                 panic!("expected table scan")
             };
             let Some(PhysicalOption {
@@ -329,12 +339,12 @@ mod tests {
             let mut execution_arena = crate::execution::ExecArena::<
                 <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
             >::with_capacity(0);
-            let executor = crate::execution::dql::index_scan::IndexScan::new(
-                scan_op,
+            let ranges = IndexScan::ranges(
                 info,
                 info.lookup.as_ref().expect("lookup"),
-            );
-            let ranges = executor.ranges(&mut execution_arena, &mut arena)?;
+                &mut execution_arena,
+                &mut arena,
+            )?;
             let expected_range = match &expected_index.lookup {
                 Some(IndexLookup::Static(range)) => range,
                 _ => unreachable!(),
@@ -594,7 +604,7 @@ mod tests {
                 .or_else(|| plan.childrens.iter().find_map(find_scan))
         }
         let scan = find_scan(&plan.plan).expect("table scan");
-        let Operator::TableScan(scan_op) = &scan.operator else {
+        let Operator::TableScan(_) = &scan.operator else {
             unreachable!()
         };
         let Some(PhysicalOption {
@@ -607,12 +617,12 @@ mod tests {
         let mut execution_arena = crate::execution::ExecArena::<
             <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
         >::with_capacity(0);
-        let ranges = crate::execution::dql::index_scan::IndexScan::new(
-            scan_op,
+        let ranges = IndexScan::ranges(
             info,
             info.lookup.as_ref().expect("lookup"),
-        )
-        .ranges(&mut execution_arena, &mut bound_arena)?;
+            &mut execution_arena,
+            &mut bound_arena,
+        )?;
         let mut ranges = ranges;
         assert_eq!(
             ranges.next(),

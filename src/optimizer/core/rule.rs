@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::Pattern;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption};
+use crate::planner::operator::PhysicalOption;
 use crate::planner::{LogicalPlan, PlanArena};
 use std::cmp::Ordering;
 
@@ -28,7 +28,14 @@ pub trait MatchPattern {
 
 pub trait NormalizationRule {
     /// Returns true when the plan tree is modified.
-    fn apply(&self, plan: &mut LogicalPlan, arena: &mut PlanArena) -> Result<bool, DatabaseError>;
+    /// Local rewrites must invalidate changed descendants before reading their schemas.
+    /// The optimizer invalidates the rewrite root and its ancestors, not untouched subtrees.
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut PlanArena,
+        loader: Option<&StatisticMetaLoader<'_>>,
+    ) -> Result<bool, DatabaseError>;
 }
 
 fn compare_costs(candidate_cost: Option<usize>, best_cost: Option<usize>) -> Ordering {
@@ -55,12 +62,18 @@ pub fn keep_best_physical_option(
     }
 }
 
+#[derive(Default)]
+pub struct HintState {
+    pub(crate) histogram_buf: Vec<u8>,
+}
+
 pub trait ImplementationRule: MatchPattern {
     fn update_best_option(
         &self,
-        op: &Operator,
+        plan: &LogicalPlan,
         arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
+        state: &mut HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError>;
 }

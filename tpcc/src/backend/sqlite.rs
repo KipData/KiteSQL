@@ -17,7 +17,7 @@ use super::{
 };
 use crate::TpccError;
 use chrono::{NaiveDateTime, TimeZone, Utc};
-use kite_sql::types::tuple::Tuple;
+use kite_sql::types::tuple::{Tuple, TupleImpl};
 use kite_sql::types::value::{DataValue, Utf8Type};
 use kite_sql::types::{CharLengthUnits, LogicalType};
 use rust_decimal::Decimal;
@@ -156,22 +156,22 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         let tuple = iter.next().transpose()?.ok_or(TpccError::EmptyTuples)?;
-        visitor(&tuple)
+        visitor(&tuple.into())
     }
 
     fn with_query_all(
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let iter = self.execute_raw(statement, params)?;
         for row in iter {
-            visitor(&row?)?;
+            visitor(&row?.into())?;
         }
         Ok(())
     }
@@ -181,7 +181,7 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         for _ in 0..n {
@@ -190,7 +190,7 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
             }
         }
         let tuple = iter.next().transpose()?.ok_or(TpccError::EmptyTuples)?;
-        visitor(&tuple)
+        visitor(&tuple.into())
     }
 
     fn commit(mut self) -> Result<(), TpccError> {
@@ -209,7 +209,9 @@ fn bind_params(statement: &mut SqliteStatement<'_>, params: &[DbParam]) -> Resul
 
 fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
     Ok(match value {
-        DataValue::Parameter { .. } => return Err(TpccError::InvalidParameter),
+        DataValue::Parameter { .. } | DataValue::InitValue { .. } => {
+            return Err(TpccError::InvalidParameter)
+        }
         DataValue::Null => Value::Null,
         DataValue::Boolean(v) => Value::Integer(*v as i64),
         DataValue::Float32(v) => Value::Float(v.0 as f64),

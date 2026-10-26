@@ -24,9 +24,9 @@ pub struct UpdateOperator {
 }
 
 impl Explain for UpdateOperator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         write!(f, "Update {} set ", self.table_name)?;

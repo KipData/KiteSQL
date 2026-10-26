@@ -17,7 +17,7 @@ use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use std::sync::LazyLock;
@@ -56,7 +56,7 @@ impl From<&DescribeOperator> for Describe {
     }
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Describe {
     type Input = &'a DescribeOperator;
 
     fn into_executor(
@@ -71,7 +71,17 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for Describe {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Describe {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.columns = None;
+        self.cursor = 0;
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -99,7 +109,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for Describe {
         let column = plan_arena.column(column_ref);
         let default = describe_default(column, plan_arena);
 
-        let output = arena.result_tuple_mut();
+        let output = arena.output_tuple_mut();
         output.pk = None;
         output.values.clear();
         fill_describe_row(&mut output.values, column, default);

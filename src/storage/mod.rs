@@ -29,14 +29,15 @@ use crate::iter_ext::Itertools;
 use crate::optimizer::core::cm_sketch::{
     CountMinSketch, CountMinSketchPage, COUNT_MIN_SKETCH_STORAGE_PAGE_LEN,
 };
-use crate::optimizer::core::statistics_meta::StatisticsMeta;
+use crate::optimizer::core::histogram::HistogramMeta;
+use crate::optimizer::core::statistics_meta::IndexStatistics;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::{MetaArena, TableArenaCell};
 use crate::serdes::ReferenceTables;
-use crate::storage::table_codec::{Bytes, StatisticsCodecType, TableCodec, BOUND_MAX_TAG};
-use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
+use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
+use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType, RuntimeIndexProbe};
 use crate::types::serialize::TupleValueSerializableImpl;
-use crate::types::tuple::{Tuple, TupleId};
+use crate::types::tuple::{Tuple, TupleId, TupleImpl, TupleLike};
 use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
 use std::borrow::{Borrow, Cow};
@@ -49,7 +50,18 @@ use std::path::Path;
 
 pub type KeyValueRef<'a> = (&'a [u8], &'a [u8]);
 
-pub(crate) type StatisticsMetaCache = HashMap<(TableName, IndexId), StatisticsMeta>;
+#[derive(Default)]
+pub(crate) struct StatisticsMetaCache {
+    pub(crate) indexes: HashMap<(TableName, IndexId), IndexStatistics>,
+    pub(crate) columns: HashMap<(TableName, ColumnId), HistogramMeta>,
+}
+
+impl StatisticsMetaCache {
+    pub(crate) fn remove_table(&mut self, table_name: &TableName) {
+        self.indexes.retain(|(name, _), _| name != table_name);
+        self.columns.retain(|(name, _), _| name != table_name);
+    }
+}
 pub(crate) type TableCache = HashMap<TableName, TableCatalog>;
 pub(crate) type ViewCache = HashMap<TableName, View>;
 
@@ -109,17 +121,18 @@ impl Display for EmptyStorageMetrics {
 pub trait Storage: Clone {
     type Metrics: Display;
 
-    type TransactionType<'a>: Transaction
+    type TransactionType<'a>: StorageTransaction
     where
         Self: 'a;
 
     fn transaction(&self) -> Result<Self::TransactionType<'_>, DatabaseError> {
-        self.transaction_with_isolation(self.default_transaction_isolation())
+        self.transaction_with_isolation(self.default_transaction_isolation(), false)
     }
 
     fn transaction_with_isolation(
         &self,
         isolation: TransactionIsolationLevel,
+        read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError>;
 
     fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
@@ -153,7 +166,7 @@ pub trait CheckpointableStorage: Storage {
 /// Optional bounds of the reader, of the form (offset, limit).
 pub(crate) type Bounds = (Option<usize>, Option<usize>);
 
-pub trait Transaction: Sized {
+pub trait StorageTransaction: Sized {
     type BorrowedBytes<'a>: AsRef<[u8]>
     where
         Self: 'a;
@@ -251,7 +264,14 @@ pub trait Transaction: Sized {
                     LogicalType::Tuple(tys) => tys.len(),
                     _ => 1,
                 };
-                let cover_mapping = mapping.map(|slots| TupleMapping::new(slots, tuple_len));
+                let cover_mapping = match mapping {
+                    Some(slots) => Some(TupleMapping::new(slots.iter().copied(), tuple_len)),
+                    None if columns.len() < tuple_len => {
+                        // Omitted mapping denotes an ordered prefix, not every key field.
+                        Some(TupleMapping::new(0..columns.len(), tuple_len))
+                    }
+                    None => None,
+                };
 
                 (
                     IndexImplEnum::Covered(CoveredIndexImpl),
@@ -361,11 +381,11 @@ pub trait Transaction: Sized {
         Ok((table, index_id))
     }
 
-    fn add_index(
+    fn add_index<V: TupleLike + ?Sized>(
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &str,
-        index: Index,
+        index: Index<'_, V>,
         tuple_id: &TupleId,
     ) -> Result<(), DatabaseError> {
         if matches!(index.ty, IndexType::PrimaryKey { .. }) {
@@ -387,11 +407,11 @@ pub trait Transaction: Sized {
         })
     }
 
-    fn del_index(
+    fn del_index<V: TupleLike + ?Sized>(
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &str,
-        index: &Index,
+        index: &Index<'_, V>,
         tuple_id: &TupleId,
     ) -> Result<(), DatabaseError> {
         if matches!(index.ty, IndexType::PrimaryKey { .. }) {
@@ -406,7 +426,7 @@ pub trait Transaction: Sized {
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &str,
-        tuple: &Tuple,
+        tuple: &TupleImpl,
         serializers: I,
         is_overwrite: bool,
     ) -> Result<(), DatabaseError>
@@ -414,14 +434,13 @@ pub trait Transaction: Sized {
         I: IntoIterator<Item = S>,
         S: Borrow<TupleValueSerializableImpl>,
     {
-        let tuple_id = tuple.pk.as_ref().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+        let tuple_id = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
         let mut serializers = serializers.into_iter();
-        let mut write_value =
-            |tuple: &Tuple, value: &mut Bytes| tuple.serialize_to(&mut serializers, value);
+        let mut write_value = |value: &mut Bytes| tuple.serialize_to(&mut serializers, value);
         table_codec.with_tuple(
             table_name,
             tuple_id,
-            Some((tuple, &mut write_value)),
+            Some(&mut write_value),
             |key, value| {
                 if !is_overwrite && self.exists(key)? {
                     return Err(DatabaseError::DuplicatePrimaryKey);
@@ -632,6 +651,7 @@ pub trait Transaction: Sized {
             column_id
         };
 
+        self.remove_column_statistics(table_codec, table_name, column_id, plan_arena)?;
         for index_meta in table_catalog.indexes.iter() {
             let index_meta = plan_arena.index(*index_meta);
             if !index_meta.column_ids.contains(&column_id) {
@@ -649,7 +669,7 @@ pub trait Transaction: Sized {
                 self.remove_range(Bound::Included(min), Bound::Included(max))
             })?;
 
-            self.remove_statistics_meta(table_codec, table_name, index_meta.id)?;
+            self.remove_index_statistics(table_codec, table_name, index_meta.id)?;
         }
         self.load_table(table_codec, plan_arena, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)
@@ -800,7 +820,7 @@ pub trait Transaction: Sized {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        self.remove_statistics_meta(table_codec, &table_name, index_id)?;
+        self.remove_index_statistics(table_codec, &table_name, index_id)?;
 
         self.load_table(table_codec, plan_arena, table_name.clone())?
             .map(|table| (table, index_id))
@@ -901,19 +921,10 @@ pub trait Transaction: Sized {
     fn views<'a>(
         &'a self,
         table_codec: &mut TableCodec,
-        table_cache: &'a TableCache,
-        table_arena: &'a TableArenaCell,
-        scala_functions: &'a ScalaFunctions,
-        table_functions: &'a TableFunctions,
     ) -> Result<ViewIter<'a, Self>, DatabaseError> {
         table_codec.with_view_bound(|min, max| {
             Ok(ViewIter {
                 iter: self.range(Bound::Included(min), Bound::Included(max))?,
-                transaction: self,
-                table_cache,
-                table_arena,
-                scala_functions,
-                table_functions,
             })
         })
     }
@@ -950,16 +961,61 @@ pub trait Transaction: Sized {
         })
     }
 
-    fn save_statistics_meta(
+    fn save_column_statistics(
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &TableName,
-        statistics_meta: StatisticsMeta,
+        column_id: ColumnId,
+        meta: &HistogramMeta,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        let index_id = statistics_meta.index_id();
-        let (root, buckets, cm_sketch, top_n) = statistics_meta.into_parts();
-        table_codec.with_statistics_meta(
+        table_codec.with_column_statistics(
+            table_name,
+            column_id,
+            Some(meta),
+            arena,
+            |key, value| self.set(key, value),
+        )
+    }
+
+    fn column_statistics(
+        &self,
+        table_codec: &mut TableCodec,
+        table_name: &str,
+        column_id: ColumnId,
+        arena: &mut (impl MetaArena + ?Sized),
+    ) -> Result<Option<HistogramMeta>, DatabaseError> {
+        let value =
+            table_codec.with_column_statistics(table_name, column_id, None, arena, |key, _| {
+                self.get_borrowed(key)
+            })?;
+        value
+            .map(|bytes| TableCodec::decode_column_statistics::<Self>(bytes.as_ref(), arena))
+            .transpose()
+    }
+
+    fn remove_column_statistics(
+        &mut self,
+        table_codec: &mut TableCodec,
+        table_name: &TableName,
+        column_id: ColumnId,
+        arena: &(impl MetaArena + ?Sized),
+    ) -> Result<(), DatabaseError> {
+        table_codec.with_column_statistics(table_name, column_id, None, arena, |key, _| {
+            self.remove(key)
+        })
+    }
+
+    fn save_index_statistics(
+        &mut self,
+        table_codec: &mut TableCodec,
+        table_name: &TableName,
+        index_statistics: IndexStatistics,
+        arena: &(impl MetaArena + ?Sized),
+    ) -> Result<(), DatabaseError> {
+        let index_id = index_statistics.index_id();
+        let (root, buckets, cm_sketch, top_n) = index_statistics.into_parts();
+        table_codec.with_index_statistics(
             table_name.as_ref(),
             index_id,
             Some(&root),
@@ -968,7 +1024,7 @@ pub trait Transaction: Sized {
         )?;
         let (sketch_meta, sketch_pages) =
             cm_sketch.into_storage_parts(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN);
-        table_codec.with_statistics_sketch_meta(
+        table_codec.with_index_statistics_sketch_meta(
             table_name.as_ref(),
             index_id,
             Some(&sketch_meta),
@@ -976,7 +1032,7 @@ pub trait Transaction: Sized {
             |key, value| self.set(key, value),
         )?;
         for sketch_page in sketch_pages {
-            table_codec.with_statistics_sketch_page(
+            table_codec.with_index_statistics_sketch_page(
                 table_name.as_ref(),
                 index_id,
                 &sketch_page,
@@ -987,7 +1043,7 @@ pub trait Transaction: Sized {
         }
 
         for (ordinal, bucket) in buckets.iter().enumerate() {
-            table_codec.with_statistics_bucket(
+            table_codec.with_index_statistics_bucket(
                 table_name.as_ref(),
                 index_id,
                 ordinal as u32,
@@ -996,7 +1052,7 @@ pub trait Transaction: Sized {
                 |key, value| self.set(key, value),
             )?;
         }
-        table_codec.with_statistics_top_n(
+        table_codec.with_index_statistics_top_n(
             table_name.as_ref(),
             index_id,
             Some(&top_n),
@@ -1007,14 +1063,14 @@ pub trait Transaction: Sized {
         Ok(())
     }
 
-    fn statistics_meta(
+    fn index_statistics(
         &self,
         table_codec: &mut TableCodec,
         table_name: &str,
         index_id: IndexId,
         arena: &mut (impl MetaArena + ?Sized),
-    ) -> Result<Option<StatisticsMeta>, DatabaseError> {
-        table_codec.with_statistics_index_bound(table_name, index_id, |min, max| {
+    ) -> Result<Option<IndexStatistics>, DatabaseError> {
+        table_codec.with_index_statistics_bound(table_name, index_id, |min, max| {
             let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
             let mut root = None;
             let mut buckets = Vec::new();
@@ -1023,25 +1079,29 @@ pub trait Transaction: Sized {
             let mut top_n = None;
 
             while let Some((key, value)) = iter.try_next()? {
-                match TableCodec::decode_statistics_codec_type(key)? {
-                    StatisticsCodecType::Root => {
-                        root = Some(TableCodec::decode_statistics_meta::<Self>(value, arena)?);
+                match TableCodec::decode_index_statistics_codec_type(key)? {
+                    IndexStatisticsCodecType::Root => {
+                        root = Some(TableCodec::decode_index_statistics::<Self>(value, arena)?);
                     }
-                    StatisticsCodecType::SketchMeta => {
-                        sketch_meta = Some(TableCodec::decode_statistics_sketch_meta::<Self>(
+                    IndexStatisticsCodecType::SketchMeta => {
+                        sketch_meta = Some(
+                            TableCodec::decode_index_statistics_sketch_meta::<Self>(value, arena)?,
+                        );
+                    }
+                    IndexStatisticsCodecType::SketchPage => {
+                        sketch_pages.push(TableCodec::decode_index_statistics_sketch_page::<Self>(
                             value, arena,
                         )?);
                     }
-                    StatisticsCodecType::SketchPage => {
-                        sketch_pages.push(TableCodec::decode_statistics_sketch_page::<Self>(
+                    IndexStatisticsCodecType::Bucket => {
+                        buckets.push(TableCodec::decode_index_statistics_bucket::<Self>(
                             value, arena,
                         )?);
                     }
-                    StatisticsCodecType::Bucket => {
-                        buckets.push(TableCodec::decode_statistics_bucket::<Self>(value, arena)?);
-                    }
-                    StatisticsCodecType::TopN => {
-                        top_n = Some(TableCodec::decode_statistics_top_n::<Self>(value, arena)?);
+                    IndexStatisticsCodecType::TopN => {
+                        top_n = Some(TableCodec::decode_index_statistics_top_n::<Self>(
+                            value, arena,
+                        )?);
                     }
                 }
             }
@@ -1049,7 +1109,7 @@ pub trait Transaction: Sized {
             match (root, sketch_meta) {
                 (Some(root), Some(sketch_meta)) => {
                     let sketch = CountMinSketch::from_storage_parts(sketch_meta, sketch_pages)?;
-                    StatisticsMeta::from_parts(root, buckets, sketch, top_n).map(Some)
+                    IndexStatistics::from_parts(root, buckets, sketch, top_n).map(Some)
                 }
                 (None, None)
                     if buckets.is_empty() && sketch_pages.is_empty() && top_n.is_none() =>
@@ -1063,13 +1123,13 @@ pub trait Transaction: Sized {
         })
     }
 
-    fn remove_statistics_meta(
+    fn remove_index_statistics(
         &mut self,
         table_codec: &mut TableCodec,
         table_name: &TableName,
         index_id: IndexId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_statistics_index_bound(table_name.as_ref(), index_id, |min, max| {
+        table_codec.with_index_statistics_bound(table_name.as_ref(), index_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
@@ -1300,7 +1360,7 @@ fn encode_bound<'a>(
     bound: &Bound<DataValue>,
     is_upper: bool,
     buffer: &'a mut Bytes,
-    params: &IndexImplParams<'_, impl Transaction>,
+    params: &IndexImplParams<'_, impl StorageTransaction>,
     inner: &IndexImplEnum,
 ) -> Result<Bound<&'a [u8]>, DatabaseError> {
     match bound {
@@ -1316,7 +1376,7 @@ fn encode_bound<'a>(
     }
 }
 
-trait IndexImpl<T: Transaction> {
+trait IndexImpl<T: StorageTransaction> {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1377,15 +1437,17 @@ struct TupleMapping {
 }
 
 impl TupleMapping {
-    fn new(scan_to_index: &[usize], tuple_len: usize) -> Self {
+    fn new(scan_to_index: impl Iterator<Item = usize>, tuple_len: usize) -> Self {
         let mut index_to_scan = vec![usize::MAX; tuple_len];
+        let mut target_len = 0;
 
-        for (scan_idx, index_idx) in scan_to_index.iter().enumerate() {
-            index_to_scan[*index_idx] = scan_idx;
+        for index_idx in scan_to_index {
+            index_to_scan[index_idx] = target_len;
+            target_len += 1;
         }
         TupleMapping {
             index_to_scan,
-            target_len: scan_to_index.len(),
+            target_len,
         }
     }
 
@@ -1394,7 +1456,7 @@ impl TupleMapping {
     }
 }
 
-struct IndexImplParams<'a, T: Transaction> {
+struct IndexImplParams<'a, T: StorageTransaction> {
     index_meta: IndexMetaRef,
     meta_arena: &'a dyn MetaArena,
     table_name: TableName,
@@ -1407,7 +1469,7 @@ struct IndexImplParams<'a, T: Transaction> {
     reverse: bool,
 }
 
-impl<T: Transaction> IndexImplParams<'_, T> {
+impl<T: StorageTransaction> IndexImplParams<'_, T> {
     #[inline]
     pub(crate) fn index_meta(&self) -> &IndexMeta {
         self.meta_arena.index(self.index_meta)
@@ -1441,18 +1503,18 @@ impl<T: Transaction> IndexImplParams<'_, T> {
     }
 }
 
-enum IndexResult<'a, T: Transaction + 'a> {
+enum IndexResult<'a, T: StorageTransaction + 'a> {
     Hit,
     Miss,
     Scope(RangeIter<'a, T>),
 }
 
-pub enum RangeIter<'a, T: Transaction + 'a> {
+pub enum RangeIter<'a, T: StorageTransaction + 'a> {
     Forward(T::IterType<'a>),
     Reverse(T::RevIterType<'a>),
 }
 
-impl<'a, T: Transaction + 'a> RangeIter<'a, T> {
+impl<'a, T: StorageTransaction + 'a> RangeIter<'a, T> {
     fn open(
         tx: &'a T,
         min: Bound<&[u8]>,
@@ -1467,7 +1529,7 @@ impl<'a, T: Transaction + 'a> RangeIter<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> InnerIter for RangeIter<'a, T> {
+impl<'a, T: StorageTransaction + 'a> InnerIter for RangeIter<'a, T> {
     fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
         match self {
             RangeIter::Forward(iter) => iter.try_next(),
@@ -1476,7 +1538,7 @@ impl<'a, T: Transaction + 'a> InnerIter for RangeIter<'a, T> {
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for IndexImplEnum {
+impl<T: StorageTransaction> IndexImpl<T> for IndexImplEnum {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1560,7 +1622,7 @@ impl<T: Transaction> IndexImpl<T> for IndexImplEnum {
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
     fn index_lookup_into(
         &self,
         _: &mut TableCodec,
@@ -1569,11 +1631,14 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<(), DatabaseError> {
-        let tuple_id = TableCodec::decode_tuple_key(key, &params.index_meta().pk_ty)?;
+        let tuple_id = params
+            .with_pk
+            .then(|| TableCodec::decode_tuple_key(key, &params.index_meta().pk_ty))
+            .transpose()?;
         TableCodec::decode_tuple_into(
             tuple,
             &params.deserializers[..],
-            Some(tuple_id),
+            tuple_id,
             value,
             params.total_len,
         )
@@ -1604,7 +1669,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
                 TableCodec::decode_tuple_into(
                     tuple,
                     &params.deserializers[..],
-                    Some(tuple_id.clone()),
+                    params.with_pk.then(|| tuple_id.clone()),
                     bytes.as_ref(),
                     params.total_len,
                 )?;
@@ -1634,7 +1699,7 @@ impl<T: Transaction> IndexImpl<T> for PrimaryKeyIndexImpl {
 }
 
 #[inline(always)]
-fn secondary_index_lookup<T: Transaction>(
+fn secondary_index_lookup<T: StorageTransaction>(
     table_codec: &mut TableCodec,
     tuple: &mut Tuple,
     bytes: &[u8],
@@ -1648,7 +1713,7 @@ fn secondary_index_lookup<T: Transaction>(
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1694,7 +1759,7 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
         table_codec: &mut TableCodec,
         params: &IndexImplParams<T>,
         value: &DataValue,
-        _: bool,
+        is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         let index = Index::new(
@@ -1704,14 +1769,19 @@ impl<T: Transaction> IndexImpl<T> for UniqueIndexImpl {
         );
 
         table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
-            out.clear();
-            out.extend_from_slice(key);
+            if index.values.len() < params.index_meta().column_ids.len() {
+                // A partial UNIQUE key bounds a prefix, not one exact index entry.
+                encode_bound_key(out, key, is_upper);
+            } else {
+                out.clear();
+                out.extend_from_slice(key);
+            }
             Ok(())
         })
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for NormalIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1763,7 +1833,7 @@ impl<T: Transaction> IndexImpl<T> for NormalIndexImpl {
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for CompositeIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
     fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1815,7 +1885,7 @@ impl<T: Transaction> IndexImpl<T> for CompositeIndexImpl {
     }
 }
 
-impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
     fn index_lookup_into(
         &self,
         _: &mut TableCodec,
@@ -1824,12 +1894,14 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
         value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<(), DatabaseError> {
-        let key = match &params.cover_mapping {
+        match &params.cover_mapping {
             Some(mapping) => {
-                TableCodec::decode_index_key(key, params.value_ty(), &mapping.as_ref())?
+                TableCodec::decode_index_key_into(tuple, key, params.value_ty(), &mapping.as_ref())?
             }
-            None => TableCodec::decode_index_key(key, params.value_ty(), &OrderedMapping)?,
-        };
+            None => {
+                TableCodec::decode_index_key_into(tuple, key, params.value_ty(), &OrderedMapping)?
+            }
+        }
 
         let tuple_id = if params.with_pk {
             Some(TableCodec::decode_index(value)?)
@@ -1837,7 +1909,6 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
             None
         };
         tuple.pk = tuple_id;
-        tuple.values = key;
         Ok(())
     }
 
@@ -1882,7 +1953,7 @@ impl<T: Transaction> IndexImpl<T> for CoveredIndexImpl {
 }
 
 #[inline(always)]
-fn eq_to_res_scope<'a, T: Transaction + 'a>(
+fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
     table_codec: &mut TableCodec,
     tuple: &mut Tuple,
     index_impl: &impl IndexImpl<T>,
@@ -1904,7 +1975,7 @@ fn eq_to_res_scope<'a, T: Transaction + 'a>(
     Ok(IndexResult::Scope(iter))
 }
 
-pub struct TupleIter<'a, T: Transaction + 'a> {
+pub struct TupleIter<'a, T: StorageTransaction + 'a> {
     bounds: IterBounds,
     pk_ty: Option<LogicalType>,
     deserializers: Vec<TupleValueSerializableImpl>,
@@ -1912,7 +1983,23 @@ pub struct TupleIter<'a, T: Transaction + 'a> {
     iter: T::IterType<'a>,
 }
 
-impl<'a, T: Transaction + 'a> Iter for TupleIter<'a, T> {
+impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
+    pub(crate) fn reset(
+        &mut self,
+        tx: &'a T,
+        table_codec: &mut TableCodec,
+        table_name: &TableName,
+        bounds: Bounds,
+    ) -> Result<(), DatabaseError> {
+        self.iter = table_codec.with_tuple_bound(table_name, |min, max| {
+            tx.range(Bound::Included(min), Bound::Included(max))
+        })?;
+        self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
+        Ok(())
+    }
+}
+
+impl<'a, T: StorageTransaction + 'a> Iter for TupleIter<'a, T> {
     fn next_tuple_into(
         &mut self,
         table_codec: &mut TableCodec,
@@ -2049,7 +2136,7 @@ impl IterBounds {
     }
 }
 
-pub struct IndexIter<'a, T: Transaction> {
+pub struct IndexIter<'a, T: StorageTransaction> {
     bounds: IterBounds,
     params: IndexImplParams<'a, T>,
     inner: IndexImplEnum,
@@ -2059,13 +2146,35 @@ pub struct IndexIter<'a, T: Transaction> {
     encode_max_buffer: Bytes,
 }
 
-pub enum IndexIterState<'a, T: Transaction + 'a> {
+pub enum IndexIterState<'a, T: StorageTransaction + 'a> {
     Init,
     Range(RangeIter<'a, T>),
     Over,
 }
 
-impl<T: Transaction> Iter for IndexIter<'_, T> {
+impl<'a, T: StorageTransaction> IndexIter<'a, T> {
+    pub(crate) fn reset(&mut self, ranges: IndexRanges<'a>, bounds: Bounds) {
+        self.params.reverse = ranges.reverse;
+        self.ranges = ranges;
+        self.rewind(bounds);
+    }
+
+    pub(crate) fn reset_probe(&mut self, probe: RuntimeIndexProbe, bounds: Bounds) {
+        match (&mut self.ranges.source, probe) {
+            (RangeSource::Owned(Range::Eq(value)), RuntimeIndexProbe::Eq(probe)) => *value = probe,
+            (source, probe) => *source = RangeSource::Owned(probe.into()),
+        }
+        self.rewind(bounds);
+    }
+
+    pub(crate) fn rewind(&mut self, bounds: Bounds) {
+        self.state = IndexIterState::Init;
+        self.ranges.next = 0;
+        self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
+    }
+}
+
+impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
     fn next_tuple_into(
         &mut self,
         table_codec: &mut TableCodec,
@@ -2147,7 +2256,7 @@ impl<T: Transaction> Iter for IndexIter<'_, T> {
                                     self.bounds.consume_limit();
                                     return Ok(true);
                                 }
-                                IndexResult::Miss => return Ok(false),
+                                IndexResult::Miss => continue,
                                 IndexResult::Scope(iter) => {
                                     self.state = IndexIterState::Range(iter);
                                 }
@@ -2192,11 +2301,11 @@ pub trait Iter {
     ) -> Result<bool, DatabaseError>;
 }
 
-pub struct TableIter<'a, T: Transaction + 'a> {
+pub struct TableIter<'a, T: StorageTransaction + 'a> {
     iter: T::IterType<'a>,
 }
 
-impl<T: Transaction> TableIter<'_, T> {
+impl<T: StorageTransaction> TableIter<'_, T> {
     pub fn try_next(
         &mut self,
         arena: &mut (impl MetaArena + ?Sized),
@@ -2209,34 +2318,26 @@ impl<T: Transaction> TableIter<'_, T> {
     }
 }
 
-pub struct ViewIter<'a, T: Transaction + 'a> {
+pub struct ViewIter<'a, T: StorageTransaction + 'a> {
     iter: T::IterType<'a>,
-    transaction: &'a T,
-    table_cache: &'a TableCache,
-    table_arena: &'a TableArenaCell,
-    scala_functions: &'a ScalaFunctions,
-    table_functions: &'a TableFunctions,
 }
 
-impl<T: Transaction> ViewIter<'_, T> {
-    pub fn try_next(&mut self) -> Result<Option<View>, DatabaseError> {
+impl<T: StorageTransaction> ViewIter<'_, T> {
+    pub fn try_next(
+        &mut self,
+        arena: &mut (impl MetaArena + ?Sized),
+    ) -> Result<Option<TableName>, DatabaseError> {
         let Some((_, value)) = self.iter.try_next()? else {
             return Ok(None);
         };
 
-        Ok(Some(TableCodec::decode_view(
-            value,
-            (self.transaction, self.table_cache),
-            self.scala_functions,
-            self.table_functions,
-            self.table_arena.borrow_mut(),
-        )?))
+        Ok(Some(TableCodec::decode_view_name::<T>(value, arena)?))
     }
 }
 
 // GRCOV_EXCL_START
 #[cfg(test)]
-pub(crate) fn check_range_rev_matches_range<T: Transaction>(
+pub(crate) fn check_range_rev_matches_range<T: StorageTransaction>(
     tx: &mut T,
 ) -> Result<(), DatabaseError> {
     fn keys<I: InnerIter>(mut iter: I) -> Result<Vec<Vec<u8>>, DatabaseError> {
@@ -2315,7 +2416,7 @@ pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
     mut db: crate::db::Database<S>,
 ) -> Result<(), DatabaseError> {
     db.ddl("create table t (id int primary key, v int not null)")?;
-    let mut tx = db.new_transaction()?;
+    let mut tx = db.new_transaction(false)?;
     tx.run("insert into t values (1,1), (2,2), (3,3), (4,4), (5,5)")?
         .done()?;
     tx.run("update t set id = id + 1000 where id > 3 and id < 3000")?
@@ -2324,7 +2425,7 @@ pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
         .done()?;
     let mut iter = tx.run("select id from t order by id")?;
     let mut ids = Vec::new();
-    while let Some(id) = iter.next_tuple(|_, tuple| tuple.values[0].clone())? {
+    while let Some(id) = iter.next_tuple(|_, tuple| tuple[0].clone())? {
         ids.push(id);
     }
     iter.done()?;
@@ -2337,7 +2438,7 @@ pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
 }
 
 #[cfg(test)]
-pub(crate) fn check_remove_range<T: Transaction>(tx: &mut T) -> Result<(), DatabaseError> {
+pub(crate) fn check_remove_range<T: StorageTransaction>(tx: &mut T) -> Result<(), DatabaseError> {
     let data: Vec<[u8; 4]> = (0u32..3000).map(u32::to_be_bytes).collect();
     let [k0, k1, k10, k2500, k2999, k5000] = [0u32, 1, 10, 2500, 2999, 5000].map(u32::to_be_bytes);
     type Case<'a> = (Bound<&'a [u8]>, Bound<&'a [u8]>);
@@ -2396,7 +2497,7 @@ mod test {
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
-        IndexIter, InnerIter, Storage, TableCache, Transaction, TransactionIsolationLevel,
+        IndexIter, InnerIter, Storage, StorageTransaction, TableCache, TransactionIsolationLevel,
     };
     use crate::types::index::{Index, IndexType};
     use crate::types::tuple::Tuple;
@@ -2561,11 +2662,11 @@ mod test {
         let plan_arena = PlanArena::new(&table_arena);
 
         let tuples = build_tuples();
-        for tuple in tuples.iter() {
+        for tuple in build_tuples() {
             transaction.append_tuple(
                 &mut table_codec,
                 "t1",
-                tuple,
+                &tuple.into(),
                 &[
                     LogicalType::Integer.serializable(),
                     LogicalType::Boolean.serializable(),
@@ -2876,11 +2977,11 @@ mod test {
         for (tuple_id, index) in indexes.iter().cloned() {
             transaction.add_index(&mut table_codec, "t1", index, &tuple_id)?;
         }
-        for tuple in tuples.iter() {
+        for tuple in build_tuples() {
             transaction.append_tuple(
                 &mut table_codec,
                 "t1",
-                tuple,
+                &tuple.into(),
                 &[
                     LogicalType::Integer.serializable(),
                     LogicalType::Boolean.serializable(),
@@ -2955,22 +3056,24 @@ mod test {
             LogicalType::Integer.serializable(),
         ];
 
-        let initial_tuple = Tuple::new(
+        let initial_tuple: crate::types::tuple::TupleImpl = Tuple::new(
             Some(DataValue::Int32(0)),
             vec![
                 DataValue::Int32(0),
                 DataValue::Boolean(true),
                 DataValue::Int32(0),
             ],
-        );
-        let updated_tuple = Tuple::new(
+        )
+        .into();
+        let updated_tuple: crate::types::tuple::TupleImpl = Tuple::new(
             Some(DataValue::Int32(0)),
             vec![
                 DataValue::Int32(0),
                 DataValue::Boolean(true),
                 DataValue::Int32(1),
             ],
-        );
+        )
+        .into();
         let table_arena = TableArenaCell::default();
         let mut plan_arena = PlanArena::new(&table_arena);
 
@@ -2998,10 +3101,10 @@ mod test {
                 "t1",
                 Index::new(
                     index_id,
-                    std::slice::from_ref(&initial_tuple.values[2]),
+                    std::slice::from_ref(&initial_tuple[2]),
                     IndexType::Normal,
                 ),
-                initial_tuple.pk.as_ref().unwrap(),
+                initial_tuple.pk().unwrap(),
             )?;
             setup_tx.append_tuple(&mut table_codec, "t1", &initial_tuple, &serializers, false)?;
             setup_tx.commit()?;
@@ -3009,7 +3112,7 @@ mod test {
             index_id
         };
         let reader_tx =
-            storage.transaction_with_isolation(TransactionIsolationLevel::ReadCommitted)?;
+            storage.transaction_with_isolation(TransactionIsolationLevel::ReadCommitted, true)?;
         let tuple_id = {
             let mut index_iter = table_codec.with_index_bound("t1", index_id, |min, max| {
                 reader_tx.range(Bound::Included(min), Bound::Included(max))
@@ -3040,20 +3143,20 @@ mod test {
             "t1",
             &Index::new(
                 index_id,
-                std::slice::from_ref(&initial_tuple.values[2]),
+                std::slice::from_ref(&initial_tuple[2]),
                 IndexType::Normal,
             ),
-            initial_tuple.pk.as_ref().unwrap(),
+            initial_tuple.pk().unwrap(),
         )?;
         writer_tx.add_index(
             &mut table_codec,
             "t1",
             Index::new(
                 index_id,
-                std::slice::from_ref(&updated_tuple.values[2]),
+                std::slice::from_ref(&updated_tuple[2]),
                 IndexType::Normal,
             ),
-            updated_tuple.pk.as_ref().unwrap(),
+            updated_tuple.pk().unwrap(),
         )?;
         writer_tx.append_tuple(&mut table_codec, "t1", &updated_tuple, &serializers, true)?;
         writer_tx.commit()?;

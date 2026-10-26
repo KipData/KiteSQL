@@ -24,19 +24,15 @@ use crate::planner::operator::window::WindowOperator;
 use crate::planner::operator::Operator;
 use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 
 struct WindowCollector {
     windows: Vec<(WindowCall, ColumnRef)>,
 }
 
-impl ExprVisitorMut for WindowCollector {
-    fn visit(
-        &mut self,
-        expr: &mut ExprRef,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for WindowCollector {
+    fn visit(&mut self, expr: &mut ExprRef, arena: &mut A) -> Result<(), DatabaseError> {
         let ScalarExpression::WindowCall(window) = arena.expression(*expr) else {
             return walk_mut_expr(self, expr, arena);
         };
@@ -71,12 +67,12 @@ struct WindowOutputBinder<'a> {
     base_position: usize,
 }
 
-impl ExprVisitorMut for WindowOutputBinder<'_> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for WindowOutputBinder<'_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        _arena: &mut (dyn MetaArena + '_),
+        _arena: &mut A,
     ) -> Result<(), DatabaseError> {
         if let Some(output_position) = self
             .groups
@@ -97,7 +93,7 @@ struct WindowGroup {
     output_columns: Vec<ColumnRef>,
 }
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_window_function(
         &mut self,
         kind: WindowFunctionKind,

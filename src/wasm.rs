@@ -16,7 +16,7 @@
 
 use crate::db::{DataBaseBuilder, Database, DatabaseIter};
 use crate::storage::memory::MemoryStorage;
-use crate::types::tuple::Tuple;
+use crate::types::tuple::TupleImpl;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use js_sys::{Array, Object, Reflect, Uint8Array};
@@ -33,8 +33,8 @@ fn set_prop(object: &Object, key: &str, value: JsValue) -> Result<(), JsValue> {
 
 fn data_value_to_js(value: &DataValue) -> Result<JsValue, JsValue> {
     match value {
-        DataValue::Parameter { id, .. } => Err(to_js_err(format!(
-            "unbound parameter ${id} reached WASM output"
+        DataValue::Parameter { .. } | DataValue::InitValue { .. } => Err(to_js_err(format!(
+            "unbound parameter {value} reached WASM output"
         ))),
         DataValue::Null => Ok(JsValue::NULL),
         DataValue::Boolean(value) => Ok(JsValue::from_bool(*value)),
@@ -108,7 +108,9 @@ fn char_length_units_to_js(unit: CharLengthUnits) -> JsValue {
     })
 }
 
-fn data_values_to_js(values: &[DataValue]) -> Result<JsValue, JsValue> {
+fn data_values_to_js<'v>(
+    values: impl IntoIterator<Item = &'v DataValue>,
+) -> Result<JsValue, JsValue> {
     let array = Array::new();
     for value in values {
         array.push(&data_value_to_js(value)?);
@@ -116,19 +118,18 @@ fn data_values_to_js(values: &[DataValue]) -> Result<JsValue, JsValue> {
     Ok(array.into())
 }
 
-fn tuple_to_wasm_row(tuple: &Tuple) -> Result<JsValue, JsValue> {
+fn tuple_to_wasm_row(tuple: &TupleImpl) -> Result<JsValue, JsValue> {
     let object = Object::new();
     set_prop(
         &object,
         "pk",
         tuple
-            .pk
-            .as_ref()
+            .pk()
             .map(data_value_to_js)
             .transpose()?
             .unwrap_or(JsValue::NULL),
     )?;
-    set_prop(&object, "values", data_values_to_js(&tuple.values)?)?;
+    set_prop(&object, "values", data_values_to_js(tuple.iter())?)?;
     Ok(object.into())
 }
 

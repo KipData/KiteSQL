@@ -26,13 +26,13 @@ use crate::execution::dql::join::hash_join::BuildState;
 use crate::execution::dql::sort::BumpVec;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::tuple::{Tuple, TupleLike};
+use crate::types::tuple::{Tuple, TupleImpl, TupleLike};
 use crate::types::value::DataValue;
 use std::collections::hash_map::IntoIter as HashMapIntoIter;
 
 pub(crate) struct ProbeState {
     pub(crate) is_keys_has_null: bool,
-    pub(crate) probe_tuple: Tuple,
+    pub(crate) probe_tuple: TupleImpl,
     pub(crate) index: usize,
     pub(crate) produced: bool,
     pub(crate) finished: bool,
@@ -45,7 +45,7 @@ pub(crate) struct LeftDropState {
 }
 
 pub(crate) struct LeftDropTuples {
-    pub(crate) tuples: std::vec::IntoIter<(usize, Tuple)>,
+    pub(crate) tuples: std::vec::IntoIter<(usize, TupleImpl)>,
 }
 
 pub(crate) trait JoinProbeState {
@@ -55,14 +55,14 @@ pub(crate) trait JoinProbeState {
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError>;
+    ) -> Result<Option<TupleImpl>, DatabaseError>;
 
     fn left_drop_next(
         &mut self,
         _left_drop_state: &mut LeftDropState,
         _filter_expr: Option<&ExprRef>,
         _plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
         Ok(None)
     }
 }
@@ -81,7 +81,7 @@ impl JoinProbeState for JoinProbeStateImpl {
         build_state: Option<&mut BuildState>,
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
         match self {
             JoinProbeStateImpl::Inner(state) => {
                 state.probe_next(probe_state, build_state, filter_expr, plan_arena)
@@ -103,7 +103,7 @@ impl JoinProbeState for JoinProbeStateImpl {
         left_drop_state: &mut LeftDropState,
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
-    ) -> Result<Option<Tuple>, DatabaseError> {
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
         match self {
             JoinProbeStateImpl::Inner(state) => {
                 state.left_drop_next(left_drop_state, filter_expr, plan_arena)
@@ -134,4 +134,22 @@ pub(crate) fn filter<T: TupleLike + ?Sized>(
         DataValue::Boolean(true) => Ok(true),
         _ => Err(DatabaseError::InvalidType),
     }
+}
+
+pub(crate) fn join_rows(
+    build: &TupleImpl,
+    probe: &mut TupleImpl,
+    consume_probe: bool,
+) -> TupleImpl {
+    if consume_probe {
+        let pk = build.pk().cloned().or_else(|| probe.take_pk());
+        let mut row = std::mem::take(probe);
+        row.prepend(build.iter().cloned());
+        row.set_pk(pk);
+        return row;
+    }
+    let mut values = Vec::with_capacity(build.len() + probe.len());
+    values.extend(build.iter().cloned());
+    values.extend(probe.iter().cloned());
+    Tuple::new(build.pk().or(probe.pk()).cloned(), values).into()
 }

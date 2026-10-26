@@ -50,15 +50,14 @@ Local 720-second comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 159616 | 315 | 81 | 44 | 435 | 332 |
-| KiteSQL RocksDB | 48035 | 459 | 258 | 200 | 11055 | 704 |
-| SQLite balanced | 67102 | 283 | 67 | 48 | 338 | 473 |
-| SQLite practical | 67153 | 336 | 66 | 41 | 427 | 339 |
+| KiteSQL LMDB | 165956 | 303 | 75 | 43 | 436 | 318 |
+| KiteSQL RocksDB | 50739 | 392 | 188 | 198 | 11743 | 812 |
+| SQLite | 191484 | 274 | 41 | 33 | 343 | 268 |
 
-- Run dates: `2026-10-01`; results: `2026-10-01_17-12-31`. Latency is measured in microseconds and includes commit.
+- Run dates: `2026-10-25`; results: `2026-10-25_16-30-15`. Latency is measured in microseconds and includes commit.
 - Every row is pinned to `cpu8`, the highest-frequency P-core on this machine (5.4 GHz).
 - All rows use `--num-ware 1`, `--max-retry 5`, and TPCC's default 720-second measure time.
-- SQLite rows use the `balanced` and `practical` profiles respectively.
+- All rows run without `--sync`, so commits are not fsynced; SQLite uses WAL with `synchronous = OFF`.
 
 ## Historical raw outputs — 2026-07-11
 

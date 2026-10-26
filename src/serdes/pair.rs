@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceSerialization, ReferenceTables};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 
 impl<A, B> ReferenceSerialization for (A, B)
@@ -37,7 +37,7 @@ where
         Ok(())
     }
 
-    fn decode<T: Transaction, R: Read, AR: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, AR: MetaArena + ?Sized>(
         reader: &mut R,
         drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,

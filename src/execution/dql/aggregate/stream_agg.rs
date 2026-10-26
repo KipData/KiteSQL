@@ -23,7 +23,7 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 use std::mem;
 
@@ -36,7 +36,7 @@ pub struct StreamAggExecutor<'a> {
     input: ExecId,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -64,7 +64,17 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.group_keys = None;
+        self.accs.clear();
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -77,7 +87,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'a> {
                     return Ok(());
                 };
                 write_aggregate_output(
-                    arena.result_tuple_mut(),
+                    arena.output_tuple_mut(),
                     mem::take(&mut self.accs),
                     group_keys,
                 )?;
@@ -110,7 +120,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'a> {
                     update_accumulators(&mut next_accs, self.agg_calls, tuple, plan_arena)?;
                     mem::swap(current_keys, &mut group_keys);
                     let current_accs = mem::replace(&mut self.accs, next_accs);
-                    write_aggregate_output(arena.result_tuple_mut(), current_accs, group_keys)?;
+                    write_aggregate_output(arena.output_tuple_mut(), current_accs, group_keys)?;
                     arena.resume();
                     return Ok(());
                 }
@@ -196,7 +206,9 @@ mod tests {
         ))?;
 
         assert_eq!(
-            rows.into_iter().map(|row| row.values).collect::<Vec<_>>(),
+            rows.into_iter()
+                .map(|mut row| row.take_values())
+                .collect::<Vec<_>>(),
             vec![
                 vec![30.into(), 2.into(), 1.into()],
                 vec![12.into(), 2.into(), 2.into()],

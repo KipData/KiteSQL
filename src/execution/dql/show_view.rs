@@ -15,15 +15,15 @@
 use crate::errors::DatabaseError;
 use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{Transaction, ViewIter};
+use crate::storage::{StorageTransaction, ViewIter};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 
-pub struct ShowViews<'a, T: Transaction + 'a> {
+pub struct ShowViews<'a, T: StorageTransaction + 'a> {
     pub(crate) metas: Option<ViewIter<'a, T>>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
     type Input = ();
 
     fn into_executor(
@@ -37,40 +37,42 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowViews<'a, T> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.metas = None;
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.metas.is_none() {
-            let context = arena.context();
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec();
-            self.metas = Some(transaction.views(
-                table_codec,
-                context.table_cache(),
-                plan_arena.table_arena_cell(),
-                context.scala_functions(),
-                context.table_functions(),
-            )?);
+            self.metas = Some(transaction.views(table_codec)?);
         }
 
-        let Some(view) = self
+        let Some(name) = self
             .metas
             .as_mut()
             .expect("show views iterator initialized")
-            .try_next()?
+            .try_next(plan_arena)?
         else {
             arena.finish();
             return Ok(());
         };
 
-        let output = arena.result_tuple_mut();
+        let output = arena.output_tuple_mut();
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: view.name.to_string(),
+            value: name.to_string(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });

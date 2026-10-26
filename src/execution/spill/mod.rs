@@ -21,11 +21,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod codec;
+pub(crate) mod runs;
 
 pub(crate) use codec::SortRow;
 
 const DEFAULT_MAX_ROWS: usize = 1024;
 const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
+const DEFAULT_READ_BUFFER_SIZE: usize = 8 * 1024;
 static NEXT_SPILL_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) type SegmentOffset = u64;
@@ -34,6 +36,9 @@ pub(crate) trait SpillCodec: Sized {
     fn encode<W: Write>(&self, writer: &mut W) -> Result<(), DatabaseError>;
 
     fn decode<R: Read>(reader: &mut R) -> Result<Self, DatabaseError>;
+
+    /// Exact byte length of encode(), without allocating or encoding the value.
+    fn encoded_len(&self) -> Result<usize, DatabaseError>;
 
     fn estimated_size(&self) -> usize;
 }
@@ -55,7 +60,17 @@ struct WriteState<'on_flush, T: SpillCodec> {
     max_bytes: usize,
 }
 
-type OnFlush<'on_flush, T> = Box<dyn FnMut(&mut Vec<T>) -> Result<(), DatabaseError> + 'on_flush>;
+/// Tells the flush callback whether it prepares a memory tail or a disk segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlushMode {
+    /// Preparing an in-memory reader, including the tail of a spilled reader.
+    Memory,
+    /// Writing a segment to disk, whether explicitly or due to a size limit.
+    Disk,
+}
+
+type OnFlush<'on_flush, T> =
+    Box<dyn FnMut(FlushMode, &mut Vec<T>) -> Result<(), DatabaseError> + 'on_flush>;
 
 enum ReadState<T: SpillCodec> {
     Memory(std::vec::IntoIter<T>),
@@ -96,7 +111,7 @@ impl<'on_flush, T: SpillCodec> SpillVec<'on_flush, T> {
 
     pub(crate) fn on_flush<F>(mut self, on_flush: F) -> Self
     where
-        F: FnMut(&mut Vec<T>) -> Result<(), DatabaseError> + 'on_flush,
+        F: FnMut(FlushMode, &mut Vec<T>) -> Result<(), DatabaseError> + 'on_flush,
     {
         if let Ok(state) = &mut self.writer {
             state.on_flush = Some(Box::new(on_flush));
@@ -186,6 +201,14 @@ impl<T: SpillCodec> Iterator for SpillReader<T> {
 }
 
 impl<T: SpillCodec> SpillReader<T> {
+    /// The unconsumed memory suffix. Borrowing it prevents advancing the reader.
+    pub(crate) fn memory_tail(&self) -> &[T] {
+        match &self.state {
+            ReadState::Memory(rows) | ReadState::Spilled { tail: rows, .. } => rows.as_slice(),
+            ReadState::Exhausted(_) => &[],
+        }
+    }
+
     /// Rewinds a fully flushed spill file. The reader must not contain an in-memory tail.
     pub(crate) fn reset(&mut self) -> Result<(), DatabaseError> {
         let ReadState::Spilled { reader, tail, .. } = &mut self.state else {
@@ -201,17 +224,21 @@ impl<T: SpillCodec> SpillReader<T> {
         reader.reset(0)
     }
 
-    pub(crate) fn open_segment_reader<'source>(
-        &'source self,
-    ) -> Result<SegmentReader<'source, BufReader<File>, T>, DatabaseError> {
+    pub(crate) fn open_segment_reader(
+        &self,
+        capacity: Option<usize>,
+    ) -> Result<SegmentReader<'_, BufReader<File>, T>, DatabaseError> {
         let ReadState::Spilled { _file_guard, .. } = &self.state else {
             return Err(DatabaseError::InvalidValue(
                 "cannot open a segment reader for an in-memory SpillVec".to_string(),
             ));
         };
-        Ok(SegmentReader::new(BufReader::new(File::open(
-            &_file_guard.path,
-        )?)))
+        Ok(SegmentReader::new(BufReader::with_capacity(
+            capacity
+                .unwrap_or(DEFAULT_READ_BUFFER_SIZE)
+                .clamp(1, DEFAULT_READ_BUFFER_SIZE),
+            File::open(&_file_guard.path)?,
+        )))
     }
 }
 
@@ -256,6 +283,20 @@ impl<R: Read, T: SpillCodec> SegmentReader<'_, R, T> {
 }
 
 impl<R: Read + Seek, T: SpillCodec> SegmentReader<'_, R, T> {
+    /// Reads a nested value without parsing a segment header. Call reset before
+    /// resuming segment iteration. Relative seeking retains BufReader's buffer.
+    pub(crate) fn read_at<V: SpillCodec>(&mut self, offset: u64) -> Result<V, DatabaseError> {
+        self.remaining_rows = 0;
+        let current = self.reader.stream_position()?;
+        match i64::try_from(i128::from(offset) - i128::from(current)) {
+            Ok(delta) if delta != i64::MIN => self.reader.seek_relative(delta)?,
+            _ => {
+                self.reader.seek(SeekFrom::Start(offset))?;
+            }
+        }
+        V::decode(&mut self.reader)
+    }
+
     pub(crate) fn reset(&mut self, offset: SegmentOffset) -> Result<(), DatabaseError> {
         self.reader.seek(SeekFrom::Start(offset))?;
         self.remaining_rows = 0;
@@ -313,7 +354,7 @@ impl<T: SpillCodec> WriteState<'_, T> {
             return Ok(None);
         }
         if let Some(on_flush) = &mut self.on_flush {
-            on_flush(&mut self.buffer)?;
+            on_flush(FlushMode::Disk, &mut self.buffer)?;
         }
         let Some(file) = self.file.as_mut() else {
             return Err(DatabaseError::InvalidValue(
@@ -328,7 +369,7 @@ impl<T: SpillCodec> WriteState<'_, T> {
 
     fn into_read(mut self) -> Result<ReadState<T>, DatabaseError> {
         if let Some(on_flush) = &mut self.on_flush {
-            on_flush(&mut self.buffer)?;
+            on_flush(FlushMode::Memory, &mut self.buffer)?;
         }
         let Some(file) = self.file.take() else {
             return Ok(ReadState::Memory(self.buffer.into_iter()));
@@ -496,9 +537,9 @@ mod tests {
         })?;
 
         let source = values.into_iter();
-        let mut first_reader = source.open_segment_reader()?;
+        let mut first_reader = source.open_segment_reader(None)?;
         first_reader.reset(first)?;
-        let mut second_reader = source.open_segment_reader()?;
+        let mut second_reader = source.open_segment_reader(None)?;
         second_reader.reset(second)?;
 
         assert_eq!(first_reader.next().transpose()?, Some(row(1)));
@@ -539,7 +580,7 @@ mod tests {
         let values = SpillVec::from(vec![row(1)]).into_iter();
 
         assert!(matches!(
-            values.open_segment_reader(),
+            values.open_segment_reader(None),
             Err(DatabaseError::InvalidValue(message))
                 if message == "cannot open a segment reader for an in-memory SpillVec"
         ));
@@ -608,6 +649,10 @@ mod tests {
                 Err(DatabaseError::InvalidValue("encode failed".to_string()))
             }
 
+            fn encoded_len(&self) -> Result<usize, DatabaseError> {
+                Err(DatabaseError::InvalidValue("encode failed".to_string()))
+            }
+
             fn decode<R: Read>(_: &mut R) -> Result<Self, DatabaseError> {
                 Ok(Self)
             }
@@ -640,6 +685,10 @@ mod tests {
 
             fn decode<R: Read>(_: &mut R) -> Result<Self, DatabaseError> {
                 Err(DatabaseError::InvalidValue("decode failed".to_string()))
+            }
+
+            fn encoded_len(&self) -> Result<usize, DatabaseError> {
+                Ok(0)
             }
 
             fn estimated_size(&self) -> usize {
@@ -697,20 +746,20 @@ mod tests {
         }
         std::fs::remove_file(path.expect("expected spilled reader"))?;
 
-        assert!(source.open_segment_reader().is_err());
+        assert!(source.open_segment_reader(None).is_err());
         Ok(())
     }
 
     #[test]
     fn on_flush_runs_before_memory_read_and_segment_flush() -> Result<(), DatabaseError> {
-        fn reverse(rows: &mut [Vec<DataValue>]) -> Result<(), DatabaseError> {
+        fn reverse(_: FlushMode, rows: &mut [Vec<DataValue>]) -> Result<(), DatabaseError> {
             rows.reverse();
             Ok(())
         }
 
         let mut memory = SpillVec::new()
             .limit(3, usize::MAX)
-            .on_flush(|rows| reverse(rows));
+            .on_flush(|mode, rows| reverse(mode, rows));
         let _ = memory.push(row(1))?;
         let _ = memory.push(row(2))?;
         assert_eq!(
@@ -720,7 +769,7 @@ mod tests {
 
         let mut spilled = SpillVec::new()
             .limit(2, usize::MAX)
-            .on_flush(|rows| reverse(rows));
+            .on_flush(|mode, rows| reverse(mode, rows));
         for value in 1..=4 {
             let _ = spilled.push(row(value))?;
         }
@@ -728,6 +777,54 @@ mod tests {
             spilled.into_iter().collect::<Result<Vec<_>, _>>()?,
             vec![row(2), row(1), row(4), row(3)]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn on_flush_receives_memory_or_disk_mode() -> Result<(), DatabaseError> {
+        for (count, limit, explicit_flush, expected) in [
+            (3, 4, false, vec![FlushMode::Memory]),
+            (
+                8,
+                3,
+                false,
+                vec![FlushMode::Disk, FlushMode::Disk, FlushMode::Memory],
+            ),
+            (4, 5, true, vec![FlushMode::Disk, FlushMode::Memory]),
+        ] {
+            let mut modes = Vec::new();
+            let mut values = SpillVec::new()
+                .limit(limit, usize::MAX)
+                .on_flush(|mode, _| {
+                    modes.push(mode);
+                    Ok(())
+                });
+            for value in 1..=count {
+                values.push(row(value))?;
+                if explicit_flush && value == 2 {
+                    values.flush()?;
+                }
+            }
+            assert_eq!(
+                values.into_iter().collect::<Result<Vec<_>, _>>()?,
+                (1..=count).map(row).collect::<Vec<_>>()
+            );
+            assert_eq!(modes, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn on_flush_errors_propagate_from_memory_and_disk() -> Result<(), DatabaseError> {
+        let callback = |_: FlushMode, _: &mut Vec<Vec<DataValue>>| {
+            Err(DatabaseError::InvalidValue("callback invoked".into()))
+        };
+        let mut memory = SpillVec::new().limit(2, usize::MAX).on_flush(callback);
+        memory.push(row(1))?;
+        assert!(memory.into_iter().next().unwrap().is_err());
+
+        let mut disk = SpillVec::new().limit(1, usize::MAX).on_flush(callback);
+        assert!(disk.push(row(1)).is_err());
         Ok(())
     }
 

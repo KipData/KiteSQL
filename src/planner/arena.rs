@@ -18,7 +18,7 @@ use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
 use crate::planner::operator::visitor_mut::{
-    walk_mut_operator, OperatorExprVisitorMut, OperatorVisitorMut,
+    walk_mut_operator, ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
 };
 use crate::planner::operator::{Operator, PhysicalOption};
 use crate::planner::{LogicalPlan, ScalarQueryRef};
@@ -27,30 +27,28 @@ use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::cell::UnsafeCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 
 struct ScalarQueryRelocator {
     source_arena: usize,
     target_arena: usize,
-    base: usize,
 }
 
 impl ScalarQueryRelocator {
     fn relocate(&self, reference: &mut ScalarQueryRef) {
         if reference.arena_id == self.source_arena {
             reference.arena_id = self.target_arena;
-            reference.pos += self.base;
         }
     }
 }
 
-impl ExprVisitorMut for ScalarQueryRelocator {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for ScalarQueryRelocator {
     fn visit_outer_param(
         &mut self,
         reference: &mut ScalarQueryRef,
         _ty: &mut LogicalType,
-        _arena: &mut dyn MetaArena,
+        _arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.relocate(reference);
         Ok(())
@@ -60,7 +58,7 @@ impl ExprVisitorMut for ScalarQueryRelocator {
         &mut self,
         reference: &mut ScalarQueryRef,
         _ty: &mut LogicalType,
-        _arena: &mut dyn MetaArena,
+        _arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.relocate(reference);
         Ok(())
@@ -70,32 +68,37 @@ impl ExprVisitorMut for ScalarQueryRelocator {
         &mut self,
         reference: &mut ScalarQueryRef,
         _ty: &mut LogicalType,
-        _arena: &mut dyn MetaArena,
+        _arena: &mut A,
     ) -> Result<(), DatabaseError> {
         self.relocate(reference);
         Ok(())
     }
 }
 
-struct ScalarQueryPlanRelocator<'a> {
+struct ScalarQueryPlanRelocator<'a, A: ?Sized> {
     references: ScalarQueryRelocator,
-    arena: &'a mut dyn MetaArena,
+    arena: &'a mut A,
 }
 
-impl<'a> OperatorVisitorMut<'a> for ScalarQueryPlanRelocator<'_> {
+impl<'a, A: MetaArena + ?Sized> OperatorVisitorMut<'a> for ScalarQueryPlanRelocator<'_, A> {
     fn visit_operator(
         &mut self,
         operator: &'a mut Operator,
         physical_option: Option<&'a mut PhysicalOption>,
+        children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
-        OperatorExprVisitorMut::new(&mut self.references, self.arena)
-            .visit_operator(operator, physical_option)?;
-        walk_mut_operator(self, operator)
+        OperatorExprVisitorMut::new(&mut self.references, self.arena).visit_operator(
+            operator,
+            physical_option,
+            &mut ChildrenVisitMut::empty(),
+        )?;
+        walk_mut_operator(self, operator, children)
     }
 
     fn visit_scalar_query_init(
         &mut self,
         op: &'a mut ScalarQueryInitOperator,
+        _children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
         for (reference, _) in &mut op.param_bindings {
             self.references.relocate(reference);
@@ -152,7 +155,7 @@ pub struct PlanArena<'a> {
     plans: Vec<LogicalPlan>,
 }
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ExprRef {
     pos: usize,
 }
@@ -243,6 +246,8 @@ pub trait MetaArena {
 
     fn reserve_scalar_query_ref(&mut self, reference: ScalarQueryRef);
 
+    fn scalar_query_count(&self) -> usize;
+
     fn init_value(&self, _reference: ScalarQueryRef) -> Option<&DataValue> {
         None
     }
@@ -252,7 +257,7 @@ pub trait MetaArena {
     }
 
     fn same_column(&self, left: ColumnRef, right: ColumnRef) -> bool {
-        self.column(left).summary() == self.column(right).summary()
+        left == right || self.column(left).summary() == self.column(right).summary()
     }
 
     fn clone_column(&self, column: ColumnRef) -> ColumnCatalog {
@@ -309,6 +314,9 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
     fn reserve_scalar_query_ref(&mut self, reference: ScalarQueryRef) {
         (**self).reserve_scalar_query_ref(reference)
     }
+    fn scalar_query_count(&self) -> usize {
+        (**self).scalar_query_count()
+    }
     fn init_value(&self, reference: ScalarQueryRef) -> Option<&DataValue> {
         (**self).init_value(reference)
     }
@@ -344,14 +352,22 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
 /// Owns the metadata and scalar-query cache for one statement execution.
 pub struct ExecMetaArena<A> {
     parent: A,
-    init_values: HashMap<ScalarQueryRef, Option<DataValue>>,
+    init_values: Vec<Option<(ScalarQueryRef, DataValue)>>,
 }
 
 impl<A: MetaArena> ExecMetaArena<A> {
     pub(crate) fn new(parent: A) -> Self {
+        let mut init_values = Vec::new();
+        init_values.resize_with(parent.scalar_query_count(), || None);
         Self {
             parent,
-            init_values: HashMap::new(),
+            init_values,
+        }
+    }
+
+    fn reserve_init_value(&mut self, reference: ScalarQueryRef) {
+        if self.init_values.len() <= reference.pos {
+            self.init_values.resize_with(reference.pos + 1, || None);
         }
     }
 
@@ -370,13 +386,23 @@ impl<A: MetaArena> ExecMetaArena<A> {
     }
 
     pub(crate) fn set_init_value(&mut self, reference: ScalarQueryRef, value: DataValue) {
-        self.init_values.insert(reference, Some(value));
+        let slot = &mut self.init_values[reference.pos];
+        debug_assert!(
+            slot.as_ref().is_none_or(|(stored, _)| *stored == reference),
+            "scalar query {reference} shares a slot with {:?}",
+            slot.as_ref().map(|(stored, _)| *stored)
+        );
+        *slot = Some((reference, value));
     }
 
     pub(crate) fn take_outer_values(&mut self) -> Vec<(ScalarQueryRef, DataValue)> {
         self.init_values
-            .extract_if(|reference, _| reference.is_outer_value)
-            .filter_map(|(reference, value)| value.map(|value| (reference, value)))
+            .iter_mut()
+            .filter(|slot| {
+                slot.as_ref()
+                    .is_some_and(|(reference, _)| reference.is_outer_value)
+            })
+            .filter_map(Option::take)
             .collect()
     }
 
@@ -392,13 +418,21 @@ impl<A: MetaArena> MetaArena for ExecMetaArena<A> {
         self.parent.arena_id()
     }
     fn alloc_scalar_query_ref(&mut self, is_outer_value: bool) -> ScalarQueryRef {
-        self.parent.alloc_scalar_query_ref(is_outer_value)
+        let reference = self.parent.alloc_scalar_query_ref(is_outer_value);
+        self.reserve_init_value(reference);
+        reference
     }
     fn reserve_scalar_query_ref(&mut self, reference: ScalarQueryRef) {
-        self.parent.reserve_scalar_query_ref(reference)
+        self.parent.reserve_scalar_query_ref(reference);
+        self.reserve_init_value(reference);
+    }
+    fn scalar_query_count(&self) -> usize {
+        self.parent.scalar_query_count()
     }
     fn init_value(&self, reference: ScalarQueryRef) -> Option<&DataValue> {
-        self.init_values.get(&reference).and_then(Option::as_ref)
+        let (stored, value) = self.init_values.get(reference.pos)?.as_ref()?;
+        debug_assert_eq!(*stored, reference, "scalar query slot collision");
+        Some(value)
     }
     fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
     where
@@ -619,6 +653,9 @@ impl MetaArena for TableArena {
         assert_eq!(reference.arena_id, 0);
         self.scalar_query_count = self.scalar_query_count.max(reference.pos + 1);
     }
+    fn scalar_query_count(&self) -> usize {
+        self.scalar_query_count
+    }
     fn alloc_column(&mut self, column: ColumnCatalog) -> ColumnRef {
         if let Some(column_ref) = self.find_column(&column) {
             return column_ref;
@@ -750,7 +787,7 @@ impl<'a> PlanArena<'a> {
             allocated_columns_len: 0,
             temp_table_id: 0,
             arena_id: table_arena.borrow().arena_id() + 1,
-            scalar_query_count: 0,
+            scalar_query_count: table_arena.borrow().scalar_query_count,
             columns: Vec::new(),
             indexes: Vec::new(),
             expressions: Vec::new(),
@@ -824,9 +861,8 @@ impl<'a> PlanArena<'a> {
         let references = ScalarQueryRelocator {
             source_arena: self.arena_id,
             target_arena: target.arena_id(),
-            base: target.scalar_query_count,
         };
-        target.scalar_query_count += self.scalar_query_count;
+        target.scalar_query_count = self.scalar_query_count;
         ScalarQueryPlanRelocator {
             references,
             arena: self,
@@ -880,7 +916,7 @@ impl<'a> PlanArena<'a> {
     }
 
     pub(crate) fn same_column(&self, left: ColumnRef, right: ColumnRef) -> bool {
-        self.column(left).summary() == self.column(right).summary()
+        left == right || self.column(left).summary() == self.column(right).summary()
     }
 
     pub(crate) fn nullable_for_join(
@@ -888,13 +924,13 @@ impl<'a> PlanArena<'a> {
         column: ColumnRef,
         nullable: bool,
     ) -> Option<ColumnRef> {
+        // A join can only make a column nullable; it never removes existing NULLs.
         let source = self.column(column);
-        if source.nullable() == nullable {
+        if !nullable || source.nullable() {
             return None;
         }
-        // FIXME
         let mut joined = source.clone();
-        joined.set_nullable(nullable);
+        joined.set_nullable(true);
         joined.set_in_join(true);
         Some(self.alloc_column(joined))
     }
@@ -979,6 +1015,9 @@ impl MetaArena for PlanArena<'_> {
             assert_eq!(reference.arena_id, 0);
             assert!(reference.pos < self.table_arena.borrow().scalar_query_count);
         }
+    }
+    fn scalar_query_count(&self) -> usize {
+        self.scalar_query_count
     }
     fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
     where
@@ -1104,11 +1143,14 @@ impl<'a> ParamArena<'a> {
             };
             let id = *id;
             let mut value = value.clone();
-            value.bind_parameters(&|id| {
-                params
-                    .iter()
-                    .find_map(|(candidate, value)| (*candidate == id).then_some(value))
-            })?;
+            value.bind_parameters(
+                &|id| {
+                    params
+                        .iter()
+                        .find_map(|(candidate, value)| (*candidate == id).then_some(value))
+                },
+                &|_| None,
+            )?;
             expressions.push((Some(id), ArenaExpr::new(ScalarExpression::Constant(value))));
         }
         Ok(Self {
@@ -1116,7 +1158,7 @@ impl<'a> ParamArena<'a> {
             expressions,
             parameter_count: parameter_expressions.len(),
             parent_end: parent.expression_end(),
-            scalar_query_count: 0,
+            scalar_query_count: parent.scalar_query_count,
         })
     }
 }
@@ -1139,6 +1181,9 @@ impl MetaArena for ParamArena<'_> {
             self.scalar_query_count = self.scalar_query_count.max(reference.pos + 1);
         }
     }
+    fn scalar_query_count(&self) -> usize {
+        self.scalar_query_count
+    }
     fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
     where
         Self: 'a,
@@ -1149,12 +1194,17 @@ impl MetaArena for ParamArena<'_> {
         true
     }
     fn bound_param(&self, id: usize) -> Option<&DataValue> {
-        self.expressions
-            .iter()
-            .find_map(|(slot, expr)| match (slot, &expr.expression) {
-                (Some(slot), ScalarExpression::Constant(value)) if *slot == id => Some(value),
-                _ => None,
-            })
+        for (slot, expr) in &self.expressions {
+            let Some(slot) = slot else {
+                return None;
+            };
+            if *slot == id {
+                if let ScalarExpression::Constant(value) = &expr.expression {
+                    return Some(value);
+                }
+            }
+        }
+        None
     }
     fn column(&self, column: ColumnRef) -> &ColumnCatalog {
         self.parent.column(column)
@@ -1211,6 +1261,7 @@ impl MetaArena for ParamArena<'_> {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::planner::Childrens;
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::LogicalType;
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1238,7 +1289,6 @@ mod tests {
     #[test]
     fn materializing_scalar_references_preserves_shared_catalog_ids() -> Result<(), DatabaseError> {
         use crate::planner::operator::project::ProjectOperator;
-        use crate::planner::Childrens;
         let catalog = TableArenaCell::default();
         let persistent = catalog.borrow_mut().alloc_scalar_query_ref(false);
         let mut arena = PlanArena::new(&catalog);
@@ -1267,9 +1317,7 @@ mod tests {
         .map(|expr| arena.alloc_expression(expr))
         .collect::<Vec<_>>();
         let input = LogicalPlan::new(
-            Operator::Project(ProjectOperator {
-                exprs: exprs.clone(),
-            }),
+            Operator::Project(ProjectOperator::new(exprs.clone())),
             Childrens::Only(Box::new(LogicalPlan::new(Operator::Dummy, Childrens::None))),
         );
         let source = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(5)));
@@ -1337,7 +1385,7 @@ mod tests {
             ScalarQueryRef {
                 is_outer_value: false,
                 arena_id: 1,
-                pos: 0
+                pos: 1
             }
         );
         assert_ne!(catalog, local);
@@ -1351,7 +1399,7 @@ mod tests {
             ScalarQueryRef {
                 is_outer_value: false,
                 arena_id: 2,
-                pos: 0
+                pos: 2
             }
         );
         let mut view = ExecMetaArena::new(params);

@@ -44,28 +44,28 @@ use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::operator::union::UnionOperator;
 use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, ScalarQueryRef};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
 
-struct RightSidePositionGlobalizer<'a> {
-    right_schema: &'a Schema,
-    left_len: usize,
+struct InputPositionBinder<'a> {
+    schema: &'a Schema,
+    offset: usize,
 }
 
-impl ExprVisitorMut for RightSidePositionGlobalizer<'_> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for InputPositionBinder<'_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
-        if self
-            .right_schema
+        if let Some(index) = self
+            .schema
             .iter()
-            .any(|right| arena.same_column(*right, *column))
+            .position(|input| arena.same_column(*input, *column))
         {
-            *position += self.left_len;
+            *position = self.offset + index;
         }
         Ok(())
     }
@@ -77,25 +77,6 @@ struct AppendedRightOutput {
     output_position: usize,
 }
 
-struct MarkerPositionGlobalizer<'a> {
-    output_column: &'a ColumnRef,
-    left_len: usize,
-}
-
-impl ExprVisitorMut for MarkerPositionGlobalizer<'_> {
-    fn visit_column_ref(
-        &mut self,
-        column: &mut ColumnRef,
-        position: &mut usize,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
-        if arena.same_column(*column, *self.output_column) {
-            *position = self.left_len;
-        }
-        Ok(())
-    }
-}
-
 struct ProjectionOutputBinder<'a> {
     project_exprs: &'a [ExprRef],
 }
@@ -105,7 +86,11 @@ impl<'a> ProjectionOutputBinder<'a> {
         Self { project_exprs }
     }
 
-    fn output_ref(&mut self, expr: ExprRef, arena: &mut dyn MetaArena) -> Option<ScalarExpression> {
+    fn output_ref<A: MetaArena + ?Sized>(
+        &mut self,
+        expr: ExprRef,
+        arena: &mut A,
+    ) -> Option<ScalarExpression> {
         self.project_exprs
             .iter()
             .position(|candidate| {
@@ -121,12 +106,8 @@ impl<'a> ProjectionOutputBinder<'a> {
     }
 }
 
-impl ExprVisitorMut for ProjectionOutputBinder<'_> {
-    fn visit(
-        &mut self,
-        expr: &mut ExprRef,
-        arena: &mut (dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for ProjectionOutputBinder<'_> {
+    fn visit(&mut self, expr: &mut ExprRef, arena: &mut A) -> Result<(), DatabaseError> {
         if let Some(output_ref) = self.output_ref(*expr, arena) {
             *expr = arena.alloc_expression(output_ref);
             return Ok(());
@@ -137,7 +118,7 @@ impl ExprVisitorMut for ProjectionOutputBinder<'_> {
 
 pub(crate) struct BindPlanStart<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) binder: &'s mut Binder<'a, 'b, T, A>,
@@ -146,7 +127,7 @@ where
 
 pub struct BindPlanFrom<'s, 'a, 'b, 'arena, T, A, M = ()>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) binder: &'s mut Binder<'a, 'b, T, A>,
@@ -157,7 +138,7 @@ where
 
 pub struct BindPlanSelectList<'s, 'a, 'b, 'arena, T, A, M = ()>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) binder: &'s mut Binder<'a, 'b, T, A>,
@@ -169,7 +150,7 @@ where
 
 pub(crate) struct BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(super) binder: &'s mut Binder<'a, 'b, T, A>,
@@ -180,7 +161,7 @@ where
 
 pub(crate) struct BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -193,7 +174,7 @@ where
 
 pub(crate) struct BindPlanHaving<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -205,7 +186,7 @@ where
 
 pub(crate) struct BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -217,7 +198,7 @@ where
 
 pub(crate) struct BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -229,7 +210,7 @@ where
 
 pub(crate) struct BindPlanSorted<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -240,7 +221,7 @@ where
 
 pub(crate) struct BindPlanProjected<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     plan: LogicalPlan,
@@ -256,6 +237,11 @@ pub(crate) struct TableAliasInput {
     pub(crate) columns: Vec<String>,
 }
 
+pub(crate) enum AliasPurpose {
+    Source,
+    Output,
+}
+
 pub(crate) enum JoinConstraintInput {
     On(ExprRef),
     Using(Vec<String>),
@@ -265,7 +251,7 @@ pub(crate) enum JoinConstraintInput {
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A, M> BindPlanFrom<'s, 'a, 'b, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     #[cfg(feature = "orm")]
@@ -294,7 +280,7 @@ where
         join_type: JoinType,
         constraint: JoinConstraintInput,
     ) -> Result<Self, DatabaseError> {
-        self.binder.extend(right_context);
+        self.binder.extend(right_context, self.arena)?;
         self.plan = self
             .binder
             .bind_join_plans(self.plan, right_plan, join_type, constraint, self.arena)?;
@@ -317,7 +303,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A, M> BindPlanSelectList<'s, 'a, 'b, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     #[cfg(feature = "orm")]
@@ -466,7 +452,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanStart<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     #[allow(clippy::wrong_self_convention)]
@@ -485,7 +471,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A, M> BindPlanSelectList<'s, 'a, 'b, 'arena, T, A, M>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn filter_expr(
@@ -509,7 +495,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn aggregate<O>(
@@ -622,7 +608,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn having(
@@ -644,7 +630,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanHaving<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn window(
@@ -702,7 +688,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn distinct(
@@ -754,7 +740,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn order_by(
@@ -775,7 +761,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanSorted<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn project(
@@ -796,7 +782,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanProjected<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn insert_into(
@@ -824,7 +810,7 @@ impl BindPlanComplete {
     }
 }
 
-impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b, T, A> {
+impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b, T, A> {
     pub(crate) fn bind_scalar_queries(
         &mut self,
         mut plan: LogicalPlan,
@@ -908,18 +894,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
     pub(crate) fn resolve_source_columns_in_scope<'context>(
         context: &'context BinderContext<'a, T>,
         table_name: &str,
+        arena: &PlanArena,
     ) -> Result<(&'context Source<'a>, usize), DatabaseError> {
-        let mut position_offset = 0;
-
-        for bound_source in &context.bind_table {
-            if bound_source.matches_name(table_name) {
-                return Ok((&bound_source.source, position_offset));
-            }
-
-            position_offset += bound_source.source.schema_len();
-        }
-
-        Err(DatabaseError::invalid_table(table_name))
+        context
+            .name_binding(table_name, None, arena)
+            .map(|binding| (&context.bind_table[binding.source].source, binding.position))
+            .ok_or_else(|| DatabaseError::invalid_table(table_name))
     }
 
     fn localize_join_condition_from_join_scope(
@@ -950,12 +930,12 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             appended_outputs: &'a [AppendedRightOutput],
         }
 
-        impl ExprVisitorMut for AppendedRightOutputBinder<'_> {
+        impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for AppendedRightOutputBinder<'_> {
             fn visit_column_ref(
                 &mut self,
                 column: &mut ColumnRef,
                 position: &mut usize,
-                arena: &mut (dyn MetaArena + '_),
+                arena: &mut A,
             ) -> Result<(), DatabaseError> {
                 if let Some(output) = self.appended_outputs.iter().find(|output| {
                     *position == output.child_position && arena.same_column(*column, output.column)
@@ -1006,14 +986,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 
         if !left_cast.is_empty() {
             left_plan = LogicalPlan::new(
-                Operator::Project(ProjectOperator { exprs: left_cast }),
+                Operator::Project(ProjectOperator::new(left_cast)),
                 Childrens::Only(Box::new(left_plan)),
             );
         }
 
         if !right_cast.is_empty() {
             right_plan = LogicalPlan::new(
-                Operator::Project(ProjectOperator { exprs: right_cast }),
+                Operator::Project(ProjectOperator::new(right_cast)),
                 Childrens::Only(Box::new(right_plan)),
             );
         }
@@ -1135,6 +1115,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         alias_column: &[String],
         table_alias: TableName,
         table_name: TableName,
+        purpose: AliasPurpose,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let input_schema = plan.output_schema(arena);
@@ -1142,6 +1123,14 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         if !alias_column.is_empty() && alias_column.len() != input_schema_len {
             return Err(DatabaseError::MisMatch("alias", "columns"));
         }
+        let reused_source = match purpose {
+            AliasPurpose::Source => self
+                .context
+                .name_binding(&table_alias, None, arena)
+                .filter(|binding| binding.source < self.context.source_scope_start)
+                .map(|binding| binding.source),
+            AliasPurpose::Output => None,
+        };
         let mut alias_exprs = Vec::with_capacity(input_schema_len);
 
         for (position, column) in input_schema.iter().copied().enumerate() {
@@ -1150,20 +1139,22 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             } else {
                 alias_column[position].clone()
             };
-            let (mut alias_column, column_id, is_temp) = {
+            let alias_column = if let Some(source) = reused_source {
+                self.context.bind_table[source].source.schema()[position]
+            } else {
                 let source_column = arena.column(column);
-                (
-                    source_column.clone(),
+                let mut alias_column = source_column.clone();
+                alias_column.set_name(alias.clone());
+                alias_column.set_ref_table(
+                    table_alias.clone(),
                     source_column.id().unwrap_or_default(),
                     matches!(
                         &source_column.summary().relation,
                         ColumnRelation::Table { is_temp: true, .. }
                     ),
-                )
+                );
+                arena.alloc_column(alias_column)
             };
-            alias_column.set_name(alias.clone());
-            alias_column.set_ref_table(table_alias.clone(), column_id, is_temp);
-            let alias_column = arena.alloc_column(alias_column);
 
             let expr = arena.alloc_expression(ScalarExpression::column_expr(column, position));
             let alias_expr =
@@ -1223,7 +1214,8 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_alias = alias.as_ref().map(|alias| alias.name.clone());
-
+        self.context
+            .ensure_unique_source_name(table_alias.as_ref().unwrap_or(&table_name))?;
         if let Some(plan_ref) = self.context.cte(&table_name).map(|cte| cte.plan_ref) {
             let mut plan = arena.plan(plan_ref).clone();
             OperatorExprVisitorMut::new(&mut ExprCloner, arena).visit_plan(&mut plan)?;
@@ -1233,6 +1225,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                     &alias.columns,
                     alias.name.clone(),
                     table_name.clone(),
+                    AliasPurpose::Source,
                     arena,
                 )?;
             }
@@ -1242,6 +1235,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 table_alias,
                 join_type,
                 Source::Schema(output_schema),
+                arena,
             );
             return Ok(plan);
         }
@@ -1249,9 +1243,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         let with_pk = self.is_scan_with_pk(&table_name);
         let source = self
             .context
-            .source_and_bind(table_name.clone(), table_alias.as_ref(), join_type, false)?
+            .source(&table_name)?
             .ok_or(DatabaseError::SourceNotFound)?;
-        let mut plan = match source {
+        let mut plan = match &source {
             Source::Table(table) => {
                 TableScanOperator::build(table_name.clone(), table, with_pk, arena)?
             }
@@ -1267,22 +1261,21 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             }
         };
 
-        if let Some(alias) = alias {
+        let source = if let Some(alias) = alias {
             plan = self.bind_alias(
                 plan,
                 &alias.columns,
-                alias.name.clone(),
+                alias.name,
                 table_name.clone(),
+                AliasPurpose::Source,
                 arena,
             )?;
-            let output_schema = plan.output_schema(arena).clone();
-            self.context.add_bound_source(
-                table_name,
-                Some(alias.name),
-                join_type,
-                Source::Schema(output_schema),
-            );
-        }
+            Source::Schema(plan.output_schema(arena).clone())
+        } else {
+            source
+        };
+        self.context
+            .add_bound_source(table_name, table_alias, join_type, source, arena);
         Ok(plan)
     }
 
@@ -1294,6 +1287,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         if let Some(alias) = alias {
+            self.context.ensure_unique_source_name(&alias.name)?;
             let source_name = arena.temp_table();
 
             plan = self.bind_alias(
@@ -1301,6 +1295,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 &alias.columns,
                 alias.name.clone(),
                 source_name.clone(),
+                AliasPurpose::Source,
                 arena,
             )?;
             let output_schema = plan.output_schema(arena).clone();
@@ -1309,6 +1304,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 Some(alias.name),
                 joint_type,
                 Source::Schema(output_schema),
+                arena,
             );
         } else {
             let passthrough_source = {
@@ -1323,6 +1319,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                     None
                 }
             };
+            if let Some(source_name) = &passthrough_source {
+                self.context.ensure_unique_source_name(source_name)?;
+            }
             let needs_virtual_source = passthrough_source.is_none();
             let source_name = passthrough_source.unwrap_or_else(|| arena.temp_table());
 
@@ -1335,6 +1334,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                 None,
                 joint_type,
                 Source::Schema(output_schema),
+                arena,
             );
         }
 
@@ -1356,17 +1356,30 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 
         let mut table_alias = None;
         let table_name: TableName = function.summary().name.clone();
+        self.context.ensure_unique_source_name(
+            alias
+                .as_ref()
+                .map(|alias| &alias.name)
+                .unwrap_or(&table_name),
+        )?;
         let mut plan = FunctionScanOperator::build(function);
 
         if let Some(alias) = alias {
             table_alias = Some(alias.name.clone());
 
-            plan = self.bind_alias(plan, &alias.columns, alias.name, table_name.clone(), arena)?;
+            plan = self.bind_alias(
+                plan,
+                &alias.columns,
+                alias.name,
+                table_name.clone(),
+                AliasPurpose::Source,
+                arena,
+            )?;
         }
 
         let source = Source::Schema(plan.output_schema(arena).clone());
         self.context
-            .add_bound_source(table_name, table_alias, joint_type, source);
+            .add_bound_source(table_name, table_alias, joint_type, source, arena);
         Ok(plan)
     }
 
@@ -1385,7 +1398,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         is_qualified_wildcard: bool,
     ) -> Result<(), DatabaseError> {
         let (source, position_offset) =
-            Self::resolve_source_columns_in_scope(context, table_name.as_ref())?;
+            Self::resolve_source_columns_in_scope(context, table_name.as_ref(), arena)?;
 
         let fn_not_on_using = |column: &ColumnRef, arena: &PlanArena<'_>| {
             let column_catalog = arena.column(*column);
@@ -1481,8 +1494,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
             ));
         }
 
-        if self.context.sub_queries.contains_key(&QueryBindStep::Where) {
-            children = self.bind_mark_queries(children, std::iter::once(&mut predicate), arena)?;
+        let pending = self.context.sub_queries.len();
+        children = self.bind_mark_queries(children, std::iter::once(&mut predicate), arena)?;
+        if self.context.sub_queries.len() < pending {
             let passthrough_exprs = children
                 .output_schema(arena)
                 .iter()
@@ -1506,9 +1520,9 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         exprs: impl Iterator<Item = &'c mut ExprRef>,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let mut output_positions = Vec::new();
-        if let Some(sub_queries) = self.context.sub_queries_at_now() {
-            for sub_query in sub_queries {
+        for expr in exprs {
+            while let Some(index) = self.next_mark_query(*expr, arena)? {
+                let sub_query = self.context.sub_queries.remove(index);
                 match sub_query {
                     SubQueryType::ExistsSubQuery {
                         plan,
@@ -1516,7 +1530,6 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                         output_column,
                     } => {
                         let left_schema = children.output_schema(arena).clone();
-                        output_positions.push((output_column, left_schema.len()));
                         let (plan, predicates) = Self::prepare_mark_apply(
                             left_schema.as_ref(),
                             plan,
@@ -1537,23 +1550,28 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                         plan,
                         correlated,
                         output_column,
-                        predicate: mut quantified_predicate,
+                        predicate: quantified_predicate,
                         ..
                     } => {
-                        if correlated {
-                            quantified_predicate = Self::rewrite_correlated_quantified_predicate(
-                                quantified_predicate,
-                                arena,
-                            );
+                        if self.context.is_step(&QueryBindStep::Where) {
+                            if let ScalarExpression::Binary { left_expr, .. } =
+                                &quantified_predicate
+                            {
+                                if left_expr.has_agg_call(arena)? {
+                                    return Err(DatabaseError::AggMiss(
+                                        "aggregate functions are not allowed in WHERE".into(),
+                                    ));
+                                }
+                            }
                         }
+                        let predicate = arena.alloc_expression(quantified_predicate);
                         let left_schema = children.output_schema(arena).clone();
-                        output_positions.push((output_column, left_schema.len()));
                         let (plan, predicates) = Self::prepare_mark_apply(
                             left_schema.as_ref(),
                             plan,
                             correlated,
                             true,
-                            vec![arena.alloc_expression(quantified_predicate)],
+                            vec![predicate],
                             arena,
                         )?;
                         children = MarkApplyOperator::build_quantified(
@@ -1566,17 +1584,43 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
                     }
                 }
             }
-        }
-        for expr in exprs {
-            for (output_column, left_len) in &output_positions {
-                MarkerPositionGlobalizer {
-                    output_column,
-                    left_len: *left_len,
-                }
-                .visit(expr, arena)?;
+            InputPositionBinder {
+                schema: children.output_schema(arena),
+                offset: 0,
             }
+            .visit(expr, arena)?;
         }
         Ok(children)
+    }
+
+    fn next_mark_query(
+        &self,
+        expr: ExprRef,
+        arena: &PlanArena,
+    ) -> Result<Option<usize>, DatabaseError> {
+        let mut next = None;
+        expr.any_referenced_column(arena, |arena, column| {
+            next = self.context.sub_queries.iter().position(|query| {
+                let output = match query {
+                    SubQueryType::ExistsSubQuery { output_column, .. }
+                    | SubQueryType::QuantifiedSubQuery { output_column, .. } => *output_column,
+                };
+                arena.same_column(output, *column)
+            });
+            next.is_some()
+        })?;
+        if let Some(index) = next {
+            if let SubQueryType::QuantifiedSubQuery {
+                predicate: ScalarExpression::Binary { left_expr, .. },
+                ..
+            } = &self.context.sub_queries[index]
+            {
+                if let Some(dependency) = self.next_mark_query(*left_expr, arena)? {
+                    return Ok(Some(dependency));
+                }
+            }
+        }
+        Ok(next)
     }
 
     fn ensure_mark_apply_right_outputs(
@@ -1662,44 +1706,19 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         }
         let right_schema = plan.output_schema(arena);
         for expr in &mut apply_predicates {
-            RightSidePositionGlobalizer {
-                right_schema,
-                left_len,
+            InputPositionBinder {
+                schema: left_schema,
+                offset: 0,
+            }
+            .visit(expr, arena)?;
+            InputPositionBinder {
+                schema: right_schema,
+                offset: left_len,
             }
             .visit(expr, arena)?;
         }
 
         Ok((plan, apply_predicates))
-    }
-
-    fn rewrite_correlated_quantified_predicate(
-        predicate: ScalarExpression,
-        arena: &PlanArena<'_>,
-    ) -> ScalarExpression {
-        let strip_projection_alias = |expr| match arena.expression(expr) {
-            ScalarExpression::Alias {
-                expr,
-                alias: AliasType::Expr(_),
-            } => *expr,
-            _ => expr,
-        };
-
-        match predicate {
-            ScalarExpression::Binary {
-                op,
-                left_expr,
-                right_expr,
-                ty,
-                ..
-            } => ScalarExpression::Binary {
-                op,
-                left_expr: strip_projection_alias(left_expr),
-                right_expr: strip_projection_alias(right_expr),
-                evaluator: None,
-                ty,
-            },
-            predicate => predicate,
-        }
     }
 
     fn plan_has_correlated_refs(
@@ -1915,7 +1934,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
         select_list: Vec<ExprRef>,
     ) -> LogicalPlan {
         LogicalPlan::new(
-            Operator::Project(ProjectOperator { exprs: select_list }),
+            Operator::Project(ProjectOperator::new(select_list)),
             Childrens::Only(Box::new(children)),
         )
     }
@@ -2154,7 +2173,7 @@ impl<'a: 'b, 'b, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'b
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::{ProjectionOutputBinder, RightSidePositionGlobalizer};
+    use super::{InputPositionBinder, ProjectionOutputBinder};
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
@@ -2208,8 +2227,7 @@ mod tests {
     }
 
     #[test]
-    fn test_right_side_position_globalizer_only_shifts_right_columns() -> Result<(), DatabaseError>
-    {
+    fn test_input_position_binder_only_binds_available_columns() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let left_column = arena.alloc_column(ColumnCatalog::new(
@@ -2223,7 +2241,7 @@ mod tests {
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         ));
         let right_schema = vec![right_column];
-        let left_expr = arena.alloc_expression(ScalarExpression::column_expr(left_column, 0));
+        let left_expr = arena.alloc_expression(ScalarExpression::column_expr(left_column, 7));
         let right_expr = arena.alloc_expression(ScalarExpression::column_expr(right_column, 0));
         let mut expr = arena.alloc_expression(ScalarExpression::Binary {
             op: crate::expression::BinaryOperator::Eq,
@@ -2233,9 +2251,23 @@ mod tests {
             ty: LogicalType::Boolean,
         });
 
-        RightSidePositionGlobalizer {
-            right_schema: &right_schema,
-            left_len: 2,
+        InputPositionBinder {
+            schema: &right_schema,
+            offset: 2,
+        }
+        .visit(&mut expr, &mut arena)?;
+        InputPositionBinder {
+            schema: &right_schema,
+            offset: 2,
+        }
+        .visit(&mut expr, &mut arena)?;
+        assert!(matches!(
+            arena.expression(left_expr),
+            ScalarExpression::ColumnRef { position: 7, .. }
+        ));
+        InputPositionBinder {
+            schema: &vec![left_column],
+            offset: 0,
         }
         .visit(&mut expr, &mut arena)?;
 
@@ -2361,6 +2393,54 @@ mod tests {
         let plan = table_states.plan("select * from t1 where c1 in (select c3 from t2)")?;
         assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_select_mark_alias_is_produced_before_where() -> Result<(), DatabaseError> {
+        let tables = build_t1_table()?;
+        let mut arena = PlanArena::new(&tables.table_arena);
+        let mut plan = tables.plan_with_arena(
+            "select c1,c2 in (select c3 from t2) as matched from t1 where matched",
+            &mut arena,
+        )?;
+        let marker = *find_mark_apply(&plan).unwrap().output_column();
+        let Operator::Project(project) = &plan.operator else {
+            unreachable!()
+        };
+        let selected = project.exprs[1].unpack_alias(&arena);
+        assert!(
+            matches!(arena.expression(selected), ScalarExpression::ColumnRef { column, position: 2 }
+            if arena.same_column(*column, marker))
+        );
+        let mut input = &mut plan;
+        let mut marks = 0;
+        let mut filters = 0;
+        loop {
+            match (&input.operator, input.childrens.as_mut()) {
+                (Operator::Filter(filter), Childrens::Only(child)) => {
+                    let schema = child.output_schema(&mut arena);
+                    assert!(arena.same_column(schema[2], marker));
+                    let referenced = filter.predicate.unpack_alias(&arena);
+                    assert!(
+                        matches!(arena.expression(referenced), ScalarExpression::ColumnRef { column, position: 2 }
+                        if arena.same_column(*column, marker))
+                    );
+                    filters += 1;
+                    input = child;
+                }
+                (Operator::MarkApply(op), Childrens::Twins { left, .. }) => {
+                    assert!(arena.same_column(*op.output_column(), marker));
+                    marks += 1;
+                    input = left;
+                }
+                (_, Childrens::Only(child)) => input = child,
+                (_, Childrens::None) => break,
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(marks, 1);
+        assert_eq!(filters, 1);
         Ok(())
     }
 

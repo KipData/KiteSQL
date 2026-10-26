@@ -29,6 +29,7 @@ mod option;
 mod pair;
 mod path_buf;
 mod phantom;
+mod physical_option;
 mod ptr;
 mod slice;
 pub(crate) mod stable_hash;
@@ -40,7 +41,7 @@ use crate::catalog::TableName;
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::storage::{TableCache, Transaction};
+use crate::storage::{StorageTransaction, TableCache};
 use std::io;
 use std::io::{Read, Write};
 
@@ -53,7 +54,7 @@ pub trait ReferenceSerialization {
         arena: &A,
     ) -> Result<(), DatabaseError>;
 
-    fn decode<T: Transaction, R: Read, A: MetaArena + ?Sized>(
+    fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
         context: Option<&ReferenceDecodeContext<'_, T>>,
         reference_tables: &ReferenceTables,
@@ -63,13 +64,13 @@ pub trait ReferenceSerialization {
         Self: Sized;
 }
 
-pub struct ReferenceDecodeContext<'a, T: Transaction> {
+pub struct ReferenceDecodeContext<'a, T: StorageTransaction> {
     drive: Option<(&'a T, &'a TableCache)>,
     scala_functions: Option<&'a ScalaFunctions>,
     table_functions: Option<&'a TableFunctions>,
 }
 
-impl<'a, T: Transaction> ReferenceDecodeContext<'a, T> {
+impl<'a, T: StorageTransaction> ReferenceDecodeContext<'a, T> {
     pub fn new(drive: Option<(&'a T, &'a TableCache)>) -> Self {
         Self {
             drive,

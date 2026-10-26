@@ -22,7 +22,7 @@ use std::array;
 #[derive(Clone)]
 pub struct HepBatch {
     #[allow(dead_code)]
-    pub name: String,
+    pub name: &'static str,
     pub strategy: HepBatchStrategy,
     pub steps: Vec<HepBatchStep>,
 }
@@ -90,13 +90,13 @@ impl HepLocalRewriteBatch {
 
 impl HepBatch {
     pub fn new(
-        name: String,
+        name: &'static str,
         strategy: HepBatchStrategy,
-        rules: Vec<NormalizationRuleImpl>,
+        rules: &[NormalizationRuleImpl],
     ) -> Self {
         let mut steps = Vec::new();
 
-        for rule in rules {
+        for &rule in rules {
             match rule.pass_kind() {
                 NormalizationPassKind::WholeTreePass(kind) => match steps.last_mut() {
                     Some(HepBatchStep::WholeTree(pass)) if pass.kind == kind => {
@@ -125,27 +125,50 @@ impl HepBatch {
 }
 
 #[derive(Clone, Copy)]
+pub enum HepMatchOrder {
+    TopDown,
+    BottomUp,
+}
+
+#[derive(Clone, Copy)]
 pub enum HepBatchStrategy {
-    /// An execution_ap strategy for rules that indicates the maximum number of executions. If the
-    /// execution_ap reaches fix point (i.e. converge) before maxIterations, it will stop.
-    ///
-    /// Fix Point means that plan tree not changed after applying all rules.
-    MaxTimes(usize),
+    /// Each local rule may succeed once across the tree.
+    Once(HepMatchOrder),
+    /// Stop at a fix point or after the configured number of full-tree iterations.
+    MaxTimes {
+        max_iteration: usize,
+        order: HepMatchOrder,
+    },
     #[allow(dead_code)]
-    LoopIfApplied,
+    LoopIfApplied(HepMatchOrder),
 }
 
 impl HepBatchStrategy {
     pub fn once_topdown() -> Self {
-        HepBatchStrategy::MaxTimes(1)
+        Self::Once(HepMatchOrder::TopDown)
+    }
+
+    #[cfg(test)]
+    pub fn once_bottomup() -> Self {
+        Self::Once(HepMatchOrder::BottomUp)
     }
 
     pub fn fix_point_topdown(max_iteration: usize) -> Self {
-        HepBatchStrategy::MaxTimes(max_iteration)
+        Self::MaxTimes {
+            max_iteration,
+            order: HepMatchOrder::TopDown,
+        }
+    }
+
+    pub fn fix_point_bottomup(max_iteration: usize) -> Self {
+        Self::MaxTimes {
+            max_iteration,
+            order: HepMatchOrder::BottomUp,
+        }
     }
 
     #[allow(dead_code)]
     pub fn loop_if_applied() -> Self {
-        HepBatchStrategy::LoopIfApplied
+        Self::LoopIfApplied(HepMatchOrder::TopDown)
     }
 }

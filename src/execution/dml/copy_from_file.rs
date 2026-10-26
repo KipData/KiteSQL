@@ -20,8 +20,8 @@ use crate::execution::{
 use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
+use crate::storage::StorageTransaction;
+use crate::types::tuple::{Tuple, TupleImpl};
 use crate::types::tuple_builder::TupleBuilder;
 use std::fs::File;
 use std::io::BufReader;
@@ -30,7 +30,7 @@ pub struct CopyFromFile<'a> {
     op: &'a CopyFromFileOperator,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CopyFromFile<'a> {
     type Input = &'a CopyFromFileOperator;
 
     fn into_executor(
@@ -44,7 +44,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for CopyFromFile<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -87,7 +87,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
         let tuple_builder = TupleBuilder::new(column_types, Some(table.primary_key_indices()));
 
         let mut record = csv::StringRecord::new();
-        let mut chunk = Tuple::new(None, Vec::with_capacity(column_count));
+        let mut chunk = TupleImpl::from(Tuple::new(None, Vec::with_capacity(column_count)));
         while reader.read_record(&mut record)? {
             if !(record.len() == column_count
                 || record.len() == column_count + 1 && record.get(column_count) == Some(""))
@@ -95,7 +95,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
                 return Err(DatabaseError::MisMatch("columns", "values"));
             }
 
-            tuple_builder.build_with_row(&mut chunk, record.iter().take(column_count))?;
+            tuple_builder.build_with_row(chunk.output_mut(), record.iter().take(column_count))?;
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
             transaction.append_tuple(table_codec, &table_name, &chunk, &serializers, false)?;
@@ -189,7 +189,7 @@ mod tests {
 
         let mut iter = db.run("select count(*) from test_copy")?;
         let count = iter
-            .next_tuple(|_, tuple| tuple.values[0].to_string())?
+            .next_tuple(|_, tuple| tuple[0].to_string())?
             .expect("count row");
         assert_eq!(count, "2");
         iter.done()?;

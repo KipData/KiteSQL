@@ -71,7 +71,7 @@ impl<S: Storage> Database<S> {
     }
 }
 
-impl<'a, S: Storage> DBTransaction<'a, S> {
+impl<'a, S: Storage> Transaction<'a, S> {
     /// Refreshes optimizer statistics for the model table inside the current transaction.
     pub fn analyze<M: Model>(&mut self) -> Result<(), DatabaseError> {
         orm_analyze::<_, M>(self)

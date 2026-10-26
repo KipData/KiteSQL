@@ -14,10 +14,11 @@
 
 use crate::errors::DatabaseError;
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::plan_utils::{only_child_mut, replace_with_only_child};
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::operator::Operator;
-use crate::planner::LogicalPlan;
+use crate::planner::{LogicalPlan, PlanArena};
 
 pub struct TopK;
 
@@ -25,7 +26,8 @@ impl NormalizationRule for TopK {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        _: &mut crate::planner::PlanArena,
+        _: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let (offset, limit) = match &plan.operator {
             Operator::Limit(op) => match op.limit {

@@ -14,8 +14,10 @@
 
 use crate::catalog::view::View;
 use crate::catalog::{TableCatalog, TableName};
-use crate::optimizer::core::statistics_meta::StatisticsMeta;
+use crate::optimizer::core::histogram::HistogramMeta;
+use crate::optimizer::core::statistics_meta::IndexStatistics;
 use crate::types::index::IndexId;
+use crate::types::ColumnId;
 
 pub(crate) enum DDLApply {
     UpsertTable {
@@ -31,14 +33,19 @@ pub(crate) enum DDLApply {
     DropView {
         name: TableName,
     },
-    UpsertStatisticsMeta {
+    UpsertIndexStatistics {
         table_name: TableName,
         index_id: IndexId,
-        meta: StatisticsMeta,
+        meta: IndexStatistics,
     },
-    RemoveStatisticsMeta {
+    RemoveIndexStatistics {
         table_name: TableName,
         index_id: IndexId,
+    },
+    UpsertColumnStatistics {
+        table_name: TableName,
+        column_id: ColumnId,
+        meta: HistogramMeta,
     },
 }
 

@@ -19,14 +19,14 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::join::RowBitmap;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
-use crate::storage::Transaction;
-use crate::types::tuple::{SplitTupleRef, Tuple};
+use crate::storage::StorageTransaction;
+use crate::types::bitset::BitSet;
+use crate::types::tuple::{SplitTupleRef, TupleImpl, TupleLike};
 use crate::types::value::DataValue;
 
 /// Equivalent condition
@@ -41,10 +41,10 @@ impl EqualCondition {
     /// Compare left tuple and right tuple on equivalent condition
     /// `left_tuple` must be from the [`NestedLoopJoin::left_input`]
     /// `right_tuple` must be from the [`NestedLoopJoin::right_input`]
-    fn equals(
+    fn equals<L: TupleLike + ?Sized, R: TupleLike + ?Sized>(
         &self,
-        left_tuple: &Tuple,
-        right_tuple: &Tuple,
+        left_tuple: &L,
+        right_tuple: &R,
         arena: &(dyn MetaArena + '_),
     ) -> Result<bool, DatabaseError> {
         if self.on_left_keys.is_empty() {
@@ -74,41 +74,40 @@ impl EqualCondition {
 /// | Right/RightSemi/RightAnti/Full |    left        |      right     |
 /// |--------------------------------|----------------|----------------|
 /// | Full                           |    left        |      right     |
-pub struct NestedLoopJoin<'a> {
-    right_input_plan: &'a LogicalPlan,
+pub struct NestedLoopJoin {
     ty: JoinType,
     filter: Option<ExprRef>,
     eq_cond: EqualCondition,
     left_input: ExecId,
-    right_pos: ExecId,
+    right_input: ExecId,
     state: NestedLoopJoinState,
 }
 
 enum NestedLoopJoinState {
     PullLeft {
-        right_bitmap: Option<RowBitmap>,
+        right_bitmap: Option<BitSet>,
     },
     ScanRight {
         active_left: ActiveLeftState,
-        right_bitmap: Option<RowBitmap>,
+        right_bitmap: Option<BitSet>,
     },
     EmitRightUnmatched {
         right_input: ExecId,
-        right_bitmap: Option<RowBitmap>,
+        right_bitmap: Option<BitSet>,
         right_emit_index: usize,
     },
     End,
 }
 
 struct ActiveLeftState {
-    left_tuple: Tuple,
+    left_tuple: TupleImpl,
     right_input: ExecId,
     right_index: usize,
     has_matched: bool,
     first_matches: Vec<usize>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
     type Input = (&'a JoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -139,21 +138,29 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin<'a> {
         };
 
         let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
-        let right_pos = arena.nodes.position();
-        build_read(arena, plan_arena, right_plan, cache, transaction);
+        let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
         arena.push(ExecNode::NestedLoopJoin(NestedLoopJoin {
-            right_input_plan: right_plan,
             ty: join_type,
             filter,
             eq_cond,
             left_input,
-            right_pos,
+            right_input,
             state: NestedLoopJoinState::PullLeft { right_bitmap: None },
         }))
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.state = NestedLoopJoinState::PullLeft { right_bitmap: None };
+        arena.reset(self.left_input, plan_arena)?;
+        arena.reset(self.right_input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -167,7 +174,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                     if !arena.next_tuple(self.left_input, plan_arena)? {
                         if matches!(self.ty, JoinType::Full) {
                             state = NestedLoopJoinState::EmitRightUnmatched {
-                                right_input: self.build_right_input(arena, plan_arena),
+                                right_input: self.reset_right_input(arena, plan_arena)?,
                                 right_bitmap,
                                 right_emit_index: 0,
                             };
@@ -177,12 +184,12 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                         arena.finish();
                         return Ok(());
                     }
-                    let left_tuple = arena.materialize_tuple();
+                    let left_tuple = arena.take_tuple();
 
                     state = NestedLoopJoinState::ScanRight {
                         active_left: ActiveLeftState {
                             left_tuple,
-                            right_input: self.build_right_input(arena, plan_arena),
+                            right_input: self.reset_right_input(arena, plan_arena)?,
                             right_index: 0,
                             has_matched: false,
                             first_matches: Vec::new(),
@@ -223,11 +230,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                         active_left.has_matched = true;
                         // A matched pair is always one output row, even when
                         // neither side projects a column (e.g. `count(*)`).
-                        Self::emit_tuple(
-                            &active_left.left_tuple,
-                            arena.result_tuple_mut(),
-                            self.ty,
-                        );
+                        Self::emit_tuple(&active_left.left_tuple, arena.result_mut(), self.ty);
                         if matches!(self.ty, JoinType::Full) {
                             if let Some(bits) = right_bitmap.as_mut() {
                                 bits.insert(idx);
@@ -250,7 +253,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                                 bits.insert(idx);
                             }
                         } else {
-                            let mut bits = RowBitmap::with_capacity(active_left.right_index);
+                            let mut bits = BitSet::with_capacity(active_left.right_index);
                             for idx in active_left.first_matches {
                                 bits.insert(idx);
                             }
@@ -262,11 +265,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                         JoinType::LeftOuter | JoinType::RightOuter | JoinType::Full
                             if !active_left.has_matched =>
                         {
-                            let right_tuple = arena.result_tuple_mut();
-                            right_tuple.pk = None;
-                            right_tuple.values.clear();
-                            right_tuple.values.resize(right_schema_len, DataValue::Null);
-                            Self::emit_tuple(&active_left.left_tuple, right_tuple, self.ty);
+                            let mut row = std::mem::take(&mut active_left.left_tuple);
+                            let nulls = std::iter::repeat_n(DataValue::Null, right_schema_len);
+                            if matches!(self.ty, JoinType::RightOuter) {
+                                row.prepend(nulls);
+                            } else {
+                                row.extend(nulls);
+                            }
+                            *arena.result_mut() = row;
                             true
                         }
                         _ => false,
@@ -294,9 +300,10 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
                         };
 
                         if is_unmatched {
-                            let values = &mut arena.result_tuple_mut().values;
-                            values.resize(values.len() + self.eq_cond.left_len, DataValue::Null);
-                            values.rotate_right(self.eq_cond.left_len);
+                            arena.result_mut().prepend(std::iter::repeat_n(
+                                DataValue::Null,
+                                self.eq_cond.left_len,
+                            ));
                             self.state = NestedLoopJoinState::EmitRightUnmatched {
                                 right_input,
                                 right_bitmap,
@@ -321,37 +328,31 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
     }
 }
 
-impl<'a> NestedLoopJoin<'a> {
-    fn build_right_input<T: Transaction + 'a>(
+impl NestedLoopJoin {
+    fn reset_right_input<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-    ) -> ExecId {
-        let cache = arena.context();
-        let transaction = arena.transaction();
-        // The same right-hand plan rebuilds the same slots, including nested joins.
-        arena.nodes.seek(self.right_pos);
-        build_read(arena, plan_arena, self.right_input_plan, cache, transaction)
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<ExecId, DatabaseError> {
+        arena.reset(self.right_input, plan_arena)?;
+        Ok(self.right_input)
     }
 
     /// Emit a tuple according to the join type.
     ///
-    /// `left_tuple`: retained outer tuple (logical right for RightOuter).
-    /// `right_tuple`: current inner tuple (logical left for RightOuter), rewritten in place.
+    /// `left`: retained outer tuple (logical right for RightOuter).
+    /// `right`: current inner tuple (logical left for RightOuter).
     /// `ty`: the type of join
-    fn emit_tuple(left_tuple: &Tuple, right_tuple: &mut Tuple, ty: JoinType) {
-        let right_len = right_tuple.values.len();
-        right_tuple.values.extend(left_tuple.values.iter().cloned());
-        if matches!(ty, JoinType::RightOuter) {
-            if right_tuple.pk.is_none() {
-                right_tuple.pk = left_tuple.pk.clone();
-            }
+    fn emit_tuple(left: &TupleImpl, right: &mut TupleImpl, ty: JoinType) {
+        let values = left.iter().cloned();
+        let pk = if matches!(ty, JoinType::RightOuter) {
+            right.extend(values);
+            right.take_pk().or_else(|| left.pk().cloned())
         } else {
-            right_tuple.values.rotate_left(right_len);
-            if left_tuple.pk.is_some() {
-                right_tuple.pk = left_tuple.pk.clone();
-            }
-        }
+            right.prepend(values);
+            left.pk().cloned().or_else(|| right.take_pk())
+        };
+        right.set_pk(pk);
     }
 }
 
@@ -386,18 +387,17 @@ mod test {
     ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
             .before_batch(
-                "Expression Remapper".to_string(),
+                "Expression Remapper",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::EvaluatorBind],
+                &[NormalizationRuleImpl::EvaluatorBind],
             )
             .build()
             .instantiate(plan)
             .find_best(None, arena)
     }
 
-    fn tuple_to_strings(tuple: &Tuple) -> Vec<Option<String>> {
+    fn tuple_to_strings(tuple: &TupleImpl) -> Vec<Option<String>> {
         tuple
-            .values
             .iter()
             .map(|value| match value {
                 DataValue::Null => None,
@@ -525,12 +525,11 @@ mod test {
         (on_keys, values_t1, values_t2, filter)
     }
 
-    fn valid_result(expected: &mut HashSet<Vec<DataValue>>, actual: &[Tuple]) {
+    fn valid_result(expected: &mut HashSet<Vec<DataValue>>, actual: &[TupleImpl]) {
         assert_eq!(actual.len(), expected.len());
 
         for tuple in actual {
             let values = tuple
-                .values
                 .iter()
                 .map(|v| {
                     if matches!(v, DataValue::Null) {
@@ -583,7 +582,7 @@ mod test {
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         while arena.next_tuple(root, &mut plan_arena)? {
             rows += 1;
-            assert_eq!(arena.result_tuple().values.len(), 9);
+            assert_eq!(arena.result_tuple().len(), 9);
             assert_eq!(arena.nodes.items.len(), count);
             assert_eq!(arena.nodes.items.as_ptr(), address);
         }
@@ -691,7 +690,7 @@ mod test {
         let tuples = try_collect(executor)?;
 
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             build_integers(vec![Some(0), Some(2), Some(4), None, None, None])
         );
 
@@ -1029,7 +1028,7 @@ mod test {
         let tuples = try_collect(executor)?;
 
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             build_integers(vec![Some(0), Some(2), Some(4), None, None, None])
         );
 
@@ -1190,7 +1189,7 @@ mod test {
 
         assert_eq!(tuples.len(), 1);
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             vec![
                 DataValue::Int32(2),
                 DataValue::Int32(5),

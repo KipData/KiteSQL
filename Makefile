@@ -3,6 +3,8 @@ CARGO ?= cargo
 GRCOV ?= grcov
 WASM_PACK ?= wasm-pack
 SQLLOGIC_PATH ?= tests/slt/**/*.slt
+SQLITE_LOGIC_PATH ?= tests/kitesql-testing/data/sqlite/**/*.slt
+SQLITE_LOGIC_ARGS ?=
 PYO3_PYTHON ?= /usr/bin/python3.12
 TPCC_MEASURE_TIME ?= 15
 TPCC_NUM_WARE ?= 1
@@ -33,9 +35,12 @@ FUZZ_PASS_EXIT_sql_exec = 70
 # sql_gen: bounded generated queries, so crashes, timeouts and OOMs all fail.
 FUZZ_ARGS_sql_gen = -max_len=4096
 FUZZ_PASS_EXIT_sql_gen = 0
+MIRI_TOOLCHAIN ?= nightly-2026-10-04
+MIRI_FEATURES ?= spill,decimal,lmdb
+MIRI_TESTS ?= types::tuple:: execution::test::
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
-.PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz
+.PHONY: test test-python test-wasm test-slt test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz miri
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -64,6 +69,12 @@ test-wasm:
 ## Run the sqllogictest harness against the configured .slt suite.
 test-slt:
 	$(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'
+
+.PHONY: test-slt-sqlite
+
+## Run the external SQLite corpus (select1–5 excluded unless --include-select is passed).
+test-slt-sqlite:
+	$(CARGO) run --release -p sqllogictest-test --bin sqlite -- --path '$(SQLITE_LOGIC_PATH)' $(SQLITE_LOGIC_ARGS)
 
 ## Convenience target to run every suite in sequence.
 test-all: test test-wasm test-slt test-python
@@ -102,6 +113,9 @@ fuzz:
 	if [ $$status -ne 0 ] && [ $$status -ne $(FUZZ_PASS_EXIT_$(FUZZ_TARGET)) ]; then \
 		echo "fuzz: $(FUZZ_TARGET) failed (exit $$status), see fuzz/artifacts/$(FUZZ_TARGET)/"; exit $$status; \
 	fi
+
+miri:
+	$(CARGO) +$(MIRI_TOOLCHAIN) miri test --lib --features '$(MIRI_FEATURES)' -- $(MIRI_TESTS)
 
 ## Run formatting (check mode) across the workspace.
 fmt:

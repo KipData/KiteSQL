@@ -19,7 +19,9 @@ pub(crate) mod macros;
 
 use crate::errors::DatabaseError;
 use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
+use crate::optimizer::core::rule::{
+    BestPhysicalOption, HintState, ImplementationRule, MatchPattern,
+};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::implementation::ddl::add_column::AddColumnImplementation;
 use crate::optimizer::rule::implementation::ddl::change_column::ChangeColumnImplementation;
@@ -55,6 +57,7 @@ use crate::optimizer::rule::implementation::dql::top_k::TopKImplementation;
 use crate::optimizer::rule::implementation::dql::values::ValuesImplementation;
 use crate::optimizer::rule::implementation::dql::window::WindowImplementation;
 use crate::planner::operator::Operator;
+use crate::planner::{LogicalPlan, PlanArena};
 
 #[repr(usize)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -101,6 +104,8 @@ impl ImplementationRuleRootTag {
             Operator::Join(_) => Some(Self::Join),
             Operator::Limit(_) => Some(Self::Limit),
             Operator::MarkApply(_) => Some(Self::MarkApply),
+            // The join planner sets its physical option when building it.
+            Operator::IndexProbeJoin(_) => None,
             Operator::Project(_) => Some(Self::Project),
             Operator::ScalarQueryInit(_) => Some(Self::ScalarQueryInit),
             Operator::ScalarSubquery(_) => Some(Self::ScalarSubquery),
@@ -258,14 +263,21 @@ impl ImplementationRuleImpl {
 impl ImplementationRule for ImplementationRuleImpl {
     fn update_best_option(
         &self,
-        operator: &Operator,
-        arena: &crate::planner::PlanArena,
+        plan: &LogicalPlan,
+        arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
+        state: &mut HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
         macro_rules! update {
             ($implementation:expr) => {
-                $implementation.update_best_option(operator, arena, loader, best_physical_option)?
+                $implementation.update_best_option(
+                    plan,
+                    arena,
+                    loader,
+                    state,
+                    best_physical_option,
+                )?
             };
         }
 
@@ -324,7 +336,9 @@ mod tests {
     };
     use crate::planner::operator::function_scan::FunctionScanOperator;
     use crate::planner::operator::top_k::TopKOperator;
-    use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+    use crate::planner::operator::{
+        Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption,
+    };
     use crate::planner::{Childrens, LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::StatisticsMetaCache;
     use crate::types::value::DataValue;
@@ -377,7 +391,14 @@ mod tests {
         let statistics_cache = StatisticsMetaCache::default();
         let loader = StatisticMetaLoader::new(&statistics_cache);
         let mut best = None;
-        rule.update_best_option(operator, arena, &loader, &mut best)?;
+        let plan = LogicalPlan::new(operator.clone(), Childrens::None);
+        rule.update_best_option(
+            &plan,
+            arena,
+            &loader,
+            &mut crate::optimizer::core::rule::HintState::default(),
+            &mut best,
+        )?;
 
         Ok(best
             .expect("implementation rule should produce an option")
@@ -418,11 +439,15 @@ mod tests {
             |op| matches!(op, Operator::Dummy),
             PlanImpl::Dummy,
         )?;
-        assert_sql_rule(
+        with_operator_from_sql(
             "select * from t1 where c1 = 1",
-            ImplementationRuleImpl::Filter,
             |op| matches!(op, Operator::Filter(_)),
-            PlanImpl::Filter,
+            |filter, arena| {
+                let option = best_option(ImplementationRuleImpl::Filter, &filter, arena)?;
+                assert_eq!(option.plan, PlanImpl::Filter);
+                assert_eq!(option.row_count, RowCountOption::Follow);
+                Ok(())
+            },
         )?;
         assert_sql_rule(
             "select * from t1 limit 1",
@@ -430,11 +455,15 @@ mod tests {
             |op| matches!(op, Operator::Limit(_)),
             PlanImpl::Limit,
         )?;
-        assert_sql_rule(
+        with_operator_from_sql(
             "select * from t1 where exists(select * from t2)",
-            ImplementationRuleImpl::MarkApply,
             |op| matches!(op, Operator::MarkApply(_)),
-            PlanImpl::MarkApply,
+            |operator, arena| {
+                let option = best_option(ImplementationRuleImpl::MarkApply, &operator, arena)?;
+                assert_eq!(option.plan, PlanImpl::MarkApply);
+                assert_eq!(option.row_count, RowCountOption::Follow);
+                Ok(())
+            },
         )?;
         assert_sql_rule(
             "select c1 from t1",

@@ -21,10 +21,16 @@ pub struct ProjectOperator {
     pub exprs: Vec<ExprRef>,
 }
 
+impl ProjectOperator {
+    pub fn new(exprs: Vec<ExprRef>) -> Self {
+        Self { exprs }
+    }
+}
+
 impl Explain for ProjectOperator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         f.write_str("Projection [")?;

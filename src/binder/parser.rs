@@ -13,14 +13,15 @@
 // limitations under the License.
 
 use super::select::{
-    BindPlanAggregated, BindPlanComplete, BindPlanDistinct, BindPlanFiltered, BindPlanFrom,
-    BindPlanProjected, BindPlanSelectList, BindPlanStart, JoinConstraintInput, TableAliasInput,
+    AliasPurpose, BindPlanAggregated, BindPlanComplete, BindPlanDistinct, BindPlanFiltered,
+    BindPlanFrom, BindPlanProjected, BindPlanSelectList, BindPlanStart, JoinConstraintInput,
+    TableAliasInput,
 };
 use super::{is_valid_identifier, Binder, CteBinding, QueryBindStep, SetOperatorKind};
 #[cfg(feature = "copy")]
 use crate::binder::copy::{ExtSource, FileFormat};
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-use crate::db::{BindSource, DBTransaction, Database, DatabaseIter, State, TransactionIter};
+use crate::db::{BindSource, Database, DatabaseIter, State, Transaction, TransactionIter};
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -35,10 +36,10 @@ use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveScanOperator};
 use crate::planner::operator::sort::SortField;
-use crate::planner::operator::Operator;
+use crate::planner::operator::{CommandType, Operator};
 use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
-use crate::storage::{Storage, Transaction};
+use crate::storage::{Storage, StorageTransaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
 pub(super) use sqlparser::ast::{
@@ -61,14 +62,6 @@ use std::slice;
 
 /// Parsed SQL statement type used by KiteSQL SQL frontend APIs.
 pub type Statement = sqlparser::ast::Statement;
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum CommandType {
-    DQL,
-    DML,
-    DDL,
-    Analyze,
-}
 
 pub(crate) trait AttachSpanSource {
     fn sql_error_span(self) -> Option<SqlErrorSpan>;
@@ -133,6 +126,8 @@ pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
         | Statement::Delete(_)
         | Statement::Insert(_) => Ok(CommandType::DML),
         #[cfg(feature = "copy")]
+        Statement::Copy { to: true, .. } => Ok(CommandType::DQL),
+        #[cfg(feature = "copy")]
         Statement::Copy { .. } => Ok(CommandType::DML),
         stmt => Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
     }
@@ -155,6 +150,15 @@ impl<S: Storage> State<S> {
             .pop()
             .ok_or(DatabaseError::EmptyStatement)
     }
+}
+
+/// Statements that only read storage can run in a read transaction.
+fn statement_is_read_only(statement: &Statement) -> Result<bool, DatabaseError> {
+    Ok(match statement {
+        // Locking reads (`FOR UPDATE`) are treated as writes.
+        Statement::Query(query) => query.locks.is_empty(),
+        _ => command_type(statement)?.is_read_only(),
+    })
 }
 
 fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool, DatabaseError> {
@@ -264,9 +268,15 @@ impl<S: Storage> Database<S> {
             .with_sql_context(sql));
         }
 
+        let read_only = statements
+            .iter()
+            .try_fold(true, |read_only, stmt| {
+                Ok::<_, DatabaseError>(read_only && statement_is_read_only(stmt)?)
+            })
+            .map_err(|err| err.with_sql_context(sql))?;
         let transaction = Box::into_raw(Box::new(
             self.storage
-                .transaction_with_isolation(self.transaction_isolation)?,
+                .transaction_with_isolation(self.transaction_isolation, read_only)?,
         ));
         let mut statements = statements.into_iter().peekable();
 
@@ -309,7 +319,7 @@ impl<S: Storage> Database<S> {
     }
 }
 
-impl<'txn, S: Storage> DBTransaction<'txn, S> {
+impl<'txn, S: Storage> Transaction<'txn, S> {
     /// Runs SQL inside the current transaction and returns the final result iterator.
     pub fn run<'a, T: AsRef<str>>(
         &'a mut self,
@@ -333,7 +343,7 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
             .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
 
         for statement in statements {
-            BindSource::execute(&mut *self, |state, tx| {
+            BindSource::execute(&mut *self, false, |state, tx| {
                 state.build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))
             })
             .map_err(|err| err.with_sql_context(sql))?
@@ -341,7 +351,7 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
             .map_err(|err| err.with_sql_context(sql))?;
         }
 
-        BindSource::execute(self, |state, tx| {
+        BindSource::execute(self, false, |state, tx| {
             state.build_plan(&[], tx, |binder, arena| binder.bind(&last_statement, arena))
         })
         .map_err(|err| err.with_sql_context(sql))
@@ -350,7 +360,7 @@ impl<'txn, S: Storage> DBTransaction<'txn, S> {
 
 struct BindStatementStart<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     binder: &'s mut Binder<'a, 'b, T, A>,
@@ -365,12 +375,12 @@ struct UpdateExprTargetRemapper<'a> {
     target_schema: &'a [ColumnRef],
 }
 
-impl ExprVisitorMut for UpdateExprTargetRemapper<'_> {
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for UpdateExprTargetRemapper<'_> {
     fn visit_column_ref(
         &mut self,
         column: &mut ColumnRef,
         position: &mut usize,
-        arena: &mut (dyn MetaArena + '_),
+        arena: &mut A,
     ) -> Result<(), DatabaseError> {
         let Some(target_position) = self
             .target_schema
@@ -389,7 +399,7 @@ impl ExprVisitorMut for UpdateExprTargetRemapper<'_> {
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindStatementStart<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn statement(self, stmt: &Statement) -> Result<BindStatementComplete, DatabaseError> {
@@ -1062,7 +1072,7 @@ where
         let source = self
             .binder
             .context
-            .source_and_bind(table_name.clone(), None, None, false)?
+            .source_and_bind(table_name.clone(), None, None, false, self.arena)?
             .ok_or(DatabaseError::TableNotFound)?;
         let values_len = expr_rows[0].len();
 
@@ -1216,6 +1226,7 @@ where
                 Binder::<'a, 'b, T, A>::resolve_source_columns_in_scope(
                     &self.binder.context,
                     &table_name,
+                    self.arena,
                 )?;
             let target_schema = target_source.schema().to_vec();
 
@@ -1318,7 +1329,7 @@ where
                     })
                     .collect();
                 plan = LogicalPlan::new(
-                    Operator::Project(ProjectOperator { exprs }),
+                    Operator::Project(ProjectOperator::new(exprs)),
                     Childrens::Only(Box::new(plan)),
                 );
             }
@@ -1407,7 +1418,7 @@ impl BindStatementComplete {
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanStart<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     #[allow(clippy::wrong_self_convention)]
@@ -1440,7 +1451,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanFrom<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn select_list_from_sql(
@@ -1457,7 +1468,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanSelectList<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn where_sql(
@@ -1479,7 +1490,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanFiltered<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn aggregate_sql(
@@ -1586,7 +1597,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> super::select::BindPlanWindowed<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn distinct_sql(
@@ -1599,7 +1610,7 @@ where
 
 impl<'s, 'a: 'b, 'b, 'arena, T, A> BindPlanProjected<'s, 'a, 'b, 'arena, T, A>
 where
-    T: Transaction,
+    T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn select_into_sql(
@@ -1716,7 +1727,7 @@ impl TryFrom<&Value> for DataValue {
                     ));
                 }
                 let mut bytes = Vec::with_capacity(hex.len() / 2);
-                for pair in hex.as_bytes().chunks_exact(2) {
+                for pair in hex.as_bytes().as_chunks::<2>().0 {
                     let Some(high) = (pair[0] as char).to_digit(16) else {
                         return Err(DatabaseError::InvalidValue("invalid hex digit".to_string()));
                     };
@@ -2061,7 +2072,9 @@ fn copy_file_format(options: Vec<CopyOption>) -> Result<FileFormat, DatabaseErro
     })
 }
 
-impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, 'parent, T, A> {
+impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
+    Binder<'a, 'parent, T, A>
+{
     fn bind_table_ref_sql(
         &mut self,
         from: &TableWithJoins,
@@ -2091,10 +2104,15 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
                 sql_optional_table_alias(alias.clone()),
                 arena,
             ),
+            TableFactor::Derived { lateral: true, .. } => Err(DatabaseError::UnsupportedStmt(
+                "LATERAL derived tables are not supported".to_string(),
+            )),
             TableFactor::Derived {
                 subquery, alias, ..
             } => {
-                let mut binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
+                // A non-LATERAL derived table cannot see the sources bound before
+                // it in the same FROM clause.
+                let mut binder = Binder::new(self.context.fork_empty(), self.args, None);
                 let plan = binder.bind_query(subquery, arena)?;
                 self.bind_derived_source(
                     plan,
@@ -2157,7 +2175,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             let right = binder.bind_single_table_ref_sql(relation, Some(join_type), arena)?;
             (right, binder.context)
         };
-        self.extend(context);
+        self.extend(context, arena)?;
 
         let constraint = match joint_condition {
             Some(constraint) => self.bind_join_constraint_sql(constraint, arena)?,
@@ -3103,7 +3121,14 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
         let mut binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
         let plan = binder.bind_query(&cte.query, arena)?;
         let source_name = arena.temp_table();
-        binder.bind_alias(plan, &alias.columns, alias.name.clone(), source_name, arena)
+        binder.bind_alias(
+            plan,
+            &alias.columns,
+            alias.name.clone(),
+            source_name,
+            AliasPurpose::Output,
+            arena,
+        )
     }
 
     fn add_cte_plan(
@@ -3165,6 +3190,7 @@ impl<'a, 'parent, T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '
             &alias.columns,
             alias.name.clone(),
             source_name,
+            AliasPurpose::Output,
             arena,
         )?;
         let schema = anchor.output_schema(arena).clone();
@@ -3484,6 +3510,16 @@ mod tests {
             command_type(&database.prepare_all("truncate table t")?.pop().unwrap())?,
             CommandType::DML
         );
+        #[cfg(feature = "copy")]
+        for (sql, expected) in [
+            ("copy t to 'out.csv'", CommandType::DQL),
+            ("copy t from 'in.csv'", CommandType::DML),
+        ] {
+            assert_eq!(
+                command_type(&database.prepare_all(sql)?.pop().unwrap())?,
+                expected
+            );
+        }
 
         let err =
             command_type(&database.prepare_all("start transaction")?.pop().unwrap()).unwrap_err();
@@ -3507,7 +3543,7 @@ mod tests {
         );
         assert_unsupported(expect_err(database.ddl("select 1")), "`Database::ddl`");
 
-        let transaction = database.new_transaction()?;
+        let transaction = database.new_transaction(false)?;
         assert_unsupported(
             expect_err(transaction.prepare_sql("analyze table t", params)),
             "DDL and ANALYZE",

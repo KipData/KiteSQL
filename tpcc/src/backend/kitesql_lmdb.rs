@@ -18,9 +18,9 @@ use super::{
     StatementSpec,
 };
 use crate::TpccError;
-use kite_sql::db::{DBTransaction, DataBaseBuilder, Database};
+use kite_sql::db::{DataBaseBuilder, Database, Transaction};
 use kite_sql::storage::lmdb::{LmdbStorage, LmdbTransaction as KiteSqlLmdbTransaction};
-use kite_sql::types::tuple::Tuple;
+use kite_sql::types::tuple::TupleImpl;
 
 pub struct KiteSqlLmdbBackend {
     database: Database<LmdbStorage>,
@@ -53,7 +53,7 @@ impl KiteSqlLmdbBackend {
 
     fn start_transaction(&self) -> Result<KiteSqlLmdbTransactionWrapper<'_>, TpccError> {
         Ok(KiteSqlLmdbTransactionWrapper {
-            inner: self.database.new_transaction()?,
+            inner: self.database.new_transaction(false)?,
         })
     }
 }
@@ -88,7 +88,7 @@ impl SimpleExecutor for KiteSqlLmdbBackend {
 }
 
 pub struct KiteSqlLmdbTransactionWrapper<'a> {
-    inner: DBTransaction<'a, LmdbStorage>,
+    inner: Transaction<'a, LmdbStorage>,
 }
 
 impl<'a> KiteSqlLmdbTransactionWrapper<'a> {
@@ -120,7 +120,7 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         iter.with_next_tuple(|tuple| visitor(tuple))?
@@ -131,7 +131,7 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
         &mut self,
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         while iter.with_next_tuple(|tuple| visitor(tuple))?.is_some() {}
@@ -143,7 +143,7 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
         statement: &mut Self::PreparedStatement,
         params: &[DbParam],
         n: usize,
-        visitor: &mut dyn FnMut(&Tuple) -> Result<(), TpccError>,
+        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         for _ in 0..n {

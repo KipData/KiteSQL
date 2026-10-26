@@ -19,19 +19,19 @@ use crate::execution::{
 use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
+use crate::storage::StorageTransaction;
+use crate::types::tuple::TupleImpl;
 use std::collections::HashMap;
 
 pub struct SetMembership {
     kind: SetMembershipKind,
     left_input: ExecId,
     right_input: ExecId,
-    right_counts: HashMap<Tuple, usize>,
+    right_counts: HashMap<TupleImpl, usize>,
     built: bool,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SetMembership {
     type Input = (SetMembershipKind, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -53,7 +53,18 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for SetMembership {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.built = false;
+        self.right_counts.clear();
+        arena.reset(self.left_input, plan_arena)?;
+        arena.reset(self.right_input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -64,7 +75,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
                 if let Some(count) = self.right_counts.get_mut(arena.result_tuple()) {
                     *count += 1;
                 } else {
-                    self.right_counts.insert(arena.materialize_tuple(), 1);
+                    self.right_counts.insert(arena.take_tuple(), 1);
                 }
             }
             self.built = true;
@@ -91,7 +102,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for SetMembership {
 }
 
 impl SetMembership {
-    fn consume_right_match(&mut self, tuple: &Tuple) -> bool {
+    fn consume_right_match(&mut self, tuple: &TupleImpl) -> bool {
         if let Some(count) = self.right_counts.get_mut(tuple) {
             if *count > 0 {
                 *count -= 1;

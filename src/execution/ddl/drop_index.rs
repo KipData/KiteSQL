@@ -18,13 +18,13 @@ use crate::execution::{
 };
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 
 pub struct DropIndex<'a> {
     op: &'a DropIndexOperator,
 }
 
-impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
+impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
     type Input = &'a DropIndexOperator;
 
     fn into_executor(
@@ -38,7 +38,7 @@ impl<'a, T: Transaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -62,7 +62,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
         };
         if let Some((table, index_id)) = dropped {
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
-            arena.push_ddl_apply(DDLApply::RemoveStatisticsMeta {
+            arena.push_ddl_apply(DDLApply::RemoveIndexStatistics {
                 table_name: table_name.clone(),
                 index_id,
             });

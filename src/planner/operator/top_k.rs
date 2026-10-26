@@ -44,9 +44,9 @@ impl TopKOperator {
 }
 
 impl Explain for TopKOperator {
-    fn fmt(
+    fn fmt<A: MetaArena + ?Sized>(
         &self,
-        arena: &(dyn MetaArena + '_),
+        arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         write!(f, "Top {}, ", self.limit)?;

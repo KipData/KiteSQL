@@ -29,7 +29,7 @@ mod test {
     use kite_sql::planner::{MetaArena, PlanArena, TableArena, TableArenaCell};
     use kite_sql::storage::rocksdb::RocksStorage;
     use kite_sql::types::evaluator::binary_create;
-    use kite_sql::types::tuple::{Schema, SchemaView, Tuple};
+    use kite_sql::types::tuple::{Schema, SchemaView, Tuple, TupleImpl};
     use kite_sql::types::value::{DataValue, Utf8Type};
     use kite_sql::types::{CharLengthUnits, LogicalType};
     use kite_sql::{from_tuple, scala_function, table_function, Model, Projection};
@@ -68,16 +68,9 @@ mod test {
         (Tuple::new(None, values), schema)
     }
 
-    fn tuple_owned(tuple: &Tuple) -> Tuple {
-        Tuple {
-            pk: tuple.pk.clone(),
-            values: tuple.values.clone(),
-        }
-    }
-
-    fn collect_result_tuples<I: ResultIter>(mut iter: I) -> Result<Vec<Tuple>, DatabaseError> {
+    fn collect_result_tuples<I: ResultIter>(mut iter: I) -> Result<Vec<TupleImpl>, DatabaseError> {
         let mut rows = Vec::new();
-        while let Some(row) = iter.next_tuple(|_, tuple| tuple_owned(tuple))? {
+        while let Some(row) = iter.next_tuple(|_, tuple| tuple.clone())? {
             rows.push(row);
         }
         iter.done()?;
@@ -357,10 +350,11 @@ mod test {
     fn test_from_tuple() {
         let table_arena = TableArenaCell::default();
         let mut plan_arena = PlanArena::new(&table_arena);
-        let (mut tuple, schema) = build_tuple(&mut plan_arena);
+        let (tuple, schema) = build_tuple(&mut plan_arena);
         let schema = SchemaView::new(&schema, &plan_arena);
         let my_struct =
-            <MyStruct as kite_sql::orm::FromQueryRow>::from_query_row(&schema, &mut tuple).unwrap();
+            <MyStruct as kite_sql::orm::FromQueryRow>::from_query_row(&schema, &mut tuple.into())
+                .unwrap();
 
         println!("{:?}", my_struct);
 
@@ -386,7 +380,7 @@ mod test {
             true,
             ColumnDesc::new(LogicalType::Integer, None, true, None).unwrap(),
         )));
-        let mut tuple = Tuple::new(
+        let tuple = Tuple::new(
             None,
             vec![
                 DataValue::Int32(9),
@@ -400,9 +394,11 @@ mod test {
         );
 
         let schema = SchemaView::new(&schema, &plan_arena);
-        let derived =
-            <DerivedStruct as kite_sql::orm::FromQueryRow>::from_query_row(&schema, &mut tuple)
-                .unwrap();
+        let derived = <DerivedStruct as kite_sql::orm::FromQueryRow>::from_query_row(
+            &schema,
+            &mut tuple.into(),
+        )
+        .unwrap();
 
         assert_eq!(derived.c1, 9);
         assert_eq!(derived.name, "LOL");
@@ -483,13 +479,13 @@ mod test {
 
         let balance = rows
             .iter()
-            .find(|row| match &row.values[0] {
+            .find(|row| match &row[0] {
                 DataValue::Utf8 { value, .. } => value == "balance",
                 _ => false,
             })
             .expect("balance column should exist");
 
-        match &balance.values[1] {
+        match &balance[1] {
             DataValue::Utf8 { value, .. } => assert_eq!(value, "Decimal(Some(10), Some(2))"),
             other => panic!("unexpected describe datatype: {other:?}"),
         }
@@ -509,13 +505,13 @@ mod test {
 
         let code = rows
             .iter()
-            .find(|row| match &row.values[0] {
+            .find(|row| match &row[0] {
                 DataValue::Utf8 { value, .. } => value == "code",
                 _ => false,
             })
             .expect("code column should exist");
 
-        match &code.values[1] {
+        match &code[1] {
             DataValue::Utf8 { value, .. } => assert_eq!(value, "Char(2, CHARACTERS)"),
             other => panic!("unexpected describe datatype: {other:?}"),
         }
@@ -547,7 +543,7 @@ mod test {
         let describe_rows = collect_result_tuples(database.run("describe migrating_users")?)?;
         let column_names = describe_rows
             .iter()
-            .filter_map(|row| match row.values.first() {
+            .filter_map(|row| match row.get(0) {
                 Some(DataValue::Utf8 { value, .. }) => Some(value.as_str()),
                 _ => None,
             })
@@ -1495,7 +1491,7 @@ mod test {
             vec![(1, Some(100)), (1, Some(200)), (2, Some(300)), (3, None)]
         );
 
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         let in_tx = tx
             .bind(|ctx| {
                 ctx.from::<User>()?
@@ -2530,7 +2526,7 @@ mod test {
             collect_result_tuples(database.run("explain select age from users where age = 1050")?)?;
         let explain_plan = explain_rows
             .iter()
-            .filter_map(|row| match row.values.first() {
+            .filter_map(|row| match row.get(0) {
                 Some(DataValue::Utf8 { value, .. }) => Some(value.as_str()),
                 _ => None,
             })
@@ -2844,7 +2840,7 @@ mod test {
         });
         assert_eq!(set_query_ages, vec![None, Some(30), Some(18), Some(18)]);
 
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         tx.insert_many([User {
             id: 4,
             name: "Dora".to_string(),
@@ -2950,7 +2946,7 @@ mod test {
         })?;
         assert_eq!(
             plan,
-            "Projection [users.user_name] [Project => (Sort Option: Follow)] Filter (users.id = 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan users -> [users.id, users.user_name] [SeqScan => (Sort Option: None)]"
+            "Projection [users.user_name] [Project => (Sort Option: Follow)] TableScan users -> [users.id, users.user_name] [IndexScan By pk_index => 1 => (Sort Option: OrderBy: (users.id Asc Nulls Last) ignore_prefix_len: 0)]"
         );
 
         let set_plan = database.explain(|ctx| {
@@ -2965,7 +2961,7 @@ mod test {
             "Aggregate [] -> Group By [users.id] [HashAggregate => (Sort Option: None)] Union: [users.id] Projection [users.id] [Project => (Sort Option: Follow)] TableScan users -> [users.id] [SeqScan => (Sort Option: None)] Projection [wallets.id] [Project => (Sort Option: Follow)] TableScan wallets -> [wallets.id] [SeqScan => (Sort Option: None)]"
         );
 
-        let mut tx = database.new_transaction()?;
+        let mut tx = database.new_transaction(false)?;
         let tx_tables = tx.show_tables()?.collect::<Result<Vec<_>, _>>()?;
         assert!(tx_tables.iter().any(|name| name == "users"));
         let tx_describe = tx.describe::<Wallet>()?.collect::<Result<Vec<_>, _>>()?;

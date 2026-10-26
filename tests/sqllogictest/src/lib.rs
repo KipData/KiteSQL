@@ -49,7 +49,6 @@ pub fn run_sql(
         let mut rows = Vec::new();
         while let Some(row) = iter.next_tuple(|_, tuple| {
             tuple
-                .values
                 .iter()
                 .enumerate()
                 .map(|(i, value)| format(i, value))

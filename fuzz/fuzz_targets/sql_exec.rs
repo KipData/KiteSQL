@@ -72,7 +72,7 @@ fn reset(db: &mut Database<LmdbStorage>) {
         let mut names = Vec::new();
         if let Ok(mut iter) = db.run(show) {
             while let Ok(Some(())) = iter.next_tuple(|_, tuple| {
-                if let Some(DataValue::Utf8 { value, .. }) = tuple.values.first() {
+                if let Some(DataValue::Utf8 { value, .. }) = tuple.get(0) {
                     names.push(value.clone());
                 }
             }) {}
@@ -165,7 +165,7 @@ fn run_one(db: &mut Database<LmdbStorage>, sql: &str) {
             // Drain and render every value, like the sqllogictest harness does.
             loop {
                 match iter.next_tuple(|_, tuple| {
-                    for value in tuple.values.iter() {
+                    for value in tuple.iter() {
                         let _ = value.to_string();
                     }
                 }) {

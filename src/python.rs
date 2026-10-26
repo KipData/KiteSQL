@@ -21,7 +21,7 @@ use crate::storage::lmdb::LmdbStorage;
 use crate::storage::memory::MemoryStorage;
 #[cfg(feature = "rocksdb")]
 use crate::storage::rocksdb::RocksStorage;
-use crate::types::tuple::{SchemaView, Tuple};
+use crate::types::tuple::{SchemaView, TupleImpl};
 use crate::types::value::DataValue;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -34,9 +34,9 @@ fn to_py_err(err: impl ToString) -> PyErr {
 #[allow(deprecated)]
 fn data_value_to_py(py: Python<'_>, value: &DataValue) -> PyResult<PyObject> {
     let object = match value {
-        DataValue::Parameter { id, .. } => {
+        DataValue::Parameter { .. } | DataValue::InitValue { .. } => {
             return Err(PyRuntimeError::new_err(format!(
-                "unbound parameter ${id} reached Python output"
+                "unbound parameter {value} reached Python output"
             )));
         }
         DataValue::Null => py.None(),
@@ -70,16 +70,15 @@ fn data_value_to_py(py: Python<'_>, value: &DataValue) -> PyResult<PyObject> {
     Ok(object)
 }
 
-fn tuple_to_python_row(py: Python<'_>, tuple: &Tuple) -> PyResult<PyObject> {
+fn tuple_to_python_row(py: Python<'_>, tuple: &TupleImpl) -> PyResult<PyObject> {
     let row = PyDict::new(py);
 
-    match tuple.pk.as_ref() {
+    match tuple.pk() {
         Some(pk) => row.set_item("pk", data_value_to_py(py, pk)?)?,
         None => row.set_item("pk", py.None())?,
     }
 
     let values = tuple
-        .values
         .iter()
         .map(|value| data_value_to_py(py, value))
         .collect::<PyResult<Vec<_>>>()?;
@@ -170,7 +169,7 @@ enum PythonResultIterInner {
 impl PythonResultIterInner {
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&mut Tuple) -> R,
+        f: impl FnOnce(&mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         match self {
             #[cfg(feature = "lmdb")]

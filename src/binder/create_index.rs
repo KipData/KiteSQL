@@ -19,11 +19,11 @@ use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
-use crate::storage::Transaction;
+use crate::storage::StorageTransaction;
 use crate::types::index::IndexType;
 use crate::types::LogicalType;
 
-impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
+impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_index_source(
         &mut self,
         table_name: TableName,
@@ -31,7 +31,7 @@ impl<T: Transaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     ) -> Result<LogicalPlan, DatabaseError> {
         let source = self
             .context
-            .source_and_bind(table_name.clone(), None, None, false)?
+            .source_and_bind(table_name.clone(), None, None, false, arena)?
             .ok_or(DatabaseError::SourceNotFound)?;
         match source {
             Source::Table(table) => {

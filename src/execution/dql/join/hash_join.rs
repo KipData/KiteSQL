@@ -20,7 +20,6 @@ use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash::{
     JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
 };
-use crate::execution::dql::join::RowBitmap;
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
     build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
@@ -29,8 +28,9 @@ use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
+use crate::storage::StorageTransaction;
+use crate::types::bitset::BitSet;
+use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 use bumpalo::Bump;
 use std::collections::HashMap;
@@ -127,7 +127,7 @@ impl HashJoin {
 
     fn eval_keys(
         on_keys: &[ExprRef],
-        tuple: &Tuple,
+        tuple: &TupleImpl,
         build_buf: &mut BumpVec<'_, DataValue>,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
@@ -143,7 +143,7 @@ impl HashJoin {
         Ok(())
     }
 
-    fn initialize_build<'a, T: Transaction + 'a, A: MetaArena + 'a>(
+    fn initialize_build<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -155,13 +155,15 @@ impl HashJoin {
         // build phase:
         // 1.construct hashtable, one hash key may contains multiple rows indices.
         // 2.merged all left tuples.
+        // TODO: std `RandomState` (SipHash) costs ~10% of an LMDB PK-sized hash join; a faster
+        // non-DoS-resistant hasher would do for build keys.
         #[allow(clippy::mutable_key_type)]
         let mut build_map = HashMap::new();
         let mut build_buf = BumpVec::with_capacity_in(self.on_left_keys.len(), &self.bump);
         let mut build_count = 0usize;
 
         while arena.next_tuple(self.left_input, plan_arena)? {
-            let tuple = arena.materialize_tuple();
+            let tuple = arena.take_tuple();
             Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf, plan_arena)?;
 
             match build_map.get_mut(&build_buf) {
@@ -207,25 +209,27 @@ impl HashJoin {
             JoinType::LeftOuter => JoinProbeStateImpl::Left(LeftJoinState {
                 left_schema_len,
                 right_schema_len,
-                bits: RowBitmap::with_capacity(build_count),
+                bits: BitSet::with_capacity(build_count),
             }),
             JoinType::RightOuter => JoinProbeStateImpl::Right(RightJoinState { left_schema_len }),
             JoinType::Full => JoinProbeStateImpl::Full(FullJoinState {
                 left_schema_len,
                 right_schema_len,
-                bits: RowBitmap::with_capacity(build_count),
+                bits: BitSet::with_capacity(build_count),
             }),
             JoinType::Cross => unreachable!(),
         }
     }
 }
 
+// TODO: dropping the build map (one heap `Vec` and owned `Tuple`s per key) costs ~13.5% of an
+// LMDB PK-sized hash join plus allocator consolidation; allocate build rows in `bump` instead.
 #[derive(Default, Debug)]
 pub(crate) struct BuildState {
-    pub(crate) tuples: Vec<(usize, Tuple)>,
+    pub(crate) tuples: Vec<(usize, TupleImpl)>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashJoin {
     type Input = (&'a JoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
@@ -250,7 +254,18 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for HashJoin {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.state = HashJoinState::Build;
+        self.bump.reset();
+        arena.reset(self.left_input, plan_arena)?;
+        arena.reset(self.right_input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -277,7 +292,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                             if !arena.next_tuple(self.right_input, plan_arena)? {
                                 break true;
                             }
-                            let tuple = arena.materialize_tuple();
+                            let tuple = arena.take_tuple();
                             Self::eval_keys(
                                 &self.on_right_keys,
                                 &tuple,
@@ -318,7 +333,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                                 probe_buf,
                                 probe_state,
                             };
-                            arena.produce_tuple(tuple);
+                            arena.produce(tuple);
                             return Ok(());
                         }
 
@@ -349,7 +364,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for HashJoin {
                             join_impl,
                             left_drop,
                         };
-                        arena.produce_tuple(tuple);
+                        arena.produce(tuple);
                         return Ok(());
                     }
                     state = HashJoinState::End;
@@ -393,9 +408,9 @@ mod test {
     ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
             .before_batch(
-                "Expression Remapper".to_string(),
+                "Expression Remapper",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::EvaluatorBind],
+                &[NormalizationRuleImpl::EvaluatorBind],
             )
             .build()
             .instantiate(plan)
@@ -527,15 +542,15 @@ mod test {
         assert_eq!(tuples.len(), 3);
 
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             build_integers(vec![Some(0), Some(2), Some(4), Some(0), Some(2), Some(4)])
         );
         assert_eq!(
-            tuples[1].values,
+            tuples[1],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(3), Some(5)])
         );
         assert_eq!(
-            tuples[2].values,
+            tuples[2],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(1), Some(1)])
         );
 
@@ -588,19 +603,19 @@ mod test {
             assert_eq!(tuples.len(), 4);
 
             assert_eq!(
-                tuples[0].values,
+                tuples[0],
                 build_integers(vec![Some(0), Some(2), Some(4), Some(0), Some(2), Some(4)])
             );
             assert_eq!(
-                tuples[1].values,
+                tuples[1],
                 build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(3), Some(5)])
             );
             assert_eq!(
-                tuples[2].values,
+                tuples[2],
                 build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(1), Some(1)])
             );
             assert_eq!(
-                tuples[3].values,
+                tuples[3],
                 build_integers(vec![Some(3), Some(5), Some(7), None, None, None])
             );
         }
@@ -654,19 +669,19 @@ mod test {
         assert_eq!(tuples.len(), 4);
 
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             build_integers(vec![Some(0), Some(2), Some(4), Some(0), Some(2), Some(4)])
         );
         assert_eq!(
-            tuples[1].values,
+            tuples[1],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(3), Some(5)])
         );
         assert_eq!(
-            tuples[2].values,
+            tuples[2],
             build_integers(vec![None, None, None, Some(4), Some(6), Some(8)])
         );
         assert_eq!(
-            tuples[3].values,
+            tuples[3],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(1), Some(1)])
         );
 
@@ -763,7 +778,7 @@ mod test {
 
         assert_eq!(tuples.len(), 1);
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             vec![
                 DataValue::Int32(2),
                 DataValue::Int32(5),
@@ -820,23 +835,23 @@ mod test {
         assert_eq!(tuples.len(), 5);
 
         assert_eq!(
-            tuples[0].values,
+            tuples[0],
             build_integers(vec![Some(0), Some(2), Some(4), Some(0), Some(2), Some(4)])
         );
         assert_eq!(
-            tuples[1].values,
+            tuples[1],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(3), Some(5)])
         );
         assert_eq!(
-            tuples[2].values,
+            tuples[2],
             build_integers(vec![None, None, None, Some(4), Some(6), Some(8)])
         );
         assert_eq!(
-            tuples[3].values,
+            tuples[3],
             build_integers(vec![Some(1), Some(3), Some(5), Some(1), Some(1), Some(1)])
         );
         assert_eq!(
-            tuples[4].values,
+            tuples[4],
             build_integers(vec![Some(3), Some(5), Some(7), None, None, None])
         );
 

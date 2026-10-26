@@ -20,6 +20,7 @@ pub(crate) mod ddl;
 mod ddl_apply;
 pub(crate) mod dml;
 pub(crate) mod dql;
+pub(crate) mod runs;
 #[cfg(feature = "spill")]
 pub(crate) mod spill;
 
@@ -61,6 +62,7 @@ use crate::execution::dql::filter::Filter;
 use crate::execution::dql::function_scan::FunctionScan;
 use crate::execution::dql::index_scan::IndexScan;
 use crate::execution::dql::join::hash_join::HashJoin;
+use crate::execution::dql::join::index_probe_join::IndexProbeJoin;
 use crate::execution::dql::limit::Limit;
 use crate::execution::dql::projection::Projection;
 use crate::execution::dql::recursive_cte::{RecursiveCte, RecursiveInput, RecursiveScan};
@@ -80,10 +82,9 @@ use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
-use crate::storage::{StatisticsMetaCache, TableCache, Transaction, ViewCache};
+use crate::storage::{StatisticsMetaCache, StorageTransaction, TableCache, ViewCache};
 use crate::types::index::RuntimeIndexProbe;
-use crate::types::tuple::{Tuple, TupleLike};
-use crate::types::value::DataValue;
+use crate::types::tuple::{ConcatPool, Input, Tuple, TupleId, TupleImpl};
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecutionContext<'a> {
@@ -115,14 +116,6 @@ impl<'a> ExecutionContext<'a> {
         self.table_cache
     }
 
-    pub(crate) fn scala_functions(self) -> &'a ScalaFunctions {
-        self.scala_functions
-    }
-
-    pub(crate) fn table_functions(self) -> &'a TableFunctions {
-        self.table_functions
-    }
-
     fn is_same_context(&self, other: ExecutionContext<'_>) -> bool {
         std::ptr::eq(self.table_cache, other.table_cache)
             && std::ptr::eq(self.view_cache, other.view_cache)
@@ -142,8 +135,16 @@ pub(crate) enum ExecStatus {
 
 #[derive(Debug, Default)]
 pub(crate) struct ExecResult {
-    pub(crate) tuple: Tuple,
+    pub(crate) tuple: TupleImpl,
     pub(crate) status: Option<ExecStatus>,
+    concat_pool: ConcatPool,
+}
+
+impl ExecResult {
+    #[inline]
+    pub(crate) fn output_mut(&mut self) -> &mut Tuple {
+        self.concat_pool.retain_leftmost(&mut self.tuple)
+    }
 }
 
 /// Resolves either an arena-backed expression or a direct scalar expression.
@@ -163,7 +164,7 @@ impl RewriteExpression for ScalarExpression {
     }
 }
 
-pub struct Executor<'a, T: Transaction + 'a> {
+pub struct Executor<'a, T: StorageTransaction + 'a> {
     arena: ExecArena<'a, T>,
     root: ExecId,
     // Never read: it only keeps the plan that `arena` borrows from alive, and must stay
@@ -172,7 +173,7 @@ pub struct Executor<'a, T: Transaction + 'a> {
     keeper: PlanKeeper<'a>,
 }
 
-impl<'a, T: Transaction + 'a> Executor<'a, T> {
+impl<'a, T: StorageTransaction + 'a> Executor<'a, T> {
     pub(crate) fn new(arena: ExecArena<'a, T>, root: ExecId, keeper: PlanKeeper<'a>) -> Self {
         Self {
             arena,
@@ -184,11 +185,11 @@ impl<'a, T: Transaction + 'a> Executor<'a, T> {
     pub(crate) fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         plan_arena: &mut ExecMetaArena<A>,
-    ) -> Result<Option<&mut Tuple>, DatabaseError> {
+    ) -> Result<Option<&mut TupleImpl>, DatabaseError> {
         if !self.arena.next_tuple(self.root, plan_arena)? {
             return Ok(None);
         }
-        Ok(Some(self.arena.result_tuple_mut()))
+        Ok(Some(self.arena.result_mut()))
     }
 
     pub(crate) fn take_ddl_apply(&mut self) -> Vec<DDLApply> {
@@ -197,7 +198,7 @@ impl<'a, T: Transaction + 'a> Executor<'a, T> {
 }
 
 #[allow(clippy::large_enum_variant)]
-pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
+pub(crate) enum ExecNode<'a, T: StorageTransaction + 'a> {
     AddColumn(AddColumn<'a>),
     Analyze(Analyze<'a>),
     ChangeColumn(ChangeColumn<'a>),
@@ -226,7 +227,8 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Insert(Insert<'a>),
     Limit(Limit),
     MarkApply(MarkApply<'a>),
-    NestedLoopJoin(NestedLoopJoin<'a>),
+    IndexProbeJoin(IndexProbeJoin<'a>),
+    NestedLoopJoin(NestedLoopJoin),
     Projection(Projection<'a>),
     RecursiveCte(RecursiveCte<'a, T>),
     RecursiveScan(RecursiveScan),
@@ -248,7 +250,18 @@ pub(crate) enum ExecNode<'a, T: Transaction + 'a> {
     Window(Window<'a>),
 }
 
-pub(crate) trait ExecutorNode<'a, T: Transaction + 'a>: Sized {
+pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
+    // Reads restore their local state and reset inputs. Writes must not be replayed.
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::UnsupportedStmt(
+            "resetting a write executor".into(),
+        ))
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -256,7 +269,151 @@ pub(crate) trait ExecutorNode<'a, T: Transaction + 'a>: Sized {
     ) -> Result<(), DatabaseError>;
 }
 
-impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        match self {
+            ExecNode::AddColumn(exec) => {
+                <AddColumn as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Analyze(exec) => {
+                <Analyze as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::ChangeColumn(exec) => {
+                <ChangeColumn as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            #[cfg(feature = "copy")]
+            ExecNode::CopyFromFile(exec) => {
+                <CopyFromFile as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            #[cfg(feature = "copy")]
+            ExecNode::CopyToFile(exec) => {
+                <CopyToFile as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::CreateIndex(exec) => {
+                <CreateIndex as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::CreateTable(exec) => {
+                <CreateTable as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::CreateView(exec) => {
+                <CreateView as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Delete(exec) => {
+                <Delete as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Describe(exec) => {
+                <Describe as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::DropColumn(exec) => {
+                <DropColumn as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::DropIndex(exec) => {
+                <DropIndex as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::DropTable(exec) => {
+                <DropTable as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::DropView(exec) => {
+                <DropView as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Dummy(exec) => <Dummy as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena),
+            ExecNode::Explain(exec) => {
+                <Explain<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            #[cfg(feature = "spill")]
+            ExecNode::ExternalSort(exec) => {
+                <ExternalSort<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Filter(exec) => {
+                <Filter as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::FunctionScan(exec) => {
+                <FunctionScan<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::HashAgg(exec) => {
+                <HashAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::HashJoin(exec) => {
+                <HashJoin as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::IndexScan(exec) => {
+                <IndexScan<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Insert(exec) => {
+                <Insert as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Limit(exec) => <Limit as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena),
+            ExecNode::MarkApply(exec) => {
+                <MarkApply<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::IndexProbeJoin(exec) => {
+                <IndexProbeJoin<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::NestedLoopJoin(exec) => {
+                <NestedLoopJoin as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Projection(exec) => {
+                <Projection<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::RecursiveCte(exec) => {
+                <RecursiveCte<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::RecursiveScan(exec) => {
+                <RecursiveScan as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::ScalarQueryInit(exec) => {
+                <ScalarQueryInit<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::ScalarSubquery(exec) => {
+                <ScalarSubquery as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::SetMembership(exec) => {
+                <SetMembership as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::SeqScan(exec) => {
+                <SeqScan<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::ShowTables(exec) => {
+                <ShowTables<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::ShowViews(exec) => {
+                <ShowViews<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::SimpleAgg(exec) => {
+                <SimpleAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Sort(exec) => {
+                <Sort<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::StreamAgg(exec) => {
+                <StreamAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::StreamDistinct(exec) => {
+                <StreamDistinctExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::TopK(exec) => {
+                <TopK<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Truncate(exec) => {
+                <Truncate as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Union(exec) => <Union as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena),
+            ExecNode::Update(exec) => {
+                <Update<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Values(exec) => {
+                <Values<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+            ExecNode::Window(exec) => {
+                <Window<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+            }
+        }
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -341,8 +498,11 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
             ExecNode::MarkApply(exec) => {
                 <MarkApply<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
+            ExecNode::IndexProbeJoin(exec) => {
+                <IndexProbeJoin<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+            }
             ExecNode::NestedLoopJoin(exec) => {
-                <NestedLoopJoin<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <NestedLoopJoin as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::Projection(exec) => {
                 <Projection<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -407,17 +567,14 @@ impl<'a, T: Transaction + 'a> ExecNode<'a, T> {
     }
 }
 
-struct ExecNodes<'a, T: Transaction + 'a> {
+struct ExecNodes<'a, T: StorageTransaction + 'a> {
     items: Vec<std::cell::RefCell<ExecNode<'a, T>>>,
     pos: ExecId,
     executing: usize,
 }
 
-impl<'a, T: Transaction + 'a> ExecNodes<'a, T> {
-    fn position(&self) -> ExecId {
-        self.pos
-    }
-
+impl<'a, T: StorageTransaction + 'a> ExecNodes<'a, T> {
+    #[cfg(test)]
     fn seek(&mut self, pos: ExecId) {
         assert!(pos <= self.items.len(), "node position out of bounds");
         self.pos = pos;
@@ -442,7 +599,7 @@ impl<'a, T: Transaction + 'a> ExecNodes<'a, T> {
     }
 }
 
-pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
+pub(crate) struct ExecArena<'a, T: StorageTransaction + 'a> {
     nodes: ExecNodes<'a, T>,
     result: ExecResult,
     table_codec: TableCodec,
@@ -453,7 +610,7 @@ pub(crate) struct ExecArena<'a, T: Transaction + 'a> {
     recursive_input: Option<RecursiveInput>,
 }
 
-pub(crate) struct ExecArenaLocalState<'b, 'a, T: Transaction + 'a> {
+pub(crate) struct ExecArenaLocalState<'b, 'a, T: StorageTransaction + 'a> {
     transaction: *mut T,
     pub(crate) table_codec: &'b mut TableCodec,
     pub(crate) context: ExecutionContext<'a>,
@@ -462,7 +619,7 @@ pub(crate) struct ExecArenaLocalState<'b, 'a, T: Transaction + 'a> {
     ddl_apply: &'b mut Vec<DDLApply>,
 }
 
-impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
+impl<'b, 'a, T: StorageTransaction + 'a> ExecArenaLocalState<'b, 'a, T> {
     pub(crate) fn transaction(&self) -> &'a T {
         unsafe { &*self.transaction }
     }
@@ -471,22 +628,10 @@ impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
         unsafe { (&mut *self.transaction, &mut *self.table_codec) }
     }
 
-    pub(crate) fn tuple_transaction_codec_mut(&mut self) -> (&Tuple, &mut T, &mut TableCodec) {
+    pub(crate) fn tuple_transaction_codec_mut(&mut self) -> (&TupleImpl, &mut T, &mut TableCodec) {
         unsafe {
             (
                 &self.result.tuple,
-                &mut *self.transaction,
-                &mut *self.table_codec,
-            )
-        }
-    }
-
-    pub(crate) fn index_values_transaction_codec_mut(
-        &mut self,
-    ) -> (&[DataValue], &mut T, &mut TableCodec) {
-        unsafe {
-            (
-                &self.result.tuple.values,
                 &mut *self.transaction,
                 &mut *self.table_codec,
             )
@@ -510,7 +655,7 @@ impl<'b, 'a, T: Transaction + 'a> ExecArenaLocalState<'b, 'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
     pub(crate) fn set_statement_stamp(&mut self, stamp: u64) {
         self.table_codec.set_stamp(stamp);
     }
@@ -533,7 +678,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
     pub(crate) fn init_context(&mut self, context: ExecutionContext<'a>, transaction: &'a T) {
         if let Some(current) = &self.context {
             debug_assert!(current.is_same_context(context));
@@ -621,56 +766,82 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
         debug_assert!(self.runtime_probe_stack.is_empty());
         debug_assert!(self.ddl_apply.is_empty());
         self.nodes.clear();
-        self.result.tuple = Tuple::default();
+        self.result.tuple = TupleImpl::default();
         self.result.status = None;
         self.recursive_input = None;
     }
 
     #[inline]
-    pub(crate) fn result_tuple(&self) -> &Tuple {
+    pub(crate) fn result_tuple(&self) -> &TupleImpl {
         &self.result.tuple
     }
 
     #[inline]
-    pub(crate) fn result_tuple_mut(&mut self) -> &mut Tuple {
+    pub(crate) fn result_mut(&mut self) -> &mut TupleImpl {
         &mut self.result.tuple
     }
 
-    pub(crate) fn materialize_tuple(&mut self) -> Tuple {
+    #[inline]
+    pub(crate) fn output_tuple_mut(&mut self) -> &mut Tuple {
+        self.result.output_mut()
+    }
+
+    #[inline]
+    pub(crate) fn concat(
+        &mut self,
+        left: TupleImpl,
+        right: TupleImpl,
+        pk: Option<TupleId>,
+    ) -> TupleImpl {
+        self.result.concat_pool.concat(left, right, pk)
+    }
+
+    #[inline]
+    pub(crate) fn release(&mut self, tuple: TupleImpl) {
+        self.result.concat_pool.release(tuple);
+    }
+
+    pub(crate) fn take_tuple(&mut self) -> TupleImpl {
         std::mem::take(&mut self.result.tuple)
     }
 
-    pub(crate) fn rewrite<E: RewriteExpression, TInput: TupleLike + ?Sized>(
+    pub(crate) fn rewrite<E: RewriteExpression, TInput: Input + ?Sized>(
         &mut self,
         exprs: &[E],
         arena: &dyn MetaArena,
         input: Option<&TInput>,
     ) -> Result<(), DatabaseError> {
-        let values = &mut self.result.tuple.values;
-        let base = values.len();
-        values.reserve(exprs.len());
-
+        let base = {
+            let values = &mut self.result.tuple.rightmost_mut().values;
+            values.reserve(exprs.len());
+            values.len()
+        };
         for expr in exprs {
             let value = {
-                let input_values = &values[..base];
                 let expression = expr.expression(arena);
                 match input {
                     Some(input) => expression.eval(arena, Some(input)),
-                    None => expression.eval(arena, Some(&input_values)),
+                    None => expression.eval(arena, Some(&self.result.tuple)),
                 }
                 .map(|value| value.into_owned())
             };
             match value {
-                Ok(value) => values.push(value),
+                Ok(value) => self.result.tuple.push(value),
                 Err(error) => {
-                    values.truncate(base);
+                    self.result.tuple.rightmost_mut().values.truncate(base);
                     return Err(error);
                 }
             }
         }
 
-        values.rotate_left(base);
-        values.truncate(exprs.len());
+        let pk = self.result.tuple.take_pk();
+        let tuple = self
+            .result
+            .concat_pool
+            .retain_rightmost(&mut self.result.tuple);
+        tuple.values.rotate_left(base);
+        tuple.values.truncate(exprs.len());
+        tuple.pk = pk;
         Ok(())
     }
 
@@ -685,9 +856,23 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     }
 
     #[inline]
-    pub(crate) fn produce_tuple(&mut self, tuple: Tuple) {
+    pub(crate) fn produce(&mut self, tuple: TupleImpl) {
         self.result.tuple = tuple;
         self.resume();
+    }
+
+    pub(crate) fn reset<A: MetaArena + 'a>(
+        &mut self,
+        id: ExecId,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        let slot = &self.nodes.items[id] as *const std::cell::RefCell<ExecNode<'a, T>>;
+        self.nodes.executing += 1;
+        // SAFETY: the same slot/RefCell invariant as next_tuple. Reset may recurse
+        // into inputs, but cannot relocate slots or overwrite an active node.
+        let result = unsafe { (&*slot).borrow_mut().reset(self, plan_arena) };
+        self.nodes.executing -= 1;
+        result
     }
 
     pub(crate) fn next_tuple<A: MetaArena + 'a>(
@@ -715,7 +900,7 @@ impl<'a, T: Transaction + 'a> ExecArena<'a, T> {
     }
 }
 
-pub(crate) trait ReadExecutor<'a, T: Transaction + 'a>: Sized {
+pub(crate) trait ReadExecutor<'a, T: StorageTransaction + 'a>: Sized {
     type Input;
 
     fn into_executor(
@@ -727,7 +912,7 @@ pub(crate) trait ReadExecutor<'a, T: Transaction + 'a>: Sized {
     ) -> ExecId;
 }
 
-pub(crate) trait WriteExecutor<'a, T: Transaction + 'a>: Sized {
+pub(crate) trait WriteExecutor<'a, T: StorageTransaction + 'a>: Sized {
     type Input;
 
     fn into_executor(
@@ -747,7 +932,7 @@ pub(crate) fn build_read<'a, T>(
     transaction: &T,
 ) -> ExecId
 where
-    T: Transaction + 'a,
+    T: StorageTransaction + 'a,
 {
     macro_rules! read {
         ($executor:ty, $input:expr) => {
@@ -801,6 +986,10 @@ where
             let (left, right) = plan.childrens.twins();
             read!(MarkApply<'a>, (op, left, right))
         }
+        Operator::IndexProbeJoin(op) => {
+            let (left, right) = plan.childrens.twins();
+            read!(IndexProbeJoin<'a>, (op, left, right))
+        }
         Operator::Join(op) => {
             let use_hash_join = matches!(
                 &op.on,
@@ -817,7 +1006,7 @@ where
             if use_hash_join {
                 read!(HashJoin, (op, left, right))
             } else {
-                read!(NestedLoopJoin<'a>, (op, left, right))
+                read!(NestedLoopJoin, (op, left, right))
             }
         }
         Operator::Project(op) => read!(Projection<'a>, (op, plan.childrens.only())),
@@ -876,7 +1065,7 @@ pub(crate) fn build_write<'a, T>(
     transaction: &'a T,
 ) -> ExecId
 where
-    T: Transaction + 'a,
+    T: StorageTransaction + 'a,
 {
     arena.init_context(cache, transaction);
     let transaction_ref: &T = transaction;
@@ -950,13 +1139,13 @@ mod test_utils {
         )
     }
 
-    pub(crate) struct TestExecutor<'a, T: Transaction + 'a> {
+    pub(crate) struct TestExecutor<'a, T: StorageTransaction + 'a> {
         executor: Executor<'a, T>,
         plan_arena: ExecMetaArena<PlanArena<'a>>,
     }
 
-    impl<T: Transaction> TestExecutor<'_, T> {
-        pub(crate) fn next_tuple(&mut self) -> Result<Option<&mut Tuple>, DatabaseError> {
+    impl<T: StorageTransaction> TestExecutor<'_, T> {
+        pub(crate) fn next_tuple(&mut self) -> Result<Option<&mut TupleImpl>, DatabaseError> {
             self.executor.next_tuple(&mut self.plan_arena)
         }
     }
@@ -968,7 +1157,7 @@ mod test_utils {
         transaction: &'a T,
     ) -> TestExecutor<'a, T>
     where
-        T: Transaction + 'a,
+        T: StorageTransaction + 'a,
         E: ReadExecutor<'a, T>,
     {
         let mut arena = ExecArena::with_capacity(0);
@@ -994,7 +1183,7 @@ mod test_utils {
         transaction: &'a T,
     ) -> TestExecutor<'a, T>
     where
-        T: Transaction + 'a,
+        T: StorageTransaction + 'a,
         E: WriteExecutor<'a, T>,
     {
         let mut arena = ExecArena::with_capacity(0);
@@ -1012,14 +1201,14 @@ mod test_utils {
         }
     }
 
-    pub fn try_collect<T: Transaction>(
+    pub fn try_collect<T: StorageTransaction>(
         executor: TestExecutor<'_, T>,
-    ) -> Result<Vec<Tuple>, DatabaseError> {
+    ) -> Result<Vec<TupleImpl>, DatabaseError> {
         let mut executor = executor;
         let mut tuples = Vec::new();
 
         while let Some(tuple) = executor.next_tuple()? {
-            tuples.push(tuple.clone());
+            tuples.push(std::mem::take(tuple));
         }
         Ok(tuples)
     }
@@ -1064,6 +1253,42 @@ mod test {
         drop(active);
         assert_eq!(arena.nodes.items.len(), 1);
         assert_eq!(arena.nodes.items.as_ptr(), slot);
+    }
+
+    #[test]
+    fn rewrite_projects_joined_row() -> Result<(), DatabaseError> {
+        use crate::catalog::{ColumnCatalog, ColumnDesc};
+        use crate::types::value::DataValue;
+        use crate::types::LogicalType;
+
+        let table_arena = TableArenaCell::default();
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let column = plan_arena.alloc_column(ColumnCatalog::new(
+            "c".to_string(),
+            true,
+            ColumnDesc::new(LogicalType::Integer, None, false, None)?,
+        ));
+        let exprs = [3, 0, 1].map(|position| {
+            plan_arena.alloc_expression(ScalarExpression::column_expr(column, position))
+        });
+        let ints = |values: [i32; 2]| Tuple::new(None, values.map(DataValue::Int32).to_vec());
+
+        let mut arena = ExecArena::<'_, MemoryTransaction>::with_capacity(0);
+        for base in [0, 10] {
+            arena.result.tuple = TupleImpl::concat(
+                ints([base, base + 1]).into(),
+                ints([base + 2, base + 3]).into(),
+                Some(DataValue::Int32(base)),
+            );
+            arena.rewrite(&exprs, &plan_arena, None::<&[DataValue]>)?;
+            assert!(matches!(arena.result_tuple(), TupleImpl::Tuple(_)));
+            assert_eq!(arena.result_tuple().pk(), Some(&DataValue::Int32(base)));
+            assert_eq!(
+                *arena.result_tuple(),
+                [base + 3, base, base + 1].map(DataValue::Int32)
+            );
+        }
+        Ok(())
     }
 }
 // GRCOV_EXCL_STOP

@@ -15,9 +15,12 @@
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::pattern::Pattern;
-use crate::optimizer::core::rule::{BestPhysicalOption, ImplementationRule, MatchPattern};
+use crate::optimizer::core::rule::{
+    keep_best_physical_option, BestPhysicalOption, ImplementationRule, MatchPattern,
+};
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, SortOption};
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
+use crate::planner::{LogicalPlan, PlanArena};
 use crate::types::index::{IndexLookup, IndexType};
 use std::sync::LazyLock;
 
@@ -37,12 +40,13 @@ impl MatchPattern for SeqScanImplementation {
 impl ImplementationRule for SeqScanImplementation {
     fn update_best_option(
         &self,
-        op: &Operator,
-        arena: &crate::planner::PlanArena,
+        plan: &LogicalPlan,
+        arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
+        _: &mut crate::optimizer::core::rule::HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
-        if let Operator::TableScan(scan_op) = op {
+        if let Operator::TableScan(scan_op) = &plan.operator {
             let cost = scan_op
                 .index_infos
                 .iter()
@@ -55,13 +59,15 @@ impl ImplementationRule for SeqScanImplementation {
                 .map(|index_info| loader.load(&scan_op.table_name, arena.index(index_info.meta).id))
                 .transpose()?
                 .flatten()
-                .map(|statistics_meta| statistics_meta.histogram().values_len());
+                .map(|index_statistics| index_statistics.histogram().values_len());
 
-            crate::optimizer::core::rule::keep_best_physical_option(
-                best_physical_option,
-                PhysicalOption::new(PlanImpl::SeqScan, SortOption::None),
-                cost,
+            let option = PhysicalOption::new(
+                PlanImpl::SeqScan,
+                SortOption::None,
+                cost.map(|rows| RowCountOption::Estimated { rows, ndv: None })
+                    .unwrap_or(RowCountOption::Unknown),
             );
+            keep_best_physical_option(best_physical_option, option, cost);
             Ok(())
         } else {
             unreachable!("invalid operator!")
@@ -80,23 +86,35 @@ impl MatchPattern for IndexScanImplementation {
 impl ImplementationRule for IndexScanImplementation {
     fn update_best_option(
         &self,
-        op: &Operator,
-        arena: &crate::planner::PlanArena,
+        plan: &LogicalPlan,
+        arena: &PlanArena,
         loader: &StatisticMetaLoader<'_>,
+        state: &mut crate::optimizer::core::rule::HintState,
         best_physical_option: &mut BestPhysicalOption,
     ) -> Result<(), DatabaseError> {
-        if let Operator::TableScan(scan_op) = op {
+        if let Operator::TableScan(scan_op) = &plan.operator {
             for index_info in scan_op.index_infos.iter() {
                 let Some(IndexLookup::Static(range)) = &index_info.lookup else {
                     continue;
                 };
                 let mut cost = None;
+                let mut estimated_rows = None;
+                let mut ndv = None;
 
                 let index_meta = arena.index(index_info.meta);
-                if let Some(mut row_count) =
-                    loader.collect_count(&scan_op.table_name, index_meta.id, range)?
-                {
+                // A PK/Unique equality range has an exact row count even without statistics.
+                let counted = loader
+                    .collect_count(
+                        &scan_op.table_name,
+                        index_meta.id,
+                        range,
+                        &mut state.histogram_buf,
+                    )?
+                    .or_else(|| unique_eq_row_count(index_meta.ty, range).map(|rows| (rows, rows)));
+                if let Some((mut row_count, distinct_count)) = counted {
                     row_count = adjust_index_row_count(index_meta.ty, range, row_count);
+                    estimated_rows = Some(row_count);
+                    ndv = Some(distinct_count.min(row_count));
                     if index_info.covered_deserializers.is_none()
                         && !matches!(index_meta.ty, IndexType::PrimaryKey { .. })
                     {
@@ -142,14 +160,14 @@ impl ImplementationRule for IndexScanImplementation {
                     }
                 }
 
-                crate::optimizer::core::rule::keep_best_physical_option(
-                    best_physical_option,
-                    PhysicalOption::new(
-                        PlanImpl::IndexScan(Box::new(index_info.clone())),
-                        index_info.sort_option.clone(),
-                    ),
-                    cost,
+                let option = PhysicalOption::new(
+                    PlanImpl::IndexScan(Box::new(index_info.clone())),
+                    index_info.sort_option.clone(),
+                    estimated_rows
+                        .map(|rows| RowCountOption::Estimated { rows, ndv })
+                        .unwrap_or(RowCountOption::Unknown),
                 );
+                keep_best_physical_option(best_physical_option, option, cost);
             }
 
             Ok(())

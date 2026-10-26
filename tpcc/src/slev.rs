@@ -52,7 +52,7 @@ impl TpccTransaction for Slev {
                 (2, DataValue::Int16(args.w_id as i16)),
             ],
             &mut |tuple| {
-                d_next_o_id = tuple.values[0].i32().unwrap();
+                d_next_o_id = tuple[0].i32().unwrap();
                 Ok(())
             },
         )?;
@@ -67,7 +67,7 @@ impl TpccTransaction for Slev {
                 (4, DataValue::Int32(d_next_o_id)),
             ],
             &mut |tuple| {
-                item_ids.push(tuple.values[0].i32().unwrap());
+                item_ids.push(tuple[0].i32().unwrap());
                 Ok(())
             },
         )?;
@@ -82,7 +82,7 @@ impl TpccTransaction for Slev {
                     (3, DataValue::Int16(args.level as i16)),
                 ],
                 &mut |tuple| {
-                    _low_stock += tuple.values[0].i32().unwrap();
+                    _low_stock += tuple[0].i32().unwrap();
                     Ok(())
                 },
             )?;

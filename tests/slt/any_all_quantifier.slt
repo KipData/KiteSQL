@@ -48,3 +48,159 @@ drop table any_all_outer;
 
 statement ok
 drop table any_all_inner;
+
+# Independent guards skip RHSs that cannot affect their own AND/OR branches.
+statement ok
+CREATE TABLE guard_left (x INTEGER PRIMARY KEY)
+
+statement ok
+INSERT INTO guard_left VALUES (1), (2), (3), (4), (5), (6)
+
+statement ok
+CREATE TABLE guard_bad (id INTEGER PRIMARY KEY, s VARCHAR)
+
+statement ok
+INSERT INTO guard_bad VALUES (1, 'not an integer')
+
+# IN2 is masked by its ordinary OR sibling or by x > 3.
+# IN3's AND condition is false for every input row.
+# Neither CAST is allowed to execute, including after IN1 returns FALSE.
+query I rowsort
+SELECT x FROM guard_left WHERE x IN (SELECT x FROM guard_left WHERE x = 5) OR (x <= 3 AND (x < 4 OR x IN (SELECT CAST(s AS INTEGER) FROM guard_bad))) OR (x < 0 AND x IN (SELECT CAST(s AS INTEGER) FROM guard_bad))
+----
+1
+2
+3
+5
+
+# NOT preserves the same local demand conditions and three-valued semantics.
+query I rowsort
+SELECT x FROM guard_left WHERE NOT (x IN (SELECT x FROM guard_left WHERE x = 5) OR (x <= 3 AND (x < 4 OR x IN (SELECT CAST(s AS INTEGER) FROM guard_bad))) OR (x < 0 AND x IN (SELECT CAST(s AS INTEGER) FROM guard_bad)))
+----
+4
+6
+
+statement ok
+CREATE TABLE guard_flags (id INTEGER PRIMARY KEY, b BOOLEAN)
+
+statement ok
+INSERT INTO guard_flags VALUES (1, FALSE)
+
+# IN1's marker is consumed by IN2, even though it is absent from the final Filter.
+# It must not be replaced with NULL before the second comparison.
+query I rowsort
+SELECT x FROM guard_left WHERE (x IN (SELECT x FROM guard_left WHERE x = 5)) IN (SELECT b FROM guard_flags)
+----
+1
+2
+3
+4
+6
+
+statement ok
+drop table guard_flags;
+
+statement ok
+drop table guard_bad;
+
+statement ok
+drop table guard_left;
+
+# Repeated outer rows materialize the RHS keys; more than 1024 keys spill into
+# several sorted runs. Membership uses binary search, other ops scan the keys.
+statement ok
+create table mat_outer(id int primary key, a int)
+
+statement ok
+create table mat_inner(id int primary key, b int)
+
+statement ok
+create table mat_inner_null(id int primary key, b int)
+
+statement ok
+insert into mat_outer select cast(number as int), cast(number as int) from table(numbers(2000))
+
+statement ok
+insert into mat_outer values (2000, null)
+
+statement ok
+insert into mat_inner select cast(number as int), cast(number * 2 as int) from table(numbers(1500))
+
+statement ok
+insert into mat_inner_null select id, b from mat_inner
+
+statement ok
+insert into mat_inner_null values (1500, null)
+
+statement ok
+analyze table mat_outer
+
+statement ok
+analyze table mat_inner
+
+statement ok
+analyze table mat_inner_null
+
+query I
+select count(*) from mat_outer where a in (select b from mat_inner)
+----
+1000
+
+query I
+select count(*) from mat_outer where a not in (select b from mat_inner)
+----
+1000
+
+query I
+select count(*) from mat_outer where a <> all(select b from mat_inner)
+----
+1000
+
+query I
+select count(*) from mat_outer where a in (select b from mat_inner_null)
+----
+1000
+
+query I
+select count(*) from mat_outer where a not in (select b from mat_inner_null)
+----
+0
+
+query I
+select count(*) from mat_outer where (a in (select b from mat_inner_null)) is null
+----
+1001
+
+query I
+select count(*) from mat_outer where a > any(select b from mat_inner)
+----
+1999
+
+query I
+select count(*) from mat_outer where a <= all(select b from mat_inner)
+----
+1
+
+query I
+select count(*) from mat_outer where a > all(select b from mat_inner_null)
+----
+0
+
+query I
+select count(*) from mat_outer where a >= any(select b from mat_inner_null)
+----
+2000
+
+query I
+select count(*) from mat_outer where (a <= all(select b from mat_inner_null)) is null
+----
+2
+
+statement ok
+drop table mat_outer
+
+statement ok
+drop table mat_inner
+
+statement ok
+drop table mat_inner_null

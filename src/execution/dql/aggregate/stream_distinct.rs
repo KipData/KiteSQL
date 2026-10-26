@@ -20,17 +20,17 @@ use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::Transaction;
-use crate::types::tuple::Tuple;
+use crate::storage::StorageTransaction;
+use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
 
 pub struct StreamDistinctExecutor<'a> {
     groupby_exprs: &'a [ExprRef],
     input: ExecId,
-    last_keys: Option<Tuple>,
+    last_keys: Option<TupleImpl>,
 }
 
-impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
     fn into_executor(
@@ -49,7 +49,16 @@ impl<'a, T: Transaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a>
     }
 }
 
-impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.last_keys = None;
+        arena.reset(self.input, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, T>,
@@ -58,7 +67,7 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a>
         loop {
             if !arena.next_tuple(self.input, plan_arena)? {
                 if let Some(last_keys) = self.last_keys.take() {
-                    drop(std::mem::replace(arena.result_tuple_mut(), last_keys));
+                    drop(std::mem::replace(arena.result_mut(), last_keys));
                     arena.resume();
                 } else {
                     arena.finish();
@@ -68,14 +77,14 @@ impl<'a, T: Transaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a>
             arena.rewrite(self.groupby_exprs, plan_arena, None::<&[DataValue]>)?;
 
             if let Some(last_keys) = &mut self.last_keys {
-                if last_keys.values == arena.result_tuple().values {
+                if last_keys.values_eq(arena.result_tuple()) {
                     continue;
                 }
-                std::mem::swap(last_keys, arena.result_tuple_mut());
+                std::mem::swap(last_keys, arena.result_mut());
                 arena.resume();
                 return Ok(());
             }
-            self.last_keys = Some(arena.materialize_tuple());
+            self.last_keys = Some(arena.take_tuple());
         }
     }
 }
@@ -130,9 +139,9 @@ mod tests {
     ) -> Result<LogicalPlan, DatabaseError> {
         HepOptimizerPipeline::builder()
             .before_batch(
-                "Expression Remapper".to_string(),
+                "Expression Remapper",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::EvaluatorBind],
+                &[NormalizationRuleImpl::EvaluatorBind],
             )
             .build()
             .instantiate(plan)
@@ -186,7 +195,7 @@ mod tests {
 
         let actual = tuples
             .into_iter()
-            .flat_map(|tuple| tuple.values)
+            .flat_map(|mut tuple| tuple.take_values())
             .flat_map(|value| value.i32())
             .collect_vec();
         assert_eq!(actual, vec![1, 2, 3]);
@@ -242,7 +251,10 @@ mod tests {
             &transaction,
         ))?;
 
-        let actual = tuples.into_iter().map(|tuple| tuple.values).collect_vec();
+        let actual = tuples
+            .into_iter()
+            .map(|mut tuple| tuple.take_values())
+            .collect_vec();
         assert_eq!(
             actual,
             vec![

@@ -18,8 +18,8 @@ use std::cmp;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
-const MIN_PRECISION: u8 = 4;
-const MAX_PRECISION: u8 = 26;
+pub(crate) const MIN_PRECISION: u8 = 4;
+pub(crate) const MAX_PRECISION: u8 = 26;
 
 #[derive(Debug, Clone)]
 pub struct HyperLogLog<K> {
@@ -29,17 +29,16 @@ pub struct HyperLogLog<K> {
 }
 
 impl<K: Hash> HyperLogLog<K> {
-    pub fn with_relative_error(relative_error: f64) -> Result<Self, DatabaseError> {
-        if relative_error <= 0.0 || relative_error.is_nan() {
+    /// Creates a sketch with `2^precision` registers, whose standard error is
+    /// about `1.04 / sqrt(2^precision)`.
+    pub fn with_precision(precision: u8) -> Result<Self, DatabaseError> {
+        if !(MIN_PRECISION..=MAX_PRECISION).contains(&precision) {
             return Err(DatabaseError::InvalidValue(format!(
-                "hyperloglog relative error must be greater than zero, got {relative_error}"
+                "hyperloglog precision must be between {MIN_PRECISION} and {MAX_PRECISION}, got {precision}"
             )));
         }
-
-        let register_count = Self::optimal_register_count(relative_error)?;
-        let precision = register_count.trailing_zeros() as u8;
         Ok(Self {
-            registers: vec![0; register_count],
+            registers: vec![0; 1 << precision],
             precision,
             phantom_k: PhantomData,
         })
@@ -80,32 +79,6 @@ impl<K: Hash> HyperLogLog<K> {
         estimate.round() as usize
     }
 
-    fn optimal_register_count(relative_error: f64) -> Result<usize, DatabaseError> {
-        let count = (1.04 / relative_error).powi(2).ceil();
-        if !count.is_finite() || count > usize::MAX as f64 {
-            return Err(DatabaseError::InvalidValue(format!(
-                "hyperloglog relative error is too small: {relative_error}"
-            )));
-        }
-
-        let min_count = 1usize << MIN_PRECISION;
-        let count = cmp::max(min_count, count as usize)
-            .checked_next_power_of_two()
-            .ok_or_else(|| {
-                DatabaseError::InvalidValue(format!(
-                    "hyperloglog register count overflow for relative error: {relative_error}"
-                ))
-            })?;
-        let precision = count.trailing_zeros() as u8;
-        if precision > MAX_PRECISION {
-            return Err(DatabaseError::InvalidValue(format!(
-                "hyperloglog relative error is too small: {relative_error}"
-            )));
-        }
-
-        Ok(count)
-    }
-
     fn hash<Q: ?Sized + Hash>(value: &Q) -> u64 {
         let (key0, key1) = HLL_HASH_KEYS;
         let mut hasher = StableHasher::new_with_keys(key0, key1);
@@ -130,7 +103,7 @@ mod tests {
 
     #[test]
     fn estimate_ignores_duplicates() {
-        let mut hll = HyperLogLog::<u64>::with_relative_error(0.01).unwrap();
+        let mut hll = HyperLogLog::<u64>::with_precision(14).unwrap();
         for _ in 0..1000 {
             hll.add(&7);
         }
@@ -139,8 +112,21 @@ mod tests {
     }
 
     #[test]
+    fn precision_sets_register_count() {
+        assert_eq!(
+            HyperLogLog::<u64>::with_precision(14)
+                .unwrap()
+                .registers
+                .len(),
+            1 << 14
+        );
+        assert!(HyperLogLog::<u64>::with_precision(3).is_err());
+        assert!(HyperLogLog::<u64>::with_precision(27).is_err());
+    }
+
+    #[test]
     fn estimate_distinct_values_within_error_budget() {
-        let mut hll = HyperLogLog::<u64>::with_relative_error(0.02).unwrap();
+        let mut hll = HyperLogLog::<u64>::with_precision(12).unwrap();
         for value in 0..10_000 {
             hll.add(&value);
         }

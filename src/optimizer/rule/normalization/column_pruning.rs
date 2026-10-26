@@ -16,14 +16,17 @@ use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::agg::AggKind;
 use crate::expression::visitor::ExprVisitor;
-use crate::expression::{AliasType, HasCountStar, ScalarExpression};
+use crate::expression::{HasCountStar, ScalarExpression};
 use crate::optimizer::core::rule::NormalizationRule;
+use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::normalization::{
     remap_expr_positions, remap_exprs_positions, PositionRemapper,
 };
 use crate::planner::operator::join::JoinCondition;
-use crate::planner::operator::visitor::{OperatorExprVisitor, OperatorVisitor};
-use crate::planner::operator::visitor_mut::{OperatorExprVisitorMut, OperatorVisitorMut};
+use crate::planner::operator::visitor::{ChildrenVisit, OperatorExprVisitor, OperatorVisitor};
+use crate::planner::operator::visitor_mut::{
+    ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
+};
 use crate::planner::operator::Operator;
 use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
@@ -95,18 +98,10 @@ impl ExprVisitor<dyn MetaArena + '_> for ReferencedColumnCollector<'_, '_> {
     fn visit_column_ref(
         &mut self,
         column: &crate::catalog::ColumnRef,
+        _: usize,
     ) -> Result<(), DatabaseError> {
         self.referenced_columns.insert(*column, self.arena);
         Ok(())
-    }
-
-    fn visit_alias(
-        &mut self,
-        expr: ExprRef,
-        _ty: &AliasType,
-        arena: &(dyn MetaArena + '_),
-    ) -> Result<(), DatabaseError> {
-        self.visit(expr, arena)
     }
 }
 
@@ -130,8 +125,11 @@ impl ColumnPruning {
             referenced_columns,
             arena,
         };
-        OperatorExprVisitor::new(&mut collector, arena as &dyn MetaArena)
-            .visit_operator(operator)?;
+        OperatorExprVisitor::new(&mut collector, arena as &dyn MetaArena).visit_operator(
+            operator,
+            None,
+            &mut ChildrenVisit::empty(),
+        )?;
 
         struct ReferencedOperatorColumnCollector<'a, 'p> {
             referenced_columns: &'a mut ReferencedColumns,
@@ -142,14 +140,10 @@ impl ColumnPruning {
             fn visit_mark_apply(
                 &mut self,
                 op: &'a crate::planner::operator::mark_apply::MarkApplyOperator,
+                _children: &mut ChildrenVisit<'a>,
             ) -> Result<(), DatabaseError> {
-                if !matches!(
-                    op.kind,
-                    crate::planner::operator::mark_apply::MarkApplyKind::InnerJoin
-                ) {
-                    self.referenced_columns
-                        .insert(*op.output_column(), self.arena);
-                }
+                self.referenced_columns
+                    .insert(*op.output_column(), self.arena);
                 Ok(())
             }
 
@@ -174,6 +168,7 @@ impl ColumnPruning {
             fn visit_union(
                 &mut self,
                 op: &'a crate::planner::operator::union::UnionOperator,
+                _children: &mut ChildrenVisit<'a>,
             ) -> Result<(), DatabaseError> {
                 self.referenced_columns.extend(
                     op.left_schema_ref
@@ -188,6 +183,7 @@ impl ColumnPruning {
             fn visit_set_membership(
                 &mut self,
                 op: &'a crate::planner::operator::set_membership::SetMembershipOperator,
+                _children: &mut ChildrenVisit<'a>,
             ) -> Result<(), DatabaseError> {
                 self.referenced_columns.extend(
                     op.left_schema_ref
@@ -202,6 +198,7 @@ impl ColumnPruning {
             fn visit_delete(
                 &mut self,
                 op: &'a crate::planner::operator::delete::DeleteOperator,
+                _children: &mut ChildrenVisit<'a>,
             ) -> Result<(), DatabaseError> {
                 self.referenced_columns
                     .extend(op.primary_keys.iter().copied(), self.arena);
@@ -213,7 +210,7 @@ impl ColumnPruning {
             referenced_columns,
             arena,
         }
-        .visit_operator(operator)
+        .visit_operator(operator, None, &mut ChildrenVisit::empty())
     }
 
     fn extend_expr_referenced_columns<'a>(
@@ -270,19 +267,7 @@ impl ColumnPruning {
             &mut PositionRemapper::new(removed_positions, remapped_exprs),
             arena,
         )
-        .visit_operator(operator, None)
-    }
-
-    fn remap_exprs_after_child_change<'a>(
-        exprs: impl IntoIterator<Item = &'a mut ExprRef>,
-        removed_positions: &[usize],
-        remapped_exprs: &mut HashSet<ExprRef>,
-        arena: &mut PlanArena<'_>,
-    ) -> Result<(), DatabaseError> {
-        if removed_positions.is_empty() {
-            return Ok(());
-        }
-        remap_exprs_positions(exprs, removed_positions, remapped_exprs, arena)
+        .visit_operator(operator, None, &mut ChildrenVisitMut::empty())
     }
 
     fn apply_only_child(
@@ -520,6 +505,7 @@ impl ColumnPruning {
             | Operator::Limit(_)
             | Operator::ScalarQueryInit(_)
             | Operator::MarkApply(_)
+            | Operator::IndexProbeJoin(_)
             | Operator::ScalarSubquery(_)
             | Operator::Join(_)
             | Operator::Filter(_)
@@ -557,7 +543,11 @@ impl ColumnPruning {
                     )?;
                     changed |= outcome.changed;
                     outcome.removed_positions.truncate(main_removed_end);
-                } else if matches!(operator, Operator::MarkApply(_)) {
+                } else if matches!(
+                    operator,
+                    Operator::MarkApply(_) | Operator::IndexProbeJoin(_)
+                ) {
+                    // Both inputs stay intact, so probe/predicate positions need no remapping.
                     Self::extend_operator_referenced_columns(
                         operator,
                         &mut required_columns,
@@ -663,21 +653,6 @@ impl ColumnPruning {
                                     );
                                 }
                             }
-                        } else if let Operator::MarkApply(op) = operator {
-                            Self::offset_removed_positions(
-                                &mut outcome.removed_positions
-                                    [right_removed_start..right_removed_end],
-                                old_left_outputs_len,
-                            );
-                            let removed_positions =
-                                &outcome.removed_positions[left_removed_start..right_removed_end];
-                            Self::remap_exprs_after_child_change(
-                                op.predicates_mut().iter_mut(),
-                                removed_positions,
-                                &mut outcome.remapped_exprs,
-                                arena,
-                            )?;
-                            outcome.removed_positions.truncate(right_removed_start);
                         } else {
                             Self::offset_removed_positions(
                                 &mut outcome.removed_positions
@@ -835,7 +810,8 @@ impl NormalizationRule for ColumnPruning {
     fn apply(
         &self,
         plan: &mut LogicalPlan,
-        arena: &mut crate::planner::PlanArena,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
         let outcome = Self::_apply(
             ReferencedColumns::with_arena_capacity(arena),
@@ -868,9 +844,9 @@ mod tests {
 
         HepOptimizerPipeline::builder()
             .before_batch(
-                format!("column_pruning::{sql}"),
+                "column_pruning",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::ColumnPruning],
+                &[NormalizationRuleImpl::ColumnPruning],
             )
             .build()
             .instantiate(plan)
@@ -1020,9 +996,9 @@ mod tests {
 
         let pipeline = HepOptimizerPipeline::builder()
             .before_batch(
-                "test_column_pruning".to_string(),
+                "test_column_pruning",
                 HepBatchStrategy::once_topdown(),
-                vec![NormalizationRuleImpl::ColumnPruning],
+                &[NormalizationRuleImpl::ColumnPruning],
             )
             .build();
         let best_plan = pipeline.instantiate(plan).find_best(None, &mut arena)?;
