@@ -696,12 +696,30 @@ fn endpoint_count(
     sketch: &CountMinSketch<DataValue>,
 ) -> Option<usize> {
     let bucket_key_type = bucket.lower.logical_type();
-    debug_assert_eq!(bucket_key_type, bucket.upper.logical_type());
+    debug_assert!(key_types_match(
+        &bucket_key_type,
+        &bucket.upper.logical_type()
+    ));
 
-    if value.logical_type() == bucket_key_type {
+    if key_types_match(&value.logical_type(), &bucket_key_type) {
         Some(sketch.estimate(value))
     } else {
         None
+    }
+}
+
+// Composite keys report a NULL component as `SqlNull`, so it matches any type.
+fn key_types_match(left: &LogicalType, right: &LogicalType) -> bool {
+    match (left, right) {
+        (LogicalType::Tuple(left), LogicalType::Tuple(right)) => {
+            left.len() == right.len()
+                && left.iter().zip(right).all(|(left, right)| {
+                    matches!(left, LogicalType::SqlNull)
+                        || matches!(right, LogicalType::SqlNull)
+                        || key_types_match(left, right)
+                })
+        }
+        _ => left == right,
     }
 }
 
@@ -1756,6 +1774,22 @@ mod tests {
             Some(1)
         );
         assert_eq!(super::endpoint_count(&prefix_bound, &bucket, &sketch), None);
+
+        // NULL components sort last, so the final bucket can end at `(NULL, x)`.
+        let null_key = DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(3)]);
+        let null_bucket = Bucket {
+            upper: null_key.clone(),
+            ..bucket
+        };
+        sketch.increment(&null_key);
+        assert_eq!(
+            super::endpoint_count(&upper_bound, &null_bucket, &sketch),
+            Some(1)
+        );
+        assert_eq!(
+            super::endpoint_count(&null_key, &null_bucket, &sketch),
+            Some(1)
+        );
 
         Ok(())
     }
