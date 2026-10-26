@@ -129,7 +129,7 @@ print(list(db.run("select * from demo")))
 ```
 
 ## TPC-C
-`make tpcc` runs the benchmark (`--backend rocksdb|lmdb`); `make tpcc-dual` cross-checks every statement against SQLite.
+`make tpcc` runs the benchmark (`--backend kitesql-lmdb|kitesql-rocksdb|sqlite`); `make tpcc-dual` cross-checks every statement against SQLite.
 
 720-second single-thread run on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), every backend pinned to the same P-core and run without fsync on commit. Latencies are p90 in µs, including commit.
 
