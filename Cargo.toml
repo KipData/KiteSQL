@@ -13,6 +13,7 @@ repository    = "https://github.com/KipData/KiteSQL"
 readme        = "README.md"
 keywords      = ["sql", "sqlite", "database", "mysql"]
 categories    = ["development-tools", "database"]
+exclude       = ["tests/kitesql-testing", "tpcc/results"]
 
 [[bin]]
 name              = "kitesql-shell"
