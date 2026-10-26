@@ -1,7 +1,28 @@
 # TPCC on KiteSQL
-Run `make tpcc` (or `cargo run -p tpcc --release`) to exercise the workload on KiteSQL's native storage.
+Run `make tpcc` (or `cargo run -p tpcc --release`) to exercise the workload on KiteSQL with LMDB storage.
 
-Run `make tpcc-dual` to execute the workload on KiteSQL while mirroring every statement to an in-memory SQLite database; the runner asserts that both engines return identical tuples, making it ideal for correctness validation. This target runs for 60 seconds (`--measure-time 60`). Use `cargo run -p tpcc --release -- --backend dual --measure-time <secs>` for a custom duration.
+| Target | Command |
+| --- | --- |
+| `make tpcc` / `make tpcc-kitesql-lmdb` | `--backend kitesql-lmdb` |
+| `make tpcc-kitesql-rocksdb` | `--backend kitesql-rocksdb` |
+| `make tpcc-sqlite` | `--backend sqlite --path kite_sql_tpcc.sqlite` |
+| `make tpcc-dual` | `--backend dual --measure-time 60` |
+| `make tpcc-lmdb-flamegraph` | LMDB run with a pprof flamegraph (`TPCC_PPROF_OUTPUT`) |
+| `make tpcc-lmdb-heaptrack` | LMDB run under heaptrack (`TPCC_HEAPTRACK_OUTPUT`) |
+
+`tpcc-dual` executes the workload on KiteSQL while mirroring every statement to an in-memory SQLite database and asserts that both engines return identical tuples, which makes it the correctness check.
+
+Common options:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--backend` | `kitesql-lmdb` | `kitesql-lmdb`, `kitesql-rocksdb`, `kitesql-optimistic-rocksdb`, `sqlite`, or `dual` |
+| `--path` | `kite_sql_tpcc` | Database path |
+| `--num-ware` | `1` | Number of warehouses |
+| `--measure-time` | `720` | Measured seconds after loading |
+| `--max-retry` | `5` | Retries per failed transaction |
+| `--sync` | off | Fsync on commit (SQLite: `synchronous = FULL` instead of `OFF`) |
+| `--rocksdb-stats` | off | Print RocksDB statistics |
 
 ## Stable Performance Runner
 Use the Python runner for local performance comparisons:
@@ -10,7 +31,7 @@ Use the Python runner for local performance comparisons:
 ./scripts/run_tpcc_stable.py --build
 ```
 
-It runs the same four variants, pins TPCC to one CPU, and waits before each variant until the machine has enough consecutive stable samples.
+It runs `kitesql-lmdb`, `kitesql-rocksdb`, and `sqlite` (select a subset with `--variants`), pins TPCC to one CPU, and waits before each variant until the machine has enough consecutive stable samples.
 
 TPCC runs as a single worker, so its speed depends on the core it lands on. On hybrid CPUs (P-cores and E-cores) an unpinned run can differ by 30-60% depending on scheduler placement. The runner therefore pins every variant, including its background threads, to the strongest core by default: the one with the highest `cpuinfo_max_freq`, lowest id on ties, skipping the physical core of `cpu0`. On hybrid CPUs this is a P-core, and on CPUs with Turbo Boost Max 3.0 it is one of the favored P-cores. Use `--cpu <n>` to choose one or `--no-cpu-pin` to disable pinning. The chosen CPU is recorded in `summary.md`.
 
@@ -54,283 +75,12 @@ Local 720-second comparison on the machine above:
 | KiteSQL RocksDB | 50739 | 392 | 188 | 198 | 11743 | 812 |
 | SQLite | 191484 | 274 | 41 | 33 | 343 | 268 |
 
-- Run dates: `2026-10-25`; results: `2026-10-25_16-30-15`. Latency is measured in microseconds and includes commit.
+- Run date: `2026-10-25`. Latency is measured in microseconds and includes commit.
 - Every row is pinned to `cpu8`, the highest-frequency P-core on this machine (5.4 GHz).
 - All rows use `--num-ware 1`, `--max-retry 5`, and TPCC's default 720-second measure time.
 - All rows run without `--sync`, so commits are not fsynced; SQLite uses WAL with `synchronous = OFF`.
 
-## Historical raw outputs — 2026-07-11
-
-### KiteSQL LMDB
-```shell
-Transaction Summary (elapsed 720.0s)
-+--------------+---------+------+---------+-------+
-| Transaction  | Success | Late | Failure | Total |
-+--------------+---------+------+---------+-------+
-| New-Order    |  994454 |    0 |   10137 | 1004591 |
-| Payment      |  994430 |    0 |       0 | 994430 |
-| Order-Status |   99443 |    0 |       0 | 99443 |
-| Delivery     |   99443 |    0 |       0 | 99443 |
-| Stock-Level  |   99443 |    0 |       0 | 99443 |
-+--------------+---------+------+---------+-------+
-<Constraint Check> (all must be [OK])
-[transaction percentage]
-   Payment:  43.5% (>=43.0%)  [OK]
-   Order-Status:   4.3% (>=4.0%)  [OK]
-   Delivery:   4.3% (>=4.0%)  [OK]
-   Stock-Level:   4.3% (>=4.0%)  [OK]
-[response time (at least 90% passed)]
-   New-Order: 100.0%  [OK]
-   Payment: 100.0%  [OK]
-   Order-Status: 100.0%  [OK]
-   Delivery: 100.0%  [OK]
-   Stock-Level: 100.0%  [OK]
-
-
-<RT Histogram>
-
-1.New-Order
-
-0.001, 994388
-0.002,     64
-0.003,      1
-0.004,      1
-
-2.Payment
-
-0.001, 994428
-0.002,      2
-
-3.Order-Status
-
-0.001,  96207
-0.002,   2704
-0.003,    532
-
-4.Delivery
-
-0.001,  89134
-0.002,  10294
-0.003,     12
-0.004,      2
-0.005,      1
-
-5.Stock-Level
-
-0.001,  99443
-
-<90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.003)
-     Payment : 0.001  (0.001)
-Order-Status : 0.001  (0.003)
-    Delivery : 0.002  (0.004)
- Stock-Level : 0.001  (0.001)
-<TpmC>
-82871 Tpmc
-```
-
-### KiteSQL RocksDB
-```shell
-Transaction Summary (elapsed 720.0s)
-+--------------+---------+------+---------+-------+
-| Transaction  | Success | Late | Failure | Total |
-+--------------+---------+------+---------+-------+
-| New-Order    |  491520 |    0 |    4973 | 496493 |
-| Payment      |  491493 |    0 |       0 | 491493 |
-| Order-Status |   49150 |    0 |       0 | 49150 |
-| Delivery     |   49150 |    0 |       0 | 49150 |
-| Stock-Level  |   49149 |    0 |       0 | 49149 |
-+--------------+---------+------+---------+-------+
-<Constraint Check> (all must be [OK])
-[transaction percentage]
-   Payment:  43.5% (>=43.0%)  [OK]
-   Order-Status:   4.3% (>=4.0%)  [OK]
-   Delivery:   4.3% (>=4.0%)  [OK]
-   Stock-Level:   4.3% (>=4.0%)  [OK]
-[response time (at least 90% passed)]
-   New-Order: 100.0%  [OK]
-   Payment: 100.0%  [OK]
-   Order-Status: 100.0%  [OK]
-   Delivery: 100.0%  [OK]
-   Stock-Level: 100.0%  [OK]
-
-
-<RT Histogram>
-
-1.New-Order
-
-0.001, 491385
-0.002,    131
-0.003,      4
-
-2.Payment
-
-0.001, 491475
-0.002,     15
-0.003,      1
-
-3.Order-Status
-
-0.001,  44281
-0.002,   3740
-0.003,    721
-0.004,    320
-0.005,     80
-
-4.Delivery
-
-0.002,   5008
-0.003,   6120
-0.004,   5573
-0.005,   2405
-0.006,   4233
-0.007,   4778
-0.008,   5329
-0.009,   5870
-0.010,   4851
-0.011,   3188
-0.012,   1585
-0.013,    191
-0.014,      4
-0.015,      2
-0.016,      5
-0.017,      2
-0.018,      4
-0.019,      1
-0.020,      1
-
-5.Stock-Level
-
-0.001,  49149
-
-<90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.003)
-     Payment : 0.001  (0.007)
-Order-Status : 0.001  (0.008)
-    Delivery : 0.011  (0.019)
- Stock-Level : 0.001  (0.001)
-<TpmC>
-40960 Tpmc
-```
-
-### SQLite balanced
-```shell
-Transaction Summary (elapsed 720.0s)
-+--------------+---------+------+---------+-------+
-| Transaction  | Success | Late | Failure | Total |
-+--------------+---------+------+---------+-------+
-| New-Order    |  619643 |    0 |    6299 | 625942 |
-| Payment      |  619618 |    0 |       0 | 619618 |
-| Order-Status |   61961 |    0 |       0 | 61961 |
-| Delivery     |   61962 |    0 |       0 | 61962 |
-| Stock-Level  |   61962 |    0 |       0 | 61962 |
-+--------------+---------+------+---------+-------+
-<Constraint Check> (all must be [OK])
-[transaction percentage]
-   Payment:  43.5% (>=43.0%)  [OK]
-   Order-Status:   4.3% (>=4.0%)  [OK]
-   Delivery:   4.3% (>=4.0%)  [OK]
-   Stock-Level:   4.3% (>=4.0%)  [OK]
-[response time (at least 90% passed)]
-   New-Order: 100.0%  [OK]
-   Payment: 100.0%  [OK]
-   Order-Status: 100.0%  [OK]
-   Delivery: 100.0%  [OK]
-   Stock-Level: 100.0%  [OK]
-
-
-<RT Histogram>
-
-1.New-Order
-
-0.001, 619561
-0.002,     82
-
-2.Payment
-
-0.001, 619618
-
-3.Order-Status
-
-0.001,  61961
-
-4.Delivery
-
-0.001,  61956
-0.002,      6
-
-5.Stock-Level
-
-0.001,  61962
-
-<90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.001)
-     Payment : 0.001  (0.001)
-Order-Status : 0.001  (0.000)
-    Delivery : 0.001  (0.001)
- Stock-Level : 0.001  (0.000)
-<TpmC>
-51637 Tpmc
-```
-
-### SQLite practical
-```shell
-Transaction Summary (elapsed 720.0s)
-+--------------+---------+------+---------+-------+
-| Transaction  | Success | Late | Failure | Total |
-+--------------+---------+------+---------+-------+
-| New-Order    |  737086 |    0 |    7349 | 744435 |
-| Payment      |  737064 |    0 |       0 | 737064 |
-| Order-Status |   73706 |    0 |       0 | 73706 |
-| Delivery     |   73706 |    0 |       0 | 73706 |
-| Stock-Level  |   73706 |    0 |       0 | 73706 |
-+--------------+---------+------+---------+-------+
-<Constraint Check> (all must be [OK])
-[transaction percentage]
-   Payment:  43.5% (>=43.0%)  [OK]
-   Order-Status:   4.3% (>=4.0%)  [OK]
-   Delivery:   4.3% (>=4.0%)  [OK]
-   Stock-Level:   4.3% (>=4.0%)  [OK]
-[response time (at least 90% passed)]
-   New-Order: 100.0%  [OK]
-   Payment: 100.0%  [OK]
-   Order-Status: 100.0%  [OK]
-   Delivery: 100.0%  [OK]
-   Stock-Level: 100.0%  [OK]
-
-
-<RT Histogram>
-
-1.New-Order
-
-0.001, 737069
-0.002,     17
-
-2.Payment
-
-0.001, 737064
-
-3.Order-Status
-
-0.001,  73706
-
-4.Delivery
-
-0.001,  73706
-
-5.Stock-Level
-
-0.001,  73706
-
-<90th Percentile RT (MaxRT)>
-   New-Order : 0.001  (0.001)
-     Payment : 0.001  (0.001)
-Order-Status : 0.001  (0.000)
-    Delivery : 0.001  (0.001)
- Stock-Level : 0.001  (0.000)
-<TpmC>
-61424 Tpmc
-```
+The runner writes `summary.md` and per-variant logs to `tpcc/results/<timestamp>/`.
 
 ## Refer to
 - https://github.com/AgilData/tpcc
