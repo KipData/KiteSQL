@@ -63,9 +63,9 @@ pub struct StorageConfig {
     pub sync: bool,
 }
 
-fn sync_write_options() -> WriteOptions {
+fn write_options(sync: bool) -> WriteOptions {
     let mut options = WriteOptions::default();
-    options.set_sync(true);
+    options.set_sync(sync);
     options
 }
 
@@ -449,36 +449,25 @@ impl Storage for OptimisticRocksStorage {
         _read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
-        let tx = if self.config.sync {
-            self.inner.transaction_opt(
-                &sync_write_options(),
-                &OptimisticTransactionOptions::default(),
-            )
-        } else {
-            self.inner.transaction()
-        };
+        // The transaction keeps a snapshot, so a write to a key committed by someone
+        // else after the transaction began fails instead of overwriting it. Reads use
+        // a snapshot taken after this one, which can only cause a spurious conflict,
+        // never a lost update.
+        let mut txn_opts = OptimisticTransactionOptions::default();
+        txn_opts.set_snapshot(true);
+        let tx = self
+            .inner
+            .transaction_opt(&write_options(self.config.sync), &txn_opts);
         Ok(OptimisticRocksTransaction {
             db: self.inner.as_ref(),
             tx,
-            isolation,
-            current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
-                .then(|| self.inner.snapshot()),
+            snapshot: self.inner.snapshot(),
             statements: 0,
         })
     }
 
     fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
         TransactionIsolationLevel::RepeatableRead
-    }
-
-    fn validate_transaction_isolation(
-        &self,
-        isolation: TransactionIsolationLevel,
-    ) -> Result<(), DatabaseError> {
-        match isolation {
-            TransactionIsolationLevel::ReadCommitted
-            | TransactionIsolationLevel::RepeatableRead => Ok(()),
-        }
     }
 
     fn metrics(&self) -> Option<Self::Metrics> {
@@ -506,34 +495,25 @@ impl Storage for RocksStorage {
         _read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
-        let tx = if self.config.sync {
-            self.inner
-                .transaction_opt(&sync_write_options(), &TransactionOptions::default())
-        } else {
-            self.inner.transaction()
-        };
+        // The transaction keeps a snapshot, so a write to a key committed by someone
+        // else after the transaction began fails instead of overwriting it. Reads use
+        // a snapshot taken after this one, which can only cause a spurious conflict,
+        // never a lost update.
+        let mut txn_opts = TransactionOptions::default();
+        txn_opts.set_snapshot(true);
+        let tx = self
+            .inner
+            .transaction_opt(&write_options(self.config.sync), &txn_opts);
         Ok(RocksTransaction {
             db: self.inner.as_ref(),
             tx,
-            isolation,
-            current_snapshot: matches!(isolation, TransactionIsolationLevel::RepeatableRead)
-                .then(|| self.inner.snapshot()),
+            snapshot: self.inner.snapshot(),
             statements: 0,
         })
     }
 
     fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
         TransactionIsolationLevel::RepeatableRead
-    }
-
-    fn validate_transaction_isolation(
-        &self,
-        isolation: TransactionIsolationLevel,
-    ) -> Result<(), DatabaseError> {
-        match isolation {
-            TransactionIsolationLevel::ReadCommitted
-            | TransactionIsolationLevel::RepeatableRead => Ok(()),
-        }
     }
 
     fn metrics(&self) -> Option<Self::Metrics> {
@@ -587,16 +567,14 @@ impl CheckpointableStorage for RocksStorage {
 pub struct OptimisticRocksTransaction<'db> {
     db: &'db OptimisticTransactionDB,
     tx: rocksdb::Transaction<'db, OptimisticTransactionDB>,
-    isolation: TransactionIsolationLevel,
-    current_snapshot: Option<SnapshotWithThreadMode<'db, OptimisticTransactionDB>>,
+    snapshot: SnapshotWithThreadMode<'db, OptimisticTransactionDB>,
     statements: u64,
 }
 
 pub struct RocksTransaction<'db> {
     db: &'db TransactionDB<rocksdb::MultiThreaded>,
     tx: rocksdb::Transaction<'db, TransactionDB<rocksdb::MultiThreaded>>,
-    isolation: TransactionIsolationLevel,
-    current_snapshot: Option<SnapshotWithThreadMode<'db, TransactionDB<rocksdb::MultiThreaded>>>,
+    snapshot: SnapshotWithThreadMode<'db, TransactionDB<rocksdb::MultiThreaded>>,
     statements: u64,
 }
 
@@ -626,12 +604,10 @@ fn statement_stamp<D: rocksdb::DBAccess>(
 }
 
 fn build_read_options<D: rocksdb::DBAccess>(
-    snapshot: Option<&SnapshotWithThreadMode<'_, D>>,
+    snapshot: &SnapshotWithThreadMode<'_, D>,
 ) -> ReadOptions {
     let mut read_opts = ReadOptions::default();
-    if let Some(snapshot) = snapshot {
-        read_opts.set_snapshot(snapshot);
-    }
+    read_opts.set_snapshot(snapshot);
     read_opts
 }
 
@@ -667,26 +643,12 @@ macro_rules! impl_transaction {
                 statement_stamp(self.db, &mut self.statements)
             }
 
-            fn begin_statement_scope(&mut self) -> Result<(), DatabaseError> {
-                if self.isolation == TransactionIsolationLevel::ReadCommitted {
-                    self.current_snapshot = Some(self.db.snapshot());
-                }
-                Ok(())
-            }
-
-            fn end_statement_scope(&mut self) -> Result<(), DatabaseError> {
-                if self.isolation == TransactionIsolationLevel::ReadCommitted {
-                    self.current_snapshot = None;
-                }
-                Ok(())
-            }
-
             #[inline]
             fn get_borrowed<'a>(
                 &'a self,
                 key: &[u8],
             ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
-                let read_opts = build_read_options(self.current_snapshot.as_ref());
+                let read_opts = build_read_options(&self.snapshot);
                 Ok(self.tx.get_pinned_opt(key, &read_opts)?)
             }
 
@@ -711,7 +673,7 @@ macro_rules! impl_transaction {
                 min: Bound<&'key [u8]>,
                 max: Bound<&'key [u8]>,
             ) -> Result<Self::IterType<'a>, DatabaseError> {
-                let mut read_opts = build_read_options(self.current_snapshot.as_ref());
+                let mut read_opts = build_read_options(&self.snapshot);
                 set_prefix_same_as_start(&mut read_opts, min, max);
                 set_iterate_upper_bound(&mut read_opts, max);
 
@@ -739,7 +701,7 @@ macro_rules! impl_transaction {
                 min: Bound<&'key [u8]>,
                 max: Bound<&'key [u8]>,
             ) -> Result<Self::RevIterType<'a>, DatabaseError> {
-                let mut read_opts = build_read_options(self.current_snapshot.as_ref());
+                let mut read_opts = build_read_options(&self.snapshot);
                 set_prefix_same_as_start(&mut read_opts, min, max);
                 set_iterate_lower_bound(&mut read_opts, min);
 
@@ -897,7 +859,7 @@ mod test {
     use crate::expression::range_detacher::Range;
     use crate::iter_ext::Itertools;
     use crate::planner::{PlanArena, TableArenaCell};
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
         IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, InnerIter, IterBounds,
@@ -950,6 +912,39 @@ mod test {
         crate::storage::check_explicit_transaction_does_not_rescan_own_writes(
             crate::db::DataBaseBuilder::path(temp_dir.path()).build_optimistic()?,
         )
+    }
+
+    // Two transactions read the same key, then both write it back. Under the default
+    // repeatable-read isolation the second commit must not silently overwrite the first.
+    fn check_no_lost_update<S: Storage>(storage: &S) -> Result<(), DatabaseError> {
+        let mut setup = storage.transaction()?;
+        setup.set(b"k", b"0")?;
+        setup.commit()?;
+
+        let mut first = storage.transaction()?;
+        let mut second = storage.transaction()?;
+        assert_eq!(
+            first.get_borrowed(b"k")?.as_ref().map(|v| v.as_ref()),
+            Some(&b"0"[..])
+        );
+        assert_eq!(
+            second.get_borrowed(b"k")?.as_ref().map(|v| v.as_ref()),
+            Some(&b"0"[..])
+        );
+
+        first.set(b"k", b"1")?;
+        first.commit()?;
+        let second_result = second.set(b"k", b"1").and_then(|()| second.commit());
+        assert!(second_result.is_err(), "lost update was committed");
+        Ok(())
+    }
+
+    #[test]
+    fn test_rocksdb_rejects_lost_update() -> Result<(), DatabaseError> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        check_no_lost_update(&RocksStorage::new(temp_dir.path())?)?;
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        check_no_lost_update(&OptimisticRocksStorage::new(temp_dir.path())?)
     }
 
     #[test]

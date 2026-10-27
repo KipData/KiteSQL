@@ -95,7 +95,7 @@ More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction
 | `build_in_memory()` | In-memory, for tests and temporary data |
 | `build_optimistic()` | RocksDB with optimistic transactions |
 
-Feature flags, checkpoints, and transaction isolation: [docs/features.md](docs/features.md), [docs/transaction-isolation.md](docs/transaction-isolation.md).
+Feature flags, checkpoints, and transaction isolation: [docs/features.md](docs/features.md).
 
 ## Shell, WebAssembly, Python
 

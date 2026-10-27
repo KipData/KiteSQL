@@ -53,10 +53,6 @@ impl Storage for MemoryStorage {
             statements: self.statements.clone(),
         })
     }
-
-    fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
-        TransactionIsolationLevel::ReadCommitted
-    }
 }
 
 pub struct MemoryTransaction {

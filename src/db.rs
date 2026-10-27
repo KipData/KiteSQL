@@ -2519,36 +2519,6 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_read_committed_refreshes_snapshot_each_statement() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
-            .transaction_isolation(TransactionIsolationLevel::ReadCommitted)
-            .build_rocksdb()?;
-
-        kite_sql.ddl("create table t_rc (a int primary key, b int)")?;
-        kite_sql.run("insert into t_rc values (1, 10)")?.done()?;
-
-        let mut reader = kite_sql.new_transaction(false)?;
-        let mut writer = kite_sql.new_transaction(false)?;
-
-        assert_eq!(
-            read_single_i32(reader.run("select b from t_rc where a = 1")?)?,
-            10
-        );
-
-        writer.run("update t_rc set b = 20 where a = 1")?.done()?;
-        writer.commit()?;
-
-        assert_eq!(
-            read_single_i32(reader.run("select b from t_rc where a = 1")?)?,
-            20
-        );
-        reader.commit()?;
-
-        Ok(())
-    }
-
-    #[test]
     fn test_rocksdb_defaults_to_repeatable_read() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
@@ -2747,24 +2717,6 @@ pub(crate) mod test {
             Err(DatabaseError::InvalidValue(message)) if message == "parser recursion limit must be >= 1"
         ));
         Ok(())
-    }
-
-    #[cfg(feature = "lmdb")]
-    #[test]
-    fn test_lmdb_rejects_read_committed_isolation() {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let db_path = temp_dir.path().join("kite_sql.lmdb");
-        let result = DataBaseBuilder::path(db_path)
-            .transaction_isolation(TransactionIsolationLevel::ReadCommitted)
-            .build_lmdb();
-
-        match result {
-            Err(DatabaseError::UnsupportedStmt(message)) => {
-                assert!(message.contains("read committed"));
-            }
-            Ok(_) => panic!("lmdb should reject read committed isolation"),
-            Err(err) => panic!("unexpected error: {err}"),
-        }
     }
 
     #[cfg(feature = "unsafe_txdb_checkpoint")]

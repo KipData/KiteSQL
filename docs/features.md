@@ -149,7 +149,7 @@ let kite_sql = DataBaseBuilder::path("./data")
 ### MVCC Transaction
 - Pessimistic (Default)
 - Optimistic
-- Isolation levels: see [Transaction Isolation](transaction-isolation.md)
+- Isolation level: repeatable read; every statement in a transaction reads the snapshot taken when it began
 
 ### Checkpoint
 KiteSQL exposes checkpoint as a storage capability rather than a full backup workflow. A checkpoint only creates a consistent local snapshot directory; compressing, uploading, retaining, and pruning backups should stay in application code.

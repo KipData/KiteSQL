@@ -66,21 +66,15 @@ pub(crate) type TableCache = HashMap<TableName, TableCatalog>;
 pub(crate) type ViewCache = HashMap<TableName, View>;
 
 /// Transaction isolation levels supported by KiteSQL.
-///
-/// See [`crate::docs::transaction_isolation`] for the storage support matrix
-/// and the detailed visibility rules used by KiteSQL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionIsolationLevel {
-    /// Statement-level snapshot isolation for ordinary reads.
-    ReadCommitted,
-    /// Transaction-level fixed snapshot for ordinary reads.
+    /// Every statement in a transaction reads the snapshot taken when it began.
     RepeatableRead,
 }
 
 impl Display for TransactionIsolationLevel {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            TransactionIsolationLevel::ReadCommitted => f.write_str("read committed"),
             TransactionIsolationLevel::RepeatableRead => f.write_str("repeatable read"),
         }
     }
@@ -136,7 +130,7 @@ pub trait Storage: Clone {
     ) -> Result<Self::TransactionType<'_>, DatabaseError>;
 
     fn default_transaction_isolation(&self) -> TransactionIsolationLevel {
-        TransactionIsolationLevel::ReadCommitted
+        TransactionIsolationLevel::RepeatableRead
     }
 
     fn validate_transaction_isolation(
@@ -2496,9 +2490,7 @@ mod test {
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::table_codec::TableCodec;
-    use crate::storage::{
-        IndexIter, InnerIter, Storage, StorageTransaction, TableCache, TransactionIsolationLevel,
-    };
+    use crate::storage::{IndexIter, InnerIter, Storage, StorageTransaction, TableCache};
     use crate::types::index::{Index, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
@@ -3040,144 +3032,6 @@ mod test {
         let (_, value) = iter.try_next()?.unwrap();
         dbg!(value);
         assert!(iter.try_next()?.is_none());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_reader_transaction_can_mix_index_and_heap_views() -> Result<(), DatabaseError> {
-        let mut table_codec = TableCodec::default();
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
-        let mut table_cache = crate::storage::TableCache::default();
-        let serializers = [
-            LogicalType::Integer.serializable(),
-            LogicalType::Boolean.serializable(),
-            LogicalType::Integer.serializable(),
-        ];
-
-        let initial_tuple: crate::types::tuple::TupleImpl = Tuple::new(
-            Some(DataValue::Int32(0)),
-            vec![
-                DataValue::Int32(0),
-                DataValue::Boolean(true),
-                DataValue::Int32(0),
-            ],
-        )
-        .into();
-        let updated_tuple: crate::types::tuple::TupleImpl = Tuple::new(
-            Some(DataValue::Int32(0)),
-            vec![
-                DataValue::Int32(0),
-                DataValue::Boolean(true),
-                DataValue::Int32(1),
-            ],
-        )
-        .into();
-        let table_arena = TableArenaCell::default();
-        let mut plan_arena = PlanArena::new(&table_arena);
-
-        let index_id = {
-            let mut setup_tx = storage.transaction()?;
-            build_table(&mut table_cache, &mut setup_tx, &mut plan_arena)?;
-            let mut plan_arena = PlanArena::new(&table_arena);
-            let table = setup_tx
-                .table(&table_cache, "t1".to_string().into())?
-                .unwrap();
-            let c3_column_id = *table.get_column_id_by_name("c3").unwrap();
-            let (table, index_id) = setup_tx.add_index_meta(
-                &mut table_codec,
-                &mut plan_arena,
-                &"t1".to_string().into(),
-                "i1".to_string(),
-                vec![c3_column_id],
-                IndexType::Normal,
-            )?;
-            let table = table.transplant_to_table_arena(&plan_arena)?;
-            table_cache.insert(table.name().clone(), table);
-
-            setup_tx.add_index(
-                &mut table_codec,
-                "t1",
-                Index::new(
-                    index_id,
-                    std::slice::from_ref(&initial_tuple[2]),
-                    IndexType::Normal,
-                ),
-                initial_tuple.pk().unwrap(),
-            )?;
-            setup_tx.append_tuple(&mut table_codec, "t1", &initial_tuple, &serializers, false)?;
-            setup_tx.commit()?;
-
-            index_id
-        };
-        let reader_tx =
-            storage.transaction_with_isolation(TransactionIsolationLevel::ReadCommitted, true)?;
-        let tuple_id = {
-            let mut index_iter = table_codec.with_index_bound("t1", index_id, |min, max| {
-                reader_tx.range(Bound::Included(min), Bound::Included(max))
-            })?;
-            let (_, value) = index_iter.try_next()?.unwrap();
-
-            TableCodec::decode_index(value)?
-        };
-
-        let before_update = table_codec.with_tuple("t1", &tuple_id, None, |key, _| {
-            let bytes = reader_tx.get_borrowed(key)?.expect("tuple should exist");
-            let mut tuple = Tuple::default();
-
-            TableCodec::decode_tuple_into(
-                &mut tuple,
-                &serializers,
-                Some(tuple_id.clone()),
-                bytes.as_ref(),
-                3,
-            )?;
-            Ok(tuple)
-        })?;
-        assert_eq!(before_update.values[2], DataValue::Int32(0));
-
-        let mut writer_tx = storage.transaction()?;
-        writer_tx.del_index(
-            &mut table_codec,
-            "t1",
-            &Index::new(
-                index_id,
-                std::slice::from_ref(&initial_tuple[2]),
-                IndexType::Normal,
-            ),
-            initial_tuple.pk().unwrap(),
-        )?;
-        writer_tx.add_index(
-            &mut table_codec,
-            "t1",
-            Index::new(
-                index_id,
-                std::slice::from_ref(&updated_tuple[2]),
-                IndexType::Normal,
-            ),
-            updated_tuple.pk().unwrap(),
-        )?;
-        writer_tx.append_tuple(&mut table_codec, "t1", &updated_tuple, &serializers, true)?;
-        writer_tx.commit()?;
-
-        let after_update = table_codec.with_tuple("t1", &tuple_id, None, |key, _| {
-            let bytes = reader_tx.get_borrowed(key)?.expect("tuple should exist");
-            let mut tuple = Tuple::default();
-
-            TableCodec::decode_tuple_into(
-                &mut tuple,
-                &serializers,
-                Some(tuple_id.clone()),
-                bytes.as_ref(),
-                3,
-            )?;
-            Ok(tuple)
-        })?;
-
-        // The same reader transaction first observed the old secondary-index entry,
-        // then observed the updated base-row contents after another transaction committed.
-        assert_eq!(after_update.values[2], DataValue::Int32(1));
 
         Ok(())
     }
