@@ -18,6 +18,7 @@ Common options:
 | --- | --- | --- |
 | `--backend` | `kitesql-lmdb` | `kitesql-lmdb`, `kitesql-rocksdb`, `kitesql-optimistic-rocksdb`, `sqlite`, or `dual` |
 | `--path` | `kite_sql_tpcc` | Database path |
+| `--threads` | `1` | Concurrent terminals, each on its own connection |
 | `--num-ware` | `1` | Number of warehouses |
 | `--measure-time` | `720` | Measured seconds after loading |
 | `--max-retry` | `5` | Retries per failed transaction |

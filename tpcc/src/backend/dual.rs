@@ -83,6 +83,16 @@ impl BackendControl for DualBackend {
         Ok(groups)
     }
 
+    type Worker<'a>
+        = DualBackend
+    where
+        Self: 'a;
+
+    // Mirrored statements are only compared in a single terminal.
+    fn worker(&self) -> Result<Self::Worker<'_>, TpccError> {
+        Err(TpccError::InvalidBackend)
+    }
+
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
         Ok(DualTransaction {
             kitesql: self.kitesql.new_transaction()?,

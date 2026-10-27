@@ -79,7 +79,7 @@ impl<S: Storage> KiteSqlRocksBackend<S> {
     }
 }
 
-impl<S: Storage> BackendControl for KiteSqlRocksBackend<S> {
+impl<S: Storage + Sync> BackendControl for KiteSqlRocksBackend<S> {
     type PreparedStatement<'a>
         = KiteSqlPreparedStatement<'a>
     where
@@ -97,8 +97,17 @@ impl<S: Storage> BackendControl for KiteSqlRocksBackend<S> {
         self.prepare_spec_groups(specs)
     }
 
+    type Worker<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
         self.start_transaction()
+    }
+
+    fn worker(&self) -> Result<Self::Worker<'_>, TpccError> {
+        Ok(self)
     }
 
     fn storage_metrics(&self) -> Option<String> {

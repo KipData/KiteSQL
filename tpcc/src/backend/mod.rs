@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,7 +43,13 @@ pub trait BackendControl: SimpleExecutor {
         specs: &[Vec<StatementSpec>],
     ) -> Result<Vec<Vec<Self::PreparedStatement<'_>>>, TpccError>;
 
+    type Worker<'a>: Borrow<Self> + Send
+    where
+        Self: 'a;
+
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError>;
+
+    fn worker(&self) -> Result<Self::Worker<'_>, TpccError>;
 
     fn storage_metrics(&self) -> Option<String> {
         None

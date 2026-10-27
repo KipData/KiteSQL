@@ -76,8 +76,17 @@ impl BackendControl for KiteSqlLmdbBackend {
         self.prepare_spec_groups(specs)
     }
 
+    type Worker<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
         self.start_transaction()
+    }
+
+    fn worker(&self) -> Result<Self::Worker<'_>, TpccError> {
+        Ok(self)
     }
 }
 
