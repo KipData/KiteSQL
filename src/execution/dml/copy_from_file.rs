@@ -40,7 +40,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CopyFromFile<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::CopyFromFile(CopyFromFile { op }))
+        arena.push(ExecNode::CopyFromFile(Box::new(CopyFromFile { op })))
     }
 }
 

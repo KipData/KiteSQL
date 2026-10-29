@@ -40,11 +40,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor<'
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::SimpleAgg(SimpleAggExecutor {
+        arena.push(ExecNode::SimpleAgg(Box::new(SimpleAggExecutor {
             agg_calls,
             input,
             returned: false,
-        }))
+        })))
     }
 }
 

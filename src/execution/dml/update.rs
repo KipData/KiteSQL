@@ -60,12 +60,12 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Update<'a> {
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Update(Update {
+        arena.push(ExecNode::Update(Box::new(Update {
             table_name,
             value_exprs,
             input_schema,
             input,
-        }))
+        })))
     }
 }
 

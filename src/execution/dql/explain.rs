@@ -35,10 +35,10 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Explain<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::Explain(Explain {
+        arena.push(ExecNode::Explain(Box::new(Explain {
             plan: input,
             emitted: false,
-        }))
+        })))
     }
 }
 

@@ -43,13 +43,13 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SetMembership {
     ) -> ExecId {
         let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
         let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
-        arena.push(ExecNode::SetMembership(SetMembership {
+        arena.push(ExecNode::SetMembership(Box::new(SetMembership {
             kind,
             left_input,
             right_input,
             right_counts: HashMap::new(),
             built: false,
-        }))
+        })))
     }
 }
 

@@ -33,7 +33,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ShowViews<'a, T> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::ShowViews(ShowViews { metas: None }))
+        arena.push(ExecNode::ShowViews(Box::new(ShowViews { metas: None })))
     }
 }
 

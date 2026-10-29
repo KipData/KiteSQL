@@ -272,11 +272,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T>
         let mut recursive_arena = ExecArena::with_capacity(recursive_plan.exec_capacity_hint());
         recursive_arena.init_context(arena.context(), arena.transaction());
         let anchor_input = build_read(arena, plan_arena, anchor_plan, cache, transaction);
-        arena.push(ExecNode::RecursiveCte(Self::new(
+        arena.push(ExecNode::RecursiveCte(Box::new(Self::new(
             anchor_input,
             recursive_plan,
             recursive_arena,
-        )))
+        ))))
     }
 }
 
@@ -349,7 +349,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
         _transaction: &T,
     ) -> ExecId {
         let input = arena.take_recursive_input();
-        arena.push(ExecNode::RecursiveScan(Self { input }))
+        arena.push(ExecNode::RecursiveScan(Box::new(Self { input })))
     }
 }
 

@@ -60,11 +60,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::ExternalSort(ExternalSort {
+        arena.push(ExecNode::ExternalSort(Box::new(ExternalSort {
             rows: None,
             sort_fields,
             input,
-        }))
+        })))
     }
 }
 

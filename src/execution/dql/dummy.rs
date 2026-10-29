@@ -41,7 +41,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Dummy {
         _: &T,
     ) -> ExecId {
         let executor = Dummy::default();
-        arena.push(ExecNode::Dummy(executor))
+        arena.push(ExecNode::Dummy(Box::new(executor)))
     }
 }
 

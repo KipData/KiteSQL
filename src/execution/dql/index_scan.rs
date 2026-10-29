@@ -93,7 +93,9 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexScan<'a, T> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::IndexScan(IndexScan::new(op, info, lookup)))
+        arena.push(ExecNode::IndexScan(Box::new(IndexScan::new(
+            op, info, lookup,
+        ))))
     }
 }
 

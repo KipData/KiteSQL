@@ -250,7 +250,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashJoin {
             left_input,
             right_input,
         );
-        arena.push(ExecNode::HashJoin(executor))
+        arena.push(ExecNode::HashJoin(Box::new(executor)))
     }
 }
 

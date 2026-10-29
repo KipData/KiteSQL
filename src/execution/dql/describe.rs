@@ -67,7 +67,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Describe {
         _: &T,
     ) -> ExecId {
         let executor = Describe::from(input);
-        arena.push(ExecNode::Describe(executor))
+        arena.push(ExecNode::Describe(Box::new(executor)))
     }
 }
 

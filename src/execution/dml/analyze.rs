@@ -72,13 +72,13 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Analyze(Analyze {
+        arena.push(ExecNode::Analyze(Box::new(Analyze {
             table_name,
             input,
             histogram_buckets: *histogram_buckets,
             hll_precision: *hll_precision,
             statistics_relative_error: *statistics_relative_error,
-        }))
+        })))
     }
 }
 

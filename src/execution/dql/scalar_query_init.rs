@@ -71,7 +71,7 @@ impl<'a> ScalarQueryInit<'a> {
         transaction: &T,
     ) -> ExecId {
         let init = build_read(arena, plan_arena, init_plan, cache, transaction);
-        arena.push(ExecNode::ScalarQueryInit(Self {
+        arena.push(ExecNode::ScalarQueryInit(Box::new(Self {
             input,
             init,
             reference: op.reference(plan_arena),
@@ -85,7 +85,7 @@ impl<'a> ScalarQueryInit<'a> {
             },
             param_bindings: &op.param_bindings,
             scratch_tuple: TupleImpl::default(),
-        }))
+        })))
     }
 }
 

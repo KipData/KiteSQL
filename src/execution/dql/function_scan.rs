@@ -45,7 +45,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for FunctionScan<'a> {
         _: &T,
     ) -> ExecId {
         let executor = FunctionScan::from(input);
-        arena.push(ExecNode::FunctionScan(executor))
+        arena.push(ExecNode::FunctionScan(Box::new(executor)))
     }
 }
 

@@ -139,14 +139,14 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
 
         let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
         let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
-        arena.push(ExecNode::NestedLoopJoin(NestedLoopJoin {
+        arena.push(ExecNode::NestedLoopJoin(Box::new(NestedLoopJoin {
             ty: join_type,
             filter,
             eq_cond,
             left_input,
             right_input,
             state: NestedLoopJoinState::PullLeft { right_bitmap: None },
-        }))
+        })))
     }
 }
 

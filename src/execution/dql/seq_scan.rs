@@ -33,7 +33,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::SeqScan(SeqScan { op, iter: None }))
+        arena.push(ExecNode::SeqScan(Box::new(SeqScan { op, iter: None })))
     }
 }
 

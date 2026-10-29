@@ -178,12 +178,12 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
                 NullableVec::new(&sort_arena),
             )
         };
-        arena.push(ExecNode::Sort(Sort {
+        arena.push(ExecNode::Sort(Box::new(Sort {
             rows,
             _arena: sort_arena,
             sort_fields,
             input,
-        }))
+        })))
     }
 }
 

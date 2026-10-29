@@ -55,12 +55,12 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a>
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::HashAgg(HashAggExecutor {
+        arena.push(ExecNode::HashAgg(Box::new(HashAggExecutor {
             agg_calls,
             groupby_exprs,
             input,
             output: None,
-        }))
+        })))
     }
 }
 

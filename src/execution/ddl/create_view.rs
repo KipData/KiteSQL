@@ -34,7 +34,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateView<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::CreateView(CreateView { op }))
+        arena.push(ExecNode::CreateView(Box::new(CreateView { op })))
     }
 }
 

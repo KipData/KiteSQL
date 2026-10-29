@@ -37,7 +37,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for ChangeColumn<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::ChangeColumn(ChangeColumn { op }))
+        arena.push(ExecNode::ChangeColumn(Box::new(ChangeColumn { op })))
     }
 }
 

@@ -34,7 +34,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropTable<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::DropTable(DropTable { op }))
+        arena.push(ExecNode::DropTable(Box::new(DropTable { op })))
     }
 }
 

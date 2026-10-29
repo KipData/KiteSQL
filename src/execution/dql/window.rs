@@ -117,7 +117,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Window<'a> {
                 function::new(function.kind, function.args.clone(), function.ty.clone())
             })
             .collect();
-        arena.push(ExecNode::Window(Window {
+        arena.push(ExecNode::Window(Box::new(Window {
             state: WindowState::default(),
             retention,
             sort_fields,
@@ -125,7 +125,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Window<'a> {
             functions,
             input_exhausted: false,
             input,
-        }))
+        })))
     }
 }
 

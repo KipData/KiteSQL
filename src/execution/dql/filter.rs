@@ -37,10 +37,10 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Filter {
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::Filter(Filter {
+        arena.push(ExecNode::Filter(Box::new(Filter {
             predicate: *predicate,
             input,
-        }))
+        })))
     }
 }
 

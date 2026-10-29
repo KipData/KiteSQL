@@ -121,12 +121,12 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
         } else {
             RightInput::Streaming { root: right_root }
         };
-        arena.push(ExecNode::MarkApply(Self {
+        arena.push(ExecNode::MarkApply(Box::new(Self {
             op,
             left_input,
             right_root,
             right_input: Some(right_input),
-        }))
+        })))
     }
 }
 

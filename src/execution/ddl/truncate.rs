@@ -34,7 +34,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Truncate<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::Truncate(Truncate { op }))
+        arena.push(ExecNode::Truncate(Box::new(Truncate { op })))
     }
 }
 

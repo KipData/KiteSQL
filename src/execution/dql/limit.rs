@@ -39,13 +39,13 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Limit {
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::Limit(Limit {
+        arena.push(ExecNode::Limit(Box::new(Limit {
             offset: *offset,
             limit: *limit,
             input,
             skipped: 0,
             emitted: 0,
-        }))
+        })))
     }
 }
 

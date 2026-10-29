@@ -62,13 +62,13 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Insert<'a> {
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Insert(Insert {
+        arena.push(ExecNode::Insert(Box::new(Insert {
             table_name,
             input_schema,
             input,
             is_overwrite: *is_overwrite,
             is_mapping_by_name: *is_mapping_by_name,
-        }))
+        })))
     }
 }
 

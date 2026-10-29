@@ -41,11 +41,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecu
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::StreamDistinct(StreamDistinctExecutor {
+        arena.push(ExecNode::StreamDistinct(Box::new(StreamDistinctExecutor {
             groupby_exprs: &op.groupby_exprs,
             input,
             last_keys: None,
-        }))
+        })))
     }
 }
 

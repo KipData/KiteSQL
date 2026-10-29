@@ -197,57 +197,56 @@ impl<'a, T: StorageTransaction + 'a> Executor<'a, T> {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
 pub(crate) enum ExecNode<'a, T: StorageTransaction + 'a> {
-    AddColumn(AddColumn<'a>),
-    Analyze(Analyze<'a>),
-    ChangeColumn(ChangeColumn<'a>),
+    AddColumn(Box<AddColumn<'a>>),
+    Analyze(Box<Analyze<'a>>),
+    ChangeColumn(Box<ChangeColumn<'a>>),
     #[cfg(feature = "copy")]
-    CopyFromFile(CopyFromFile<'a>),
+    CopyFromFile(Box<CopyFromFile<'a>>),
     #[cfg(feature = "copy")]
-    CopyToFile(CopyToFile<'a>),
-    CreateIndex(CreateIndex<'a>),
-    CreateTable(CreateTable<'a>),
-    CreateView(CreateView<'a>),
-    Delete(Delete<'a>),
-    Describe(Describe),
-    DropColumn(DropColumn<'a>),
-    DropIndex(DropIndex<'a>),
-    DropTable(DropTable<'a>),
-    DropView(DropView<'a>),
-    Dummy(Dummy),
-    Explain(Explain<'a>),
+    CopyToFile(Box<CopyToFile<'a>>),
+    CreateIndex(Box<CreateIndex<'a>>),
+    CreateTable(Box<CreateTable<'a>>),
+    CreateView(Box<CreateView<'a>>),
+    Delete(Box<Delete<'a>>),
+    Describe(Box<Describe>),
+    DropColumn(Box<DropColumn<'a>>),
+    DropIndex(Box<DropIndex<'a>>),
+    DropTable(Box<DropTable<'a>>),
+    DropView(Box<DropView<'a>>),
+    Dummy(Box<Dummy>),
+    Explain(Box<Explain<'a>>),
     #[cfg(feature = "spill")]
-    ExternalSort(ExternalSort<'a>),
-    Filter(Filter),
-    FunctionScan(FunctionScan<'a>),
-    HashAgg(HashAggExecutor<'a>),
-    HashJoin(HashJoin),
-    IndexScan(IndexScan<'a, T>),
-    Insert(Insert<'a>),
-    Limit(Limit),
-    MarkApply(MarkApply<'a>),
-    IndexProbeJoin(IndexProbeJoin<'a>),
-    NestedLoopJoin(NestedLoopJoin),
-    Projection(Projection<'a>),
-    RecursiveCte(RecursiveCte<'a, T>),
-    RecursiveScan(RecursiveScan),
-    ScalarQueryInit(ScalarQueryInit<'a>),
-    ScalarSubquery(ScalarSubquery),
-    SetMembership(SetMembership),
-    SeqScan(SeqScan<'a, T>),
-    ShowTables(ShowTables<'a, T>),
-    ShowViews(ShowViews<'a, T>),
-    SimpleAgg(SimpleAggExecutor<'a>),
-    Sort(Sort<'a>),
-    StreamAgg(StreamAggExecutor<'a>),
-    StreamDistinct(StreamDistinctExecutor<'a>),
-    TopK(TopK<'a>),
-    Truncate(Truncate<'a>),
-    Union(Union),
-    Update(Update<'a>),
-    Values(Values<'a>),
-    Window(Window<'a>),
+    ExternalSort(Box<ExternalSort<'a>>),
+    Filter(Box<Filter>),
+    FunctionScan(Box<FunctionScan<'a>>),
+    HashAgg(Box<HashAggExecutor<'a>>),
+    HashJoin(Box<HashJoin>),
+    IndexScan(Box<IndexScan<'a, T>>),
+    Insert(Box<Insert<'a>>),
+    Limit(Box<Limit>),
+    MarkApply(Box<MarkApply<'a>>),
+    IndexProbeJoin(Box<IndexProbeJoin<'a>>),
+    NestedLoopJoin(Box<NestedLoopJoin>),
+    Projection(Box<Projection<'a>>),
+    RecursiveCte(Box<RecursiveCte<'a, T>>),
+    RecursiveScan(Box<RecursiveScan>),
+    ScalarQueryInit(Box<ScalarQueryInit<'a>>),
+    ScalarSubquery(Box<ScalarSubquery>),
+    SetMembership(Box<SetMembership>),
+    SeqScan(Box<SeqScan<'a, T>>),
+    ShowTables(Box<ShowTables<'a, T>>),
+    ShowViews(Box<ShowViews<'a, T>>),
+    SimpleAgg(Box<SimpleAggExecutor<'a>>),
+    Sort(Box<Sort<'a>>),
+    StreamAgg(Box<StreamAggExecutor<'a>>),
+    StreamDistinct(Box<StreamDistinctExecutor<'a>>),
+    TopK(Box<TopK<'a>>),
+    Truncate(Box<Truncate<'a>>),
+    Union(Box<Union>),
+    Update(Box<Update<'a>>),
+    Values(Box<Values<'a>>),
+    Window(Box<Window<'a>>),
 }
 
 pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
@@ -1226,24 +1225,33 @@ mod test {
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
+    fn exec_node_stays_pointer_sized() {
+        // Every variant is boxed so a statement's node Vec stays small and allocator-friendly.
+        assert_eq!(
+            std::mem::size_of::<ExecNode<'_, MemoryTransaction>>(),
+            2 * std::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
     fn active_nodes_cannot_be_overwritten_or_relocated() {
         let table_arena = TableArenaCell::default();
         let mut plan_arena = ExecMetaArena::new(PlanArena::new(&table_arena));
         let mut arena = ExecArena::<'_, MemoryTransaction>::with_capacity(0);
-        arena.push(ExecNode::Dummy(Dummy::default()));
+        arena.push(ExecNode::Dummy(Box::default()));
         let slot =
             &arena.nodes.items[0] as *const std::cell::RefCell<ExecNode<'_, MemoryTransaction>>;
         arena.nodes.executing = 1;
         // Same access pattern as next_tuple; mutations must fail before changing storage.
         let active = unsafe { (&*slot).borrow_mut() };
         assert!(catch_unwind(AssertUnwindSafe(|| {
-            arena.push(ExecNode::Dummy(Dummy::default()));
+            arena.push(ExecNode::Dummy(Box::default()));
         }))
         .is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| arena.nodes.clear())).is_err());
         arena.nodes.seek(0);
         assert!(catch_unwind(AssertUnwindSafe(|| {
-            arena.push(ExecNode::Dummy(Dummy::default()));
+            arena.push(ExecNode::Dummy(Box::default()));
         }))
         .is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| {

@@ -46,7 +46,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
             cache,
             transaction,
         ));
-        arena.push(ExecNode::Delete(Delete { table_name, input }))
+        arena.push(ExecNode::Delete(Box::new(Delete { table_name, input })))
     }
 }
 

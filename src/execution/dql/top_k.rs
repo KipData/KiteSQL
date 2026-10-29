@@ -135,14 +135,14 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::TopK(TopK {
+        arena.push(ExecNode::TopK(Box::new(TopK {
             output: None,
             arena: Box::<Bump>::default(),
             sort_fields,
             limit: *limit,
             offset: *offset,
             input,
-        }))
+        })))
     }
 }
 

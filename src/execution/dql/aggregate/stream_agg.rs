@@ -54,13 +54,13 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor<'
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::StreamAgg(StreamAggExecutor {
+        arena.push(ExecNode::StreamAgg(Box::new(StreamAggExecutor {
             agg_calls,
             groupby_exprs,
             group_keys: None,
             accs: Vec::new(),
             input,
-        }))
+        })))
     }
 }
 

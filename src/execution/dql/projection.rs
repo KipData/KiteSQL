@@ -39,7 +39,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
         transaction: &T,
     ) -> ExecId {
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::Projection(Projection { exprs, input }))
+        arena.push(ExecNode::Projection(Box::new(Projection { exprs, input })))
     }
 }
 

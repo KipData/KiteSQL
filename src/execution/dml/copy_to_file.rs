@@ -52,11 +52,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for CopyToFile<'a> {
             cache,
             transaction,
         ));
-        arena.push(ExecNode::CopyToFile(CopyToFile {
+        arena.push(ExecNode::CopyToFile(Box::new(CopyToFile {
             op,
             column_names,
             input,
-        }))
+        })))
     }
 }
 

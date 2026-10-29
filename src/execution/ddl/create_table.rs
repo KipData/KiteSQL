@@ -34,7 +34,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateTable<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::CreateTable(CreateTable { op }))
+        arena.push(ExecNode::CreateTable(Box::new(CreateTable { op })))
     }
 }
 

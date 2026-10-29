@@ -40,11 +40,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexProbeJoin<'a> 
     ) -> ExecId {
         let left_input = build_read(arena, plan_arena, left_input, cache, transaction);
         let right_input = build_read(arena, plan_arena, right_input, cache, transaction);
-        arena.push(ExecNode::IndexProbeJoin(Self {
+        arena.push(ExecNode::IndexProbeJoin(Box::new(Self {
             op,
             left_input,
             right_input,
-        }))
+        })))
     }
 }
 

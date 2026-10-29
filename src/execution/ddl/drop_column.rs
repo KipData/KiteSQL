@@ -36,7 +36,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropColumn<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::DropColumn(DropColumn { op }))
+        arena.push(ExecNode::DropColumn(Box::new(DropColumn { op })))
     }
 }
 

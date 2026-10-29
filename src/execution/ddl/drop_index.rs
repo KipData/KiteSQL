@@ -34,7 +34,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::DropIndex(DropIndex { op }))
+        arena.push(ExecNode::DropIndex(Box::new(DropIndex { op })))
     }
 }
 

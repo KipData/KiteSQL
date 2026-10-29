@@ -40,11 +40,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
     ) -> ExecId {
         let value_count = input.read_schema().len();
         let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::ScalarSubquery(Self {
+        arena.push(ExecNode::ScalarSubquery(Box::new(Self {
             input,
             value_count,
             returned: false,
-        }))
+        })))
     }
 }
 

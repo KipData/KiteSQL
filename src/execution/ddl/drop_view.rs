@@ -34,7 +34,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropView<'a> {
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::DropView(DropView { op }))
+        arena.push(ExecNode::DropView(Box::new(DropView { op })))
     }
 }
 

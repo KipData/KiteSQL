@@ -45,11 +45,11 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateIndex<'a> {
     ) -> ExecId {
         let input_schema = input_plan.read_schema().clone();
         let input = build_read(arena, plan_arena, input_plan, cache, transaction);
-        arena.push(ExecNode::CreateIndex(CreateIndex {
+        arena.push(ExecNode::CreateIndex(Box::new(CreateIndex {
             op,
             input_schema,
             input,
-        }))
+        })))
     }
 }
 
