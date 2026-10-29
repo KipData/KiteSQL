@@ -14,9 +14,7 @@
 
 use super::{rewrite_table_in_batches, visit_table_in_batches};
 use crate::errors::DatabaseError;
-use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{DDLApply, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -32,12 +30,10 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for ChangeColumn<'a> {
 
     fn into_executor(
         op: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::ChangeColumn(Box::new(ChangeColumn { op })))
+    ) -> ExecNode<'a> {
+        ExecNode::ChangeColumn(Box::new(ChangeColumn { op }))
     }
 }
 

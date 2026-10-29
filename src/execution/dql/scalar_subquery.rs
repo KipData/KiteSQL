@@ -13,49 +13,45 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 
-pub struct ScalarSubquery {
-    input: ExecId,
+pub struct ScalarSubquery<'a> {
+    input: ExecNode<'a>,
     value_count: usize,
     returned: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ScalarSubquery {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ScalarSubquery<'a> {
     type Input = (&'a ScalarSubqueryOperator, &'a LogicalPlan);
 
     fn into_executor(
         (_, input): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let value_count = input.read_schema().len();
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::ScalarSubquery(Box::new(Self {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::ScalarSubquery(Box::new(Self {
             input,
             value_count,
             returned: false,
-        })))
+        }))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarSubquery<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.returned = false;
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
@@ -63,7 +59,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarSubquery {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let has_next = arena.next_tuple(self.input, plan_arena)?;
+        let has_next = self.input.next_tuple(arena, plan_arena)?;
         if self.returned {
             if has_next {
                 return Err(DatabaseError::InvalidValue(

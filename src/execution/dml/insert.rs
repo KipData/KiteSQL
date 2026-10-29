@@ -14,9 +14,7 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
@@ -32,7 +30,7 @@ use std::collections::HashMap;
 pub struct Insert<'a> {
     table_name: &'a TableName,
     input_schema: Schema,
-    input: Option<ExecId>,
+    input: Option<ExecNode<'a>>,
     is_overwrite: bool,
     is_mapping_by_name: bool,
 }
@@ -51,24 +49,16 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Insert<'a> {
         ): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let input_schema = input_plan.read_schema().clone();
-        let input = Some(build_read(
-            arena,
-            plan_arena,
-            input_plan,
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::Insert(Box::new(Insert {
+        let input = Some(build_read(arena, plan_arena, input_plan));
+        ExecNode::Insert(Box::new(Insert {
             table_name,
             input_schema,
             input,
             is_overwrite: *is_overwrite,
             is_mapping_by_name: *is_mapping_by_name,
-        })))
+        }))
     }
 }
 
@@ -97,12 +87,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(input) = self.input.take() else {
+        let Some(mut input) = self.input.take() else {
             arena.finish();
             return Ok(());
         };
 
-        let table_cache = arena.context().table_cache();
+        let table_cache = arena.table_cache();
         let transaction = arena.transaction();
         let table_snapshot = {
             transaction
@@ -126,7 +116,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 Vec::with_capacity(table_snapshot.columns_len),
             ));
 
-            while arena.next_tuple(input, plan_arena)? {
+            while input.next_tuple(arena, plan_arena)? {
                 let mut tuple_map = HashMap::with_capacity(self.input_schema.len());
                 let mut i = 0;
                 arena.result_mut().drain_values(|value| {

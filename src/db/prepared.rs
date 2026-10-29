@@ -229,20 +229,8 @@ mod tests {
             fields: vec![SortField::new(col_expr, true, false)],
             ignore_prefix_len: 0,
         };
-        let (tables, views, statistics) = (
-            TableCache::default(),
-            ViewCache::default(),
-            StatisticsMetaCache::default(),
-        );
-        let (scala_functions, table_functions) =
-            (ScalaFunctions::default(), TableFunctions::default());
-        let context = ExecutionContext::new(
-            &tables,
-            &views,
-            &statistics,
-            &scala_functions,
-            &table_functions,
-        );
+        let tables = TableCache::default();
+        let context = &tables;
         let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         for (lookup, has_residual, parameter, should_change) in [
@@ -352,7 +340,7 @@ mod tests {
             if !matches!(info.lookup, Some(IndexLookup::Static(_))) {
                 continue;
             }
-            let mut execution_arena = ExecArena::new(0, context, &transaction);
+            let mut execution_arena = ExecArena::new(context, &transaction);
             let ranges = IndexScan::ranges(
                 info,
                 info.lookup.as_ref().expect("lookup"),
@@ -628,23 +616,11 @@ mod tests {
         else {
             panic!("expected index scan")
         };
-        let (tables, views, statistics) = (
-            TableCache::default(),
-            ViewCache::default(),
-            StatisticsMetaCache::default(),
-        );
-        let (scala_functions, table_functions) =
-            (ScalaFunctions::default(), TableFunctions::default());
-        let context = ExecutionContext::new(
-            &tables,
-            &views,
-            &statistics,
-            &scala_functions,
-            &table_functions,
-        );
+        let tables = TableCache::default();
+        let context = &tables;
         let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
-        let mut execution_arena = ExecArena::new(0, context, &transaction);
+        let mut execution_arena = ExecArena::new(context, &transaction);
         let ranges = IndexScan::ranges(
             info,
             info.lookup.as_ref().expect("lookup"),

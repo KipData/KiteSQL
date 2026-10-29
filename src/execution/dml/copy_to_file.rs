@@ -14,9 +14,7 @@
 
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::LogicalPlan;
@@ -27,7 +25,7 @@ use crate::types::tuple_builder::TupleBuilder;
 pub struct CopyToFile<'a> {
     op: &'a CopyToFileOperator,
     column_names: Vec<String>,
-    input: Option<ExecId>,
+    input: Option<ExecNode<'a>>,
 }
 
 impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for CopyToFile<'a> {
@@ -37,26 +35,18 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for CopyToFile<'a> {
         (op, input_plan): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let column_names = input_plan
             .read_schema()
             .iter()
             .map(|column| plan_arena.column(*column).name().to_string())
             .collect_vec();
-        let input = Some(build_read(
-            arena,
-            plan_arena,
-            input_plan,
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::CopyToFile(Box::new(CopyToFile {
+        let input = Some(build_read(arena, plan_arena, input_plan));
+        ExecNode::CopyToFile(Box::new(CopyToFile {
             op,
             column_names,
             input,
-        })))
+        }))
     }
 }
 
@@ -89,13 +79,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(input) = self.input.take() else {
+        let Some(mut input) = self.input.take() else {
             arena.finish();
             return Ok(());
         };
 
         let mut writer = self.create_writer()?;
-        while arena.next_tuple(input, plan_arena)? {
+        while input.next_tuple(arena, plan_arena)? {
             writer.write_record(arena.result_tuple().iter().map(|v| v.to_string()))?;
         }
         writer.flush().map_err(DatabaseError::from)?;
@@ -159,11 +149,7 @@ mod tests {
         input_plan.populate_output_schema_recursive(&mut plan_arena);
         let mut executor = crate::execution::execute_input::<_, CopyToFile>(
             (&op, &input_plan),
-            crate::execution::test_utils::empty_context(
-                db.state.table_cache(),
-                db.state.view_cache(),
-                db.state.meta_cache(),
-            ),
+            db.state.table_cache(),
             plan_arena,
             &transaction,
         );

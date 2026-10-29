@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -25,7 +23,7 @@ use crate::types::value::DataValue;
 
 pub struct Projection<'a> {
     exprs: &'a [ExprRef],
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
 impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
@@ -35,11 +33,9 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
         (ProjectOperator { exprs }, input): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::Projection(Box::new(Projection { exprs, input })))
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::Projection(Box::new(Projection { exprs, input }))
     }
 }
 
@@ -49,7 +45,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
@@ -57,7 +53,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        if !arena.next_tuple(self.input, plan_arena)? {
+        if !self.input.next_tuple(arena, plan_arena)? {
             arena.finish();
             return Ok(());
         }

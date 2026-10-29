@@ -14,7 +14,7 @@
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -61,13 +61,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Describe {
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let executor = Describe::from(input);
-        arena.push(ExecNode::Describe(Box::new(executor)))
+        ExecNode::Describe(Box::new(executor))
     }
 }
 

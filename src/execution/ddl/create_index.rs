@@ -13,10 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode,
-    WriteExecutor,
-};
+use crate::execution::{build_read, DDLApply, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::LogicalPlan;
@@ -30,7 +27,7 @@ use crate::types::ColumnId;
 pub struct CreateIndex<'a> {
     op: &'a CreateIndexOperator,
     input_schema: Schema,
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
 impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateIndex<'a> {
@@ -40,16 +37,14 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateIndex<'a> {
         (op, input_plan): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let input_schema = input_plan.read_schema().clone();
-        let input = build_read(arena, plan_arena, input_plan, cache, transaction);
-        arena.push(ExecNode::CreateIndex(Box::new(CreateIndex {
+        let input = build_read(arena, plan_arena, input_plan);
+        ExecNode::CreateIndex(Box::new(CreateIndex {
             op,
             input_schema,
             input,
-        })))
+        }))
     }
 }
 
@@ -116,7 +111,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             Err(err) => return Err(err),
         };
 
-        while arena.next_tuple(self.input, plan_arena)? {
+        while self.input.next_tuple(arena, plan_arena)? {
             if arena.result_tuple().pk().is_none() {
                 continue;
             }

@@ -19,9 +19,7 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
 use crate::storage::StorageTransaction;
@@ -74,12 +72,12 @@ impl EqualCondition {
 /// | Right/RightSemi/RightAnti/Full |    left        |      right     |
 /// |--------------------------------|----------------|----------------|
 /// | Full                           |    left        |      right     |
-pub struct NestedLoopJoin {
+pub struct NestedLoopJoin<'a> {
     ty: JoinType,
     filter: Option<ExprRef>,
     eq_cond: EqualCondition,
-    left_input: ExecId,
-    right_input: ExecId,
+    left_input: ExecNode<'a>,
+    right_input: ExecNode<'a>,
     state: NestedLoopJoinState,
 }
 
@@ -92,7 +90,6 @@ enum NestedLoopJoinState {
         right_bitmap: Option<BitSet>,
     },
     EmitRightUnmatched {
-        right_input: ExecId,
         right_bitmap: Option<BitSet>,
         right_emit_index: usize,
     },
@@ -101,22 +98,19 @@ enum NestedLoopJoinState {
 
 struct ActiveLeftState {
     left_tuple: TupleImpl,
-    right_input: ExecId,
     right_index: usize,
     has_matched: bool,
     first_matches: Vec<usize>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin<'a> {
     type Input = (&'a JoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
         (JoinOperator { on, join_type, .. }, left_plan, right_plan): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let ((mut on_left_keys, mut on_right_keys), filter) = match on {
             JoinCondition::On { on, filter } => (on.iter().copied().unzip(), *filter),
             JoinCondition::None => ((vec![], vec![]), None),
@@ -137,28 +131,28 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
             right_len: right_plan.read_schema().len(),
         };
 
-        let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
-        let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
-        arena.push(ExecNode::NestedLoopJoin(Box::new(NestedLoopJoin {
+        let left_input = build_read(arena, plan_arena, left_plan);
+        let right_input = build_read(arena, plan_arena, right_plan);
+        ExecNode::NestedLoopJoin(Box::new(NestedLoopJoin {
             ty: join_type,
             filter,
             eq_cond,
             left_input,
             right_input,
             state: NestedLoopJoinState::PullLeft { right_bitmap: None },
-        })))
+        }))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = NestedLoopJoinState::PullLeft { right_bitmap: None };
-        arena.reset(self.left_input, plan_arena)?;
-        arena.reset(self.right_input, plan_arena)
+        self.left_input.reset(arena, plan_arena)?;
+        self.right_input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
@@ -171,10 +165,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
         loop {
             match state {
                 NestedLoopJoinState::PullLeft { right_bitmap } => {
-                    if !arena.next_tuple(self.left_input, plan_arena)? {
+                    if !self.left_input.next_tuple(arena, plan_arena)? {
                         if matches!(self.ty, JoinType::Full) {
+                            self.right_input.reset(arena, plan_arena)?;
                             state = NestedLoopJoinState::EmitRightUnmatched {
-                                right_input: self.reset_right_input(arena, plan_arena)?,
                                 right_bitmap,
                                 right_emit_index: 0,
                             };
@@ -185,11 +179,11 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                         return Ok(());
                     }
                     let left_tuple = arena.take_tuple();
+                    self.right_input.reset(arena, plan_arena)?;
 
                     state = NestedLoopJoinState::ScanRight {
                         active_left: ActiveLeftState {
                             left_tuple,
-                            right_input: self.reset_right_input(arena, plan_arena)?,
                             right_index: 0,
                             has_matched: false,
                             first_matches: Vec::new(),
@@ -201,7 +195,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                     mut active_left,
                     mut right_bitmap,
                 } => {
-                    while arena.next_tuple(active_left.right_input, plan_arena)? {
+                    while self.right_input.next_tuple(arena, plan_arena)? {
                         let right_tuple = arena.result_tuple();
                         let idx = active_left.right_index;
                         active_left.right_index += 1;
@@ -286,11 +280,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                     state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
                 }
                 NestedLoopJoinState::EmitRightUnmatched {
-                    right_input,
                     right_bitmap,
                     mut right_emit_index,
                 } => {
-                    while arena.next_tuple(right_input, plan_arena)? {
+                    while self.right_input.next_tuple(arena, plan_arena)? {
                         let idx = right_emit_index;
                         right_emit_index += 1;
 
@@ -305,7 +298,6 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
                                 self.eq_cond.left_len,
                             ));
                             self.state = NestedLoopJoinState::EmitRightUnmatched {
-                                right_input,
                                 right_bitmap,
                                 right_emit_index,
                             };
@@ -328,16 +320,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
     }
 }
 
-impl NestedLoopJoin {
-    fn reset_right_input<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
-        &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut ExecMetaArena<A>,
-    ) -> Result<ExecId, DatabaseError> {
-        arena.reset(self.right_input, plan_arena)?;
-        Ok(self.right_input)
-    }
-
+impl NestedLoopJoin<'_> {
     /// Emit a tuple according to the join type.
     ///
     /// `left`: retained outer tuple (logical right for RightOuter).
@@ -549,8 +532,6 @@ mod test {
     fn nested_right_subtrees_reuse_slots() -> Result<(), DatabaseError> {
         let storage = crate::storage::memory::MemoryStorage::new();
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -571,23 +552,17 @@ mod test {
         };
         let mut plan = cross(left.clone(), cross(left, right));
         plan.populate_output_schema_recursive(&mut plan_arena);
-        let context = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
-        let mut arena = ExecArena::new(plan.exec_capacity_hint(), context, &transaction);
-        let root = build_read(&mut arena, &mut plan_arena, &plan, context, &transaction);
-        let count = arena.nodes.items.len();
-        let address = arena.nodes.items.as_ptr();
-        assert_eq!(count, 5);
+        let context = &table_cache;
+        let mut arena = ExecArena::new(context, &transaction);
+        let mut root = build_read(&mut arena, &mut plan_arena, &plan);
         let mut rows = 0;
         let mut plan_arena = ExecMetaArena::new(plan_arena);
-        while arena.next_tuple(root, &mut plan_arena)? {
+        while root.next_tuple(&mut arena, &mut plan_arena)? {
             rows += 1;
             assert_eq!(arena.result_tuple().len(), 9);
-            assert_eq!(arena.nodes.items.len(), count);
-            assert_eq!(arena.nodes.items.as_ptr(), address);
         }
         assert_eq!(rows, 64);
-        assert_eq!(arena.nodes.items.len(), count);
-        assert!(!arena.next_tuple(root, &mut plan_arena)?);
+        assert!(!root.next_tuple(&mut arena, &mut plan_arena)?);
         Ok(())
     }
 
@@ -596,8 +571,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -626,7 +599,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -652,8 +625,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -682,7 +653,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -737,8 +708,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -767,7 +736,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -793,8 +762,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -823,7 +790,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -864,8 +831,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -894,7 +859,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -910,8 +875,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -940,7 +903,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -990,8 +953,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -1020,7 +981,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -1099,8 +1060,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -1180,7 +1139,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, NestedLoopJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );

@@ -16,9 +16,7 @@ use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
     create_accumulators, update_accumulators, write_aggregate_output, Accumulator,
 };
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -33,7 +31,7 @@ type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
 pub struct HashAggExecutor<'a> {
     agg_calls: &'a [ExprRef],
     groupby_exprs: &'a [ExprRef],
-    input: ExecId,
+    input: ExecNode<'a>,
     output: Option<HashAggOutput>,
 }
 
@@ -51,16 +49,14 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a>
         ): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::HashAgg(Box::new(HashAggExecutor {
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::HashAgg(Box::new(HashAggExecutor {
             agg_calls,
             groupby_exprs,
             input,
             output: None,
-        })))
+        }))
     }
 }
 
@@ -71,7 +67,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.output = None;
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
@@ -84,7 +80,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
                 HashMap::new();
             let mut group_keys = Vec::with_capacity(self.groupby_exprs.len());
 
-            while arena.next_tuple(self.input, plan_arena)? {
+            while self.input.next_tuple(arena, plan_arena)? {
                 let tuple = arena.result_tuple();
                 group_keys.clear();
                 for expr in self.groupby_exprs {
@@ -146,8 +142,6 @@ mod test {
 
     #[test]
     fn test_hash_agg() -> Result<(), DatabaseError> {
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -227,7 +221,7 @@ mod test {
         };
         let tuples = try_collect(execute_input::<_, HashAggExecutor>(
             (op, plan.childrens.iter().next().unwrap()),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;

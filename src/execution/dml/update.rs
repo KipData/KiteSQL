@@ -14,9 +14,7 @@
 
 use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::ExprRef;
@@ -33,7 +31,7 @@ pub struct Update<'a> {
     table_name: &'a TableName,
     value_exprs: &'a [(ColumnRef, ExprRef)],
     input_schema: Schema,
-    input: Option<ExecId>,
+    input: Option<ExecNode<'a>>,
 }
 
 impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Update<'a> {
@@ -49,23 +47,15 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Update<'a> {
         ): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let input_schema = input_plan.read_schema().clone();
-        let input = Some(build_read(
-            arena,
-            plan_arena,
-            input_plan,
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::Update(Box::new(Update {
+        let input = Some(build_read(arena, plan_arena, input_plan));
+        ExecNode::Update(Box::new(Update {
             table_name,
             value_exprs,
             input_schema,
             input,
-        })))
+        }))
     }
 }
 
@@ -93,7 +83,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(input) = self.input.take() else {
+        let Some(mut input) = self.input.take() else {
             arena.finish();
             return Ok(());
         };
@@ -109,7 +99,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
             exprs_map.insert(column_id, expr);
         }
 
-        let table_cache = arena.context().table_cache();
+        let table_cache = arena.table_cache();
         let transaction = arena.transaction();
         let table_snapshot = {
             transaction
@@ -133,7 +123,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 .map(|column: &ColumnRef| plan_arena.column(*column).datatype().serializable())
                 .collect_vec();
 
-            while arena.next_tuple(input, plan_arena)? {
+            while input.next_tuple(arena, plan_arena)? {
                 let mut is_overwrite = true;
 
                 let mut tuple = arena.take_tuple();

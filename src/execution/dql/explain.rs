@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -30,15 +30,13 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Explain<'a> {
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::Explain(Box::new(Explain {
+    ) -> ExecNode<'a> {
+        ExecNode::Explain(Box::new(Explain {
             plan: input,
             emitted: false,
-        })))
+        }))
     }
 }
 

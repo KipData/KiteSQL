@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{DDLApply, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -29,12 +27,10 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
 
     fn into_executor(
         op: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::DropIndex(Box::new(DropIndex { op })))
+    ) -> ExecNode<'a> {
+        ExecNode::DropIndex(Box::new(DropIndex { op }))
     }
 }
 

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::ExprRef;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -41,13 +41,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Values<'a> {
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let executor = Values::from(input);
-        arena.push(ExecNode::Values(Box::new(executor)))
+        ExecNode::Values(Box::new(executor))
     }
 }
 

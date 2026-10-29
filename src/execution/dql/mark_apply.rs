@@ -17,9 +17,7 @@ use crate::execution::dql::join::predicates_matched;
 use crate::execution::runs::{Runs, RunsBuilder, RunsCursor};
 #[cfg(feature = "spill")]
 use crate::execution::spill::runs::SpillRuns;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::expression::{BinaryOperator, ScalarExpression, TypeCast};
 use crate::planner::operator::mark_apply::{MarkApplyKind, MarkApplyOperator, MarkApplyQuantifier};
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, MetaArena};
@@ -53,31 +51,23 @@ struct MaterializedKeys {
 
 // TODO: range ANY/ALL only need the RHS extrema rather than every key.
 enum RightInput {
-    Streaming { root: ExecId },
-    Materialize { root: ExecId },
+    Streaming,
+    Materialize,
     Materialized(MaterializedKeys),
 }
 
 impl RightInput {
-    fn reset<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
-        &self,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut ExecMetaArena<A>,
-        probe: Option<RuntimeIndexProbe>,
-    ) -> Result<ExecId, DatabaseError> {
-        let (Self::Streaming { root } | Self::Materialize { root }) = self else {
-            unreachable!("materialized input looks up its keys")
-        };
-        if let Some(probe) = probe {
-            arena.push_runtime_probe(probe);
+    fn new(materialize: bool) -> Self {
+        if materialize {
+            RightInput::Materialize
+        } else {
+            RightInput::Streaming
         }
-        arena.reset(*root, plan_arena)?;
-        Ok(*root)
     }
 
     // Return the first terminal predicate result, or None after exhausting the RHS.
     fn scan<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
-        &self,
+        root: &mut ExecNode<'a>,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
         probe: Option<RuntimeIndexProbe>,
@@ -86,8 +76,11 @@ impl RightInput {
             &ExecMetaArena<A>,
         ) -> Result<Option<DataValue>, DatabaseError>,
     ) -> Result<Option<DataValue>, DatabaseError> {
-        let root = self.reset(arena, plan_arena, probe)?;
-        while arena.next_tuple(root, plan_arena)? {
+        if let Some(probe) = probe {
+            arena.push_runtime_probe(probe);
+        }
+        root.reset(arena, plan_arena)?;
+        while root.next_tuple(arena, plan_arena)? {
             if let Some(value) = evaluate(arena.result_tuple(), plan_arena)? {
                 return Ok(Some(value));
             }
@@ -98,8 +91,8 @@ impl RightInput {
 
 pub struct MarkApply<'a> {
     op: &'a MarkApplyOperator,
-    left_input: ExecId,
-    right_root: ExecId,
+    left_input: ExecNode<'a>,
+    right_root: ExecNode<'a>,
     // Temporarily None while scan owns and transitions the right input.
     right_input: Option<RightInput>,
 }
@@ -111,22 +104,15 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for MarkApply<'a> {
         (op, left_input, right_input): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let left_input = build_read(arena, plan_arena, left_input, cache, transaction);
-        let right_root = build_read(arena, plan_arena, right_input, cache, transaction);
-        let right_input = if op.materialize {
-            RightInput::Materialize { root: right_root }
-        } else {
-            RightInput::Streaming { root: right_root }
-        };
-        arena.push(ExecNode::MarkApply(Box::new(Self {
+    ) -> ExecNode<'a> {
+        let left_input = build_read(arena, plan_arena, left_input);
+        let right_root = build_read(arena, plan_arena, right_input);
+        ExecNode::MarkApply(Box::new(Self {
             op,
             left_input,
             right_root,
-            right_input: Some(right_input),
-        })))
+            right_input: Some(RightInput::new(op.materialize)),
+        }))
     }
 }
 
@@ -139,17 +125,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
         // Materialization already makes the RHS reusable across left rows.
         // Keep both complete caches and paused prefixes; only reset the left input.
         if !self.op.materialize || self.right_input.is_none() {
-            self.right_input = Some(if self.op.materialize {
-                RightInput::Materialize {
-                    root: self.right_root,
-                }
-            } else {
-                RightInput::Streaming {
-                    root: self.right_root,
-                }
-            });
+            self.right_input = Some(RightInput::new(self.op.materialize));
         }
-        arena.reset(self.left_input, plan_arena)
+        self.left_input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
@@ -161,7 +139,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
             arena.finish();
             return Ok(());
         };
-        if !arena.next_tuple(self.left_input, plan_arena)? {
+        if !self.left_input.next_tuple(arena, plan_arena)? {
             // Return the temporarily owned cache so reset can reuse it after EOF.
             if self.op.materialize {
                 self.right_input = Some(input);
@@ -222,7 +200,7 @@ impl<'a> MarkApply<'a> {
     }
 
     fn mark_value<T: StorageTransaction + 'a, A: MetaArena + 'a>(
-        &self,
+        &mut self,
         mut input: RightInput,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -233,17 +211,22 @@ impl<'a> MarkApply<'a> {
             MarkApplyKind::Exists => {
                 let predicates = self.op.predicates();
                 let runtime_probe = self.runtime_probe_for(probe);
-                input
-                    .scan(arena, plan_arena, runtime_probe, |right, meta| {
+                RightInput::scan(
+                    &mut self.right_root,
+                    arena,
+                    plan_arena,
+                    runtime_probe,
+                    |right, meta| {
                         Ok(predicates_matched(predicates, left_tuple, right, meta)?
                             .then_some(DataValue::Boolean(true)))
-                    })?
-                    .unwrap_or(DataValue::Boolean(false))
+                    },
+                )?
+                .unwrap_or(DataValue::Boolean(false))
             }
             MarkApplyKind::Quantified(quantifier) => {
-                if let RightInput::Materialize { root } = input {
+                if let RightInput::Materialize = input {
                     input = RightInput::Materialized(
-                        self.materialize_keys(root, arena, plan_arena, left_tuple)?,
+                        self.materialize_keys(arena, plan_arena, left_tuple)?,
                     );
                 }
                 match &input {
@@ -251,7 +234,7 @@ impl<'a> MarkApply<'a> {
                         self.lookup_keys(keys, quantifier, plan_arena, left_tuple)?
                     }
                     _ => self.scan_quantified_right_input(
-                        &input, arena, plan_arena, probe, quantifier, left_tuple,
+                        arena, plan_arena, probe, quantifier, left_tuple,
                     )?,
                 }
             }
@@ -281,17 +264,17 @@ impl<'a> MarkApply<'a> {
     }
 
     fn materialize_keys<T: StorageTransaction + 'a, A: MetaArena + 'a>(
-        &self,
-        root: ExecId,
+        &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
         left_tuple: &TupleImpl,
     ) -> Result<MaterializedKeys, DatabaseError> {
         let (_, _, right_expr, _) = Self::quantified_comparison(self.op.predicates(), plan_arena)?;
-        arena.reset(root, plan_arena)?;
+        let root = &mut self.right_root;
+        root.reset(arena, plan_arena)?;
         let mut builder = KeysBuilder::new(compare_keys);
         let (mut is_empty, mut has_null) = (true, false);
-        while arena.next_tuple(root, plan_arena)? {
+        while root.next_tuple(arena, plan_arena)? {
             // RHS positions follow the outer row, so evaluate against the joined layout.
             let values = SplitTupleRef::new(left_tuple, arena.result_tuple());
             let key = plan_arena
@@ -370,8 +353,7 @@ impl<'a> MarkApply<'a> {
     }
 
     fn scan_quantified_right_input<T: StorageTransaction + 'a, A: MetaArena + 'a>(
-        &self,
-        input: &RightInput,
+        &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
         probe: Option<DataValue>,
@@ -382,23 +364,29 @@ impl<'a> MarkApply<'a> {
         let predicates = self.op.predicates();
         // One fold across all probed ranges, so the mark is the quantifier over their union.
         for runtime_probe in self.quantified_probes(probe) {
-            let value = input.scan(arena, plan_arena, runtime_probe, |right, meta| {
-                match Self::quantified_row_value(predicates, left_tuple, right, meta)? {
-                    Some(DataValue::Boolean(true))
-                        if matches!(quantifier, MarkApplyQuantifier::Any) =>
-                    {
-                        return Ok(Some(DataValue::Boolean(true)));
+            let value = RightInput::scan(
+                &mut self.right_root,
+                arena,
+                plan_arena,
+                runtime_probe,
+                |right, meta| {
+                    match Self::quantified_row_value(predicates, left_tuple, right, meta)? {
+                        Some(DataValue::Boolean(true))
+                            if matches!(quantifier, MarkApplyQuantifier::Any) =>
+                        {
+                            return Ok(Some(DataValue::Boolean(true)));
+                        }
+                        Some(DataValue::Boolean(false))
+                            if matches!(quantifier, MarkApplyQuantifier::All) =>
+                        {
+                            return Ok(Some(DataValue::Boolean(false)));
+                        }
+                        Some(DataValue::Null) => saw_null = true,
+                        _ => {}
                     }
-                    Some(DataValue::Boolean(false))
-                        if matches!(quantifier, MarkApplyQuantifier::All) =>
-                    {
-                        return Ok(Some(DataValue::Boolean(false)));
-                    }
-                    Some(DataValue::Null) => saw_null = true,
-                    _ => {}
-                }
-                Ok(None)
-            })?;
+                    Ok(None)
+                },
+            )?;
             if let Some(value) = value {
                 return Ok(value);
             }
@@ -458,7 +446,7 @@ mod tests {
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
+    use crate::storage::{Storage, TableCache};
     use crate::types::evaluator::{binary_create, cast_create};
     use crate::types::index::RuntimeIndexProbe;
     use crate::types::tuple::Tuple;
@@ -500,24 +488,13 @@ mod tests {
         build_values_with_schema(arena, vec![(name, LogicalType::Integer)], rows)
     }
 
-    fn build_test_storage() -> Result<
-        (
-            TableCache,
-            ViewCache,
-            StatisticsMetaCache,
-            TempDir,
-            RocksStorage,
-        ),
-        DatabaseError,
-    > {
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
+    fn build_test_storage() -> Result<(TableCache, TempDir, RocksStorage), DatabaseError> {
         let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
 
-        Ok((table_cache, view_cache, meta_cache, temp_dir, storage))
+        Ok((table_cache, temp_dir, storage))
     }
 
     fn build_marker_column(arena: &mut crate::planner::PlanArena) -> ColumnRef {
@@ -572,26 +549,19 @@ mod tests {
         let op =
             MarkApplyOperator::new_exists(build_marker_column(&mut plan_arena), vec![predicate]);
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let context = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
-        let mut arena = ExecArena::new(0, context, &transaction);
-        let root = <MarkApply as ReadExecutor<_>>::into_executor(
+        let context = &table_cache;
+        let mut arena = ExecArena::new(context, &transaction);
+        let mut root = <MarkApply as ReadExecutor<_>>::into_executor(
             (&op, &left, &right),
             &mut arena,
             &mut plan_arena,
-            context,
-            &transaction,
         );
-        let count = arena.nodes.items.len();
-        let address = arena.nodes.items.as_ptr();
-        assert_eq!(count, 3);
         let mut tuples = Vec::new();
         let mut plan_arena = ExecMetaArena::new(plan_arena);
-        while arena.next_tuple(root, &mut plan_arena)? {
+        while root.next_tuple(&mut arena, &mut plan_arena)? {
             tuples.push(arena.take_tuple());
-            assert_eq!(arena.nodes.items.len(), count);
-            assert_eq!(arena.nodes.items.as_ptr(), address);
         }
 
         assert_eq!(
@@ -632,11 +602,11 @@ mod tests {
         let op =
             MarkApplyOperator::new_exists(build_marker_column(&mut plan_arena), vec![predicate]);
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;
@@ -700,21 +670,16 @@ mod tests {
             plan_arena.alloc_expression(ScalarExpression::column_expr(left_value_column, 0));
         op.set_parameterized_probe(Some(probe));
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let mut arena = ExecArena::new(
-            0,
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
-            &transaction,
-        );
+        let mut arena = ExecArena::new(&table_cache, &transaction);
 
-        let cache = arena.context();
-        let right_root = build_read(&mut arena, &mut plan_arena, &right, cache, &transaction);
+        let right_root = build_read(&mut arena, &mut plan_arena, &right);
         let mut exec: MarkApply = MarkApply {
             right_root,
             op: &op,
-            right_input: Some(RightInput::Streaming { root: right_root }),
-            left_input: 0,
+            right_input: Some(RightInput::Streaming),
+            left_input: ExecNode::Dummy(Box::default()),
         };
         let left_tuple: TupleImpl =
             Tuple::new(None, vec![DataValue::Int32(2), DataValue::Int32(1)]).into();
@@ -758,21 +723,16 @@ mod tests {
             plan_arena.alloc_expression(ScalarExpression::column_expr(left_value_column, 0));
         op.set_parameterized_probe(Some(probe));
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let mut arena = ExecArena::new(
-            0,
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
-            &transaction,
-        );
+        let mut arena = ExecArena::new(&table_cache, &transaction);
 
-        let cache = arena.context();
-        let right_root = build_read(&mut arena, &mut plan_arena, &right, cache, &transaction);
+        let right_root = build_read(&mut arena, &mut plan_arena, &right);
         let mut exec: MarkApply = MarkApply {
             right_root,
             op: &op,
-            right_input: Some(RightInput::Streaming { root: right_root }),
-            left_input: 0,
+            right_input: Some(RightInput::Streaming),
+            left_input: ExecNode::Dummy(Box::default()),
         };
         let left_tuple: TupleImpl = Tuple::new(None, vec![DataValue::Int32(2)]).into();
 
@@ -815,21 +775,16 @@ mod tests {
             plan_arena.alloc_expression(ScalarExpression::column_expr(left_value_column, 0)),
         ));
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let mut arena = ExecArena::new(
-            0,
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
-            &transaction,
-        );
+        let mut arena = ExecArena::new(&table_cache, &transaction);
 
-        let cache = arena.context();
-        let right_root = build_read(&mut arena, &mut plan_arena, &right, cache, &transaction);
+        let right_root = build_read(&mut arena, &mut plan_arena, &right);
         let mut exec: MarkApply = MarkApply {
             right_root,
             op: &op,
-            right_input: Some(RightInput::Streaming { root: right_root }),
-            left_input: 0,
+            right_input: Some(RightInput::Streaming),
+            left_input: ExecNode::Dummy(Box::default()),
         };
         let left_tuple: TupleImpl = Tuple::new(None, vec![DataValue::Null]).into();
 
@@ -870,7 +825,7 @@ mod tests {
 
         let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
@@ -878,7 +833,7 @@ mod tests {
                 &left,
                 &right,
             ),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;
@@ -901,9 +856,9 @@ mod tests {
 
     #[test]
     fn guard_false_skips_failing_rhs_but_true_and_null_evaluate_it() -> Result<(), DatabaseError> {
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
+        let cache = &table_cache;
         for kind in [
             MarkApplyKind::Exists,
             MarkApplyKind::Quantified(MarkApplyQuantifier::Any),
@@ -955,13 +910,13 @@ mod tests {
                             meta.alloc_expression(ScalarExpression::column_expr(flag_column, 1)),
                         );
                     }
-                    let mut arena = ExecArena::new(0, cache, &transaction);
-                    let left_input = build_read(&mut arena, &mut meta, &left, cache, &transaction);
-                    let right_root = build_read(&mut arena, &mut meta, &right, cache, &transaction);
+                    let mut arena = ExecArena::new(cache, &transaction);
+                    let left_input = build_read(&mut arena, &mut meta, &left);
+                    let right_root = build_read(&mut arena, &mut meta, &right);
                     let right_input = if op.materialize {
-                        RightInput::Materialize { root: right_root }
+                        RightInput::Materialize
                     } else {
-                        RightInput::Streaming { root: right_root }
+                        RightInput::Streaming
                     };
                     let mut exec = MarkApply {
                         right_root,
@@ -979,7 +934,7 @@ mod tests {
                         );
                         assert!(matches!(
                             exec.right_input,
-                            Some(RightInput::Streaming { .. } | RightInput::Materialize { .. })
+                            Some(RightInput::Streaming | RightInput::Materialize)
                         ));
                         exec.next_tuple(&mut arena, &mut meta)?;
                         assert_eq!(exec.right_input.is_none(), !op.materialize);
@@ -994,9 +949,9 @@ mod tests {
 
     #[test]
     fn guard_skips_preserve_materialized_rhs() -> Result<(), DatabaseError> {
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
+        let cache = &table_cache;
         let cases = [
             (99, DataValue::Boolean(false), DataValue::Null),
             (1, DataValue::Boolean(true), DataValue::Boolean(true)),
@@ -1037,13 +992,13 @@ mod tests {
             let mut op = MarkApplyOperator::new_in(build_marker_column(&mut meta), vec![predicate]);
             op.materialize = materialize;
             op.guard = Some(meta.alloc_expression(ScalarExpression::column_expr(flag_column, 1)));
-            let mut arena = ExecArena::new(0, cache, &transaction);
-            let left_input = build_read(&mut arena, &mut meta, &left, cache, &transaction);
-            let right_root = build_read(&mut arena, &mut meta, &right, cache, &transaction);
+            let mut arena = ExecArena::new(cache, &transaction);
+            let left_input = build_read(&mut arena, &mut meta, &left);
+            let right_root = build_read(&mut arena, &mut meta, &right);
             let right_input = if materialize {
-                RightInput::Materialize { root: right_root }
+                RightInput::Materialize
             } else {
-                RightInput::Streaming { root: right_root }
+                RightInput::Streaming
             };
             let mut exec = MarkApply {
                 right_root,
@@ -1060,10 +1015,7 @@ mod tests {
                 );
                 if materialize {
                     if index == 0 {
-                        assert!(matches!(
-                            exec.right_input,
-                            Some(RightInput::Materialize { .. })
-                        ));
+                        assert!(matches!(exec.right_input, Some(RightInput::Materialize)));
                     } else {
                         // The first unguarded row materializes every RHS key at once.
                         let Some(RightInput::Materialized(keys)) = &exec.right_input else {
@@ -1072,10 +1024,7 @@ mod tests {
                         assert!(!keys.is_empty && keys.has_null);
                     }
                 } else {
-                    assert!(matches!(
-                        exec.right_input,
-                        Some(RightInput::Streaming { .. })
-                    ));
+                    assert!(matches!(exec.right_input, Some(RightInput::Streaming)));
                 }
             }
             exec.next_tuple(&mut arena, &mut meta)?;
@@ -1087,9 +1036,9 @@ mod tests {
     #[test]
     fn quantified_apply_materializes_once_and_reuses_keys_after_short_circuit(
     ) -> Result<(), DatabaseError> {
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
+        let cache = &table_cache;
         // Exercise both a single segment and the default 1024-row spill boundary.
         for (quantifier, repeated_rows) in [
             (MarkApplyQuantifier::Any, 1),
@@ -1113,13 +1062,13 @@ mod tests {
             );
             op.materialize = true;
             let empty = build_values(&mut meta, "empty", vec![]);
-            let mut arena = ExecArena::new(0, cache, &transaction);
-            let left_input = build_read(&mut arena, &mut meta, &left, cache, &transaction);
-            let right_root = build_read(&mut arena, &mut meta, &right, cache, &transaction);
+            let mut arena = ExecArena::new(cache, &transaction);
+            let left_input = build_read(&mut arena, &mut meta, &left);
+            let right_root = build_read(&mut arena, &mut meta, &right);
             let mut exec = MarkApply {
                 right_root,
                 op: &op,
-                right_input: Some(RightInput::Materialize { root: right_root }),
+                right_input: Some(RightInput::Materialize),
                 left_input,
             };
             let mut meta = ExecMetaArena::new(meta);
@@ -1151,7 +1100,7 @@ mod tests {
                 ));
             }
             // Exhausting the left must not discard the RHS cache either.
-            while arena.next_tuple(exec.left_input, &mut meta)? {}
+            while exec.left_input.next_tuple(&mut arena, &mut meta)? {}
             exec.next_tuple(&mut arena, &mut meta)?;
             assert!(matches!(
                 exec.right_input,
@@ -1176,11 +1125,8 @@ mod tests {
             ));
 
             // An empty RHS completes immediately, including for a NULL left value.
-            let cache = arena.context();
-            exec.right_root = build_read(&mut arena, &mut meta, &empty, cache, &transaction);
-            exec.right_input = Some(RightInput::Materialize {
-                root: exec.right_root,
-            });
+            exec.right_root = build_read(&mut arena, &mut meta, &empty);
+            exec.right_input = Some(RightInput::Materialize);
             let input = exec.right_input.take().unwrap();
             let (input, value) = exec.mark_value(
                 input,
@@ -1253,11 +1199,11 @@ mod tests {
         let mut op =
             MarkApplyOperator::new_quantified(MarkApplyQuantifier::Any, marker, vec![predicate]);
         op.materialize = true;
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             meta,
             &transaction,
         ))?;
@@ -1311,7 +1257,7 @@ mod tests {
 
         let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
@@ -1319,7 +1265,7 @@ mod tests {
                 &left,
                 &right,
             ),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;
@@ -1379,7 +1325,7 @@ mod tests {
             ty: LogicalType::Boolean,
         });
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
@@ -1390,7 +1336,7 @@ mod tests {
                 &left,
                 &right,
             ),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;

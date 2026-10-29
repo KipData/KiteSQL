@@ -14,10 +14,7 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode,
-    WriteExecutor,
-};
+use crate::execution::{build_read, DDLApply, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::optimizer::core::histogram::{
@@ -40,7 +37,7 @@ const DEFAULT_NUM_OF_BUCKETS: usize = 10;
 
 pub struct Analyze<'a> {
     table_name: &'a TableName,
-    input: Option<ExecId>,
+    input: Option<ExecNode<'a>>,
     histogram_buckets: Option<usize>,
     hll_precision: Option<u8>,
     statistics_relative_error: Option<OrderedFloat<f64>>,
@@ -62,23 +59,15 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
         ): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = Some(build_read(
-            arena,
-            plan_arena,
-            input_plan,
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::Analyze(Box::new(Analyze {
+    ) -> ExecNode<'a> {
+        let input = Some(build_read(arena, plan_arena, input_plan));
+        ExecNode::Analyze(Box::new(Analyze {
             table_name,
             input,
             histogram_buckets: *histogram_buckets,
             hll_precision: *hll_precision,
             statistics_relative_error: *statistics_relative_error,
-        })))
+        }))
     }
 }
 
@@ -88,7 +77,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(input) = self.input.take() else {
+        let Some(mut input) = self.input.take() else {
             arena.finish();
             return Ok(());
         };
@@ -135,7 +124,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
             (columns, indexes)
         };
 
-        while arena.next_tuple(input, plan_arena)? {
+        while input.next_tuple(arena, plan_arena)? {
             let tuple = arena.take_tuple();
             for (_, position, builder) in &mut columns {
                 builder.append(tuple.value_at(*position));

@@ -14,9 +14,7 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -26,7 +24,7 @@ use crate::types::tuple_builder::TupleBuilder;
 
 pub struct Delete<'a> {
     table_name: &'a TableName,
-    input: Option<ExecId>,
+    input: Option<ExecNode<'a>>,
 }
 
 impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
@@ -36,17 +34,9 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
         (DeleteOperator { table_name, .. }, input_plan): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = Some(build_read(
-            arena,
-            plan_arena,
-            input_plan,
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::Delete(Box::new(Delete { table_name, input })))
+    ) -> ExecNode<'a> {
+        let input = Some(build_read(arena, plan_arena, input_plan));
+        ExecNode::Delete(Box::new(Delete { table_name, input }))
     }
 }
 
@@ -56,7 +46,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(input) = self.input.take() else {
+        let Some(mut input) = self.input.take() else {
             arena.finish();
             return Ok(());
         };
@@ -88,7 +78,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
         };
         let mut deleted_count = 0;
 
-        while arena.next_tuple(input, plan_arena)? {
+        while input.next_tuple(arena, plan_arena)? {
             let tuple = arena.take_tuple();
             let Some(tuple_id) = tuple.pk() else {
                 continue;

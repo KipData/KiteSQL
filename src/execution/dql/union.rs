@@ -13,47 +13,43 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
-pub struct Union {
-    left_input: ExecId,
-    right_input: ExecId,
+pub struct Union<'a> {
+    left_input: ExecNode<'a>,
+    right_input: ExecNode<'a>,
     reading_left: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Union {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Union<'a> {
     type Input = (&'a LogicalPlan, &'a LogicalPlan);
 
     fn into_executor(
         (left_plan, right_plan): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
-        let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
-        arena.push(ExecNode::Union(Box::new(Union {
+    ) -> ExecNode<'a> {
+        let left_input = build_read(arena, plan_arena, left_plan);
+        let right_input = build_read(arena, plan_arena, right_plan);
+        ExecNode::Union(Box::new(Union {
             left_input,
             right_input,
             reading_left: true,
-        })))
+        }))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Union {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Union<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.reading_left = true;
-        arena.reset(self.left_input, plan_arena)?;
-        arena.reset(self.right_input, plan_arena)
+        self.left_input.reset(arena, plan_arena)?;
+        self.right_input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
@@ -62,13 +58,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Union {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.reading_left {
-            if arena.next_tuple(self.left_input, plan_arena)? {
+            if self.left_input.next_tuple(arena, plan_arena)? {
                 arena.resume();
                 return Ok(());
             }
             self.reading_left = false;
         }
-        if arena.next_tuple(self.right_input, plan_arena)? {
+        if self.right_input.next_tuple(arena, plan_arena)? {
             arena.resume();
         } else {
             arena.finish();

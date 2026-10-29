@@ -13,10 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, IterSlot, ReadExecutor,
-    StorageIter,
-};
+use crate::execution::{ExecArena, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter};
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
@@ -33,11 +30,9 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ShowViews {
         _: Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         _: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let metas = arena.alloc_iter();
-        arena.push(ExecNode::ShowViews(Box::new(ShowViews { metas })))
+        ExecNode::ShowViews(Box::new(ShowViews { metas }))
     }
 }
 

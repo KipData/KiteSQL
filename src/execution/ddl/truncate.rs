@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{ExecArena, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -29,12 +27,10 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Truncate<'a> {
 
     fn into_executor(
         op: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::Truncate(Box::new(Truncate { op })))
+    ) -> ExecNode<'a> {
+        ExecNode::Truncate(Box::new(Truncate { op }))
     }
 }
 

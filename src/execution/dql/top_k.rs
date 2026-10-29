@@ -14,9 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -114,7 +112,7 @@ pub struct TopK<'a> {
     sort_fields: &'a [SortField],
     limit: usize,
     offset: Option<usize>,
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
 impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
@@ -131,18 +129,16 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
         ): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::TopK(Box::new(TopK {
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::TopK(Box::new(TopK {
             output: None,
             arena: Box::<Bump>::default(),
             sort_fields,
             limit: *limit,
             offset: *offset,
             input,
-        })))
+        }))
     }
 }
 
@@ -154,7 +150,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
     ) -> Result<(), DatabaseError> {
         self.output = None;
         self.arena.reset();
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
@@ -169,7 +165,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
 
             let mut sequence = 0;
             let mut key_scratch = BumpBytes::new_in(&self.arena);
-            while arena.next_tuple(self.input, plan_arena)? {
+            while self.input.next_tuple(arena, plan_arena)? {
                 top_sort(
                     &mut key_scratch,
                     self.sort_fields,

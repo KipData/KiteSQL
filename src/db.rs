@@ -19,7 +19,7 @@ pub use crate::binder::Statement;
 use crate::binder::{Binder, BinderContext};
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::{build_write, DDLApply, ExecArena, ExecutionContext, Executor};
+use crate::execution::{build_write, DDLApply, ExecArena, Executor};
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::table::{
     ArcTableFunctionImpl, TableFunctionCatalog, TableFunctionImpl,
@@ -763,16 +763,9 @@ impl<S: Storage> State<S> {
         let plan = keeper.plan();
         let schema = plan.read_schema().clone();
         let stamp = statement_stamp(transaction, plan)?;
-        let read_context = ExecutionContext::new(
-            &self.table_cache,
-            &self.view_cache,
-            &self.meta_cache,
-            &self.scala_functions,
-            &self.table_functions,
-        );
-        let mut arena = ExecArena::new(plan.exec_capacity_hint(), read_context, transaction);
+        let mut arena = ExecArena::new(&self.table_cache, transaction);
         arena.set_statement_stamp(stamp);
-        let root = build_write(&mut arena, &mut plan_arena, plan, read_context, transaction);
+        let root = build_write(&mut arena, &mut plan_arena, plan);
         let plan_arena = ExecMetaArena::new(plan_arena);
         let executor = Executor::new(arena, root, keeper);
 
@@ -842,16 +835,9 @@ impl<S: Storage> State<S> {
         let plan = keeper.plan();
         let schema = plan.read_schema().clone();
         let stamp = statement_stamp(transaction, plan)?;
-        let cache = ExecutionContext::new(
-            table_cache,
-            view_cache,
-            meta_cache,
-            scala_functions,
-            table_functions,
-        );
-        let mut arena = ExecArena::new(plan.exec_capacity_hint(), cache, transaction);
+        let mut arena = ExecArena::new(table_cache, transaction);
         arena.set_statement_stamp(stamp);
-        let root = build_write(&mut arena, &mut plan_arena, plan, cache, transaction);
+        let root = build_write(&mut arena, &mut plan_arena, plan);
         let plan_arena = ExecMetaArena::new(plan_arena);
         let executor = Executor::new(arena, root, keeper);
 
@@ -1558,7 +1544,7 @@ pub(crate) mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::{optimizer_pipeline, CatalogKind, DataBaseBuilder, DatabaseError, ResultIter};
     use crate::execution::dql::projection::Projection;
-    use crate::execution::{empty_context, execute_input};
+    use crate::execution::execute_input;
     use crate::expression::{AliasType, BinaryOperator, ScalarExpression};
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
     use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
@@ -1569,7 +1555,7 @@ pub(crate) mod test {
     use crate::storage::memory::MemoryStorage;
     use crate::storage::{
         table_codec::TableCodec, StatisticsMetaCache, Storage, StorageTransaction, TableCache,
-        TransactionIsolationLevel, ViewCache,
+        TransactionIsolationLevel,
     };
     use crate::types::tuple::{Tuple, TupleImpl};
     use crate::types::value::DataValue;
@@ -1672,8 +1658,7 @@ pub(crate) mod test {
             let storage = MemoryStorage::new();
             let transaction = storage.transaction()?;
             let table_cache = TableCache::default();
-            let view_cache = ViewCache::default();
-            let context = empty_context(&table_cache, &view_cache, &cache);
+            let context = &table_cache;
             let mut executor =
                 execute_input::<_, Projection>((project, input), context, arena, &transaction);
             for value in [1, 2, 3, 4] {
@@ -1734,8 +1719,7 @@ pub(crate) mod test {
         let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = TableCache::default();
-        let view_cache = ViewCache::default();
-        let context = empty_context(&table_cache, &view_cache, &cache);
+        let context = &table_cache;
         let mut executor =
             execute_input::<_, Projection>((project, input), context, arena, &transaction);
         for value in [11, 12, 13, 14] {

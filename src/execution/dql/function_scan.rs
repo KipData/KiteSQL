@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::expression::function::table::TableFunction;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -39,13 +39,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for FunctionScan<'a> {
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let executor = FunctionScan::from(input);
-        arena.push(ExecNode::FunctionScan(Box::new(executor)))
+        ExecNode::FunctionScan(Box::new(executor))
     }
 }
 

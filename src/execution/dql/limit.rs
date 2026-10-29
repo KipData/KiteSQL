@@ -13,43 +13,39 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::limit::LimitOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
-pub struct Limit {
+pub struct Limit<'a> {
     offset: Option<usize>,
     limit: Option<usize>,
-    input: ExecId,
+    input: ExecNode<'a>,
     skipped: usize,
     emitted: usize,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Limit {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Limit<'a> {
     type Input = (&'a LimitOperator, &'a LogicalPlan);
 
     fn into_executor(
         (LimitOperator { offset, limit }, input): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::Limit(Box::new(Limit {
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::Limit(Box::new(Limit {
             offset: *offset,
             limit: *limit,
             input,
             skipped: 0,
             emitted: 0,
-        })))
+        }))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Limit {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Limit<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
@@ -57,7 +53,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Limit {
     ) -> Result<(), DatabaseError> {
         self.skipped = 0;
         self.emitted = 0;
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
@@ -74,7 +70,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Limit {
         }
 
         loop {
-            if !arena.next_tuple(self.input, plan_arena)? {
+            if !self.input.next_tuple(arena, plan_arena)? {
                 arena.finish();
                 return Ok(());
             }

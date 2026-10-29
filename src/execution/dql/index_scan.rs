@@ -13,10 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, IterSlot, ReadExecutor,
-    StorageIter,
-};
+use crate::execution::{ExecArena, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter};
 use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::SortOption;
@@ -94,13 +91,9 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexScan<'a> {
         (op, info, lookup): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
+    ) -> ExecNode<'a> {
         let iter = arena.alloc_iter();
-        arena.push(ExecNode::IndexScan(Box::new(IndexScan::new(
-            op, info, lookup, iter,
-        ))))
+        ExecNode::IndexScan(Box::new(IndexScan::new(op, info, lookup, iter)))
     }
 }
 
@@ -147,7 +140,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
             } = self.op;
             let state = arena.local_state(plan_arena);
             let iter = state.transaction().read_by_index(
-                state.context.table_cache,
+                state.table_cache,
                 state.plan_arena,
                 table_name.clone(),
                 *limit,
@@ -177,11 +170,11 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
 mod tests {
     use super::*;
     use crate::db::test::build_table;
-    use crate::execution::{empty_context, ExecStatus};
+    use crate::execution::ExecStatus;
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::table_codec::TableCodec;
-    use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
+    use crate::storage::{Storage, TableCache};
     use crate::types::index::RuntimeIndexProbe;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
@@ -238,9 +231,7 @@ mod tests {
             sort_elimination_hint: None,
             stream_aggregate_hint: None,
         };
-        let views = ViewCache::default();
-        let statistics = StatisticsMetaCache::default();
-        let mut arena = ExecArena::new(0, empty_context(&tables, &views, &statistics), &tx);
+        let mut arena = ExecArena::new(&tables, &tx);
         let mut meta = ExecMetaArena::new(meta);
         let slot = arena.alloc_iter();
         let mut scan = IndexScan::new(&op, &info, &IndexLookup::Probe, slot);

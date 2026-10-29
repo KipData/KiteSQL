@@ -13,44 +13,40 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
-};
+use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
-pub struct Filter {
+pub struct Filter<'a> {
     predicate: ExprRef,
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Filter {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Filter<'a> {
     type Input = (&'a FilterOperator, &'a LogicalPlan);
 
     fn into_executor(
         (FilterOperator { predicate, .. }, input): Self::Input,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::Filter(Box::new(Filter {
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::Filter(Box::new(Filter {
             predicate: *predicate,
             input,
-        })))
+        }))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Filter {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Filter<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
@@ -59,7 +55,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Filter {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if !arena.next_tuple(self.input, plan_arena)? {
+            if !self.input.next_tuple(arena, plan_arena)? {
                 arena.finish();
                 return Ok(());
             };

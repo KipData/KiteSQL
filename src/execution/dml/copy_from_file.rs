@@ -14,9 +14,7 @@
 
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{ExecArena, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -35,12 +33,10 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CopyFromFile<'a> {
 
     fn into_executor(
         op: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::CopyFromFile(Box::new(CopyFromFile { op })))
+    ) -> ExecNode<'a> {
+        ExecNode::CopyFromFile(Box::new(CopyFromFile { op }))
     }
 }
 
@@ -60,7 +56,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
             .iter()
             .map(|ty| ty.serializable())
             .collect_vec();
-        let table_cache = arena.context().table_cache();
+        let table_cache = arena.table_cache();
         let transaction = arena.transaction();
         let table = transaction
             .table(table_cache, op.table.clone())?
@@ -174,11 +170,7 @@ mod tests {
         let transaction = db.storage.transaction()?;
         let mut executor = crate::execution::execute_input_mut::<_, CopyFromFile>(
             &op,
-            crate::execution::test_utils::empty_context(
-                db.state.table_cache(),
-                db.state.view_cache(),
-                db.state.meta_cache(),
-            ),
+            db.state.table_cache(),
             plan_arena,
             &transaction,
         );
