@@ -40,6 +40,7 @@ use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId, TupleImpl, TupleLike};
 use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
+use kite_sql_serde_macros::ReferenceSerialization;
 use std::borrow::{Borrow, Cow};
 use std::collections::{Bound, HashMap};
 use std::fmt::{self, Display, Formatter};
@@ -190,34 +191,24 @@ pub trait StorageTransaction: Sized {
     }
 
     /// The bounds is applied to the whole data batches, not per batch.
-    ///
-    /// The projections is column indices.
-    #[allow(clippy::too_many_arguments)]
     fn read<'a>(
         &'a self,
         table_codec: &mut TableCodec,
-        arena: &(dyn MetaArena + '_),
         table_cache: &TableCache,
-        table_name: TableName,
+        deserializers: &'a TupleDeserializers,
+        table_name: &TableName,
         bounds: Bounds,
-        columns: &[ColumnRef],
-        with_pk: bool,
     ) -> Result<TupleIter<'a, Self>, DatabaseError> {
-        let table = self
-            .table(table_cache, table_name.clone())?
+        self.table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let deserializers = Self::create_deserializers(columns, table, arena, with_pk);
-        let pk_ty = with_pk.then(|| table.primary_keys_type().clone());
         let offset = bounds.0.unwrap_or(0);
 
-        table_codec.with_tuple_bound(&table_name, |min, max| {
+        table_codec.with_tuple_bound(table_name, |min, max| {
             let iter = self.range(Bound::Included(min), Bound::Included(max))?;
 
             Ok(TupleIter {
                 bounds: IterBounds::new(offset, bounds.1),
-                pk_ty,
                 deserializers,
-                total_len: table.columns_len(),
                 iter,
             })
         })
@@ -230,69 +221,47 @@ pub trait StorageTransaction: Sized {
         arena: &(dyn MetaArena + 'a),
         table_name: TableName,
         (offset_option, limit_option): Bounds,
-        columns: &[ColumnRef],
         index_meta: IndexMetaRef,
         ranges: R,
         with_pk: bool,
-        covered_deserializers: Option<&'a [TupleValueSerializableImpl]>,
+        deserializers: &'a TupleDeserializers,
+        covered: bool,
         cover_mapping_indices: Option<&[usize]>,
     ) -> Result<IndexIter<'a, Self>, DatabaseError>
     where
         R: Into<IndexRanges<'a>>,
     {
-        let index_meta_ref = index_meta;
-        let index_meta = arena.index(index_meta_ref);
-        let table = self
-            .table(table_cache, table_name.clone())?
+        self.table(table_cache, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let offset = offset_option.unwrap_or(0);
-
-        let is_primary_index = matches!(index_meta.ty, IndexType::PrimaryKey { .. });
-        let (inner, deserializers, cover_mapping) = match (
-            covered_deserializers,
-            cover_mapping_indices,
-            is_primary_index,
-        ) {
-            (Some(deserializers), mapping, false) => {
-                let tuple_len = match &index_meta.value_ty {
-                    LogicalType::Tuple(tys) => tys.len(),
-                    _ => 1,
-                };
-                let cover_mapping = match mapping {
-                    Some(slots) => Some(TupleMapping::new(slots.iter().copied(), tuple_len)),
-                    None if columns.len() < tuple_len => {
-                        // Omitted mapping denotes an ordered prefix, not every key field.
-                        Some(TupleMapping::new(0..columns.len(), tuple_len))
-                    }
-                    None => None,
-                };
-
-                (
-                    IndexImplEnum::Covered(CoveredIndexImpl),
-                    Cow::Borrowed(deserializers),
-                    cover_mapping,
-                )
-            }
-            _ => {
-                let deserializers = Self::create_deserializers(columns, table, arena, with_pk);
-                (
-                    IndexImplEnum::instance(index_meta.ty),
-                    Cow::Owned(deserializers),
-                    None,
-                )
-            }
+        let meta = arena.index(index_meta);
+        let (inner, cover_mapping) = if covered && !matches!(meta.ty, IndexType::PrimaryKey { .. })
+        {
+            let tuple_len = match &meta.value_ty {
+                LogicalType::Tuple(tys) => tys.len(),
+                _ => 1,
+            };
+            let columns_len = deserializers.read_columns().count();
+            let cover_mapping = match cover_mapping_indices {
+                Some(slots) => Some(TupleMapping::new(slots.iter().copied(), tuple_len)),
+                None if columns_len < tuple_len => {
+                    // Omitted mapping denotes an ordered prefix, not every key field.
+                    Some(TupleMapping::new(0..columns_len, tuple_len))
+                }
+                None => None,
+            };
+            (IndexImplEnum::Covered(CoveredIndexImpl), cover_mapping)
+        } else {
+            (IndexImplEnum::instance(meta.ty), None)
         };
-        let total_len = table.columns_len();
         let ranges = ranges.into();
 
         Ok(IndexIter {
-            bounds: IterBounds::new(offset, limit_option),
+            bounds: IterBounds::new(offset_option.unwrap_or(0), limit_option),
             params: IndexImplParams {
-                index_meta: index_meta_ref,
+                index_meta,
                 meta_arena: arena.table_arena_cell().borrow(),
                 table_name,
                 deserializers,
-                total_len,
                 tx: self,
                 cursor: None,
                 cover_mapping,
@@ -305,48 +274,6 @@ pub trait StorageTransaction: Sized {
             encode_min_buffer: Bytes::new(),
             encode_max_buffer: Bytes::new(),
         })
-    }
-
-    fn create_deserializers(
-        columns: &[ColumnRef],
-        table: &TableCatalog,
-        arena: &(dyn MetaArena + '_),
-        with_pk: bool,
-    ) -> Vec<TupleValueSerializableImpl> {
-        let mut pk_len = if with_pk {
-            table.primary_keys().len()
-        } else {
-            0
-        };
-        let mut deserializers = Vec::with_capacity(table.columns_len());
-        let mut columns = columns.iter().peekable();
-
-        for table_column_ref in table.columns() {
-            let table_column = arena.column(*table_column_ref);
-            if columns.peek().is_none() && pk_len == 0 {
-                break;
-            }
-
-            let is_primary_key = with_pk && table_column.desc().primary().is_some();
-            if columns
-                .peek()
-                .is_some_and(|column| arena.same_column(**column, *table_column_ref))
-            {
-                deserializers.push(table_column.datatype().serializable());
-                columns.next();
-                if is_primary_key {
-                    pk_len -= 1;
-                }
-            } else if is_primary_key {
-                deserializers.push(table_column.datatype().serializable());
-                pk_len -= 1;
-            } else {
-                deserializers.push(table_column.datatype().skip_serializable());
-            }
-        }
-        debug_assert!(columns.next().is_none());
-        debug_assert_eq!(pk_len, 0);
-        deserializers
     }
 
     fn add_index_meta(
@@ -1454,8 +1381,7 @@ struct IndexImplParams<'a, T: StorageTransaction> {
     index_meta: IndexMetaRef,
     meta_arena: &'a dyn MetaArena,
     table_name: TableName,
-    deserializers: Cow<'a, [TupleValueSerializableImpl]>,
-    total_len: usize,
+    deserializers: &'a TupleDeserializers,
     tx: &'a T,
     cursor: Option<T::PointCursor<'a>>,
     cover_mapping: Option<TupleMapping>,
@@ -1487,10 +1413,10 @@ impl<T: StorageTransaction> IndexImplParams<'_, T> {
             };
             TableCodec::decode_tuple_into(
                 tuple,
-                &self.deserializers[..],
+                self.deserializers.deserializers(),
                 Some(tuple_id.clone()),
                 bytes.as_ref(),
-                self.total_len,
+                self.deserializers.total_len,
             )?;
             Ok(true)
         })
@@ -1631,10 +1557,10 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
             .transpose()?;
         TableCodec::decode_tuple_into(
             tuple,
-            &params.deserializers[..],
+            params.deserializers.deserializers(),
             tuple_id,
             value,
-            params.total_len,
+            params.deserializers.total_len,
         )
     }
 
@@ -1662,10 +1588,10 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
                 };
                 TableCodec::decode_tuple_into(
                     tuple,
-                    &params.deserializers[..],
+                    params.deserializers.deserializers(),
                     params.with_pk.then(|| tuple_id.clone()),
                     bytes.as_ref(),
-                    params.total_len,
+                    params.deserializers.total_len,
                 )?;
                 Ok(true)
             },
@@ -1969,11 +1895,83 @@ fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
     Ok(IndexResult::Scope(iter))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ReferenceSerialization)]
+pub struct ScanColumn {
+    pub(crate) column: ColumnRef,
+    pub(crate) deserializer: TupleValueSerializableImpl,
+}
+
+impl ScanColumn {
+    pub(crate) fn is_read(&self) -> bool {
+        !matches!(
+            self.deserializer,
+            TupleValueSerializableImpl::SkipFixed(_) | TupleValueSerializableImpl::SkipVariable
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, ReferenceSerialization)]
+pub struct TupleDeserializers {
+    columns: Vec<ScanColumn>,
+    total_len: usize,
+    pk_ty: Option<LogicalType>,
+}
+
+impl TupleDeserializers {
+    pub(crate) fn new(table: &TableCatalog, arena: &(dyn MetaArena + '_), with_pk: bool) -> Self {
+        Self {
+            columns: table
+                .columns()
+                .map(|column| ScanColumn {
+                    column: *column,
+                    deserializer: arena.column(*column).datatype().serializable(),
+                })
+                .collect(),
+            total_len: table.columns_len(),
+            pk_ty: with_pk.then(|| table.primary_keys_type().clone()),
+        }
+    }
+
+    pub(crate) fn read_columns(&self) -> impl Iterator<Item = ColumnRef> + '_ {
+        self.columns
+            .iter()
+            .filter(|column| column.is_read())
+            .map(|column| column.column)
+    }
+
+    pub(crate) fn retain(
+        &mut self,
+        arena: &(dyn MetaArena + '_),
+        mut keep: impl FnMut(usize, ColumnRef) -> bool,
+    ) {
+        let with_pk = self.pk_ty.is_some();
+        let read = self
+            .columns
+            .iter_mut()
+            .enumerate()
+            .filter(|(_, column)| column.is_read());
+        let mut read_len = 0;
+        for (position, (index, scan_column)) in read.enumerate() {
+            let table_column = arena.column(scan_column.column);
+            let forced = with_pk && table_column.desc().primary().is_some();
+
+            if forced || keep(position, scan_column.column) {
+                read_len = index + 1;
+            } else {
+                scan_column.deserializer = table_column.datatype().skip_serializable();
+            }
+        }
+        self.columns.truncate(read_len);
+    }
+
+    fn deserializers(&self) -> impl Iterator<Item = &TupleValueSerializableImpl> {
+        self.columns.iter().map(|column| &column.deserializer)
+    }
+}
+
 pub struct TupleIter<'a, T: StorageTransaction + 'a> {
     bounds: IterBounds,
-    pk_ty: Option<LogicalType>,
-    deserializers: Vec<TupleValueSerializableImpl>,
-    total_len: usize,
+    deserializers: &'a TupleDeserializers,
     iter: T::IterType<'a>,
 }
 
@@ -2007,17 +2005,17 @@ impl<'a, T: StorageTransaction + 'a> Iter for TupleIter<'a, T> {
                 return Ok(false);
             }
             self.bounds.consume_limit();
-            let tuple_id = if let Some(pk_ty) = &self.pk_ty {
+            let tuple_id = if let Some(pk_ty) = &self.deserializers.pk_ty {
                 Some(TableCodec::decode_tuple_key(key, pk_ty)?)
             } else {
                 None
             };
             TableCodec::decode_tuple_into(
                 tuple,
-                &self.deserializers,
+                self.deserializers.deserializers(),
                 tuple_id,
                 value,
-                self.total_len,
+                self.deserializers.total_len,
             )?;
 
             return Ok(true);
@@ -2467,6 +2465,41 @@ pub(crate) fn check_remove_range<T: StorageTransaction>(tx: &mut T) -> Result<()
 }
 
 #[cfg(test)]
+pub(crate) fn project_deserializers_for_test(
+    table_cache: &TableCache,
+    table_name: &str,
+    columns: &[ColumnRef],
+    arena: &(dyn MetaArena + '_),
+    with_pk: bool,
+) -> TupleDeserializers {
+    let mut deserializers = TupleDeserializers::new(&table_cache[table_name], arena, with_pk);
+    deserializers.retain(arena, |_, column| {
+        columns
+            .iter()
+            .any(|wanted| arena.same_column(*wanted, column))
+    });
+    deserializers
+}
+
+#[cfg(test)]
+pub(crate) fn deserializers_for_test(
+    columns: impl IntoIterator<Item = ColumnRef>,
+) -> TupleDeserializers {
+    let columns: Vec<_> = columns
+        .into_iter()
+        .map(|column| ScanColumn {
+            column,
+            deserializer: TupleValueSerializableImpl::Boolean,
+        })
+        .collect();
+    TupleDeserializers {
+        total_len: columns.len(),
+        columns,
+        pk_ty: None,
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn next_tuple_for_test<I: Iter>(iter: &mut I) -> Result<Option<Tuple>, DatabaseError> {
     let mut tuple = Tuple::default();
     let mut table_codec = TableCodec::default();
@@ -2490,7 +2523,10 @@ mod test {
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
     use crate::storage::table_codec::TableCodec;
-    use crate::storage::{IndexIter, InnerIter, Storage, StorageTransaction, TableCache};
+    use crate::storage::{
+        project_deserializers_for_test, IndexIter, InnerIter, Storage, StorageTransaction,
+        TableCache, TupleDeserializers,
+    };
     use crate::types::index::{Index, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
@@ -2668,14 +2704,19 @@ mod test {
             )?;
         }
         {
+            let deserializers = project_deserializers_for_test(
+                &table_cache,
+                "t1",
+                &full_columns(&table_cache),
+                &plan_arena,
+                true,
+            );
             let mut tuple_iter = transaction.read(
                 &mut table_codec,
-                &plan_arena,
                 &table_cache,
-                "t1".to_string().into(),
+                &deserializers,
+                &"t1".to_string().into(),
                 (None, None),
-                &full_columns(&table_cache),
-                true,
             )?;
 
             assert_eq!(
@@ -2706,14 +2747,19 @@ mod test {
 
         transaction.remove_tuple(&mut table_codec, "t1", &tuples[1].values[0])?;
         {
+            let deserializers = project_deserializers_for_test(
+                &table_cache,
+                "t1",
+                &full_columns(&table_cache),
+                &plan_arena,
+                true,
+            );
             let mut tuple_iter = transaction.read(
                 &mut table_codec,
-                &plan_arena,
                 &table_cache,
-                "t1".to_string().into(),
+                &deserializers,
+                &"t1".to_string().into(),
                 (None, None),
-                &full_columns(&table_cache),
-                true,
             )?;
 
             assert_eq!(
@@ -2884,6 +2930,7 @@ mod test {
             transaction: &'a RocksTransaction<'a>,
             table_cache: &'a TableCache,
             plan_arena: &'a PlanArena<'a>,
+            deserializers: &'a TupleDeserializers,
         ) -> Result<IndexIter<'a, RocksTransaction<'a>>, DatabaseError> {
             let table_name: crate::catalog::TableName = "t1".to_string().into();
             let index_meta = table_cache
@@ -2900,14 +2947,14 @@ mod test {
                 plan_arena,
                 "t1".to_string().into(),
                 (None, None),
-                &full_columns(table_cache),
                 index_meta,
                 &[Range::Scope {
                     min: Bound::Unbounded,
                     max: Bound::Unbounded,
                 }][..],
                 true,
-                None,
+                deserializers,
+                false,
                 None,
             )
         }
@@ -2983,7 +3030,15 @@ mod test {
             )?;
         }
         {
-            let mut index_iter = build_index_iter(&transaction, &table_cache, &plan_arena)?;
+            let deserializers = project_deserializers_for_test(
+                &table_cache,
+                "t1",
+                &full_columns(&table_cache),
+                &plan_arena,
+                true,
+            );
+            let mut index_iter =
+                build_index_iter(&transaction, &table_cache, &plan_arena, &deserializers)?;
 
             assert_eq!(
                 super::next_tuple_for_test(&mut index_iter)?.unwrap(),
@@ -3012,7 +3067,16 @@ mod test {
         }
         transaction.del_index(&mut table_codec, "t1", &indexes[0].1, &indexes[0].0)?;
 
-        let mut index_iter = build_index_iter(&transaction, &table_cache, &plan_arena)?;
+        let deserializers = project_deserializers_for_test(
+            &table_cache,
+            "t1",
+            &full_columns(&table_cache),
+            &plan_arena,
+            true,
+        );
+
+        let mut index_iter =
+            build_index_iter(&transaction, &table_cache, &plan_arena, &deserializers)?;
 
         assert_eq!(
             super::next_tuple_for_test(&mut index_iter)?.unwrap(),

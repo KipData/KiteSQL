@@ -857,7 +857,6 @@ mod test {
     use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
-    use crate::iter_ext::Itertools;
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
     use crate::storage::table_codec::TableCodec;
@@ -1073,14 +1072,19 @@ mod test {
             .unwrap();
         let read_columns = vec![read_column];
 
+        let deserializers = crate::storage::project_deserializers_for_test(
+            &table_cache,
+            "test",
+            &read_columns,
+            &plan_arena,
+            true,
+        );
         let mut iter = transaction.read(
             &mut table_codec,
-            &plan_arena,
             &table_cache,
-            "test".to_string().into(),
+            &deserializers,
+            &"test".to_string().into(),
             (Some(1), Some(1)),
-            &read_columns,
-            true,
         )?;
 
         let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
@@ -1126,10 +1130,6 @@ mod test {
             DataValue::Int32(3),
             DataValue::Int32(4),
         ];
-        let deserializers = table
-            .columns()
-            .map(|column| plan_arena.column(*column).datatype().serializable())
-            .collect_vec();
         let ranges = [
             Range::Eq(DataValue::Int32(0)),
             Range::Scope {
@@ -1137,14 +1137,14 @@ mod test {
                 max: Bound::Included(DataValue::Int32(4)),
             },
         ];
+        let deserializers = crate::storage::TupleDeserializers::new(&table, &plan_arena, false);
         let mut iter: IndexIter<'_, _> = IndexIter {
             bounds: IterBounds::new(0, None),
             params: IndexImplParams {
                 index_meta,
                 meta_arena: plan_arena.table_arena_cell().borrow(),
                 table_name: table.name.clone(),
-                deserializers: std::borrow::Cow::Owned(deserializers),
-                total_len: table.columns_len(),
+                deserializers: &deserializers,
                 tx: &transaction,
                 cursor: None,
                 cover_mapping: None,
@@ -1185,20 +1185,27 @@ mod test {
             .clone();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         {
+            let deserializers = crate::storage::project_deserializers_for_test(
+                kite_sql.state.table_cache(),
+                "t1",
+                &table.columns().cloned().collect::<Vec<_>>(),
+                &plan_arena,
+                true,
+            );
             let mut iter = transaction
                 .read_by_index(
                     kite_sql.state.table_cache(),
                     &plan_arena,
                     "t1".to_string().into(),
                     (Some(0), Some(1)),
-                    &table.columns().cloned().collect::<Vec<_>>(),
                     table.indexes[0],
                     &[Range::Scope {
                         min: Bound::Excluded(DataValue::Int32(0)),
                         max: Bound::Unbounded,
                     }][..],
                     true,
-                    None,
+                    &deserializers,
+                    false,
                     None,
                 )
                 .unwrap();
@@ -1213,20 +1220,27 @@ mod test {
             let mut columns: Vec<_> = table.columns().cloned().collect();
             let _ = columns.pop();
 
+            let deserializers = crate::storage::project_deserializers_for_test(
+                kite_sql.state.table_cache(),
+                "t1",
+                &columns,
+                &plan_arena,
+                true,
+            );
             let mut iter = transaction
                 .read_by_index(
                     kite_sql.state.table_cache(),
                     &plan_arena,
                     "t1".to_string().into(),
                     (Some(0), Some(1)),
-                    &columns,
                     table.indexes[0],
                     &[Range::Scope {
                         min: Bound::Excluded(DataValue::Int32(3)),
                         max: Bound::Unbounded,
                     }][..],
                     true,
-                    None,
+                    &deserializers,
+                    false,
                     None,
                 )
                 .unwrap();
@@ -1266,22 +1280,28 @@ mod test {
             .iter()
             .find(|index| plan_arena.index(**index).name == "idx_c1")
             .ok_or(DatabaseError::InvalidIndex)?;
-        let c1_deserializer = vec![plan_arena.column(c1_column).datatype().serializable()];
 
         let c1_ranges = [Range::Scope {
             min: Bound::Excluded(DataValue::Int32(0)),
             max: Bound::Excluded(DataValue::Int32(10)),
         }];
+        let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.table_cache(),
+            "t1",
+            &[c1_column],
+            &plan_arena,
+            false,
+        );
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
             &plan_arena,
             "t1".to_string().into(),
             (None, None),
-            &[c1_column],
             idx_c1,
             &c1_ranges[..],
             false,
-            Some(&c1_deserializer),
+            &deserializers,
+            true,
             None,
         )?;
 
@@ -1339,7 +1359,6 @@ mod test {
             .find(|column| plan_arena.column(*column).name() == "b")
             .unwrap();
         let columns = vec![b_column];
-        let covered_deserializers = vec![plan_arena.column(b_column).datatype().serializable()];
 
         // ensure cover mapping can reorder index values to match scan order
         let composite_index = *table
@@ -1348,10 +1367,6 @@ mod test {
             .find(|index| plan_arena.index(**index).name == "idx_b_a")
             .unwrap();
         let reordered_columns = vec![a_cover_column, b_cover_column];
-        let reordered_deserializers = vec![
-            plan_arena.column(a_cover_column).datatype().serializable(),
-            plan_arena.column(b_cover_column).datatype().serializable(),
-        ];
         let a_id = plan_arena.column(a_cover_column).id().unwrap();
         let b_id = plan_arena.column(b_cover_column).id().unwrap();
         let cover_mapping = vec![
@@ -1369,19 +1384,26 @@ mod test {
                 .unwrap(),
         ];
 
+        let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.table_cache(),
+            "t1",
+            &reordered_columns,
+            &plan_arena,
+            false,
+        );
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
             &plan_arena,
             "t1".to_string().into(),
             (None, None),
-            &reordered_columns,
             composite_index,
             &[Range::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Unbounded,
             }][..],
             false,
-            Some(&reordered_deserializers),
+            &deserializers,
+            true,
             Some(&cover_mapping),
         )?;
         let first_tuple = crate::storage::next_tuple_for_test(&mut iter)?.unwrap();
@@ -1393,26 +1415,26 @@ mod test {
 
         // An identity prefix projection still skips the remaining key fields;
         // omitted mapping must not widen the output back to the full index.
-        let prefix_deserializers = [
-            plan_arena.column(b_cover_column).datatype().serializable(),
-            plan_arena
-                .column(a_cover_column)
-                .datatype()
-                .skip_serializable(),
-        ];
+        let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.table_cache(),
+            "t1",
+            &[b_cover_column],
+            &plan_arena,
+            false,
+        );
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
             &plan_arena,
             "t1".to_string().into(),
             (None, None),
-            &[b_cover_column],
             composite_index,
             &[Range::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Unbounded,
             }][..],
             false,
-            Some(&prefix_deserializers),
+            &deserializers,
+            true,
             None,
         )?;
         for value in [0, 1, 2, 4] {
@@ -1428,16 +1450,23 @@ mod test {
         let mut table_codec = TableCodec::default();
         transaction.remove_tuple(&mut table_codec, "t1", &target_pk)?;
 
+        let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.table_cache(),
+            "t1",
+            &columns,
+            &plan_arena,
+            false,
+        );
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
             &plan_arena,
             "t1".to_string().into(),
             (Some(0), Some(1)),
-            &columns,
             unique_index,
             &covered_ranges[..],
             false,
-            Some(&covered_deserializers),
+            &deserializers,
+            true,
             None,
         )?;
 
@@ -1457,20 +1486,26 @@ mod test {
             .find(|index| plan_arena.index(**index).name == "pk_index")
             .unwrap();
         let pk_columns = vec![a_cover_column];
-        let pk_deserializers = vec![plan_arena.column(a_cover_column).datatype().serializable()];
+        let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.table_cache(),
+            "t1",
+            &pk_columns,
+            &plan_arena,
+            false,
+        );
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
             &plan_arena,
             "t1".to_string().into(),
             (None, None),
-            &pk_columns,
             pk_index,
             &[Range::Scope {
                 min: Bound::Unbounded,
                 max: Bound::Unbounded,
             }][..],
             false,
-            Some(&pk_deserializers),
+            &deserializers,
+            true,
             Some(&[0]),
         )?;
         let mut row_count = 0;

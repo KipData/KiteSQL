@@ -151,8 +151,7 @@ impl ColumnPruning {
                 &mut self,
                 op: &'a crate::planner::operator::table_scan::TableScanOperator,
             ) -> Result<(), DatabaseError> {
-                self.referenced_columns
-                    .extend(op.columns.iter().copied(), self.arena);
+                self.referenced_columns.extend(op.columns(), self.arena);
                 Ok(())
             }
 
@@ -483,14 +482,10 @@ impl ColumnPruning {
             Operator::TableScan(op) => {
                 if !all_referenced {
                     outcome.removed_positions.truncate(output_start);
-                    outcome.removed_positions.reserve(op.columns.len());
-                    let mut position = 0;
-                    op.columns.retain(|column| {
-                        let current_position = position;
-                        position += 1;
-                        let keep = required_columns.contains(*column, arena);
+                    op.deserializers.retain(&*arena, |position, column| {
+                        let keep = required_columns.contains(column, arena);
                         if !keep {
-                            outcome.removed_positions.push(current_position);
+                            outcome.removed_positions.push(position);
                         }
                         keep
                     });
@@ -870,9 +865,8 @@ mod tests {
         if let Operator::TableScan(op) = &plan.operator {
             if op.table_name.to_string() == table_name {
                 scans.push(
-                    op.columns
-                        .iter()
-                        .map(|column| arena.column(*column).name().to_string())
+                    op.columns()
+                        .map(|column| arena.column(column).name().to_string())
                         .collect(),
                 );
             }
@@ -1029,7 +1023,7 @@ mod tests {
         for grandson_plan in join_op.childrens.iter() {
             match &grandson_plan.operator {
                 Operator::TableScan(op) => {
-                    assert_eq!(op.columns.len(), 1);
+                    assert_eq!(op.columns().count(), 1);
                 }
                 _ => unreachable!("Should be a scan operator"),
             }

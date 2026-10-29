@@ -184,13 +184,12 @@ impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'plan, '_
     fn visit_table_scan(&mut self, scan: &'plan TableScanOperator) -> Result<(), DatabaseError> {
         if scan.limit == (None, None) {
             if let Some(source) = self.column.and_then(|column| {
-                scan.columns
-                    .iter()
-                    .find(|source| self.arena.same_column(**source, column))
+                scan.columns()
+                    .find(|source| self.arena.same_column(*source, column))
             }) {
                 self.source = self
                     .arena
-                    .column(*source)
+                    .column(source)
                     .id()
                     .map(|id| (&scan.table_name, id));
             }

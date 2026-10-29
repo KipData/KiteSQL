@@ -65,19 +65,16 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
         if state.iters[self.iter].is_empty() {
             let TableScanOperator {
                 table_name,
-                columns,
+                deserializers,
                 limit,
-                with_pk,
                 ..
             } = self.op;
             let iter = state.transaction().read(
                 state.table_codec,
-                state.plan_arena,
                 state.table_cache,
-                table_name.clone(),
+                deserializers,
+                table_name,
                 *limit,
-                columns,
-                *with_pk,
             )?;
             state.iters[self.iter] = StorageIter::Tuple(iter);
         }
@@ -100,7 +97,7 @@ mod tests {
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::table_codec::TableCodec;
-    use crate::storage::{Storage, TableCache};
+    use crate::storage::{Storage, TableCache, TupleDeserializers};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -139,7 +136,7 @@ mod tests {
         }
         let op = TableScanOperator {
             table_name: "t1".into(),
-            columns: tables.get("t1").unwrap().columns().copied().collect(),
+            deserializers: TupleDeserializers::new(tables.get("t1").unwrap(), &meta, true),
             limit: (Some(1), Some(2)),
             index_infos: vec![],
             with_pk: true,

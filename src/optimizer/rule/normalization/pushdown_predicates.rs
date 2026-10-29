@@ -365,11 +365,11 @@ impl NormalizationRule for PushPredicateIntoScan {
 
             *lookup = Some(IndexLookup::Static(detached.range));
             *residual_predicate = detached.residual;
-            (*covered_deserializers, *cover_mapping) =
-                match index_covering(&scan_op.columns, *meta, arena) {
-                    Some((deserializers, mapping)) => (Some(deserializers), mapping),
-                    None => (None, None),
-                };
+            let columns = scan_op.deserializers.read_columns();
+            (*covered_deserializers, *cover_mapping) = match index_covering(columns, *meta, arena) {
+                Some((deserializers, mapping)) => (Some(deserializers), mapping),
+                None => (None, None),
+            };
         }
 
         Ok(changed)
@@ -379,50 +379,47 @@ impl NormalizationRule for PushPredicateIntoScan {
 /// Index-only read layout when `index` holds every scanned column: deserializers for the
 /// index columns, plus a scan-to-index slot mapping when their orders differ.
 pub(crate) fn index_covering(
-    columns: &[ColumnRef],
+    columns: impl Iterator<Item = ColumnRef>,
     index: IndexMetaRef,
     arena: &PlanArena,
 ) -> Option<(Vec<TupleValueSerializableImpl>, Option<Vec<usize>>)> {
-    if !is_index_covers(columns, index, arena) {
-        return None;
-    }
-    let mut mapping_slots = vec![usize::MAX; columns.len()];
-    let mut needs_mapping = false;
     let index_meta = arena.index(index);
     let index_column_types = match &index_meta.value_ty {
         LogicalType::Tuple(tys) => tys,
         ty => slice::from_ref(ty),
     };
-    let mut deserializers = Vec::with_capacity(index_meta.column_ids.len());
+    let mut deserializers = (0..index_meta.column_ids.len())
+        .map(|idx| index_column_types[idx].skip_serializable())
+        .collect::<Vec<_>>();
+    let mut mapping_slots = Vec::with_capacity(index_meta.column_ids.len());
+    let mut needs_mapping = false;
 
-    for (idx, column_id) in index_meta.column_ids.iter().enumerate() {
-        if let Some((scan_idx, column)) = columns.iter().enumerate().find(|(_, column)| {
-            arena
-                .column(**column)
-                .id()
-                .map(|id| id == *column_id)
-                .unwrap_or(false)
-        }) {
-            mapping_slots[scan_idx] = idx;
-            needs_mapping |= scan_idx != idx;
-            deserializers.push(arena.column(*column).datatype().serializable());
-        } else {
-            deserializers.push(index_column_types[idx].skip_serializable());
-        }
+    for (scan_idx, column) in columns.enumerate() {
+        let column = arena.column(column);
+        // Not covered once any scanned column is missing from the index.
+        let idx = column.id().and_then(|id| {
+            index_meta
+                .column_ids
+                .iter()
+                .position(|column_id| *column_id == id)
+        })?;
+        deserializers[idx] = column.datatype().serializable();
+        mapping_slots.push(idx);
+        needs_mapping |= scan_idx != idx;
     }
 
     Some((deserializers, needs_mapping.then_some(mapping_slots)))
 }
 
 pub(crate) fn is_index_covers(
-    columns: &[ColumnRef],
+    mut columns: impl Iterator<Item = ColumnRef>,
     index: IndexMetaRef,
     arena: &PlanArena,
 ) -> bool {
     let index_meta = arena.index(index);
-    columns.iter().all(|column| {
+    columns.all(|column| {
         arena
-            .column(*column)
+            .column(column)
             .id()
             .is_some_and(|id| index_meta.column_ids.contains(&id))
     })
@@ -833,7 +830,7 @@ mod tests {
             let scan = LogicalPlan::new(
                 Operator::TableScan(TableScanOperator {
                     table_name: table_name.clone(),
-                    columns: vec![c1, c2],
+                    deserializers: crate::storage::deserializers_for_test(vec![c1, c2]),
                     limit: (None, None),
                     index_infos: vec![IndexInfo {
                         meta,
@@ -1063,7 +1060,7 @@ mod tests {
         let scan_plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name,
-                columns,
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: vec![
                     IndexInfo {

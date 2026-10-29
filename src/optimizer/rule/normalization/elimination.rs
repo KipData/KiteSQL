@@ -441,9 +441,8 @@ pub(crate) fn apply_scan_order_hint(
         };
         if !expr.all_referenced_columns(arena, |arena, column, _| {
             scan_op
-                .columns
-                .iter()
-                .any(|scan_column| arena.same_column(*scan_column, *column))
+                .columns()
+                .any(|scan_column| arena.same_column(scan_column, *column))
         })? {
             required_from_table = false;
             break;
@@ -1368,7 +1367,7 @@ mod tests {
         let mut scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name: ::std::sync::Arc::from("t1"),
-                columns: vec![column],
+                deserializers: crate::storage::deserializers_for_test(vec![column]),
                 limit: (None, None),
                 index_infos: vec![index_info.clone()],
                 with_pk: false,
@@ -1433,7 +1432,7 @@ mod tests {
         let scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name,
-                columns,
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: vec![index_info],
                 with_pk: false,
@@ -1749,7 +1748,7 @@ mod tests {
         let table_scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name,
-                columns,
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: vec![index_info],
                 with_pk: false,
@@ -1997,7 +1996,7 @@ mod tests {
         let mut scan_plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name: ::std::sync::Arc::from("t"),
-                columns,
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: vec![index_info],
                 with_pk: false,

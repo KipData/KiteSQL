@@ -133,7 +133,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
             let ranges = Self::ranges(self.info, self.lookup, arena, plan_arena)?;
             let TableScanOperator {
                 table_name,
-                columns,
+                deserializers,
                 limit,
                 with_pk,
                 ..
@@ -144,11 +144,11 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
                 state.plan_arena,
                 table_name.clone(),
                 *limit,
-                columns,
                 self.info.meta,
                 ranges,
                 *with_pk,
-                self.info.covered_deserializers.as_deref(),
+                deserializers,
+                self.info.covered_deserializers.is_some(),
                 self.info.cover_mapping.as_deref(),
             )?;
             state.iters[self.iter] = StorageIter::Index(Box::new(iter));
@@ -174,7 +174,7 @@ mod tests {
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::table_codec::TableCodec;
-    use crate::storage::{Storage, TableCache};
+    use crate::storage::{Storage, TableCache, TupleDeserializers};
     use crate::types::index::RuntimeIndexProbe;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
@@ -216,7 +216,7 @@ mod tests {
         let table = tables.get("t1").unwrap();
         let op = TableScanOperator {
             table_name: "t1".into(),
-            columns: table.columns().copied().collect(),
+            deserializers: TupleDeserializers::new(table, &meta, true),
             limit: (None, None),
             index_infos: vec![],
             with_pk: true,

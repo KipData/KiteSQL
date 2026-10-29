@@ -694,7 +694,7 @@ pub(crate) mod tests {
             Operator::ScalarSubquery(ScalarSubqueryOperator),
             Operator::TableScan(TableScanOperator {
                 table_name: "t1".into(),
-                columns: vec![column_ref],
+                deserializers: crate::storage::deserializers_for_test(vec![column_ref]),
                 limit: (None, None),
                 index_infos: vec![index_info(expr(10), expr(11))],
                 with_pk: false,

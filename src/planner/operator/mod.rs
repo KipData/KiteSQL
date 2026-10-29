@@ -848,8 +848,8 @@ impl Operator {
                 &mut self,
                 op: &'operator TableScanOperator,
             ) -> Result<(), DatabaseError> {
-                for (position, column) in op.columns.iter().enumerate() {
-                    ExprVisitor::visit_column_ref(self, column, position)?;
+                for (position, column) in op.columns().enumerate() {
+                    ExprVisitor::visit_column_ref(self, &column, position)?;
                 }
                 Ok(())
             }
@@ -1485,7 +1485,7 @@ mod tests {
 
         let table_scan = Operator::TableScan(TableScanOperator {
             table_name: "users".into(),
-            columns: vec![a, d],
+            deserializers: crate::storage::deserializers_for_test(vec![a, d]),
             limit: (None, None),
             index_infos: Vec::new(),
             with_pk: false,

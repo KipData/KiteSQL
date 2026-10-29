@@ -742,7 +742,7 @@ mod tests {
         let mut plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name: name.into(),
-                columns: vec![column],
+                deserializers: crate::storage::deserializers_for_test(vec![column]),
                 limit: (None, None),
                 index_infos: Vec::new(),
                 with_pk: false,

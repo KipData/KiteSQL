@@ -304,14 +304,19 @@ mod wasm_tests {
             .unwrap();
         let read_columns = vec![read_column];
 
+        let deserializers = crate::storage::project_deserializers_for_test(
+            &table_cache,
+            "test",
+            &read_columns,
+            &plan_arena,
+            true,
+        );
         let mut iter = transaction.read(
             &mut table_codec,
-            &plan_arena,
             &table_cache,
-            "test".to_string().into(),
+            &deserializers,
+            &"test".to_string().into(),
             (Some(1), Some(1)),
-            &read_columns,
-            true,
         )?;
 
         let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
@@ -340,19 +345,26 @@ mod wasm_tests {
             .clone();
         let pk_index = table.indexes().next().unwrap().clone();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
+        let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.table_cache(),
+            &table_name,
+            &table.columns().cloned().collect::<Vec<_>>(),
+            &plan_arena,
+            true,
+        );
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
             &plan_arena,
             table_name,
             (Some(0), None),
-            &table.columns().cloned().collect::<Vec<_>>(),
             pk_index,
             &[Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(0)),
                 max: Bound::Included(DataValue::Int32(2)),
             }][..],
             true,
-            None,
+            &deserializers,
+            false,
             None,
         )?;
 
@@ -471,14 +483,19 @@ mod native_tests {
             .unwrap();
         let read_columns = vec![read_column];
 
+        let deserializers = crate::storage::project_deserializers_for_test(
+            &table_cache,
+            "test",
+            &read_columns,
+            &plan_arena,
+            true,
+        );
         let mut iter = transaction.read(
             &mut table_codec,
-            &plan_arena,
             &table_cache,
-            "test".to_string().into(),
+            &deserializers,
+            &"test".to_string().into(),
             (Some(1), Some(1)),
-            &read_columns,
-            true,
         )?;
 
         let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
@@ -507,19 +524,26 @@ mod native_tests {
             .clone();
         let pk_index = *table.indexes().next().unwrap();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
+        let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.table_cache(),
+            &table_name,
+            &table.columns().cloned().collect::<Vec<_>>(),
+            &plan_arena,
+            true,
+        );
         let mut iter = transaction.read_by_index(
             kite_sql.state.table_cache(),
             &plan_arena,
             table_name,
             (Some(0), None),
-            &table.columns().cloned().collect::<Vec<_>>(),
             pk_index,
             &[Range::Scope {
                 min: Bound::Excluded(DataValue::Int32(0)),
                 max: Bound::Included(DataValue::Int32(2)),
             }][..],
             true,
-            None,
+            &deserializers,
+            false,
             None,
         )?;
 

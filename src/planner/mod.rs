@@ -58,13 +58,19 @@ impl<T: Explain + ?Sized, A: MetaArena + ?Sized> fmt::Display for ExplainDisplay
     }
 }
 
-pub(crate) fn fmt_explain_list<T: Explain, A: MetaArena + ?Sized>(
-    values: &[T],
+impl<T: Explain + ?Sized> Explain for &T {
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (**self).fmt(arena, f)
+    }
+}
+
+pub(crate) fn fmt_explain_list<A: MetaArena + ?Sized>(
+    values: impl IntoIterator<Item = impl Explain>,
     separator: &str,
     arena: &A,
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
-    for (index, value) in values.iter().enumerate() {
+    for (index, value) in values.into_iter().enumerate() {
         if index > 0 {
             f.write_str(separator)?;
         }
@@ -360,7 +366,7 @@ impl LogicalPlan {
                 .iter()
                 .map(|expr| expr.output_column_ref(arena))
                 .collect(),
-            Operator::TableScan(op) => op.columns.clone(),
+            Operator::TableScan(op) => op.columns().collect(),
             Operator::FunctionScan(op) => {
                 let mut schema = Vec::new();
                 op.table_function.output_schema_into(&mut schema);
@@ -605,7 +611,7 @@ mod tests {
         LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 table_name: table.to_string().into(),
-                columns,
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: Vec::new(),
                 with_pk: false,
@@ -869,7 +875,7 @@ mod tests {
 
         if let Childrens::Only(child) = plan.childrens.as_mut() {
             if let Operator::TableScan(scan) = &mut child.operator {
-                scan.columns = vec![name];
+                scan.deserializers = crate::storage::deserializers_for_test([name]);
             }
         }
 
