@@ -13,40 +13,46 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, IterSlot, ReadExecutor,
+    StorageIter,
+};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{Iter, StorageTransaction, TupleIter};
+use crate::storage::{Iter, StorageTransaction};
 
-pub(crate) struct SeqScan<'a, T: StorageTransaction + 'a> {
+pub(crate) struct SeqScan<'a> {
     op: &'a TableScanOperator,
-    iter: Option<TupleIter<'a, T>>,
+    iter: IterSlot,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SeqScan<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SeqScan<'a> {
     type Input = &'a TableScanOperator;
 
     fn into_executor(
         op: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
     ) -> ExecId {
-        arena.push(ExecNode::SeqScan(Box::new(SeqScan { op, iter: None })))
+        let iter = arena.alloc_iter();
+        arena.push(ExecNode::SeqScan(Box::new(SeqScan { op, iter })))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        if let Some(iter) = &mut self.iter {
-            let state = arena.local_state(plan_arena);
-            iter.reset(
-                state.transaction(),
+        let state = arena.local_state(plan_arena);
+        let transaction = state.transaction();
+        let iter = &mut state.iters[self.iter];
+        if !iter.is_empty() {
+            iter.as_tuple().reset(
+                transaction,
                 state.table_codec,
                 &self.op.table_name,
                 self.op.limit,
@@ -57,31 +63,30 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a, T> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let state = arena.local_state(plan_arena);
-        let iter = match &mut self.iter {
-            Some(iter) => iter,
-            None => {
-                let TableScanOperator {
-                    table_name,
-                    columns,
-                    limit,
-                    with_pk,
-                    ..
-                } = self.op;
-                self.iter.insert(state.transaction().read(
-                    state.table_codec,
-                    state.plan_arena,
-                    state.context.table_cache,
-                    table_name.clone(),
-                    *limit,
-                    columns,
-                    *with_pk,
-                )?)
-            }
-        };
+        if state.iters[self.iter].is_empty() {
+            let TableScanOperator {
+                table_name,
+                columns,
+                limit,
+                with_pk,
+                ..
+            } = self.op;
+            let iter = state.transaction().read(
+                state.table_codec,
+                state.plan_arena,
+                state.context.table_cache,
+                table_name.clone(),
+                *limit,
+                columns,
+                *with_pk,
+            )?;
+            state.iters[self.iter] = StorageIter::Tuple(iter);
+        }
+        let iter = state.iters[self.iter].as_tuple();
 
         if iter.next_tuple_into(state.table_codec, state.result.output_mut())? {
             arena.resume();
@@ -147,23 +152,22 @@ mod tests {
         };
         let views = ViewCache::default();
         let statistics = StatisticsMetaCache::default();
-        let mut arena = ExecArena::with_capacity(0);
-        arena.init_context(empty_context(&tables, &views, &statistics), &tx);
+        let mut arena = ExecArena::new(0, empty_context(&tables, &views, &statistics), &tx);
         let mut meta = ExecMetaArena::new(meta);
         let mut scan = SeqScan {
             op: &op,
-            iter: None,
+            iter: arena.alloc_iter(),
         };
         scan.next_tuple(&mut arena, &mut meta)?;
         assert_eq!(arena.result_tuple()[0], DataValue::Int32(2));
-        let iterator = scan.iter.as_ref().unwrap() as *const _;
+        let iterator = &arena.iters[scan.iter] as *const _;
         for _ in 0..3 {
             scan.reset(&mut arena, &mut meta)?;
             scan.reset(&mut arena, &mut meta)?;
             for id in [2, 3] {
                 scan.next_tuple(&mut arena, &mut meta)?;
                 assert_eq!(arena.result_tuple()[0], DataValue::Int32(id));
-                assert_eq!(scan.iter.as_ref().unwrap() as *const _, iterator);
+                assert_eq!(&arena.iters[scan.iter] as *const _, iterator);
             }
             scan.next_tuple(&mut arena, &mut meta)?;
             assert_eq!(arena.result.status, Some(crate::execution::ExecStatus::End));

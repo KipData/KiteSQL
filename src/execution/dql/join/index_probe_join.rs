@@ -33,7 +33,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexProbeJoin<'a> 
 
     fn into_executor(
         (op, left_input, right_input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -51,7 +51,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexProbeJoin<'a> 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         arena.reset(self.left_input, plan_arena)
@@ -59,7 +59,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         while arena.next_tuple(self.left_input, plan_arena)? {
@@ -214,8 +214,7 @@ mod tests {
         let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
-        let mut arena = ExecArena::with_capacity(0);
-        arena.init_context(cache, &transaction);
+        let mut arena = ExecArena::new(0, cache, &transaction);
         let root = <IndexProbeJoin as ReadExecutor<_>>::into_executor(
             (&op, &left, &right),
             &mut arena,

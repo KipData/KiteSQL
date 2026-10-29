@@ -34,7 +34,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
 
     fn into_executor(
         (DeleteOperator { table_name, .. }, input_plan): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -53,7 +53,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let Some(input) = self.input.take() else {

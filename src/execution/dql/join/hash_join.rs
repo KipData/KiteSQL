@@ -145,7 +145,7 @@ impl HashJoin {
 
     fn initialize_build<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if !matches!(self.state, HashJoinState::Build) {
@@ -234,7 +234,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashJoin {
 
     fn into_executor(
         (op, left_plan, right_plan): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -257,7 +257,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashJoin {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = HashJoinState::Build;
@@ -268,7 +268,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if let Some(err) = self.init_error.take() {

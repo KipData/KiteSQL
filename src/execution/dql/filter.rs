@@ -31,7 +31,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Filter {
 
     fn into_executor(
         (FilterOperator { predicate, .. }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -47,7 +47,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Filter {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Filter {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         arena.reset(self.input, plan_arena)
@@ -55,7 +55,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Filter {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {

@@ -41,7 +41,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Values<'a> {
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
@@ -54,7 +54,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Values<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Values<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows = self.op.rows.iter();
@@ -64,7 +64,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Values<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.remaining_rows == 0 {

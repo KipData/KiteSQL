@@ -762,8 +762,7 @@ impl<S: Storage> State<S> {
         let keeper = PlanKeeper::new(plan);
         let plan = keeper.plan();
         let schema = plan.read_schema().clone();
-        let mut arena = ExecArena::with_capacity(plan.exec_capacity_hint());
-        arena.set_statement_stamp(statement_stamp(transaction, plan)?);
+        let stamp = statement_stamp(transaction, plan)?;
         let read_context = ExecutionContext::new(
             &self.table_cache,
             &self.view_cache,
@@ -771,6 +770,8 @@ impl<S: Storage> State<S> {
             &self.scala_functions,
             &self.table_functions,
         );
+        let mut arena = ExecArena::new(plan.exec_capacity_hint(), read_context, transaction);
+        arena.set_statement_stamp(stamp);
         let root = build_write(&mut arena, &mut plan_arena, plan, read_context, transaction);
         let plan_arena = ExecMetaArena::new(plan_arena);
         let executor = Executor::new(arena, root, keeper);
@@ -840,8 +841,7 @@ impl<S: Storage> State<S> {
         let keeper = PlanKeeper::new(PlanInput::Owned(plan));
         let plan = keeper.plan();
         let schema = plan.read_schema().clone();
-        let mut arena = ExecArena::with_capacity(plan.exec_capacity_hint());
-        arena.set_statement_stamp(statement_stamp(transaction, plan)?);
+        let stamp = statement_stamp(transaction, plan)?;
         let cache = ExecutionContext::new(
             table_cache,
             view_cache,
@@ -849,6 +849,8 @@ impl<S: Storage> State<S> {
             scala_functions,
             table_functions,
         );
+        let mut arena = ExecArena::new(plan.exec_capacity_hint(), cache, transaction);
+        arena.set_statement_stamp(stamp);
         let root = build_write(&mut arena, &mut plan_arena, plan, cache, transaction);
         let plan_arena = ExecMetaArena::new(plan_arena);
         let executor = Executor::new(arena, root, keeper);

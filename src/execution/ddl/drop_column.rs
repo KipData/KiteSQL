@@ -31,7 +31,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropColumn<'a> {
 
     fn into_executor(
         op: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
@@ -43,7 +43,7 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropColumn<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();

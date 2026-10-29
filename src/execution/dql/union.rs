@@ -30,7 +30,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Union {
 
     fn into_executor(
         (left_plan, right_plan): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -48,7 +48,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Union {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Union {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.reading_left = true;
@@ -58,7 +58,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Union {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.reading_left {

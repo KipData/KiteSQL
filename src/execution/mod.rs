@@ -82,9 +82,13 @@ use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
-use crate::storage::{StatisticsMetaCache, StorageTransaction, TableCache, ViewCache};
+use crate::storage::{
+    IndexIter, StatisticsMetaCache, StorageTransaction, TableCache, TableIter, TupleIter,
+    ViewCache, ViewIter,
+};
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{ConcatPool, Input, Tuple, TupleId, TupleImpl};
+use std::marker::PhantomData;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecutionContext<'a> {
@@ -114,14 +118,6 @@ impl<'a> ExecutionContext<'a> {
 
     pub(crate) fn table_cache(self) -> &'a TableCache {
         self.table_cache
-    }
-
-    fn is_same_context(&self, other: ExecutionContext<'_>) -> bool {
-        std::ptr::eq(self.table_cache, other.table_cache)
-            && std::ptr::eq(self.view_cache, other.view_cache)
-            && std::ptr::eq(self.meta_cache, other.meta_cache)
-            && std::ptr::eq(self.scala_functions, other.scala_functions)
-            && std::ptr::eq(self.table_functions, other.table_functions)
     }
 }
 
@@ -165,7 +161,7 @@ impl RewriteExpression for ScalarExpression {
 }
 
 pub struct Executor<'a, T: StorageTransaction + 'a> {
-    arena: ExecArena<'a, T>,
+    arena: ExecArena<'a, 'a, T>,
     root: ExecId,
     // Never read: it only keeps the plan that `arena` borrows from alive, and must stay
     // declared after `arena` so the executors are dropped before the plan is freed.
@@ -174,7 +170,7 @@ pub struct Executor<'a, T: StorageTransaction + 'a> {
 }
 
 impl<'a, T: StorageTransaction + 'a> Executor<'a, T> {
-    pub(crate) fn new(arena: ExecArena<'a, T>, root: ExecId, keeper: PlanKeeper<'a>) -> Self {
+    pub(crate) fn new(arena: ExecArena<'a, 'a, T>, root: ExecId, keeper: PlanKeeper<'a>) -> Self {
         Self {
             arena,
             root,
@@ -197,7 +193,7 @@ impl<'a, T: StorageTransaction + 'a> Executor<'a, T> {
     }
 }
 
-pub(crate) enum ExecNode<'a, T: StorageTransaction + 'a> {
+pub(crate) enum ExecNode<'a> {
     AddColumn(Box<AddColumn<'a>>),
     Analyze(Box<Analyze<'a>>),
     ChangeColumn(Box<ChangeColumn<'a>>),
@@ -222,21 +218,21 @@ pub(crate) enum ExecNode<'a, T: StorageTransaction + 'a> {
     FunctionScan(Box<FunctionScan<'a>>),
     HashAgg(Box<HashAggExecutor<'a>>),
     HashJoin(Box<HashJoin>),
-    IndexScan(Box<IndexScan<'a, T>>),
+    IndexScan(Box<IndexScan<'a>>),
     Insert(Box<Insert<'a>>),
     Limit(Box<Limit>),
     MarkApply(Box<MarkApply<'a>>),
     IndexProbeJoin(Box<IndexProbeJoin<'a>>),
     NestedLoopJoin(Box<NestedLoopJoin>),
     Projection(Box<Projection<'a>>),
-    RecursiveCte(Box<RecursiveCte<'a, T>>),
+    RecursiveCte(Box<RecursiveCte<'a>>),
     RecursiveScan(Box<RecursiveScan>),
     ScalarQueryInit(Box<ScalarQueryInit<'a>>),
     ScalarSubquery(Box<ScalarSubquery>),
     SetMembership(Box<SetMembership>),
-    SeqScan(Box<SeqScan<'a, T>>),
-    ShowTables(Box<ShowTables<'a, T>>),
-    ShowViews(Box<ShowViews<'a, T>>),
+    SeqScan(Box<SeqScan<'a>>),
+    ShowTables(Box<ShowTables>),
+    ShowViews(Box<ShowViews>),
     SimpleAgg(Box<SimpleAggExecutor<'a>>),
     Sort(Box<Sort<'a>>),
     StreamAgg(Box<StreamAggExecutor<'a>>),
@@ -253,7 +249,7 @@ pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
     // Reads restore their local state and reset inputs. Writes must not be replayed.
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         Err(DatabaseError::UnsupportedStmt(
@@ -263,15 +259,15 @@ pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError>;
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
-    fn reset<A: MetaArena + 'a>(
+impl<'a> ExecNode<'a> {
+    fn reset<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         match self {
@@ -340,7 +336,7 @@ impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
                 <HashJoin as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
             }
             ExecNode::IndexScan(exec) => {
-                <IndexScan<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <IndexScan<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
             }
             ExecNode::Insert(exec) => {
                 <Insert as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
@@ -359,7 +355,7 @@ impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
                 <Projection<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
             }
             ExecNode::RecursiveCte(exec) => {
-                <RecursiveCte<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <RecursiveCte<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
             }
             ExecNode::RecursiveScan(exec) => {
                 <RecursiveScan as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
@@ -374,13 +370,13 @@ impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
                 <SetMembership as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
             }
             ExecNode::SeqScan(exec) => {
-                <SeqScan<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <SeqScan<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
             }
             ExecNode::ShowTables(exec) => {
-                <ShowTables<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <ShowTables as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
             }
             ExecNode::ShowViews(exec) => {
-                <ShowViews<'a, T> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <ShowViews as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
             }
             ExecNode::SimpleAgg(exec) => {
                 <SimpleAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
@@ -413,9 +409,9 @@ impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
         }
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    fn next_tuple<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         match self {
@@ -486,7 +482,7 @@ impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
                 <HashJoin as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::IndexScan(exec) => {
-                <IndexScan<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <IndexScan<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::Insert(exec) => {
                 <Insert as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -507,7 +503,7 @@ impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
                 <Projection<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::RecursiveCte(exec) => {
-                <RecursiveCte<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <RecursiveCte<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::RecursiveScan(exec) => {
                 <RecursiveScan as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -522,13 +518,13 @@ impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
                 <SetMembership as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::SeqScan(exec) => {
-                <SeqScan<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <SeqScan<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::ShowTables(exec) => {
-                <ShowTables<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <ShowTables as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::ShowViews(exec) => {
-                <ShowViews<'a, T> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <ShowViews as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
             ExecNode::SimpleAgg(exec) => {
                 <SimpleAggExecutor<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -566,60 +562,94 @@ impl<'a, T: StorageTransaction + 'a> ExecNode<'a, T> {
     }
 }
 
-struct ExecNodes<'a, T: StorageTransaction + 'a> {
-    items: Vec<std::cell::RefCell<ExecNode<'a, T>>>,
-    pos: ExecId,
+struct ExecNodes<'a> {
+    items: Vec<std::cell::RefCell<ExecNode<'a>>>,
     executing: usize,
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecNodes<'a, T> {
-    #[cfg(test)]
-    fn seek(&mut self, pos: ExecId) {
-        assert!(pos <= self.items.len(), "node position out of bounds");
-        self.pos = pos;
-    }
-
-    fn push(&mut self, node: ExecNode<'a, T>) -> ExecId {
-        let id = self.pos;
-        if id == self.items.len() {
-            assert_eq!(self.executing, 0, "cannot grow nodes during execution");
-            self.items.push(std::cell::RefCell::new(node));
-        } else {
-            *self.items[id].borrow_mut() = node;
-        }
-        self.pos += 1;
-        id
+impl<'a> ExecNodes<'a> {
+    fn push(&mut self, node: ExecNode<'a>) -> ExecId {
+        assert_eq!(self.executing, 0, "cannot grow nodes during execution");
+        self.items.push(std::cell::RefCell::new(node));
+        self.items.len() - 1
     }
 
     fn clear(&mut self) {
         assert_eq!(self.executing, 0, "cannot clear nodes during execution");
         self.items.clear();
-        self.pos = 0;
     }
 }
 
-pub(crate) struct ExecArena<'a, T: StorageTransaction + 'a> {
-    nodes: ExecNodes<'a, T>,
+pub(crate) type IterSlot = usize;
+
+pub(crate) struct ExecArena<'a, 't, T: StorageTransaction + 'a> {
+    nodes: ExecNodes<'a>,
     result: ExecResult,
     table_codec: TableCodec,
-    context: Option<ExecutionContext<'a>>,
+    context: ExecutionContext<'a>,
     transaction: *mut T,
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
     ddl_apply: Vec<DDLApply>,
     recursive_input: Option<RecursiveInput>,
+    iters: Vec<StorageIter<'t, T>>,
+    sub_arenas: Vec<ExecArena<'a, 't, T>>,
+    _lifetimes: PhantomData<&'t &'a ()>,
 }
 
-pub(crate) struct ExecArenaLocalState<'b, 'a, T: StorageTransaction + 'a> {
+pub(crate) enum StorageIter<'t, T: StorageTransaction + 't> {
+    Empty,
+    Tuple(TupleIter<'t, T>),
+    Index(Box<IndexIter<'t, T>>),
+    Table(TableIter<'t, T>),
+    View(ViewIter<'t, T>),
+}
+
+impl<'t, T: StorageTransaction + 't> StorageIter<'t, T> {
+    pub(crate) fn is_empty(&self) -> bool {
+        matches!(self, StorageIter::Empty)
+    }
+
+    pub(crate) fn as_tuple(&mut self) -> &mut TupleIter<'t, T> {
+        match self {
+            StorageIter::Tuple(iter) => iter,
+            _ => unreachable!("storage iterator is not a tuple iterator"),
+        }
+    }
+
+    pub(crate) fn as_index(&mut self) -> &mut IndexIter<'t, T> {
+        match self {
+            StorageIter::Index(iter) => iter,
+            _ => unreachable!("storage iterator is not an index iterator"),
+        }
+    }
+
+    pub(crate) fn as_table(&mut self) -> &mut TableIter<'t, T> {
+        match self {
+            StorageIter::Table(iter) => iter,
+            _ => unreachable!("storage iterator is not a table iterator"),
+        }
+    }
+
+    pub(crate) fn as_view(&mut self) -> &mut ViewIter<'t, T> {
+        match self {
+            StorageIter::View(iter) => iter,
+            _ => unreachable!("storage iterator is not a view iterator"),
+        }
+    }
+}
+
+pub(crate) struct ExecArenaLocalState<'b, 'a, 't, T: StorageTransaction + 'a> {
     transaction: *mut T,
     pub(crate) table_codec: &'b mut TableCodec,
     pub(crate) context: ExecutionContext<'a>,
     pub(crate) result: &'b mut ExecResult,
     pub(crate) plan_arena: &'b (dyn MetaArena + 'a),
+    pub(crate) iters: &'b mut [StorageIter<'t, T>],
     ddl_apply: &'b mut Vec<DDLApply>,
 }
 
-impl<'b, 'a, T: StorageTransaction + 'a> ExecArenaLocalState<'b, 'a, T> {
-    pub(crate) fn transaction(&self) -> &'a T {
+impl<'b, 'a, 't, T: StorageTransaction + 'a> ExecArenaLocalState<'b, 'a, 't, T> {
+    pub(crate) fn transaction(&self) -> &'t T {
         unsafe { &*self.transaction }
     }
 
@@ -637,7 +667,7 @@ impl<'b, 'a, T: StorageTransaction + 'a> ExecArenaLocalState<'b, 'a, T> {
         }
     }
 
-    pub(crate) fn transaction_codec(&mut self) -> (&'a T, &mut TableCodec) {
+    pub(crate) fn transaction_codec(&mut self) -> (&'t T, &mut TableCodec) {
         unsafe { (&*self.transaction, &mut *self.table_codec) }
     }
 
@@ -654,41 +684,37 @@ impl<'b, 'a, T: StorageTransaction + 'a> ExecArenaLocalState<'b, 'a, T> {
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
+impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
     pub(crate) fn set_statement_stamp(&mut self, stamp: u64) {
         self.table_codec.set_stamp(stamp);
     }
 
-    pub(crate) fn with_capacity(node_capacity: usize) -> Self {
+    pub(crate) fn new(
+        node_capacity: usize,
+        context: ExecutionContext<'a>,
+        transaction: &'t T,
+    ) -> Self {
         Self {
             nodes: ExecNodes {
                 items: Vec::with_capacity(node_capacity),
-                pos: 0,
                 executing: 0,
             },
             result: ExecResult::default(),
             table_codec: TableCodec::default(),
-            context: None,
-            transaction: std::ptr::null_mut(),
+            context,
+            transaction: transaction as *const T as *mut T,
             runtime_probe_stack: Vec::new(),
             ddl_apply: Vec::new(),
             recursive_input: None,
+            iters: Vec::new(),
+            sub_arenas: Vec::new(),
+            _lifetimes: PhantomData,
         }
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
-    pub(crate) fn init_context(&mut self, context: ExecutionContext<'a>, transaction: &'a T) {
-        if let Some(current) = &self.context {
-            debug_assert!(current.is_same_context(context));
-            debug_assert_eq!(self.transaction, transaction as *const T as *mut T);
-        } else {
-            self.context = Some(context);
-            self.transaction = transaction as *const T as *mut T;
-        }
-    }
-
-    pub(crate) fn push(&mut self, node: ExecNode<'a, T>) -> ExecId {
+impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
+    pub(crate) fn push(&mut self, node: ExecNode<'a>) -> ExecId {
         self.nodes.push(node)
     }
 
@@ -701,21 +727,24 @@ impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
     }
 
     pub(crate) fn context(&self) -> ExecutionContext<'a> {
-        *self
-            .context
-            .as_ref()
-            .expect("execution arena context initialized")
+        self.context
     }
 
     pub(crate) fn table_cache(&self) -> &TableCache {
-        self.context
-            .as_ref()
-            .expect("execution arena context initialized")
-            .table_cache
+        self.context.table_cache
     }
 
-    pub(crate) fn transaction(&self) -> &'a T {
+    pub(crate) fn transaction(&self) -> &'t T {
         unsafe { &*self.transaction }
+    }
+
+    pub(crate) fn alloc_iter(&mut self) -> IterSlot {
+        self.iters.push(StorageIter::Empty);
+        self.iters.len() - 1
+    }
+
+    pub(crate) fn iter_mut(&mut self, slot: IterSlot) -> &mut StorageIter<'t, T> {
+        &mut self.iters[slot]
     }
 
     pub(crate) fn transaction_codec_mut(&mut self) -> (&mut T, &mut TableCodec) {
@@ -725,17 +754,14 @@ impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
     pub(crate) fn local_state<'b>(
         &'b mut self,
         plan_arena: &'b (dyn MetaArena + 'a),
-    ) -> ExecArenaLocalState<'b, 'a, T> {
-        let context = *self
-            .context
-            .as_ref()
-            .expect("execution arena context initialized");
+    ) -> ExecArenaLocalState<'b, 'a, 't, T> {
         ExecArenaLocalState {
             transaction: self.transaction,
             table_codec: &mut self.table_codec,
-            context,
+            context: self.context,
             result: &mut self.result,
             plan_arena,
+            iters: &mut self.iters,
             ddl_apply: &mut self.ddl_apply,
         }
     }
@@ -747,7 +773,7 @@ impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
     pub(crate) fn pop_runtime_probe(&mut self) -> RuntimeIndexProbe {
         self.runtime_probe_stack
             .pop()
-            .expect("runtime probe scope initialized")
+            .expect("index probe join pushes a probe before resetting its input")
     }
 
     pub(crate) fn set_recursive_input(&mut self, input: RecursiveInput) {
@@ -761,10 +787,22 @@ impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
             .expect("recursive input initialized")
     }
 
+    pub(crate) fn alloc_sub_arena(&mut self, node_capacity: usize) -> usize {
+        let arena = ExecArena::new(node_capacity, self.context, self.transaction());
+        self.sub_arenas.push(arena);
+        self.sub_arenas.len() - 1
+    }
+
+    pub(crate) fn sub_arena_mut(&mut self, id: usize) -> &mut ExecArena<'a, 't, T> {
+        &mut self.sub_arenas[id]
+    }
+
     pub(crate) fn reset_for_rebuild(&mut self) {
         debug_assert!(self.runtime_probe_stack.is_empty());
         debug_assert!(self.ddl_apply.is_empty());
         self.nodes.clear();
+        self.iters.clear();
+        self.sub_arenas.clear();
         self.result.tuple = TupleImpl::default();
         self.result.status = None;
         self.recursive_input = None;
@@ -865,10 +903,10 @@ impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
         id: ExecId,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let slot = &self.nodes.items[id] as *const std::cell::RefCell<ExecNode<'a, T>>;
+        let slot = &self.nodes.items[id] as *const std::cell::RefCell<ExecNode<'a>>;
         self.nodes.executing += 1;
         // SAFETY: the same slot/RefCell invariant as next_tuple. Reset may recurse
-        // into inputs, but cannot relocate slots or overwrite an active node.
+        // into inputs, but cannot relocate slots or re-borrow an active node.
         let result = unsafe { (&*slot).borrow_mut().reset(self, plan_arena) };
         self.nodes.executing -= 1;
         result
@@ -880,11 +918,11 @@ impl<'a, T: StorageTransaction + 'a> ExecArena<'a, T> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<bool, DatabaseError> {
         self.result.status = None;
-        let slot = &self.nodes.items[id] as *const std::cell::RefCell<ExecNode<'a, T>>;
+        let slot = &self.nodes.items[id] as *const std::cell::RefCell<ExecNode<'a>>;
         self.nodes.executing += 1;
         // SAFETY: push/clear cannot relocate or destroy slots while executing.
-        // Access to nodes always goes through RefCell: recursive calls and
-        // subtree rebuilds cannot borrow/overwrite an active node. The payload
+        // Access to nodes always goes through RefCell: recursive calls cannot
+        // re-borrow an active node. The payload
         // is behind UnsafeCell, separate from the arena's own mutable state.
         // On unwind the borrow is released; executing remains nonzero, preventing
         // relocation even if the caller catches the panic (the arena is poisoned).
@@ -904,7 +942,7 @@ pub(crate) trait ReadExecutor<'a, T: StorageTransaction + 'a>: Sized {
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -916,7 +954,7 @@ pub(crate) trait WriteExecutor<'a, T: StorageTransaction + 'a>: Sized {
 
     fn into_executor(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -924,7 +962,7 @@ pub(crate) trait WriteExecutor<'a, T: StorageTransaction + 'a>: Sized {
 }
 
 pub(crate) fn build_read<'a, T>(
-    arena: &mut ExecArena<'a, T>,
+    arena: &mut ExecArena<'a, '_, T>,
     plan_arena: &mut (dyn MetaArena + 'a),
     plan: &'a LogicalPlan,
     cache: ExecutionContext<'_>,
@@ -1019,10 +1057,10 @@ where
             }) = physical_option
             {
                 if let Some(lookup) = &info.lookup {
-                    return read!(IndexScan<'a, T>, (op, info.as_ref(), lookup));
+                    return read!(IndexScan<'a>, (op, info.as_ref(), lookup));
                 }
             }
-            read!(SeqScan<'a, T>, op)
+            read!(SeqScan<'a>, op)
         }
         Operator::FunctionScan(op) => read!(FunctionScan<'a>, op),
         Operator::Sort(op) => {
@@ -1039,13 +1077,13 @@ where
         Operator::TopK(op) => read!(TopK<'a>, (op, plan.childrens.only())),
         Operator::Values(op) => read!(Values<'a>, op),
         Operator::Window(op) => read!(Window<'a>, (op, plan.childrens.only())),
-        Operator::ShowTable => read!(ShowTables<'a, T>, ()),
-        Operator::ShowView => read!(ShowViews<'a, T>, ()),
+        Operator::ShowTable => read!(ShowTables, ()),
+        Operator::ShowView => read!(ShowViews, ()),
         Operator::Explain => read!(Explain<'a>, plan.childrens.only()),
         Operator::Describe(op) => read!(Describe, op),
         Operator::Union(_) => read!(Union, plan.childrens.twins()),
         Operator::RecursiveCte(_) => {
-            read!(RecursiveCte<'a, T>, plan.childrens.twins())
+            read!(RecursiveCte<'a>, plan.childrens.twins())
         }
         Operator::RecursiveScan(op) => read!(RecursiveScan, op),
         Operator::SetMembership(op) => {
@@ -1056,17 +1094,16 @@ where
     }
 }
 
-pub(crate) fn build_write<'a, T>(
-    arena: &mut ExecArena<'a, T>,
+pub(crate) fn build_write<'a, 't, T>(
+    arena: &mut ExecArena<'a, 't, T>,
     plan_arena: &mut (dyn MetaArena + 'a),
     plan: &'a LogicalPlan,
     cache: ExecutionContext<'a>,
-    transaction: &'a T,
+    transaction: &'t T,
 ) -> ExecId
 where
     T: StorageTransaction + 'a,
 {
-    arena.init_context(cache, transaction);
     let transaction_ref: &T = transaction;
     macro_rules! write {
         ($executor:ty, $input:expr) => {
@@ -1159,8 +1196,7 @@ mod test_utils {
         T: StorageTransaction + 'a,
         E: ReadExecutor<'a, T>,
     {
-        let mut arena = ExecArena::with_capacity(0);
-        arena.init_context(cache, transaction);
+        let mut arena = ExecArena::new(0, cache, transaction);
         let root = <E as ReadExecutor<'a, T>>::into_executor(
             input,
             &mut arena,
@@ -1185,8 +1221,7 @@ mod test_utils {
         T: StorageTransaction + 'a,
         E: WriteExecutor<'a, T>,
     {
-        let mut arena = ExecArena::with_capacity(0);
-        arena.init_context(cache, transaction);
+        let mut arena = ExecArena::new(0, cache, transaction);
         let root = <E as WriteExecutor<'a, T>>::into_executor(
             input,
             &mut arena,
@@ -1221,26 +1256,42 @@ pub(crate) use test_utils::{empty_context, execute_input, execute_input_mut, try
 mod test {
     use super::*;
     use crate::planner::TableArenaCell;
-    use crate::storage::memory::MemoryTransaction;
+    use crate::storage::memory::MemoryStorage;
+    use crate::storage::Storage;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
     fn exec_node_stays_pointer_sized() {
         // Every variant is boxed so a statement's node Vec stays small and allocator-friendly.
         assert_eq!(
-            std::mem::size_of::<ExecNode<'_, MemoryTransaction>>(),
+            std::mem::size_of::<ExecNode<'_>>(),
             2 * std::mem::size_of::<usize>()
         );
     }
 
     #[test]
-    fn active_nodes_cannot_be_overwritten_or_relocated() {
+    fn active_nodes_cannot_be_relocated() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut plan_arena = ExecMetaArena::new(PlanArena::new(&table_arena));
-        let mut arena = ExecArena::<'_, MemoryTransaction>::with_capacity(0);
+        let (tables, views, statistics) = (
+            TableCache::default(),
+            ViewCache::default(),
+            StatisticsMetaCache::default(),
+        );
+        let (scala_functions, table_functions) =
+            (ScalaFunctions::default(), TableFunctions::default());
+        let context = ExecutionContext::new(
+            &tables,
+            &views,
+            &statistics,
+            &scala_functions,
+            &table_functions,
+        );
+        let storage = MemoryStorage::new();
+        let transaction = storage.transaction()?;
+        let mut arena = ExecArena::new(0, context, &transaction);
         arena.push(ExecNode::Dummy(Box::default()));
-        let slot =
-            &arena.nodes.items[0] as *const std::cell::RefCell<ExecNode<'_, MemoryTransaction>>;
+        let slot = &arena.nodes.items[0] as *const std::cell::RefCell<ExecNode<'_>>;
         arena.nodes.executing = 1;
         // Same access pattern as next_tuple; mutations must fail before changing storage.
         let active = unsafe { (&*slot).borrow_mut() };
@@ -1249,11 +1300,6 @@ mod test {
         }))
         .is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| arena.nodes.clear())).is_err());
-        arena.nodes.seek(0);
-        assert!(catch_unwind(AssertUnwindSafe(|| {
-            arena.push(ExecNode::Dummy(Box::default()));
-        }))
-        .is_err());
         assert!(catch_unwind(AssertUnwindSafe(|| {
             arena.next_tuple(0, &mut plan_arena).unwrap();
         }))
@@ -1261,6 +1307,7 @@ mod test {
         drop(active);
         assert_eq!(arena.nodes.items.len(), 1);
         assert_eq!(arena.nodes.items.as_ptr(), slot);
+        Ok(())
     }
 
     #[test]
@@ -1281,7 +1328,23 @@ mod test {
         });
         let ints = |values: [i32; 2]| Tuple::new(None, values.map(DataValue::Int32).to_vec());
 
-        let mut arena = ExecArena::<'_, MemoryTransaction>::with_capacity(0);
+        let (tables, views, statistics) = (
+            TableCache::default(),
+            ViewCache::default(),
+            StatisticsMetaCache::default(),
+        );
+        let (scala_functions, table_functions) =
+            (ScalaFunctions::default(), TableFunctions::default());
+        let context = ExecutionContext::new(
+            &tables,
+            &views,
+            &statistics,
+            &scala_functions,
+            &table_functions,
+        );
+        let storage = MemoryStorage::new();
+        let transaction = storage.transaction()?;
+        let mut arena = ExecArena::new(0, context, &transaction);
         for base in [0, 10] {
             arena.result.tuple = TupleImpl::concat(
                 ints([base, base + 1]).into(),

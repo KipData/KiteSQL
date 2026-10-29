@@ -35,7 +35,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Dummy {
 
     fn into_executor(
         _: Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut (dyn MetaArena + 'a),
         _: ExecutionContext<'_>,
         _: &T,
@@ -48,7 +48,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Dummy {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Dummy {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, T>,
+        _arena: &mut ExecArena<'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.row = Some(Tuple::default());
@@ -57,7 +57,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Dummy {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         _: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let Some(row) = self.row.take() else {

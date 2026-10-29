@@ -33,7 +33,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
 
     fn into_executor(
         (ProjectOperator { exprs }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -46,7 +46,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         arena.reset(self.input, plan_arena)
@@ -54,7 +54,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if !arena.next_tuple(self.input, plan_arena)? {

@@ -166,7 +166,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
 
     fn into_executor(
         (SortOperator { sort_fields }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -190,7 +190,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows.clear();
@@ -199,7 +199,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
@@ -305,8 +305,7 @@ mod test {
                 nulls_first: false,
             }],
         };
-        let mut arena = ExecArena::with_capacity(0);
-        arena.init_context(cache, &transaction);
+        let mut arena = ExecArena::new(0, cache, &transaction);
         // Select the memory executor explicitly even when the spill feature is enabled.
         let root = <Sort as ReadExecutor<_>>::into_executor(
             (&op, &plan),

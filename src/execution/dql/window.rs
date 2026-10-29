@@ -89,7 +89,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Window<'a> {
 
     fn into_executor(
         (operator, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -228,7 +228,7 @@ impl<'a> Window<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state.clear();
@@ -239,7 +239,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut output_ready = true;

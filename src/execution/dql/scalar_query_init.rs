@@ -45,7 +45,7 @@ pub struct ScalarQueryInit<'a> {
 impl<'a> ScalarQueryInit<'a> {
     fn evaluate_init<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut value = DataValue::Null;
@@ -65,7 +65,7 @@ impl<'a> ScalarQueryInit<'a> {
         op: &'a ScalarQueryInitOperator,
         input: ExecId,
         init_plan: &'a LogicalPlan,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -98,7 +98,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit<'a>
 
     fn into_executor(
         (op, input, init): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -111,7 +111,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit<'a>
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = if self.reference.is_outer_value {
@@ -125,7 +125,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a>
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
@@ -238,8 +238,7 @@ mod tests {
             );
             first.populate_output_schema_recursive(&mut metadata);
             duplicate.populate_output_schema_recursive(&mut metadata);
-            let mut arena = ExecArena::with_capacity(0);
-            arena.init_context(cache, &transaction);
+            let mut arena = ExecArena::new(0, cache, &transaction);
             let first_root = build_read(&mut arena, &mut metadata, &first, cache, &transaction);
             let duplicate_root =
                 build_read(&mut arena, &mut metadata, &duplicate, cache, &transaction);

@@ -112,7 +112,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
 
     fn into_executor(
         (JoinOperator { on, join_type, .. }, left_plan, right_plan): Self::Input,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
         cache: ExecutionContext<'_>,
         transaction: &T,
@@ -153,7 +153,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = NestedLoopJoinState::PullLeft { right_bitmap: None };
@@ -163,7 +163,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
@@ -331,7 +331,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin {
 impl NestedLoopJoin {
     fn reset_right_input<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<ExecId, DatabaseError> {
         arena.reset(self.right_input, plan_arena)?;
@@ -572,8 +572,7 @@ mod test {
         let mut plan = cross(left.clone(), cross(left, right));
         plan.populate_output_schema_recursive(&mut plan_arena);
         let context = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
-        let mut arena = ExecArena::with_capacity(plan.exec_capacity_hint());
-        arena.init_context(context, &transaction);
+        let mut arena = ExecArena::new(plan.exec_capacity_hint(), context, &transaction);
         let root = build_read(&mut arena, &mut plan_arena, &plan, context, &transaction);
         let count = arena.nodes.items.len();
         let address = arena.nodes.items.as_ptr();
