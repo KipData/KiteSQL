@@ -290,9 +290,7 @@ impl<S: Storage> Database<S> {
                     .state
                     .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))?;
                 let executor = Executor::new(plan, &arena);
-                self.state
-                    .execute::<_, ()>(tx, executor, arena)
-                    .map_err(DatabaseError::from)
+                self.state.execute(tx, executor, arena)
             })() {
                 Ok(result) => result,
                 Err(err) => {
@@ -345,24 +343,22 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
             .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
 
         for statement in statements {
-            BindSource::execute(&mut *self, false, (), |state, tx, ()| {
+            BindSource::execute(&mut *self, false, |state, tx| {
                 state
                     .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))
                     .map(Executor::from_plan)
-                    .map_err(Into::into)
             })
-            .map_err(|err| DatabaseError::from(err).with_sql_context(sql))?
+            .map_err(|err| err.with_sql_context(sql))?
             .done()
             .map_err(|err| err.with_sql_context(sql))?;
         }
 
-        BindSource::execute(self, false, (), |state, tx, ()| {
+        BindSource::execute(self, false, |state, tx| {
             state
                 .build_plan(&[], tx, |binder, arena| binder.bind(&last_statement, arena))
                 .map(Executor::from_plan)
-                .map_err(Into::into)
         })
-        .map_err(|err| DatabaseError::from(err).with_sql_context(sql))
+        .map_err(|err| err.with_sql_context(sql))
     }
 }
 

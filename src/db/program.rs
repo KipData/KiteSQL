@@ -23,18 +23,16 @@ use crate::planner::ParamArena;
 use crate::types::index::IndexLookup;
 // GRCOV_EXCL_STOP
 use crate::types::LogicalType;
-use std::mem::ManuallyDrop;
-use std::ptr;
 
 /// A bound and optimized plan with its executor tree, reused by every execution.
 pub struct Program<'p> {
     pub(crate) executor: Executor<'p>,
-    pub(crate) arena: ParamArena<'p>,
+    pub(crate) arena: ExecMetaArena<ParamArena<'p>>,
 }
 
 impl<'p> Program<'p> {
-    /// Runs the program with `params` in `transaction`. The returned iterator puts the
-    /// program back when it ends.
+    /// Runs the program with `params` in `transaction`. The returned iterator borrows the
+    /// program until the execution ends.
     pub fn execute<'a, 'txn, S: Storage>(
         &'a mut self,
         transaction: &'a mut Transaction<'txn, S>,
@@ -44,44 +42,27 @@ impl<'p> Program<'p> {
         'txn: 'p,
         'p: 'a,
     {
-        let guard = AbortOnUnwind;
-        // SAFETY: `*self` is moved out until the iterator, which borrows it, writes the
-        // program back when the execution ends, or until the failed start below does.
-        // `guard` aborts on a panic in between, which would otherwise drop it twice.
-        let result = unsafe { ptr::read(self) }.start(transaction, params.as_ref());
-        mem::forget(guard);
-        match result {
-            Ok(iter) => Ok(ProgramIter {
-                iter: ManuallyDrop::new(iter),
-                program: self,
-            }),
-            Err(err) => {
-                let ExecuteError { error, program } = *err;
-                unsafe { ptr::write(self, program) };
-                Err(error)
-            }
+        self.bind(transaction.state.table_arena(), params.as_ref())?;
+        if transaction.read_only && !self.read_only() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "cannot write in a read-only transaction".into(),
+            ));
         }
-    }
-
-    #[allow(clippy::type_complexity)]
-    fn start<'a, 'txn, S: Storage>(
-        mut self,
-        transaction: &'a mut Transaction<'txn, S>,
-        params: &[(usize, DataValue)],
-    ) -> Result<
-        TransactionIter<'a, 'p, S::TransactionType<'txn>, ParamArena<'p>>,
-        Box<ExecuteError<Self>>,
-    >
-    where
-        'txn: 'p,
-        'p: 'a,
-    {
-        if let Err(error) = self.bind(transaction.state.table_arena(), params) {
-            return Err(ExecuteError::new(error, self));
-        }
-        let read_only = self.read_only();
-        BindSource::execute(transaction, read_only, self, |_, _, program| {
-            Ok((program.executor, program.arena))
+        transaction.inner.begin_statement_scope()?;
+        let inner = std::ptr::from_mut(&mut transaction.inner);
+        let arena = begin_execution(
+            &transaction.state.table_cache,
+            unsafe { &mut *inner },
+            &mut self.executor,
+            &mut self.arena,
+        )?;
+        Ok(ProgramIter {
+            guard: TransactionGuard {
+                arena,
+                transaction: inner,
+                statement_scope_active: true,
+            },
+            program: self,
         })
     }
 
@@ -90,44 +71,21 @@ impl<'p> Program<'p> {
         table_arena: &TableArenaCell,
         params: &[(usize, DataValue)],
     ) -> Result<(), DatabaseError> {
-        if !std::ptr::eq(self.arena.plan_arena().table_arena_cell(), table_arena) {
+        if !std::ptr::eq(
+            self.arena.parent().plan_arena().table_arena_cell(),
+            table_arena,
+        ) {
             return Err(DatabaseError::UnsupportedStmt(
                 "plan belongs to another database".into(),
             ));
         }
-        self.arena.bind(params)
+        self.arena.parent_mut().bind(params)?;
+        self.arena.reset();
+        Ok(())
     }
 
     pub(crate) fn read_only(&self) -> bool {
         self.executor.plan().operator.command_type().is_read_only()
-    }
-}
-
-impl<'p> Reclaim<'p, ParamArena<'p>> for Program<'p> {
-    fn reclaim(executor: Executor<'p>, arena: ParamArena<'p>) -> Self {
-        Program { executor, arena }
-    }
-}
-
-impl<'a, 'p, T: StorageTransaction + 'p> TransactionIter<'a, 'p, T, ParamArena<'p>> {
-    /// Ends the execution, dropping the rows not read yet, and hands back its program.
-    fn into_program(mut self) -> Result<Program<'p>, Box<ExecuteError<Program<'p>>>> {
-        let finished = self.finish_statement_scope();
-        let Self {
-            guard,
-            executor,
-            plan_arena,
-            ..
-        } = self;
-        drop(guard);
-        let program = Program {
-            executor,
-            arena: plan_arena.into_parent(),
-        };
-        match finished {
-            Ok(()) => Ok(program),
-            Err(error) => Err(ExecuteError::new(error, program)),
-        }
     }
 }
 
@@ -205,56 +163,22 @@ impl<S: Storage> State<S> {
         let parameter_expressions = arena.parameter_expressions();
         Ok(Program {
             executor: Executor::new(plan, &arena),
-            arena: ParamArena::new(arena, parameter_expressions),
+            arena: ExecMetaArena::new(ParamArena::new(arena, parameter_expressions)),
         })
     }
 }
 
-struct AbortOnUnwind;
-
-impl Drop for AbortOnUnwind {
-    fn drop(&mut self) {
-        std::process::abort()
-    }
-}
-
-/// Rows of one execution of a [`Program`]; ending it puts the program back.
-pub struct ProgramIter<'a, 'p, T: StorageTransaction> {
-    iter: ManuallyDrop<TransactionIter<'a, 'p, T, ParamArena<'p>>>,
+/// Rows of one execution of a [`Program`], which it borrows until the execution ends.
+pub struct ProgramIter<'a, 'p, T: StorageTransaction + 'p> {
+    guard: TransactionGuard<'a, 'p, T>,
     program: &'a mut Program<'p>,
 }
 
-impl<T: StorageTransaction> ProgramIter<'_, '_, T> {
-    /// Ends the execution and writes the program back; called exactly once.
-    fn end(&mut self) -> Result<(), DatabaseError> {
-        let guard = AbortOnUnwind;
-        // SAFETY: `iter` is taken only here, and `end` runs once: from `done`, which
-        // forgets `self` afterwards, or from `drop`.
-        let iter = unsafe { ManuallyDrop::take(&mut self.iter) };
-        let (program, result) = match iter.into_program() {
-            Ok(program) => (program, Ok(())),
-            Err(err) => {
-                let ExecuteError { error, program } = *err;
-                (program, Err(error))
-            }
-        };
-        // SAFETY: `*self.program` was moved out by `Program::execute`.
-        unsafe { ptr::write(self.program, program) };
-        mem::forget(guard);
-        result
-    }
-}
-
-impl<T: StorageTransaction> Drop for ProgramIter<'_, '_, T> {
-    fn drop(&mut self) {
-        let _ = self.end();
-    }
-}
-
-impl<T: StorageTransaction> ProgramIter<'_, '_, T> {
+impl<'p, T: StorageTransaction + 'p> ProgramIter<'_, 'p, T> {
     #[inline]
     pub fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
-        self.iter.schema(f)
+        let Program { executor, arena } = &*self.program;
+        f(&SchemaView::new(&executor.schema, arena))
     }
 
     #[inline]
@@ -262,19 +186,19 @@ impl<T: StorageTransaction> ProgramIter<'_, '_, T> {
         &mut self,
         f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
-        self.iter.next_tuple(f)
+        let Program { executor, arena } = &mut *self.program;
+        // A program never applies DDL.
+        self.guard.next_tuple(executor, arena, &mut Vec::new(), f)
     }
 
     #[inline]
     pub fn done(mut self) -> Result<(), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
-        let result = self.end();
-        mem::forget(self);
-        result
+        Ok(())
     }
 }
 
-impl<T: StorageTransaction> ResultIter for ProgramIter<'_, '_, T> {
+impl<'p, T: StorageTransaction + 'p> ResultIter for ProgramIter<'_, 'p, T> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         ProgramIter::schema(self, f)
     }
@@ -749,7 +673,7 @@ mod tests {
                 (3, LogicalType::Integer),
             ],
         )?;
-        plan.arena.bind(&[
+        plan.arena.parent_mut().bind(&[
             (1, DataValue::Int32(2)),
             (2, DataValue::Int32(5)),
             (3, DataValue::Int32(22)),

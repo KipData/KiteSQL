@@ -375,6 +375,21 @@ impl<A: MetaArena> ExecMetaArena<A> {
         self.parent
     }
 
+    pub(crate) fn parent(&self) -> &A {
+        &self.parent
+    }
+
+    pub(crate) fn parent_mut(&mut self) -> &mut A {
+        &mut self.parent
+    }
+
+    /// Drops the scalar-query results of the previous execution.
+    pub(crate) fn reset(&mut self) {
+        self.init_values.clear();
+        self.init_values
+            .resize_with(self.parent.scalar_query_count(), || None);
+    }
+
     pub(crate) fn set_init_value(&mut self, reference: ScalarQueryRef, value: DataValue) {
         let slot = &mut self.init_values[reference.pos];
         debug_assert!(
@@ -1132,7 +1147,8 @@ impl<'a> ParamArena<'a> {
 
     pub(crate) fn bind(&mut self, params: &[(usize, DataValue)]) -> Result<(), DatabaseError> {
         let parent = &self.parent;
-        self.expressions.clear();
+        // Keep the parameter slots of the previous execution and overwrite their values.
+        self.expressions.truncate(self.parameter_count);
         self.scalar_query_count = parent.scalar_query_count;
         for (slot, &expr_ref) in self.parameter_expressions.iter().enumerate() {
             debug_assert_eq!(parent.arena_expression(expr_ref).param, Some(slot));
@@ -1151,8 +1167,21 @@ impl<'a> ParamArena<'a> {
                 },
                 &|_| None,
             )?;
-            self.expressions
-                .push((Some(id), ArenaExpr::new(ScalarExpression::Constant(value))));
+            // reuse
+            match self.expressions.get_mut(slot) {
+                Some((
+                    _,
+                    ArenaExpr {
+                        expression: ScalarExpression::Constant(bound),
+                        param: None,
+                    },
+                )) => *bound = value,
+                // An execution rewrote the slot; rebuild it.
+                Some((_, expr)) => *expr = ArenaExpr::new(ScalarExpression::Constant(value)),
+                None => self
+                    .expressions
+                    .push((Some(id), ArenaExpr::new(ScalarExpression::Constant(value)))),
+            }
         }
         Ok(())
     }

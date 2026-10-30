@@ -1033,9 +1033,9 @@ fn bind_orm_context<'a, E, F>(
     executor: E,
     read_only: bool,
     build: F,
-) -> Result<E::Iter<PlanArena<'a>>, DatabaseError>
+) -> Result<E::Iter, DatabaseError>
 where
-    E: BindSource<'a, 'a>,
+    E: BindSource<'a>,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
         &'ctx mut OrmContext<
             'ctx,
@@ -1048,22 +1048,19 @@ where
     ) -> Result<LogicalPlan, DatabaseError>,
 {
     static EMPTY_BIND_PARAMS: &[(usize, LogicalType)] = &[];
-    executor
-        .execute(read_only, (), |state, tx, ()| {
-            state
-                .build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
-                    let mut context = OrmContext { binder, arena };
-                    build(&mut context)
-                })
-                .map(Executor::from_plan)
-                .map_err(Into::into)
-        })
-        .map_err(Into::into)
+    executor.execute(read_only, |state, tx| {
+        state
+            .build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
+                let mut context = OrmContext { binder, arena };
+                build(&mut context)
+            })
+            .map(Executor::from_plan)
+    })
 }
 
 fn explain_orm_context<'a, E, F>(executor: E, build: F) -> Result<String, DatabaseError>
 where
-    E: BindSource<'a, 'a>,
+    E: BindSource<'a>,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
         &'ctx mut OrmContext<
             'ctx,
@@ -3406,37 +3403,35 @@ fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut TupleImpl) -> Result<T
     T::from_query_tuple(tuple)
 }
 
-fn orm_analyze<'a, E: BindSource<'a, 'a>, M: Model>(executor: E) -> Result<(), DatabaseError> {
+fn orm_analyze<'a, E: BindSource<'a>, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
-        .execute(false, (), |state, tx, ()| {
+        .execute(false, |state, tx| {
             state
                 .build_plan(&[], tx, |binder, arena| {
                     binder.bind_analyze(M::table_name().into(), arena)
                 })
                 .map(Executor::from_plan)
-                .map_err(Into::into)
         })?
         .done()
 }
 
-fn orm_insert<'a, E: BindSource<'a, 'a>, M: Model>(
+fn orm_insert<'a, E: BindSource<'a>, M: Model>(
     executor: E,
     model: &M,
 ) -> Result<(), DatabaseError> {
     let params = model.params();
     executor
-        .execute(false, (), |state, tx, ()| {
+        .execute(false, |state, tx| {
             state
                 .build_plan(&[], tx, |binder, arena| {
                     bind_orm_insert_model::<_, _, M>(binder, params, arena)
                 })
                 .map(Executor::from_plan)
-                .map_err(Into::into)
         })?
         .done()
 }
 
-fn orm_get<'a, E: BindSource<'a, 'a>, M: Model>(
+fn orm_get<'a, E: BindSource<'a>, M: Model>(
     executor: E,
     key: &M::PrimaryKey,
 ) -> Result<Option<M>, DatabaseError> {
@@ -3457,9 +3452,9 @@ fn orm_get<'a, E: BindSource<'a, 'a>, M: Model>(
     })?)
 }
 
-fn orm_list<'a, E: BindSource<'a, 'a>, M: Model>(
+fn orm_list<'a, E: BindSource<'a>, M: Model>(
     executor: E,
-) -> Result<OrmIter<E::Iter<PlanArena<'a>>, M>, DatabaseError> {
+) -> Result<OrmIter<E::Iter, M>, DatabaseError> {
     Ok(bind_orm_context(executor, true, |ctx| {
         let plan: LogicalPlan = ctx.from::<M>()?.finish()?;
         Ok(plan)

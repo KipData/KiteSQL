@@ -48,8 +48,8 @@ mod app {
 
         // A program is parsed, optimized and built into executors once. Every execution
         // binds new parameters and reuses those executors, in any transaction of the
-        // database. It runs one execution at a time: the iterator borrows it and puts
-        // it back when it ends.
+        // database. It runs one execution at a time: the iterator borrows it until the
+        // execution ends.
         let mut update = database.program_sql(
             "update t1 set c2 = $2 where c1 = $1",
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
