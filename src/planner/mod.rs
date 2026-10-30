@@ -33,7 +33,7 @@ use std::hash::{Hash, Hasher};
 
 pub(crate) use arena::{ExecMetaArena, ParamArena, PlanRef};
 pub use arena::{ExprRef, MetaArena, PlanArena, TableArena, TableArenaCell};
-pub(crate) use plan_keeper::{PlanInput, PlanKeeper};
+pub(crate) use plan_keeper::PlanKeeper;
 pub use scalar_query_ref::ScalarQueryRef;
 
 pub(crate) trait Explain {

@@ -42,7 +42,7 @@ impl KiteSqlLmdbBackend {
             let mut prepared = Vec::with_capacity(group.len());
             for spec in group {
                 prepared.push(KiteSqlPreparedStatement {
-                    plan: self.database.prepare_sql(spec.sql, &spec.parameters)?,
+                    program: self.database.program_sql(spec.sql, &spec.parameters)?,
                     spec: spec.clone(),
                 });
             }
@@ -105,9 +105,9 @@ impl<'a> KiteSqlLmdbTransactionWrapper<'a> {
         &'b mut self,
         statement: &'b mut KiteSqlPreparedStatement<'a>,
         params: &[DbParam],
-    ) -> Result<KiteSqlTxnResult<'b, KiteSqlLmdbTransaction<'a>>, TpccError> {
-        Ok(KiteSqlTxnResult::new(
-            self.inner.execute(&statement.plan, params)?,
+    ) -> Result<KiteSqlTxnResult<'b, 'a, KiteSqlLmdbTransaction<'a>>, TpccError> {
+        Ok(KiteSqlTxnResult(
+            statement.program.execute(&mut self.inner, params)?,
         ))
     }
 }

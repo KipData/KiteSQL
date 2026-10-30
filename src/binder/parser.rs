@@ -40,7 +40,7 @@ use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveSca
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::{CommandType, Operator};
 use crate::planner::MetaArena;
-use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, PlanInput};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, StorageTransaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
@@ -289,8 +289,10 @@ impl<S: Storage> Database<S> {
                 let (plan, arena) = self
                     .state
                     .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))?;
-                let executor = Executor::new(PlanInput::Owned(plan), &arena);
-                self.state.execute(tx, executor, arena)
+                let executor = Executor::new(plan, &arena);
+                self.state
+                    .execute::<_, ()>(tx, executor, arena)
+                    .map_err(DatabaseError::from)
             })() {
                 Ok(result) => result,
                 Err(err) => {
@@ -306,7 +308,7 @@ impl<S: Storage> Database<S> {
                 }
             } else {
                 let inner = Box::into_raw(Box::new(TransactionIter::new(
-                    plan_arena.boxed(),
+                    plan_arena,
                     executor,
                     transaction,
                 )));
@@ -343,22 +345,24 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
             .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
 
         for statement in statements {
-            BindSource::execute(&mut *self, false, |state, tx| {
+            BindSource::execute(&mut *self, false, (), |state, tx, ()| {
                 state
                     .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))
                     .map(Executor::from_plan)
+                    .map_err(Into::into)
             })
-            .map_err(|err| err.with_sql_context(sql))?
+            .map_err(|err| DatabaseError::from(err).with_sql_context(sql))?
             .done()
             .map_err(|err| err.with_sql_context(sql))?;
         }
 
-        BindSource::execute(self, false, |state, tx| {
+        BindSource::execute(self, false, (), |state, tx, ()| {
             state
                 .build_plan(&[], tx, |binder, arena| binder.bind(&last_statement, arena))
                 .map(Executor::from_plan)
+                .map_err(Into::into)
         })
-        .map_err(|err| err.with_sql_context(sql))
+        .map_err(|err| DatabaseError::from(err).with_sql_context(sql))
     }
 }
 
@@ -3459,7 +3463,7 @@ mod tests {
         let db = DataBaseBuilder::path(".").build_in_memory()?;
         for placeholder in ["$0", "$01", "$name"] {
             assert!(matches!(
-                db.prepare_sql(
+                db.program_sql(
                     &format!("select {placeholder}"),
                     &[(1, LogicalType::Integer)]
                 ),
@@ -3538,7 +3542,7 @@ mod tests {
         let params = &[] as &[(usize, LogicalType)];
 
         assert_unsupported(
-            expect_err(database.prepare_sql("create table t (id int primary key)", params)),
+            expect_err(database.program_sql("create table t (id int primary key)", params)),
             "DDL and ANALYZE",
         );
         assert_unsupported(
@@ -3549,7 +3553,7 @@ mod tests {
 
         let transaction = database.new_transaction(false)?;
         assert_unsupported(
-            expect_err(transaction.prepare_sql("analyze table t", params)),
+            expect_err(transaction.program_sql("analyze table t", params)),
             "DDL and ANALYZE",
         );
         transaction.commit()?;

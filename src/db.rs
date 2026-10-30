@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(any(feature = "parser", feature = "orm"))]
-mod prepared;
+mod program;
 #[cfg(feature = "parser")]
 pub use crate::binder::Statement;
 use crate::binder::{Binder, BinderContext};
@@ -45,9 +44,7 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 #[cfg(feature = "orm")]
 use crate::orm::FromQueryRow;
 use crate::planner::operator::Operator;
-use crate::planner::{
-    ExecMetaArena, LogicalPlan, MetaArena, ParamArena, PlanArena, PlanInput, TableArenaCell,
-};
+use crate::planner::{ExecMetaArena, LogicalPlan, MetaArena, PlanArena, TableArenaCell};
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 use crate::storage::memory::MemoryStorage;
@@ -62,9 +59,9 @@ use crate::types::tuple::{Schema, SchemaView, TupleImpl};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ordered_float::OrderedFloat;
-#[cfg(any(feature = "parser", feature = "orm"))]
-pub use prepared::PreparedPlan;
+pub use program::{Program, ProgramIter};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::marker::PhantomData;
 use std::mem;
 use std::path::Path;
@@ -74,30 +71,63 @@ use std::sync::Arc;
 /// Metadata arena, and the executor with the arena it runs in.
 pub(crate) type Execution<'a, 'p, A, T> = (ExecMetaArena<A>, (Executor<'p>, ExecArena<'p, 'a, T>));
 
-pub trait IntoExecutor<'p> {
-    fn into_executor(self) -> Executor<'p>;
+/// A failed execution, with what the caller lent it: the program it ran, or nothing
+/// for a statement built on the spot.
+pub struct ExecuteError<E> {
+    pub error: DatabaseError,
+    pub program: E,
 }
 
-impl<'p> IntoExecutor<'p> for Executor<'p> {
-    fn into_executor(self) -> Executor<'p> {
-        self
+impl<E> fmt::Debug for ExecuteError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.error, f)
     }
 }
 
-fn bind<'p>(
-    executor: &Executor<'p>,
-    table_arena: &TableArenaCell,
-    params: &[(usize, DataValue)],
-) -> Result<(bool, ParamArena<'p>), DatabaseError> {
-    let prepared = executor.prepared.ok_or_else(|| {
-        DatabaseError::UnsupportedStmt("only prepared executors can run again".into())
-    })?;
-    if !std::ptr::eq(prepared.arena.table_arena_cell(), table_arena) {
-        return Err(DatabaseError::UnsupportedStmt(
-            "plan belongs to another database".into(),
-        ));
+impl<E> fmt::Display for ExecuteError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
     }
-    Ok((prepared.read_only, prepared.bind_parameters(params)?))
+}
+
+impl<E> std::error::Error for ExecuteError<E> {}
+
+impl<E> ExecuteError<E> {
+    // Boxed: a program makes it too large to return by value.
+    fn new(error: DatabaseError, program: E) -> Box<Self> {
+        Box::new(Self { error, program })
+    }
+}
+
+/// What a caller lends an execution, rebuilt from the executor and arena when it fails.
+pub(crate) trait Reclaim<'p, A> {
+    fn reclaim(executor: Executor<'p>, arena: A) -> Self;
+}
+
+impl<'p, A> Reclaim<'p, A> for () {
+    fn reclaim(_: Executor<'p>, _: A) -> Self {}
+}
+
+/// Unwraps `result`, or returns its error together with `program`.
+macro_rules! try_with {
+    ($result:expr, $program:expr) => {
+        match $result {
+            Ok(value) => value,
+            Err(error) => return Err(ExecuteError::new(error, $program)),
+        }
+    };
+}
+
+impl<E> From<Box<ExecuteError<E>>> for DatabaseError {
+    fn from(err: Box<ExecuteError<E>>) -> Self {
+        err.error
+    }
+}
+
+impl From<DatabaseError> for Box<ExecuteError<()>> {
+    fn from(error: DatabaseError) -> Self {
+        ExecuteError::new(error, ())
+    }
 }
 
 pub(crate) type ScalaFunctions = HashMap<FunctionSummary, Arc<dyn ScalarFunctionImpl>>;
@@ -110,24 +140,29 @@ pub enum CatalogKind {
     TableFunction(Arc<dyn TableFunctionImpl>),
 }
 
-pub(crate) trait BindSource<'a> {
-    type Iter: ResultIter;
+/// `'p` is the lifetime of the plan an execution runs.
+pub(crate) trait BindSource<'a, 'p> {
+    type Iter<A: MetaArena + 'p>: ResultIter;
     type Transaction: StorageTransaction;
 
     type Storage: Storage;
 
     /// `read_only` lets a fresh transaction use the storage's read path; executors
     /// that already hold a transaction ignore it.
-    fn execute<A: MetaArena + 'a, F>(
+    ///
+    /// `input` is handed to `build`, and back to the caller when the execution fails.
+    fn execute<E: Reclaim<'p, A>, A: MetaArena + 'p, F>(
         self,
         read_only: bool,
+        input: E,
         build: F,
-    ) -> Result<Self::Iter, DatabaseError>
+    ) -> Result<Self::Iter<A>, Box<ExecuteError<E>>>
     where
         F: FnOnce(
             &'a State<Self::Storage>,
             &Self::Transaction,
-        ) -> Result<(Executor<'a>, A), DatabaseError>;
+            E,
+        ) -> Result<(Executor<'p>, A), Box<ExecuteError<E>>>;
 
     #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
@@ -641,17 +676,25 @@ fn statement_stamp<T: StorageTransaction>(
     }
 }
 
-fn start_execution<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
+fn start_execution<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p, E: Reclaim<'p, A>>(
     table_cache: &'p TableCache,
     transaction: &'a mut T,
-    executor: Executor<'p>,
+    mut executor: Executor<'p>,
     plan_arena: A,
-) -> Result<Execution<'a, 'p, A, T>, DatabaseError> {
-    let stamp = statement_stamp(transaction, executor.plan())?;
+) -> Result<Execution<'a, 'p, A, T>, Box<ExecuteError<E>>> {
+    let stamp = try_with!(
+        statement_stamp(transaction, executor.plan()),
+        E::reclaim(executor, plan_arena)
+    );
     let mut arena = ExecArena::new(table_cache, transaction).with_iters(executor.iters());
     arena.set_statement_stamp(stamp);
+    let mut plan_arena = ExecMetaArena::new(plan_arena);
+    try_with!(
+        executor.start(&mut arena, &mut plan_arena),
+        E::reclaim(executor, plan_arena.into_parent())
+    );
 
-    Ok((ExecMetaArena::new(plan_arena), (executor, arena)))
+    Ok((plan_arena, (executor, arena)))
 }
 
 pub(crate) struct State<S> {
@@ -794,12 +837,12 @@ impl<S: Storage> State<S> {
         Ok((plan, arena))
     }
 
-    pub(crate) fn execute<'a, 'p, 'txn, A: MetaArena + 'p>(
+    pub(crate) fn execute<'a, 'p, 'txn, A: MetaArena + 'p, E: Reclaim<'p, A>>(
         &'p self,
         transaction: &'a mut S::TransactionType<'txn>,
         executor: Executor<'p>,
         plan_arena: A,
-    ) -> Result<Execution<'a, 'p, A, S::TransactionType<'txn>>, DatabaseError>
+    ) -> Result<Execution<'a, 'p, A, S::TransactionType<'txn>>, Box<ExecuteError<E>>>
     where
         S: 'txn,
         'txn: 'p,
@@ -867,8 +910,9 @@ impl<S: Storage> State<S> {
         }
 
         plan.populate_output_schema_recursive(&mut plan_arena);
-        let executor = Executor::new(PlanInput::Owned(plan), &plan_arena);
-        start_execution(table_cache, transaction, executor, plan_arena)
+        let executor = Executor::new(plan, &plan_arena);
+        start_execution::<_, _, ()>(table_cache, transaction, executor, plan_arena)
+            .map_err(Into::into)
     }
 }
 
@@ -1155,42 +1199,34 @@ impl<S: Storage> Database<S> {
     }
 }
 
-impl<S: Storage> Database<S> {
-    /// Executes an already prepared SQL or ORM plan, or an executor taken back from an
-    /// earlier execution, with the supplied parameters.
-    pub fn execute<'a, 'p: 'a>(
-        &'a self,
-        plan: impl IntoExecutor<'p>,
-        params: impl AsRef<[(usize, DataValue)]>,
-    ) -> Result<DatabaseIter<'a, S>, DatabaseError> {
-        let executor = plan.into_executor();
-        let (read_only, arena) = bind(&executor, self.state.table_arena(), params.as_ref())?;
-        BindSource::execute(self, read_only, move |_, _| Ok((executor, arena)))
-    }
-}
-
-impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
-    type Iter = DatabaseIter<'a, S>;
+impl<'a, S: Storage> BindSource<'a, 'a> for &'a Database<S> {
+    type Iter<A: MetaArena + 'a> = DatabaseIter<'a, S, A>;
     type Transaction = S::TransactionType<'a>;
 
     type Storage = S;
 
-    fn execute<A: MetaArena + 'a, F>(
+    fn execute<E: Reclaim<'a, A>, A: MetaArena + 'a, F>(
         self,
         read_only: bool,
+        input: E,
         build: F,
-    ) -> Result<Self::Iter, DatabaseError>
+    ) -> Result<Self::Iter<A>, Box<ExecuteError<E>>>
     where
-        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(Executor<'a>, A), DatabaseError>,
+        F: FnOnce(
+            &'a State<S>,
+            &Self::Transaction,
+            E,
+        ) -> Result<(Executor<'a>, A), Box<ExecuteError<E>>>,
     {
-        let transaction = Box::into_raw(Box::new(
+        let transaction = Box::into_raw(Box::new(try_with!(
             self.storage
-                .transaction_with_isolation(self.transaction_isolation, read_only)?,
-        ));
+                .transaction_with_isolation(self.transaction_isolation, read_only),
+            input
+        )));
         let result = (|| {
             let transaction = unsafe { &mut *transaction };
-            transaction.begin_statement_scope()?;
-            let (executor, arena) = build(&self.state, transaction)?;
+            try_with!(transaction.begin_statement_scope(), input);
+            let (executor, arena) = build(&self.state, transaction, input)?;
             self.state.execute(transaction, executor, arena)
         })();
         let (arena, executor) = match result {
@@ -1200,11 +1236,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
                 return Err(error);
             }
         };
-        let inner = Box::into_raw(Box::new(TransactionIter::new(
-            arena.boxed(),
-            executor,
-            transaction,
-        )));
+        let inner = Box::into_raw(Box::new(TransactionIter::new(arena, executor, transaction)));
         Ok(DatabaseIter { transaction, inner })
     }
 
@@ -1316,12 +1348,12 @@ where
 }
 
 /// Raw result iterator returned by database execution APIs.
-pub struct DatabaseIter<'a, S: Storage + 'a> {
+pub struct DatabaseIter<'a, S: Storage + 'a, A: MetaArena + 'a = PlanArena<'a>> {
     pub(crate) transaction: *mut S::TransactionType<'a>,
-    pub(crate) inner: *mut TransactionIter<'a, 'a, S::TransactionType<'a>>,
+    pub(crate) inner: *mut TransactionIter<'a, 'a, S::TransactionType<'a>, A>,
 }
 
-impl<S: Storage> Drop for DatabaseIter<'_, S> {
+impl<S: Storage, A: MetaArena> Drop for DatabaseIter<'_, S, A> {
     fn drop(&mut self) {
         if !self.inner.is_null() {
             unsafe { drop(Box::from_raw(self.inner)) }
@@ -1332,7 +1364,7 @@ impl<S: Storage> Drop for DatabaseIter<'_, S> {
     }
 }
 
-impl<'a, S: Storage> DatabaseIter<'a, S> {
+impl<'a, S: Storage, A: MetaArena + 'a> DatabaseIter<'a, S, A> {
     #[inline]
     pub fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         unsafe { (*self.inner).schema(f) }
@@ -1344,18 +1376,6 @@ impl<'a, S: Storage> DatabaseIter<'a, S> {
         f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         unsafe { (*self.inner).next_tuple(f) }
-    }
-
-    /// Ends the execution, dropping the rows not read yet, commits the transaction and
-    /// hands back the executor reset to run again.
-    pub fn into_executor(mut self) -> Result<Executor<'a>, DatabaseError> {
-        let executor = unsafe {
-            Box::from_raw(mem::replace(&mut self.inner, std::ptr::null_mut())).into_executor()?
-        };
-        unsafe {
-            Box::from_raw(mem::replace(&mut self.transaction, std::ptr::null_mut())).commit()?;
-        }
-        Ok(executor)
     }
 
     #[inline]
@@ -1370,7 +1390,7 @@ impl<'a, S: Storage> DatabaseIter<'a, S> {
     }
 }
 
-impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
+impl<S: Storage, A: MetaArena> ResultIter for DatabaseIter<'_, S, A> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         DatabaseIter::schema(self, f)
     }
@@ -1403,66 +1423,41 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
     }
 }
 
-impl<'txn, S: Storage> Transaction<'txn, S> {
-    /// Executes a prepared SQL or ORM plan, or an executor taken back from an earlier
-    /// execution, inside this transaction.
-    pub fn execute<'a, 'p>(
-        &'a mut self,
-        plan: impl IntoExecutor<'p>,
-        params: impl AsRef<[(usize, DataValue)]>,
-    ) -> Result<TransactionIter<'a, 'p, S::TransactionType<'txn>>, DatabaseError>
-    where
-        'txn: 'p,
-        'p: 'a,
-    {
-        let executor = plan.into_executor();
-        let (_, arena) = bind(&executor, self.state.table_arena(), params.as_ref())?;
-        self.execute_with(move |_, _| Ok((executor, arena)))
-    }
+impl<'a, 'p, 'txn, S: Storage> BindSource<'a, 'p> for &'a mut Transaction<'txn, S>
+where
+    'txn: 'p,
+    'p: 'a,
+{
+    type Iter<A: MetaArena + 'p> = TransactionIter<'a, 'p, S::TransactionType<'txn>, A>;
+    type Transaction = S::TransactionType<'txn>;
 
-    /// Runs the executor `build` returns inside this transaction.
-    pub(crate) fn execute_with<'a, 'p, A: MetaArena + 'p, F>(
-        &'a mut self,
+    type Storage = S;
+
+    fn execute<E: Reclaim<'p, A>, A: MetaArena + 'p, F>(
+        self,
+        _read_only: bool,
+        input: E,
         build: F,
-    ) -> Result<TransactionIter<'a, 'p, S::TransactionType<'txn>>, DatabaseError>
+    ) -> Result<Self::Iter<A>, Box<ExecuteError<E>>>
     where
-        'txn: 'p,
-        'p: 'a,
         F: FnOnce(
-            &'p State<S>,
-            &S::TransactionType<'txn>,
-        ) -> Result<(Executor<'p>, A), DatabaseError>,
+            &'a State<S>,
+            &Self::Transaction,
+            E,
+        ) -> Result<(Executor<'p>, A), Box<ExecuteError<E>>>,
     {
-        self.inner.begin_statement_scope()?;
-        let (executor, arena) = build(self.state, &self.inner)?;
+        try_with!(self.inner.begin_statement_scope(), input);
+        let (executor, arena) = build(self.state, &self.inner, input)?;
         if self.read_only && !executor.plan().operator.command_type().is_read_only() {
-            return Err(DatabaseError::UnsupportedStmt(
-                "cannot write in a read-only transaction".into(),
-            ));
+            let error =
+                DatabaseError::UnsupportedStmt("cannot write in a read-only transaction".into());
+            return Err(ExecuteError::new(error, E::reclaim(executor, arena)));
         }
         let transaction = std::ptr::from_mut(&mut self.inner);
         let (arena, executor) =
             self.state
                 .execute(unsafe { &mut *transaction }, executor, arena)?;
-        Ok(TransactionIter::new(arena.boxed(), executor, transaction))
-    }
-}
-
-impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut Transaction<'txn, S> {
-    type Iter = TransactionIter<'a, 'a, S::TransactionType<'txn>>;
-    type Transaction = S::TransactionType<'txn>;
-
-    type Storage = S;
-
-    fn execute<A: MetaArena + 'a, F>(
-        self,
-        _read_only: bool,
-        build: F,
-    ) -> Result<Self::Iter, DatabaseError>
-    where
-        F: FnOnce(&'a State<S>, &Self::Transaction) -> Result<(Executor<'a>, A), DatabaseError>,
-    {
-        self.execute_with(build)
+        Ok(TransactionIter::new(arena, executor, transaction))
     }
 
     #[cfg(feature = "orm")]
@@ -1512,12 +1507,7 @@ impl<T: StorageTransaction> Drop for TransactionGuard<'_, '_, T> {
 /// Raw result iterator returned by transaction execution APIs.
 ///
 /// `'a` borrows the transaction, `'p` the plan its [`Executor`] runs.
-pub struct TransactionIter<
-    'a,
-    'p,
-    T: StorageTransaction + 'p,
-    A: MetaArena + 'p = Box<dyn MetaArena + 'p>,
-> {
+pub struct TransactionIter<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p = PlanArena<'p>> {
     // Drop execution before the metadata arena it borrows from, and before the
     // executor, whose plan the storage iterators in the guard may borrow.
     guard: TransactionGuard<'a, 'p, T>,
@@ -1584,19 +1574,6 @@ impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TransactionIter<'a, 
     pub fn done(mut self) -> Result<(), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         Ok(())
-    }
-
-    pub fn into_executor(mut self) -> Result<Executor<'p>, DatabaseError> {
-        let reset = self
-            .executor
-            .reset(&mut self.guard.arena, &mut self.plan_arena);
-        self.finish_statement_scope()?;
-        reset?;
-        let Self {
-            guard, executor, ..
-        } = self;
-        drop(guard);
-        Ok(executor)
     }
 }
 
@@ -2305,15 +2282,16 @@ pub(crate) mod test {
         kite_sql.run("insert into t1 values(1, 1)")?.done()?;
         kite_sql.run("insert into t1 values(2, 2)")?.done()?;
         kite_sql.analyze("t1")?;
+        let mut tx = kite_sql.new_transaction(false)?;
 
         // Filter
         {
-            let statement = kite_sql.prepare_sql(
+            let mut statement = kite_sql.program_sql(
                 "explain select * from t1 where b > $1",
                 &[(1, LogicalType::Integer)],
             )?;
 
-            let mut iter = kite_sql.execute(&statement, &[(1, DataValue::Int32(0))])?;
+            let mut iter = statement.execute(&mut tx, &[(1, DataValue::Int32(0))])?;
 
             let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row[0].utf8().unwrap();
@@ -2324,7 +2302,7 @@ pub(crate) mod test {
         }
         // Aggregate
         {
-            let statement = kite_sql.prepare_sql(
+            let mut statement = kite_sql.program_sql(
                 "explain select a + $1, max(b + $2) from t1 where b > $3 group by a + $1",
                 &[
                     (1, LogicalType::Integer),
@@ -2333,8 +2311,8 @@ pub(crate) mod test {
                 ],
             )?;
 
-            let mut iter = kite_sql.execute(
-                &statement,
+            let mut iter = statement.execute(
+                &mut tx,
                 &[
                     (1, DataValue::Int32(0)),
                     (2, DataValue::Int32(0)),
@@ -2350,10 +2328,10 @@ pub(crate) mod test {
             );
         }
         {
-            let statement = kite_sql.prepare_sql("explain select *, $1 from (select * from t1 where b > $2) as l left join (select * from t1 where a > $3) on l.a > $4", &[(1, LogicalType::Integer), (2, LogicalType::Integer), (3, LogicalType::Integer), (4, LogicalType::Integer)])?;
+            let mut statement = kite_sql.program_sql("explain select *, $1 from (select * from t1 where b > $2) as l left join (select * from t1 where a > $3) on l.a > $4", &[(1, LogicalType::Integer), (2, LogicalType::Integer), (3, LogicalType::Integer), (4, LogicalType::Integer)])?;
 
-            let mut iter = kite_sql.execute(
-                &statement,
+            let mut iter = statement.execute(
+                &mut tx,
                 &[
                     (1, DataValue::Int32(9)),
                     (2, DataValue::Int32(0)),
@@ -2756,22 +2734,22 @@ pub(crate) mod test {
             );
             Ok(())
         })?;
-        let prepared = db.prepare_sql(&sql, &[])?;
-        let mut iter = db.execute(&prepared, [])?;
+        let mut tx = db.new_transaction(false)?;
+        let mut program = db.program_sql(&sql, &[])?;
+        let mut iter = program.execute(&mut tx, [])?;
         assert_eq!(
             iter.next_tuple(|_, row| row.clone())?.unwrap(),
             vec![DataValue::Int32(7)]
         );
         iter.done()?;
-        let mut tx = db.new_transaction(false)?;
         let mut iter = tx.run(&sql)?;
         assert_eq!(
             iter.next_tuple(|_, row| row.clone())?.unwrap(),
             vec![DataValue::Int32(7)]
         );
         iter.done()?;
-        let prepared = tx.prepare_sql(&sql, &[])?;
-        let mut iter = tx.execute(&prepared, [])?;
+        let mut program = tx.program_sql(&sql, &[])?;
+        let mut iter = program.execute(&mut tx, [])?;
         assert_eq!(
             iter.next_tuple(|_, row| row.clone())?.unwrap(),
             vec![DataValue::Int32(7)]

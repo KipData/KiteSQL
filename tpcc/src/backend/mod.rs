@@ -19,7 +19,7 @@ pub mod kitesql_rocksdb;
 pub mod sqlite;
 
 use crate::TpccError;
-use kite_sql::db::PreparedPlan;
+use kite_sql::db::Program;
 use kite_sql::types::tuple::TupleImpl;
 use kite_sql::types::value::DataValue;
 use kite_sql::types::LogicalType;
@@ -98,7 +98,7 @@ pub struct StatementSpec {
 }
 
 pub struct KiteSqlPreparedStatement<'a> {
-    pub plan: PreparedPlan<'a>,
+    pub program: Program<'a>,
     pub spec: StatementSpec,
 }
 

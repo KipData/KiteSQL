@@ -27,7 +27,6 @@ use self::ddl::change_column::ChangeColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;
 use self::dql::mark_apply::MarkApply;
 use self::dql::scalar_query_init::ScalarQueryInit;
-use crate::db::PreparedPlan;
 use crate::errors::DatabaseError;
 use crate::execution::ddl::create_index::CreateIndex;
 use crate::execution::ddl::create_table::CreateTable;
@@ -76,12 +75,13 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
-use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanArena, PlanInput, PlanKeeper};
+use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanArena, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{IndexIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter};
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{ConcatPool, Input, Schema, Tuple, TupleId, TupleImpl};
 use std::marker::PhantomData;
+use std::mem;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecStatus {
@@ -128,14 +128,15 @@ pub struct Executor<'a> {
     root: ExecNode<'a>,
     iters: usize,
     pub(crate) schema: Schema,
-    pub(crate) prepared: Option<&'a PreparedPlan<'a>>,
+    // Set once an execution started; the next one resets the tree first.
+    ran: bool,
     // Keeps the plan the tree borrows from alive, so it must stay declared after `root`.
     keeper: PlanKeeper<'a>,
 }
 
 impl<'a> Executor<'a> {
-    pub(crate) fn new(plan: PlanInput<'a>, plan_arena: &(dyn MetaArena + 'a)) -> Self {
-        let schema = plan.as_ref().read_schema().clone();
+    pub(crate) fn new(plan: LogicalPlan, plan_arena: &(dyn MetaArena + 'a)) -> Self {
+        let schema = plan.read_schema().clone();
         let keeper = PlanKeeper::new(plan);
         let mut iters = IterCounter::default();
         let root = build_write(&mut iters, plan_arena, keeper.plan());
@@ -143,7 +144,7 @@ impl<'a> Executor<'a> {
             root,
             iters: iters.0,
             schema,
-            prepared: None,
+            ran: false,
             keeper,
         }
     }
@@ -151,7 +152,7 @@ impl<'a> Executor<'a> {
     pub(crate) fn from_plan(
         (plan, plan_arena): (LogicalPlan, PlanArena<'a>),
     ) -> (Self, PlanArena<'a>) {
-        (Self::new(PlanInput::Owned(plan), &plan_arena), plan_arena)
+        (Self::new(plan, &plan_arena), plan_arena)
     }
 
     pub(crate) fn plan(&self) -> &'a LogicalPlan {
@@ -170,12 +171,15 @@ impl<'a> Executor<'a> {
         self.root.next_tuple(arena, plan_arena)
     }
 
-    pub(crate) fn reset<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    pub(crate) fn start<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        self.root.reset(arena, plan_arena)
+        if mem::replace(&mut self.ran, true) {
+            self.root.reset(arena, plan_arena)?;
+        }
+        Ok(())
     }
 }
 

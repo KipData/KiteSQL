@@ -234,14 +234,14 @@ fn drain_sqlite_iter(mut iter: SqliteResult<'_, '_>) -> Result<(), TpccError> {
 }
 
 fn drain_kitesql_iter<T: kite_sql::storage::StorageTransaction>(
-    mut iter: KiteSqlTxnResult<'_, T>,
+    mut iter: KiteSqlTxnResult<'_, '_, T>,
 ) -> Result<(), TpccError> {
     while iter.skip_next_tuple()? {}
     Ok(())
 }
 
 fn with_kitesql_nth<T: kite_sql::storage::StorageTransaction>(
-    mut iter: KiteSqlTxnResult<'_, T>,
+    mut iter: KiteSqlTxnResult<'_, '_, T>,
     n: usize,
     visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
 ) -> Result<(), TpccError> {
@@ -255,7 +255,7 @@ fn with_kitesql_nth<T: kite_sql::storage::StorageTransaction>(
 }
 
 fn with_ordered_nth<T: kite_sql::storage::StorageTransaction>(
-    mut kitesql_iter: KiteSqlTxnResult<'_, T>,
+    mut kitesql_iter: KiteSqlTxnResult<'_, '_, T>,
     mut sqlite_iter: SqliteResult<'_, '_>,
     sql: &'static str,
     n: usize,
@@ -314,7 +314,7 @@ fn with_ordered_nth<T: kite_sql::storage::StorageTransaction>(
 }
 
 fn drain_and_compare_ordered<T: kite_sql::storage::StorageTransaction>(
-    mut kitesql_iter: KiteSqlTxnResult<'_, T>,
+    mut kitesql_iter: KiteSqlTxnResult<'_, '_, T>,
     mut sqlite_iter: SqliteResult<'_, '_>,
     sql: &'static str,
 ) -> Result<(), TpccError> {

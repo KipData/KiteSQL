@@ -1,13 +1,14 @@
 use super::*;
 
 impl<S: Storage> Database<S> {
-    /// Prepares an ORM-built plan once for repeated execution with positional parameters.
-    /// Use `e.param(id)` inside expression closures, then pass values to `execute`.
-    pub fn prepare<F>(
+    /// Prepares an ORM-built plan once into a program for repeated execution with
+    /// positional parameters. Use `e.param(id)` inside expression closures, then pass
+    /// values to `Program::execute`.
+    pub fn program<F>(
         &self,
         params: &[(usize, LogicalType)],
         build: F,
-    ) -> Result<crate::db::PreparedPlan<'_>, DatabaseError>
+    ) -> Result<crate::db::Program<'_>, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -186,12 +187,12 @@ impl<S: Storage> Database<S> {
 }
 
 impl<'a, S: Storage> Transaction<'a, S> {
-    /// Prepares an ORM-built plan for repeated execution inside this transaction.
-    pub fn prepare<F>(
+    /// Prepares an ORM-built plan into a program, against this transaction's view.
+    pub fn program<F>(
         &self,
         params: &[(usize, LogicalType)],
         build: F,
-    ) -> Result<crate::db::PreparedPlan<'a>, DatabaseError>
+    ) -> Result<crate::db::Program<'a>, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
