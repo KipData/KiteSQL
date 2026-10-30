@@ -215,7 +215,7 @@ impl<'a, S: Storage> Transaction<'a, S> {
     pub fn bind<F>(
         &mut self,
         build: F,
-    ) -> Result<TransactionIter<'_, S::TransactionType<'a>>, DatabaseError>
+    ) -> Result<TransactionIter<'_, '_, S::TransactionType<'a>>, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -256,15 +256,17 @@ impl<'a, S: Storage> Transaction<'a, S> {
     /// Fetches all rows for a model inside the current transaction.
     pub fn fetch<M: Model>(
         &mut self,
-    ) -> Result<OrmIter<TransactionIter<'_, S::TransactionType<'a>>, M>, DatabaseError> {
+    ) -> Result<OrmIter<TransactionIter<'_, '_, S::TransactionType<'a>>, M>, DatabaseError> {
         orm_list::<_, M>(self)
     }
 
     /// Lists all table names inside the current transaction.
     pub fn show_tables(
         &mut self,
-    ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
-    {
+    ) -> Result<
+        ProjectValueIter<TransactionIter<'_, '_, S::TransactionType<'a>>, String>,
+        DatabaseError,
+    > {
         Ok(ProjectValueIter::new(
             self.bind(|ctx| ctx.binder.bind_show_tables())?,
         ))
@@ -273,8 +275,10 @@ impl<'a, S: Storage> Transaction<'a, S> {
     /// Lists all view names inside the current transaction.
     pub fn show_views(
         &mut self,
-    ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
-    {
+    ) -> Result<
+        ProjectValueIter<TransactionIter<'_, '_, S::TransactionType<'a>>, String>,
+        DatabaseError,
+    > {
         Ok(ProjectValueIter::new(
             self.bind(|ctx| ctx.binder.bind_show_views())?,
         ))
@@ -283,8 +287,10 @@ impl<'a, S: Storage> Transaction<'a, S> {
     /// Describes the schema of the model table inside the current transaction.
     pub fn describe<M: Model>(
         &mut self,
-    ) -> Result<OrmIter<TransactionIter<'_, S::TransactionType<'a>>, DescribeColumn>, DatabaseError>
-    {
+    ) -> Result<
+        OrmIter<TransactionIter<'_, '_, S::TransactionType<'a>>, DescribeColumn>,
+        DatabaseError,
+    > {
         Ok(self
             .bind(|ctx| ctx.binder.bind_describe(M::table_name().into()))?
             .orm::<DescribeColumn>())

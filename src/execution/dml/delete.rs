@@ -14,42 +14,59 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexType};
 use crate::types::tuple_builder::TupleBuilder;
+use std::mem;
 
 pub struct Delete<'a> {
     table_name: &'a TableName,
-    input: Option<ExecNode<'a>>,
+    input: ExecNode<'a>,
+    // Set once the statement ran; cleared when the executor is reset.
+    done: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
+impl<'a> WriteExecutor<'a> for Delete<'a> {
     type Input = (&'a DeleteOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (DeleteOperator { table_name, .. }, input_plan): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
-        let input = Some(build_read(arena, plan_arena, input_plan));
-        ExecNode::Delete(Box::new(Delete { table_name, input }))
+        let input = build_read(arena, plan_arena, input_plan);
+        ExecNode::Delete(Box::new(Delete {
+            table_name,
+            input,
+            done: false,
+        }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.done = false;
+        self.input.reset(arena, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(mut input) = self.input.take() else {
+        if mem::replace(&mut self.done, true) {
             arena.finish();
             return Ok(());
-        };
+        }
+        let input = &mut self.input;
 
         let index_templates = {
             let table = arena

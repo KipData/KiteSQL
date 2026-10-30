@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -22,19 +22,27 @@ pub struct Truncate<'a> {
     op: &'a TruncateOperator,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Truncate<'a> {
+impl<'a> WriteExecutor<'a> for Truncate<'a> {
     type Input = &'a TruncateOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         op: Self::Input,
-        _arena: &mut ExecArena<'a, '_, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         ExecNode::Truncate(Box::new(Truncate { op }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, '_, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,

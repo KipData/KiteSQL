@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -115,10 +115,10 @@ pub struct TopK<'a> {
     input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
+impl<'a> ReadExecutor<'a> for TopK<'a> {
     type Input = (&'a TopKOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (
             TopKOperator {
                 sort_fields,
@@ -127,8 +127,8 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for TopK<'a> {
             },
             input,
         ): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input);
         ExecNode::TopK(Box::new(TopK {

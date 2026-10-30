@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter};
+use crate::execution::{
+    ExecArena, ExecBuilder, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
+};
 use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::SortOption;
@@ -84,13 +86,13 @@ impl<'a> IndexScan<'a> {
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexScan<'a> {
+impl<'a> ReadExecutor<'a> for IndexScan<'a> {
     type Input = (&'a TableScanOperator, &'a IndexInfo, &'a IndexLookup);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, info, lookup): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let iter = arena.alloc_iter();
         ExecNode::IndexScan(Box::new(IndexScan::new(op, info, lookup, iter)))

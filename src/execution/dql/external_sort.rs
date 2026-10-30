@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::compare_sort_keys;
 use crate::execution::spill::{SegmentOffset, SegmentReader, SortRow, SpillReader, SpillVec};
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -47,13 +47,13 @@ pub struct ExternalSort<'a> {
     input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
+impl<'a> ReadExecutor<'a> for ExternalSort<'a> {
     type Input = (&'a SortOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (SortOperator { sort_fields }, input): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input);
         ExecNode::ExternalSort(Box::new(ExternalSort {

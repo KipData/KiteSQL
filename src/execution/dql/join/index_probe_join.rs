@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::predicates_matched;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::index_probe_join::IndexProbeJoinOperator;
 use crate::planner::{ExecMetaArena, LogicalPlan, MetaArena};
 use crate::storage::StorageTransaction;
@@ -26,13 +26,13 @@ pub struct IndexProbeJoin<'a> {
     right_input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexProbeJoin<'a> {
+impl<'a> ReadExecutor<'a> for IndexProbeJoin<'a> {
     type Input = (&'a IndexProbeJoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, left_input, right_input): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let left_input = build_read(arena, plan_arena, left_input);
         let right_input = build_read(arena, plan_arena, right_input);
@@ -196,10 +196,10 @@ mod tests {
         let transaction = storage.transaction()?;
         let cache = &table_cache;
         let mut arena = ExecArena::new(cache, &transaction);
-        let mut root = <IndexProbeJoin as ReadExecutor<_>>::into_executor(
+        let mut root = <IndexProbeJoin as ReadExecutor>::into_executor(
             (&op, &left, &right),
             &mut arena,
-            &mut plan_arena,
+            &plan_arena,
         );
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         for payload in ["first", "again"] {

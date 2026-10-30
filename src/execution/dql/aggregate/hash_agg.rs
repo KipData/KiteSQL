@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
     create_accumulators, update_accumulators, write_aggregate_output, Accumulator,
 };
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -35,10 +35,10 @@ pub struct HashAggExecutor<'a> {
     output: Option<HashAggOutput>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a> {
+impl<'a> ReadExecutor<'a> for HashAggExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (
             AggregateOperator {
                 agg_calls,
@@ -47,8 +47,8 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashAggExecutor<'a>
             },
             input,
         ): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input);
         ExecNode::HashAgg(Box::new(HashAggExecutor {

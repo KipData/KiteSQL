@@ -21,7 +21,9 @@ use super::{is_valid_identifier, Binder, CteBinding, QueryBindStep, SetOperatorK
 #[cfg(feature = "copy")]
 use crate::binder::copy::{ExtSource, FileFormat};
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
-use crate::db::{BindSource, Database, DatabaseIter, State, Transaction, TransactionIter};
+use crate::db::{
+    BindSource, Database, DatabaseIter, Executor, State, Transaction, TransactionIter,
+};
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -38,7 +40,7 @@ use crate::planner::operator::recursive_cte::{RecursiveCteOperator, RecursiveSca
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::{CommandType, Operator};
 use crate::planner::MetaArena;
-use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, PlanInput};
 use crate::storage::{Storage, StorageTransaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
@@ -199,7 +201,7 @@ impl<S: Storage> Database<S> {
     pub fn run_mut<C, R>(&mut self, sql: impl AsRef<str>, consume: C) -> Result<R, DatabaseError>
     where
         C: for<'a> FnOnce(
-            &mut TransactionIter<'a, S::TransactionType<'a>, PlanArena<'a>>,
+            &mut TransactionIter<'a, 'a, S::TransactionType<'a>, PlanArena<'a>>,
         ) -> Result<R, DatabaseError>,
     {
         let sql = sql.as_ref();
@@ -218,7 +220,7 @@ impl<S: Storage> Database<S> {
     ) -> Result<R, DatabaseError>
     where
         C: for<'a> FnOnce(
-            &mut TransactionIter<'a, S::TransactionType<'a>, PlanArena<'a>>,
+            &mut TransactionIter<'a, 'a, S::TransactionType<'a>, PlanArena<'a>>,
         ) -> Result<R, DatabaseError>,
     {
         let last = statements
@@ -281,13 +283,14 @@ impl<S: Storage> Database<S> {
         let mut statements = statements.into_iter().peekable();
 
         while let Some(statement) = statements.next() {
-            let (schema, plan_arena, executor) = match (|| {
+            let (plan_arena, executor) = match (|| {
                 let tx = unsafe { &mut *transaction };
                 tx.begin_statement_scope()?;
                 let (plan, arena) = self
                     .state
                     .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))?;
-                self.state.execute(tx, plan.into(), arena)
+                let executor = Executor::new(PlanInput::Owned(plan), &arena);
+                self.state.execute(tx, executor, arena)
             })() {
                 Ok(result) => result,
                 Err(err) => {
@@ -297,15 +300,12 @@ impl<S: Storage> Database<S> {
             };
 
             if statements.peek().is_some() {
-                if let Err(err) =
-                    TransactionIter::new(schema, plan_arena, executor, transaction).done()
-                {
+                if let Err(err) = TransactionIter::new(plan_arena, executor, transaction).done() {
                     unsafe { drop(Box::from_raw(transaction)) };
                     return Err(err.with_sql_context(sql));
                 }
             } else {
                 let inner = Box::into_raw(Box::new(TransactionIter::new(
-                    schema,
                     plan_arena.boxed(),
                     executor,
                     transaction,
@@ -324,7 +324,7 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
     pub fn run<'a, T: AsRef<str>>(
         &'a mut self,
         sql: T,
-    ) -> Result<TransactionIter<'a, S::TransactionType<'txn>>, DatabaseError> {
+    ) -> Result<TransactionIter<'a, 'a, S::TransactionType<'txn>>, DatabaseError> {
         let sql = sql.as_ref();
         let mut statements = self
             .state
@@ -344,7 +344,9 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
 
         for statement in statements {
             BindSource::execute(&mut *self, false, |state, tx| {
-                state.build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))
+                state
+                    .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))
+                    .map(Executor::from_plan)
             })
             .map_err(|err| err.with_sql_context(sql))?
             .done()
@@ -352,7 +354,9 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
         }
 
         BindSource::execute(self, false, |state, tx| {
-            state.build_plan(&[], tx, |binder, arena| binder.bind(&last_statement, arena))
+            state
+                .build_plan(&[], tx, |binder, arena| binder.bind(&last_statement, arena))
+                .map(Executor::from_plan)
         })
         .map_err(|err| err.with_sql_context(sql))
     }

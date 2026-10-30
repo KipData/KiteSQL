@@ -21,7 +21,7 @@ use crate::execution::dql::join::hash::{
     JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
 };
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -227,13 +227,13 @@ pub(crate) struct BuildState {
     pub(crate) tuples: Vec<(usize, TupleImpl)>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashJoin<'a> {
+impl<'a> ReadExecutor<'a> for HashJoin<'a> {
     type Input = (&'a JoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, left_plan, right_plan): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let left_schema_len = left_plan.read_schema().len();
         let right_schema_len = right_plan.read_schema().len();

@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, DDLApply, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{
+    build_read, DDLApply, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::LogicalPlan;
@@ -30,13 +32,13 @@ pub struct CreateIndex<'a> {
     input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateIndex<'a> {
+impl<'a> WriteExecutor<'a> for CreateIndex<'a> {
     type Input = (&'a CreateIndexOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, input_plan): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input_schema = input_plan.read_schema().clone();
         let input = build_read(arena, plan_arena, input_plan);
@@ -49,6 +51,14 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateIndex<'a> {
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.input.reset(arena, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,

@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter};
+use crate::execution::{
+    ExecArena, ExecBuilder, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
+};
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
@@ -23,13 +25,13 @@ pub struct ShowViews {
     metas: IterSlot,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ShowViews {
+impl<'a> ReadExecutor<'a> for ShowViews {
     type Input = ();
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         _: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        _: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        _: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let metas = arena.alloc_iter();
         ExecNode::ShowViews(Box::new(ShowViews { metas }))

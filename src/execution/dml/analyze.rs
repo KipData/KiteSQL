@@ -14,7 +14,9 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, DDLApply, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{
+    build_read, DDLApply, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::optimizer::core::histogram::{
@@ -32,21 +34,24 @@ use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId};
 use ordered_float::OrderedFloat;
 use std::fmt::{self, Formatter};
+use std::mem;
 
 const DEFAULT_NUM_OF_BUCKETS: usize = 10;
 
 pub struct Analyze<'a> {
     table_name: &'a TableName,
-    input: Option<ExecNode<'a>>,
+    input: ExecNode<'a>,
+    // Set once the statement ran; cleared when the executor is reset.
+    done: bool,
     histogram_buckets: Option<usize>,
     hll_precision: Option<u8>,
     statistics_relative_error: Option<OrderedFloat<f64>>,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
+impl<'a> WriteExecutor<'a> for Analyze<'a> {
     type Input = (&'a AnalyzeOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (
             AnalyzeOperator {
                 table_name,
@@ -57,13 +62,14 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
             },
             input_plan,
         ): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
-        let input = Some(build_read(arena, plan_arena, input_plan));
+        let input = build_read(arena, plan_arena, input_plan);
         ExecNode::Analyze(Box::new(Analyze {
             table_name,
             input,
+            done: false,
             histogram_buckets: *histogram_buckets,
             hll_precision: *hll_precision,
             statistics_relative_error: *statistics_relative_error,
@@ -72,15 +78,25 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.done = false;
+        self.input.reset(arena, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(mut input) = self.input.take() else {
+        if mem::replace(&mut self.done, true) {
             arena.finish();
             return Ok(());
-        };
+        }
+        let input = &mut self.input;
 
         let hll_precision = self.hll_precision.unwrap_or(DEFAULT_HLL_PRECISION);
         let relative_error = self

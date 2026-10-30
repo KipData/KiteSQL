@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -26,13 +26,13 @@ pub struct Projection<'a> {
     input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Projection<'a> {
+impl<'a> ReadExecutor<'a> for Projection<'a> {
     type Input = (&'a ProjectOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (ProjectOperator { exprs }, input): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input);
         ExecNode::Projection(Box::new(Projection { exprs, input }))

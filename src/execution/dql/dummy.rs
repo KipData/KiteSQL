@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::tuple::Tuple;
@@ -30,13 +30,13 @@ impl Default for Dummy {
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Dummy {
+impl<'a> ReadExecutor<'a> for Dummy {
     type Input = ();
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         _: Self::Input,
-        _arena: &mut ExecArena<'a, '_, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let executor = Dummy::default();
         ExecNode::Dummy(Box::new(executor))

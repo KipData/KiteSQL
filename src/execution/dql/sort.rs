@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::planner::ScalarQueryRef;
@@ -159,13 +159,13 @@ pub struct Sort<'a> {
     input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
+impl<'a> ReadExecutor<'a> for Sort<'a> {
     type Input = (&'a SortOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (SortOperator { sort_fields }, input): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input);
         let sort_arena = Box::<Bump>::default();
@@ -301,8 +301,7 @@ mod test {
         };
         let mut arena = ExecArena::new(cache, &transaction);
         // Select the memory executor explicitly even when the spill feature is enabled.
-        let mut root =
-            <Sort as ReadExecutor<_>>::into_executor((&op, &plan), &mut arena, &mut metadata);
+        let mut root = <Sort as ReadExecutor>::into_executor((&op, &plan), &mut arena, &metadata);
         let mut metadata = ExecMetaArena::new(metadata);
         assert!(root.next_tuple(&mut arena, &mut metadata)?);
         assert_eq!(*arena.result_tuple(), vec![DataValue::Int32(1)]);

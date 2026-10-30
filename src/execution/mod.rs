@@ -1,7 +1,3 @@
-// GRCOV_EXCL_START
-#[cfg(test)]
-use crate::planner::PlanArena;
-// GRCOV_EXCL_STOP
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,6 +27,7 @@ use self::ddl::change_column::ChangeColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;
 use self::dql::mark_apply::MarkApply;
 use self::dql::scalar_query_init::ScalarQueryInit;
+use crate::db::PreparedPlan;
 use crate::errors::DatabaseError;
 use crate::execution::ddl::create_index::CreateIndex;
 use crate::execution::ddl::create_table::CreateTable;
@@ -79,11 +76,11 @@ use crate::expression::ScalarExpression;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
-use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanKeeper};
+use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanArena, PlanInput, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{IndexIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter};
 use crate::types::index::RuntimeIndexProbe;
-use crate::types::tuple::{ConcatPool, Input, Tuple, TupleId, TupleImpl};
+use crate::types::tuple::{ConcatPool, Input, Schema, Tuple, TupleId, TupleImpl};
 use std::marker::PhantomData;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,40 +120,62 @@ impl RewriteExpression for ScalarExpression {
     }
 }
 
-pub struct Executor<'a, T: StorageTransaction + 'a> {
+/// A statement built into an executor tree, like a compiled SQLite program.
+///
+/// It holds no transaction, so an executor taken back from a finished iterator can run
+/// again in another one.
+pub struct Executor<'a> {
     root: ExecNode<'a>,
-    arena: ExecArena<'a, 'a, T>,
-    // Never read: it only keeps the plan that `arena` borrows from alive, and must stay
-    // declared after `arena` so the executors are dropped before the plan is freed.
-    #[allow(dead_code)]
+    iters: usize,
+    pub(crate) schema: Schema,
+    pub(crate) prepared: Option<&'a PreparedPlan<'a>>,
+    // Keeps the plan the tree borrows from alive, so it must stay declared after `root`.
     keeper: PlanKeeper<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> Executor<'a, T> {
-    pub(crate) fn new(
-        arena: ExecArena<'a, 'a, T>,
-        root: ExecNode<'a>,
-        keeper: PlanKeeper<'a>,
-    ) -> Self {
+impl<'a> Executor<'a> {
+    pub(crate) fn new(plan: PlanInput<'a>, plan_arena: &(dyn MetaArena + 'a)) -> Self {
+        let schema = plan.as_ref().read_schema().clone();
+        let keeper = PlanKeeper::new(plan);
+        let mut iters = IterCounter::default();
+        let root = build_write(&mut iters, plan_arena, keeper.plan());
         Self {
             root,
-            arena,
+            iters: iters.0,
+            schema,
+            prepared: None,
             keeper,
         }
     }
 
-    pub(crate) fn next_tuple<A: MetaArena + 'a>(
-        &mut self,
-        plan_arena: &mut ExecMetaArena<A>,
-    ) -> Result<Option<&mut TupleImpl>, DatabaseError> {
-        if !self.root.next_tuple(&mut self.arena, plan_arena)? {
-            return Ok(None);
-        }
-        Ok(Some(self.arena.result_mut()))
+    pub(crate) fn from_plan(
+        (plan, plan_arena): (LogicalPlan, PlanArena<'a>),
+    ) -> (Self, PlanArena<'a>) {
+        (Self::new(PlanInput::Owned(plan), &plan_arena), plan_arena)
     }
 
-    pub(crate) fn take_ddl_apply(&mut self) -> Vec<DDLApply> {
-        self.arena.take_ddl_apply()
+    pub(crate) fn plan(&self) -> &'a LogicalPlan {
+        self.keeper.plan()
+    }
+
+    pub(crate) fn iters(&self) -> usize {
+        self.iters
+    }
+
+    pub(crate) fn next_tuple<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<bool, DatabaseError> {
+        self.root.next_tuple(arena, plan_arena)
+    }
+
+    pub(crate) fn reset<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.root.reset(arena, plan_arena)
     }
 }
 
@@ -213,16 +232,12 @@ pub(crate) enum ExecNode<'a> {
 }
 
 pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
-    // Reads restore their local state and reset inputs. Writes must not be replayed.
+    // Restores the state the node had right after it was built, resetting its inputs too.
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, '_, T>,
-        _plan_arena: &mut ExecMetaArena<A>,
-    ) -> Result<(), DatabaseError> {
-        Err(DatabaseError::UnsupportedStmt(
-            "resetting a write executor".into(),
-        ))
-    }
+        arena: &mut ExecArena<'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError>;
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
@@ -645,6 +660,15 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
         self.table_codec.set_stamp(stamp);
     }
 
+    pub(crate) fn with_iters(mut self, iters: usize) -> Self {
+        self.iters.resize_with(iters, || StorageIter::Empty);
+        self
+    }
+
+    pub(crate) fn release_iters(&mut self) {
+        self.iters.fill_with(|| StorageIter::Empty);
+    }
+
     pub(crate) fn new(table_cache: &'a TableCache, transaction: &'t T) -> Self {
         Self {
             result: ExecResult::default(),
@@ -675,11 +699,6 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
 
     pub(crate) fn transaction(&self) -> &'t T {
         unsafe { &*self.transaction }
-    }
-
-    pub(crate) fn alloc_iter(&mut self) -> IterSlot {
-        self.iters.push(StorageIter::Empty);
-        self.iters.len() - 1
     }
 
     pub(crate) fn iter_mut(&mut self, slot: IterSlot) -> &mut StorageIter<'t, T> {
@@ -718,12 +737,6 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
     pub(crate) fn set_recursive_input(&mut self, input: RecursiveInput) {
         debug_assert!(self.recursive_input.is_none());
         self.recursive_input = Some(input);
-    }
-
-    pub(crate) fn take_recursive_input(&mut self) -> RecursiveInput {
-        self.recursive_input
-            .take()
-            .expect("recursive input initialized")
     }
 
     pub(crate) fn iter_len(&self) -> usize {
@@ -826,37 +839,70 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
     }
 }
 
-pub(crate) trait ReadExecutor<'a, T: StorageTransaction + 'a>: Sized {
+/// What building an executor tree needs: storage iterator slots, plus the rows a
+/// recursive step reads, which only exist while a recursive CTE runs.
+pub(crate) trait ExecBuilder {
+    fn alloc_iter(&mut self) -> IterSlot;
+
+    fn take_recursive_input(&mut self) -> RecursiveInput;
+}
+
+/// Counts the iterator slots of a tree built ahead of any transaction.
+#[derive(Default)]
+struct IterCounter(usize);
+
+impl ExecBuilder for IterCounter {
+    fn alloc_iter(&mut self) -> IterSlot {
+        self.0 += 1;
+        self.0 - 1
+    }
+
+    fn take_recursive_input(&mut self) -> RecursiveInput {
+        unreachable!("recursive steps are built while their CTE runs")
+    }
+}
+
+impl<'a, T: StorageTransaction + 'a> ExecBuilder for ExecArena<'a, '_, T> {
+    fn alloc_iter(&mut self) -> IterSlot {
+        self.iters.push(StorageIter::Empty);
+        self.iters.len() - 1
+    }
+
+    fn take_recursive_input(&mut self) -> RecursiveInput {
+        self.recursive_input
+            .take()
+            .expect("recursive input initialized")
+    }
+}
+
+pub(crate) trait ReadExecutor<'a>: Sized {
     type Input;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         input: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a>;
 }
 
-pub(crate) trait WriteExecutor<'a, T: StorageTransaction + 'a>: Sized {
+pub(crate) trait WriteExecutor<'a>: Sized {
     type Input;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         input: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a>;
 }
 
-pub(crate) fn build_read<'a, T>(
-    arena: &mut ExecArena<'a, '_, T>,
-    plan_arena: &mut (dyn MetaArena + 'a),
+pub(crate) fn build_read<'a, B: ExecBuilder>(
+    arena: &mut B,
+    plan_arena: &(dyn MetaArena + 'a),
     plan: &'a LogicalPlan,
-) -> ExecNode<'a>
-where
-    T: StorageTransaction + 'a,
-{
+) -> ExecNode<'a> {
     macro_rules! read {
         ($executor:ty, $input:expr) => {
-            <$executor as ReadExecutor<'a, T>>::into_executor($input, arena, plan_arena)
+            <$executor as ReadExecutor<'a>>::into_executor($input, arena, plan_arena)
         };
     }
 
@@ -971,17 +1017,14 @@ where
     }
 }
 
-pub(crate) fn build_write<'a, T>(
-    arena: &mut ExecArena<'a, '_, T>,
-    plan_arena: &mut (dyn MetaArena + 'a),
+pub(crate) fn build_write<'a, B: ExecBuilder>(
+    arena: &mut B,
+    plan_arena: &(dyn MetaArena + 'a),
     plan: &'a LogicalPlan,
-) -> ExecNode<'a>
-where
-    T: StorageTransaction + 'a,
-{
+) -> ExecNode<'a> {
     macro_rules! write {
         ($executor:ty, $input:expr) => {
-            <$executor as WriteExecutor<'a, T>>::into_executor($input, arena, plan_arena)
+            <$executor as WriteExecutor<'a>>::into_executor($input, arena, plan_arena)
         };
     }
 
@@ -1007,7 +1050,7 @@ where
         #[cfg(feature = "copy")]
         Operator::CopyFromFile(op) => write!(CopyFromFile<'a>, op),
         #[cfg(feature = "copy")]
-        Operator::CopyToFile(op) => <CopyToFile<'a> as ReadExecutor<'a, T>>::into_executor(
+        Operator::CopyToFile(op) => <CopyToFile<'a> as ReadExecutor<'a>>::into_executor(
             (op, plan.childrens.only()),
             arena,
             plan_arena,
@@ -1023,31 +1066,39 @@ mod test_utils {
     use super::*;
 
     pub(crate) struct TestExecutor<'a, T: StorageTransaction + 'a> {
-        executor: Executor<'a, T>,
+        root: ExecNode<'a>,
+        arena: ExecArena<'a, 'a, T>,
         plan_arena: ExecMetaArena<PlanArena<'a>>,
     }
 
     impl<T: StorageTransaction> TestExecutor<'_, T> {
         pub(crate) fn next_tuple(&mut self) -> Result<Option<&mut TupleImpl>, DatabaseError> {
-            self.executor.next_tuple(&mut self.plan_arena)
+            if !self
+                .root
+                .next_tuple(&mut self.arena, &mut self.plan_arena)?
+            {
+                return Ok(None);
+            }
+            Ok(Some(self.arena.result_mut()))
         }
     }
 
     pub(crate) fn execute_input<'a, T, E>(
         input: E::Input,
         cache: &'a TableCache,
-        mut plan_arena: PlanArena<'a>,
+        plan_arena: PlanArena<'a>,
         transaction: &'a T,
     ) -> TestExecutor<'a, T>
     where
         T: StorageTransaction + 'a,
-        E: ReadExecutor<'a, T>,
+        E: ReadExecutor<'a>,
     {
         let mut arena = ExecArena::new(cache, transaction);
-        let root = <E as ReadExecutor<'a, T>>::into_executor(input, &mut arena, &mut plan_arena);
+        let root = <E as ReadExecutor<'a>>::into_executor(input, &mut arena, &plan_arena);
         TestExecutor {
+            root,
+            arena,
             plan_arena: ExecMetaArena::new(plan_arena),
-            executor: Executor::new(arena, root, PlanKeeper::empty()),
         }
     }
 
@@ -1055,18 +1106,19 @@ mod test_utils {
     pub(crate) fn execute_input_mut<'a, T, E>(
         input: E::Input,
         cache: &'a TableCache,
-        mut plan_arena: PlanArena<'a>,
+        plan_arena: PlanArena<'a>,
         transaction: &'a T,
     ) -> TestExecutor<'a, T>
     where
         T: StorageTransaction + 'a,
-        E: WriteExecutor<'a, T>,
+        E: WriteExecutor<'a>,
     {
         let mut arena = ExecArena::new(cache, transaction);
-        let root = <E as WriteExecutor<'a, T>>::into_executor(input, &mut arena, &mut plan_arena);
+        let root = <E as WriteExecutor<'a>>::into_executor(input, &mut arena, &plan_arena);
         TestExecutor {
+            root,
+            arena,
             plan_arena: ExecMetaArena::new(plan_arena),
-            executor: Executor::new(arena, root, PlanKeeper::empty()),
         }
     }
 

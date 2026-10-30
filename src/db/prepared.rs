@@ -19,6 +19,14 @@ pub struct PreparedPlan<'db> {
     pub(crate) read_only: bool,
 }
 
+impl<'p> IntoExecutor<'p> for &'p PreparedPlan<'_> {
+    fn into_executor(self) -> Executor<'p> {
+        let mut executor = Executor::new(PlanInput::Borrowed(&self.plan), &self.arena);
+        executor.prepared = Some(self);
+        executor
+    }
+}
+
 impl<'db> PreparedPlan<'db> {
     pub(crate) fn bind_parameters(
         &self,
@@ -29,23 +37,6 @@ impl<'db> PreparedPlan<'db> {
 }
 
 impl<S: Storage> Database<S> {
-    /// Executes an already prepared SQL or ORM plan with the supplied parameters.
-    pub fn execute<'a>(
-        &'a self,
-        prepared: &'a PreparedPlan<'_>,
-        params: impl AsRef<[(usize, DataValue)]>,
-    ) -> Result<DatabaseIter<'a, S>, DatabaseError> {
-        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
-            return Err(DatabaseError::UnsupportedStmt(
-                "plan belongs to another database".into(),
-            ));
-        }
-        let arena = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, prepared.read_only, |_, _| {
-            Ok((PlanInput::Borrowed(&prepared.plan), arena))
-        })
-    }
-
     /// Prepare SQL with explicit positional parameter types.
     /// Parameter values are supplied separately for each execution.
     #[cfg(feature = "parser")]
@@ -63,23 +54,6 @@ impl<S: Storage> Database<S> {
 }
 
 impl<'db, S: Storage> Transaction<'db, S> {
-    /// Executes a prepared SQL or ORM plan inside this transaction.
-    pub fn execute<'a>(
-        &'a mut self,
-        prepared: &'a PreparedPlan<'db>,
-        params: impl AsRef<[(usize, DataValue)]>,
-    ) -> Result<TransactionIter<'a, S::TransactionType<'db>>, DatabaseError> {
-        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
-            return Err(DatabaseError::UnsupportedStmt(
-                "plan belongs to another database".into(),
-            ));
-        }
-        let arena = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, prepared.read_only, |_, _| {
-            Ok((PlanInput::Borrowed(&prepared.plan), arena))
-        })
-    }
-
     #[cfg(feature = "parser")]
     pub fn prepare_sql(
         &self,

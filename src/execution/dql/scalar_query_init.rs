@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
 use crate::planner::ExecMetaArena;
@@ -59,12 +59,12 @@ impl<'a> ScalarQueryInit<'a> {
         Ok(())
     }
 
-    pub(crate) fn build<T: StorageTransaction + 'a>(
+    pub(crate) fn build<B: ExecBuilder>(
         op: &'a ScalarQueryInitOperator,
         input: ExecNode<'a>,
         init_plan: &'a LogicalPlan,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let init = build_read(arena, plan_arena, init_plan);
         ExecNode::ScalarQueryInit(Box::new(Self {
@@ -85,17 +85,17 @@ impl<'a> ScalarQueryInit<'a> {
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ScalarQueryInit<'a> {
+impl<'a> ReadExecutor<'a> for ScalarQueryInit<'a> {
     type Input = (
         &'a ScalarQueryInitOperator,
         &'a LogicalPlan,
         &'a LogicalPlan,
     );
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, input, init): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input);
         Self::build(op, input, init, arena, plan_arena)
@@ -230,8 +230,8 @@ mod tests {
             first.populate_output_schema_recursive(&mut metadata);
             duplicate.populate_output_schema_recursive(&mut metadata);
             let mut arena = ExecArena::new(cache, &transaction);
-            let mut first_root = build_read(&mut arena, &mut metadata, &first);
-            let mut duplicate_root = build_read(&mut arena, &mut metadata, &duplicate);
+            let mut first_root = build_read(&mut arena, &metadata, &first);
+            let mut duplicate_root = build_read(&mut arena, &metadata, &duplicate);
             let mut view = ExecMetaArena::new(metadata);
             if row_count == 2 {
                 assert!(first_root.next_tuple(&mut arena, &mut view).is_err());

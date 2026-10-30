@@ -20,8 +20,8 @@ pub(crate) enum PlanInput<'p> {
     Borrowed(&'p LogicalPlan),
 }
 
-impl PlanInput<'_> {
-    pub(crate) fn root(&self) -> &LogicalPlan {
+impl AsRef<LogicalPlan> for PlanInput<'_> {
+    fn as_ref(&self) -> &LogicalPlan {
         match self {
             PlanInput::Owned(plan) => plan,
             PlanInput::Borrowed(plan) => plan,
@@ -41,16 +41,6 @@ pub(crate) struct PlanKeeper<'p> {
 }
 
 impl<'p> PlanKeeper<'p> {
-    // GRCOV_EXCL_START
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(crate) fn empty() -> Self {
-        Self {
-            owned: std::ptr::null_mut(),
-            borrowed: None,
-        }
-    }
-    // GRCOV_EXCL_STOP
-
     pub(crate) fn new(input: PlanInput<'p>) -> Self {
         match input {
             PlanInput::Owned(plan) => Self {

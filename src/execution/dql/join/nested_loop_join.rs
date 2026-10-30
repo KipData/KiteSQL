@@ -19,7 +19,7 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
 use crate::storage::StorageTransaction;
@@ -103,13 +103,13 @@ struct ActiveLeftState {
     first_matches: Vec<usize>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for NestedLoopJoin<'a> {
+impl<'a> ReadExecutor<'a> for NestedLoopJoin<'a> {
     type Input = (&'a JoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (JoinOperator { on, join_type, .. }, left_plan, right_plan): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let ((mut on_left_keys, mut on_right_keys), filter) = match on {
             JoinCondition::On { on, filter } => (on.iter().copied().unzip(), *filter),
@@ -554,7 +554,7 @@ mod test {
         plan.populate_output_schema_recursive(&mut plan_arena);
         let context = &table_cache;
         let mut arena = ExecArena::new(context, &transaction);
-        let mut root = build_read(&mut arena, &mut plan_arena, &plan);
+        let mut root = build_read(&mut arena, &plan_arena, &plan);
         let mut rows = 0;
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         while root.next_tuple(&mut arena, &mut plan_arena)? {

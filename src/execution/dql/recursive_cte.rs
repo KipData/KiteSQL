@@ -19,7 +19,7 @@ use crate::planner::PlanArena;
 use crate::errors::DatabaseError;
 #[cfg(feature = "spill")]
 use crate::execution::spill::{SpillReader, SpillVec};
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::recursive_cte::RecursiveScanOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -247,13 +247,13 @@ impl<'a> RecursiveCte<'a> {
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a> {
+impl<'a> ReadExecutor<'a> for RecursiveCte<'a> {
     type Input = (&'a LogicalPlan, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (anchor_plan, recursive_plan): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let anchor_input = build_read(arena, plan_arena, anchor_plan);
         ExecNode::RecursiveCte(Box::new(Self::new(anchor_input, recursive_plan)))
@@ -322,13 +322,13 @@ pub struct RecursiveScan {
     input: RecursiveInput,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
+impl<'a> ReadExecutor<'a> for RecursiveScan {
     type Input = &'a RecursiveScanOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         _input: Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = arena.take_recursive_input();
         ExecNode::RecursiveScan(Box::new(Self { input }))

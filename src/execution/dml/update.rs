@@ -14,7 +14,7 @@
 
 use crate::catalog::{ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::ExprRef;
@@ -26,18 +26,21 @@ use crate::types::tuple::{Schema, Tuple};
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::ColumnId;
 use std::collections::{HashMap, HashSet};
+use std::mem;
 
 pub struct Update<'a> {
     table_name: &'a TableName,
     value_exprs: &'a [(ColumnRef, ExprRef)],
     input_schema: Schema,
-    input: Option<ExecNode<'a>>,
+    input: ExecNode<'a>,
+    // Set once the statement ran; cleared when the executor is reset.
+    done: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Update<'a> {
+impl<'a> WriteExecutor<'a> for Update<'a> {
     type Input = (&'a UpdateOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (
             UpdateOperator {
                 table_name,
@@ -45,16 +48,17 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Update<'a> {
             },
             input_plan,
         ): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input_schema = input_plan.read_schema().clone();
-        let input = Some(build_read(arena, plan_arena, input_plan));
+        let input = build_read(arena, plan_arena, input_plan);
         ExecNode::Update(Box::new(Update {
             table_name,
             value_exprs,
             input_schema,
             input,
+            done: false,
         }))
     }
 }
@@ -78,15 +82,25 @@ impl Update<'_> {
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.done = false;
+        self.input.reset(arena, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(mut input) = self.input.take() else {
+        if mem::replace(&mut self.done, true) {
             arena.finish();
             return Ok(());
-        };
+        }
+        let input = &mut self.input;
 
         let mut exprs_map = HashMap::with_capacity(self.value_exprs.len());
         let mut updated_column_ids = HashSet::with_capacity(self.value_exprs.len());

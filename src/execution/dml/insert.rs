@@ -14,7 +14,7 @@
 
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
@@ -26,19 +26,22 @@ use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
 use std::collections::HashMap;
+use std::mem;
 
 pub struct Insert<'a> {
     table_name: &'a TableName,
     input_schema: Schema,
-    input: Option<ExecNode<'a>>,
+    input: ExecNode<'a>,
+    // Set once the statement ran; cleared when the executor is reset.
+    done: bool,
     is_overwrite: bool,
     is_mapping_by_name: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Insert<'a> {
+impl<'a> WriteExecutor<'a> for Insert<'a> {
     type Input = (&'a InsertOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (
             InsertOperator {
                 table_name,
@@ -47,15 +50,16 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Insert<'a> {
             },
             input_plan,
         ): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input_schema = input_plan.read_schema().clone();
-        let input = Some(build_read(arena, plan_arena, input_plan));
+        let input = build_read(arena, plan_arena, input_plan);
         ExecNode::Insert(Box::new(Insert {
             table_name,
             input_schema,
             input,
+            done: false,
             is_overwrite: *is_overwrite,
             is_mapping_by_name: *is_mapping_by_name,
         }))
@@ -82,15 +86,25 @@ impl Insert<'_> {
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecArena<'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.done = false;
+        self.input.reset(arena, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(mut input) = self.input.take() else {
+        if mem::replace(&mut self.done, true) {
             arena.finish();
             return Ok(());
-        };
+        }
+        let input = &mut self.input;
 
         let table_cache = arena.table_cache();
         let transaction = arena.transaction();

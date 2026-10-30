@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::create_accumulators;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
@@ -27,13 +27,13 @@ pub struct SimpleAggExecutor<'a> {
     returned: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor<'a> {
+impl<'a> ReadExecutor<'a> for SimpleAggExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (AggregateOperator { agg_calls, .. }, input): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input);
         ExecNode::SimpleAgg(Box::new(SimpleAggExecutor {

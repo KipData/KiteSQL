@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{DDLApply, ExecArena, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{DDLApply, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::drop_view::DropViewOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -22,19 +22,27 @@ pub struct DropView<'a> {
     op: &'a DropViewOperator,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropView<'a> {
+impl<'a> WriteExecutor<'a> for DropView<'a> {
     type Input = &'a DropViewOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         op: Self::Input,
-        _arena: &mut ExecArena<'a, '_, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         ExecNode::DropView(Box::new(DropView { op }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropView<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecArena<'a, '_, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -29,13 +29,13 @@ pub struct SetMembership<'a> {
     built: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SetMembership<'a> {
+impl<'a> ReadExecutor<'a> for SetMembership<'a> {
     type Input = (SetMembershipKind, &'a LogicalPlan, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (kind, left_plan, right_plan): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let left_input = build_read(arena, plan_arena, left_plan);
         let right_input = build_read(arena, plan_arena, right_plan);

@@ -6,7 +6,7 @@ use crate::binder::{
 };
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableName};
 use crate::db::{
-    BindSource, Database, DatabaseIter, OrmIter, ResultIter, Transaction, TransactionIter,
+    BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, Transaction, TransactionIter,
 };
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
@@ -1049,10 +1049,12 @@ where
 {
     static EMPTY_BIND_PARAMS: &[(usize, LogicalType)] = &[];
     executor.execute(read_only, |state, tx| {
-        state.build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
-            let mut context = OrmContext { binder, arena };
-            build(&mut context)
-        })
+        state
+            .build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
+                let mut context = OrmContext { binder, arena };
+                build(&mut context)
+            })
+            .map(Executor::from_plan)
     })
 }
 
@@ -3404,9 +3406,11 @@ fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut TupleImpl) -> Result<T
 fn orm_analyze<'a, E: BindSource<'a>, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
         .execute(false, |state, tx| {
-            state.build_plan(&[], tx, |binder, arena| {
-                binder.bind_analyze(M::table_name().into(), arena)
-            })
+            state
+                .build_plan(&[], tx, |binder, arena| {
+                    binder.bind_analyze(M::table_name().into(), arena)
+                })
+                .map(Executor::from_plan)
         })?
         .done()
 }
@@ -3418,9 +3422,11 @@ fn orm_insert<'a, E: BindSource<'a>, M: Model>(
     let params = model.params();
     executor
         .execute(false, |state, tx| {
-            state.build_plan(&[], tx, |binder, arena| {
-                bind_orm_insert_model::<_, _, M>(binder, params, arena)
-            })
+            state
+                .build_plan(&[], tx, |binder, arena| {
+                    bind_orm_insert_model::<_, _, M>(binder, params, arena)
+                })
+                .map(Executor::from_plan)
         })?
         .done()
 }

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -28,13 +28,13 @@ pub struct StreamDistinctExecutor<'a> {
     last_keys: Option<TupleImpl>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a> {
+impl<'a> ReadExecutor<'a> for StreamDistinctExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, input): Self::Input,
-        arena: &mut ExecArena<'a, '_, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input);
         ExecNode::StreamDistinct(Box::new(StreamDistinctExecutor {
