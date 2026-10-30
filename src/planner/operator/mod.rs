@@ -1437,7 +1437,8 @@ mod tests {
 
         let update = Operator::Update(UpdateOperator {
             table_name: "users".into(),
-            value_exprs: vec![(b, column_expr(a, 0, &mut arena))],
+            table: crate::catalog::table::DmlTable::default(),
+            value_exprs: vec![(1, column_expr(a, 0, &mut arena))],
         });
         assert_eq!(referenced_columns(&update, &mut arena)?, vec![a]);
 
@@ -1749,15 +1750,19 @@ mod tests {
             (
                 Operator::Insert(InsertOperator {
                     table_name: "users".into(),
+                    table: crate::catalog::table::DmlTable::default(),
                     is_overwrite: true,
-                    is_mapping_by_name: false,
                 }),
-                "Insert users, Is Overwrite: true, Is Mapping By Name: false",
+                "Insert users, Is Overwrite: true",
             ),
             (
                 Operator::Update(UpdateOperator {
                     table_name: "users".into(),
-                    value_exprs: vec![(id, arena.alloc_expression(ScalarExpression::from(7_i32)))],
+                    table: crate::catalog::table::DmlTable {
+                        columns: vec![id],
+                        ..Default::default()
+                    },
+                    value_exprs: vec![(0, arena.alloc_expression(ScalarExpression::from(7_i32)))],
                 }),
                 "Update users set id -> 7",
             ),

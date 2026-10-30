@@ -397,6 +397,11 @@ impl TupleImpl {
         }
     }
 
+    /// Empties the tuple, keeping the buffer of its leftmost part.
+    pub fn clear(&mut self) {
+        self.output_mut().clear();
+    }
+
     pub fn push(&mut self, value: DataValue) {
         self.rightmost_mut().values.push(value);
     }

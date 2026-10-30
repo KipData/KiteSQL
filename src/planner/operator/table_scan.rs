@@ -55,7 +55,7 @@ impl TableScanOperator {
             let column_ids = arena.index(index_ref).column_ids.clone();
             let mut sort_fields = Vec::with_capacity(column_ids.len());
             for (position, col_id) in column_ids.iter().enumerate() {
-                let column_ref = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
+                let (_, column_ref) = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
                     DatabaseError::column_not_found(format!("index column id: {col_id} not found"))
                 })?;
                 sort_fields.push(SortField {

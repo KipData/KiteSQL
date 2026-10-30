@@ -744,12 +744,13 @@ pub(crate) mod tests {
             }),
             Operator::Insert(InsertOperator {
                 table_name: "t1".into(),
+                table: crate::catalog::table::DmlTable::default(),
                 is_overwrite: false,
-                is_mapping_by_name: false,
             }),
             Operator::Update(UpdateOperator {
                 table_name: "t1".into(),
-                value_exprs: vec![(column_ref, expr(15))],
+                table: crate::catalog::table::DmlTable::default(),
+                value_exprs: vec![(0, expr(15))],
             }),
             Operator::Delete(DeleteOperator {
                 table_name: "t1".into(),

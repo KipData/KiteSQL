@@ -90,7 +90,7 @@ pub(crate) fn index_value_type(
     for column_id in column_ids {
         let value_type = table
             .get_column_by_id(column_id)
-            .map(|column| arena.column(column))
+            .map(|(_, column)| arena.column(column))
             .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?
             .datatype()
             .clone();
@@ -549,7 +549,7 @@ pub trait StorageTransaction: Sized {
             )?;
         }
 
-        let column = plan_arena.column(table.get_column_by_id(&col_id).unwrap());
+        let column = plan_arena.column(table.get_column_by_id(&col_id).unwrap().1);
         table_codec.with_column(column, true, plan_arena, |key, value| self.set(key, value))?;
 
         Ok((table, col_id))

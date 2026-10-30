@@ -1954,7 +1954,8 @@ where
         if self.value_exprs.is_empty() {
             return Err(DatabaseError::ColumnsEmpty);
         }
-        self.binder.bind_update(table_name, self.value_exprs, plan)
+        self.binder
+            .bind_update(table_name, self.value_exprs, plan, self.arena)
     }
 }
 
@@ -2637,10 +2638,9 @@ where
     A: AsRef<[(usize, LogicalType)]>,
 {
     let table_name: TableName = table_name.into();
-    let input_schema = input_plan.output_schema(arena).clone();
-    let input_len = input_schema.len();
+    let input_len = input_plan.output_schema(arena).len();
 
-    let projection = {
+    let targets = {
         let source = binder
             .context
             .source(&table_name)?
@@ -2654,45 +2654,23 @@ where
                     input_len,
                 ));
             }
-            table_schema[..input_len]
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(position, target_column)| {
-                    let expr = arena.alloc_expression(ScalarExpression::column_expr(
-                        input_schema[position],
-                        position,
-                    ));
-                    arena.alloc_expression(ScalarExpression::Alias {
-                        expr,
-                        alias: AliasType::Name(arena.column(target_column).name().to_string()),
-                    })
-                })
-                .collect::<Vec<_>>()
+            table_schema[..input_len].to_vec()
         } else {
             if input_len != columns.len() {
                 return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
             }
-            let mut projection = Vec::with_capacity(columns.len());
-            for (position, column_name) in columns.into_iter().enumerate() {
+            let mut targets = Vec::with_capacity(columns.len());
+            for column_name in columns {
                 let column = source
                     .column(&column_name, arena)
                     .ok_or_else(|| DatabaseError::column_not_found(column_name.clone()))?;
-                let expr = arena.alloc_expression(ScalarExpression::column_expr(
-                    input_schema[position],
-                    position,
-                ));
-                projection.push(arena.alloc_expression(ScalarExpression::Alias {
-                    expr,
-                    alias: AliasType::Name(arena.column(column).name().to_string()),
-                }));
+                targets.push(column);
             }
-            projection
+            targets
         }
     };
-    input_plan = binder.bind_project(input_plan, projection, arena)?;
 
-    binder.bind_insert_query(table_name, input_plan, overwrite)
+    binder.bind_insert_query(table_name, input_plan, &targets, overwrite, arena)
 }
 
 fn bind_orm_insert_model<'bind, 'parent, 'arena, T, A, M>(
@@ -2734,7 +2712,7 @@ where
         row.push(arena.alloc_expression(ScalarExpression::Constant(value)));
     }
 
-    binder.bind_insert_values(table_name, schema_ref, row, 1, false, true)
+    binder.bind_insert_values(table_name, schema_ref, row, 1, false, arena)
 }
 
 fn describe_text_value(value: Option<DataValue>) -> String {

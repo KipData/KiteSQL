@@ -37,7 +37,6 @@ use crate::expression::visitor_mut::{walk_mut_expr, ExprCloner, ExprVisitorMut, 
 use crate::expression::{AliasType, BinaryOperator, TypeCast};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::function_scan::FunctionScanOperator;
-use crate::planner::operator::insert::InsertOperator;
 use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::set_membership::{SetMembershipKind, SetMembershipOperator};
 use crate::planner::operator::sort::{SortField, SortOperator};
@@ -224,8 +223,9 @@ where
     T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
+    binder: &'s mut Binder<'a, 'b, T, A>,
+    arena: &'s mut PlanArena<'arena>,
     plan: LogicalPlan,
-    _marker: std::marker::PhantomData<(&'s (), &'a (), &'b (), &'arena (), T, A)>,
 }
 
 pub(crate) struct BindPlanComplete {
@@ -774,8 +774,9 @@ where
         }
 
         Ok(BindPlanProjected {
+            binder: self.binder,
+            arena: self.arena,
             plan: self.plan,
-            _marker: std::marker::PhantomData,
         })
     }
 }
@@ -786,21 +787,33 @@ where
     A: AsRef<[(usize, LogicalType)]>,
 {
     pub(crate) fn insert_into(
-        mut self,
+        self,
         table_name: Option<TableName>,
     ) -> Result<BindPlanComplete, DatabaseError> {
+        let BindPlanProjected {
+            binder,
+            arena,
+            mut plan,
+        } = self;
         if let Some(table_name) = table_name {
-            self.plan = LogicalPlan::new(
-                Operator::Insert(InsertOperator {
-                    table_name,
-                    is_overwrite: false,
-                    is_mapping_by_name: true,
-                }),
-                Childrens::Only(Box::new(self.plan)),
-            )
+            let source = binder
+                .context
+                .source(&table_name)?
+                .ok_or(DatabaseError::TableNotFound)?;
+            let output = plan.output_schema(arena);
+            let mut targets = Vec::with_capacity(output.len());
+            for column in output {
+                let name = arena.column(*column).name();
+                targets.push(
+                    source
+                        .column(name, arena)
+                        .ok_or_else(|| DatabaseError::column_not_found(name.to_string()))?,
+                );
+            }
+            plan = binder.bind_insert_query(table_name, plan, &targets, false, arena)?;
         }
 
-        Ok(BindPlanComplete { plan: self.plan })
+        Ok(BindPlanComplete { plan })
     }
 }
 

@@ -1058,7 +1058,7 @@ where
             DatabaseError::UnsupportedStmt("insert without source is not supported".to_string())
         })?;
         if let SetExpr::Values(values) = source.body.as_ref() {
-            self.insert_values(table_name, columns, &values.rows, is_overwrite, false)
+            self.insert_values(table_name, columns, &values.rows, is_overwrite)
         } else {
             self.insert_query(table_name, columns, source, is_overwrite)
         }
@@ -1070,7 +1070,6 @@ where
         idents: &[Ident],
         expr_rows: &[Vec<Expr>],
         is_overwrite: bool,
-        is_mapping_by_name: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.binder.context.allow_default = true;
         let source = self
@@ -1134,7 +1133,7 @@ where
             rows,
             expr_rows.len(),
             is_overwrite,
-            is_mapping_by_name,
+            self.arena,
         )
     }
 
@@ -1146,10 +1145,9 @@ where
         is_overwrite: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut input_plan = self.binder.bind_query(query, self.arena)?;
-        let input_schema = input_plan.output_schema(self.arena).clone();
-        let input_len = input_schema.len();
+        let input_len = input_plan.output_schema(self.arena).len();
 
-        let projection = {
+        let targets = {
             let source = self
                 .binder
                 .context
@@ -1164,29 +1162,13 @@ where
                         input_len,
                     ));
                 }
-                table_schema[..input_len]
-                    .iter()
-                    .copied()
-                    .enumerate()
-                    .map(|(position, target_column)| {
-                        let expr = self.arena.alloc_expression(ScalarExpression::column_expr(
-                            input_schema[position],
-                            position,
-                        ));
-                        self.arena.alloc_expression(ScalarExpression::Alias {
-                            expr,
-                            alias: AliasType::Name(
-                                self.arena.column(target_column).name().to_string(),
-                            ),
-                        })
-                    })
-                    .collect::<Vec<_>>()
+                table_schema[..input_len].to_vec()
             } else {
                 if input_len != idents.len() {
                     return Err(DatabaseError::ValuesLenMismatch(idents.len(), input_len));
                 }
-                let mut projection = Vec::with_capacity(idents.len());
-                for (position, ident) in idents.iter().enumerate() {
+                let mut targets = Vec::with_capacity(idents.len());
+                for ident in idents {
                     let column_name = lower_ident(ident);
                     let column = source.column(&column_name, self.arena).ok_or_else(|| {
                         attach_span_if_absent(
@@ -1194,24 +1176,14 @@ where
                             ident.span,
                         )
                     })?;
-                    let expr = self.arena.alloc_expression(ScalarExpression::column_expr(
-                        input_schema[position],
-                        position,
-                    ));
-                    projection.push(self.arena.alloc_expression(ScalarExpression::Alias {
-                        expr,
-                        alias: AliasType::Name(self.arena.column(column).name().to_string()),
-                    }));
+                    targets.push(column);
                 }
-                projection
+                targets
             }
         };
-        input_plan = self
-            .binder
-            .bind_project(input_plan, projection, self.arena)?;
 
         self.binder
-            .bind_insert_query(table_name, input_plan, is_overwrite)
+            .bind_insert_query(table_name, input_plan, &targets, is_overwrite, self.arena)
     }
 
     fn update(self, update: &sqlparser::ast::Update) -> Result<LogicalPlan, DatabaseError> {
@@ -1343,7 +1315,8 @@ where
                 QueryBindStep::Project,
             ];
             plan = self.binder.bind_scalar_queries(plan, &steps, self.arena)?;
-            self.binder.bind_update(table_name, value_exprs, plan)
+            self.binder
+                .bind_update(table_name, value_exprs, plan, self.arena)
         } else {
             Err(DatabaseError::UnsupportedStmt(format!(
                 "UPDATE target must be a table: {:?}",

@@ -158,7 +158,8 @@ mod tests {
             Operator::MarkApply(MarkApplyOperator::new_exists(column, vec![mark_expr])),
             Operator::Update(UpdateOperator {
                 table_name: "t1".into(),
-                value_exprs: vec![(column, update_expr)],
+                table: crate::catalog::table::DmlTable::default(),
+                value_exprs: vec![(0, update_expr)],
             }),
         ];
 

@@ -128,12 +128,8 @@ impl IndexMeta {
         table: &'a TableCatalog,
     ) -> impl Iterator<Item = Result<ScalarExpression, DatabaseError>> + 'a {
         self.column_ids.iter().copied().map(move |column_id| {
-            let column_ref = table
+            let (position, column_ref) = table
                 .get_column_by_id(&column_id)
-                .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?;
-            let position = table
-                .columns()
-                .position(|column| *column == column_ref)
                 .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?;
             Ok(ScalarExpression::column_expr(column_ref, position))
         })

@@ -12,30 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::catalog::table::DmlTable;
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
-use crate::iter_ext::Itertools;
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::index::Index;
-use crate::types::tuple::{Schema, Tuple, TupleImpl};
+use crate::types::tuple::{Tuple, TupleImpl};
 use crate::types::tuple_builder::TupleBuilder;
 use crate::types::value::DataValue;
-use crate::types::ColumnId;
-use std::collections::HashMap;
 use std::mem;
 
 pub struct Insert<'a> {
     table_name: &'a TableName,
-    input_schema: Schema,
+    table: &'a DmlTable,
+    // Its rows hold all columns of the table, in table order.
     input: ExecNode<'a>,
+    // Reused by every row of every execution.
+    tuple: TupleImpl,
     // Set once the statement ran; cleared when the executor is reset.
     done: bool,
     is_overwrite: bool,
-    is_mapping_by_name: bool,
 }
 
 impl<'a> WriteExecutor<'a> for Insert<'a> {
@@ -45,43 +45,23 @@ impl<'a> WriteExecutor<'a> for Insert<'a> {
         (
             InsertOperator {
                 table_name,
+                table,
                 is_overwrite,
-                is_mapping_by_name,
             },
             input_plan,
         ): Self::Input,
         arena: &mut B,
         plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
-        let input_schema = input_plan.read_schema().clone();
         let input = build_read(arena, plan_arena, input_plan);
         ExecNode::Insert(Box::new(Insert {
             table_name,
-            input_schema,
+            table,
             input,
+            tuple: TupleImpl::from(Tuple::new(None, Vec::with_capacity(table.columns_len))),
             done: false,
             is_overwrite: *is_overwrite,
-            is_mapping_by_name: *is_mapping_by_name,
         }))
-    }
-}
-
-#[derive(Debug, Eq, PartialEq, Hash)]
-enum MappingKey<'a> {
-    Name(&'a str),
-    Id(Option<ColumnId>),
-}
-
-impl Insert<'_> {
-    fn column_key<'c>(
-        column: &'c crate::catalog::ColumnCatalog,
-        is_mapping_by_name: bool,
-    ) -> MappingKey<'c> {
-        if is_mapping_by_name {
-            MappingKey::Name(column.name())
-        } else {
-            MappingKey::Id(column.id())
-        }
     }
 }
 
@@ -104,82 +84,54 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
             arena.finish();
             return Ok(());
         }
-        let input = &mut self.input;
-
-        let table_cache = arena.table_cache();
-        let transaction = arena.transaction();
-        let table_snapshot = {
-            transaction
-                .table(table_cache, self.table_name.clone())?
-                .map(|table| table.dml_snapshot(plan_arena))
-                .transpose()?
-        };
+        let Insert {
+            table_name,
+            table,
+            input,
+            tuple,
+            is_overwrite,
+            ..
+        } = self;
+        if table.primary_key_indices.is_empty() {
+            return Err(DatabaseError::not_null());
+        }
         let mut inserted_count = 0;
-        if let Some(table_snapshot) = table_snapshot {
-            if table_snapshot.primary_key_indices.is_empty() {
-                return Err(DatabaseError::not_null());
+
+        while input.next_tuple(arena, plan_arena)? {
+            tuple.clear();
+            arena.result_mut().drain_values(|value| tuple.push(value));
+            for (i, column) in table.columns.iter().enumerate() {
+                let column = plan_arena.column(*column);
+                let value = mem::replace(&mut tuple[i], DataValue::Null).cast(column.datatype())?;
+                value.check_len(column.datatype())?;
+                if value.is_null() && !column.nullable() {
+                    return Err(DatabaseError::not_null_column(column.name().to_string()));
+                }
+                tuple[i] = value;
             }
-
-            let serializers = table_snapshot
-                .columns
-                .iter()
-                .map(|column| plan_arena.column(*column).datatype().serializable())
-                .collect_vec();
-            let mut tuple = TupleImpl::from(Tuple::new(
-                None,
-                Vec::with_capacity(table_snapshot.columns_len),
-            ));
-
-            while input.next_tuple(arena, plan_arena)? {
-                let mut tuple_map = HashMap::with_capacity(self.input_schema.len());
-                let mut i = 0;
-                arena.result_mut().drain_values(|value| {
-                    let column = plan_arena.column(self.input_schema[i]);
-                    tuple_map.insert(Self::column_key(column, self.is_mapping_by_name), value);
-                    i += 1;
-                });
-
-                let row = tuple.output_mut();
-                row.values.clear();
-                for column in table_snapshot.columns.iter() {
-                    let column = plan_arena.column(*column);
-                    let value = match tuple_map
-                        .remove(&Self::column_key(column, self.is_mapping_by_name))
-                    {
-                        Some(value) => value,
-                        None => column.default_value(plan_arena)?.unwrap_or(DataValue::Null),
-                    }
-                    .cast(column.datatype())?;
-                    value.check_len(column.datatype())?;
-                    if value.is_null() && !column.nullable() {
-                        return Err(DatabaseError::not_null_column(column.name().to_string()));
-                    }
-                    row.values.push(value)
-                }
-                row.pk = Some(Tuple::primary_projection(
-                    table_snapshot.primary_key_indices,
-                    row.values.as_slice(),
-                ));
-                for (index_meta, exprs) in table_snapshot.index_metas.iter() {
-                    let index_meta = plan_arena.index(*index_meta);
-                    let tuple_id = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-                    arena.rewrite(exprs, plan_arena, Some(&tuple))?;
-                    let mut state = arena.local_state(plan_arena);
-                    let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
-                    let index = Index::new(index_meta.id, values, index_meta.ty);
-                    transaction.add_index(table_codec, self.table_name, index, tuple_id)?;
-                }
+            tuple.set_pk(Some(Tuple::primary_projection(
+                &table.primary_key_indices,
+                &*tuple,
+            )));
+            for (index_meta, exprs) in table.index_exprs.iter() {
+                let index_meta = plan_arena.index(*index_meta);
+                let tuple_id = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
+                arena.rewrite(exprs, plan_arena, Some(&*tuple))?;
                 let mut state = arena.local_state(plan_arena);
-                let (transaction, table_codec) = state.transaction_codec_mut();
-                transaction.append_tuple(
-                    table_codec,
-                    self.table_name,
-                    &tuple,
-                    &serializers,
-                    self.is_overwrite,
-                )?;
-                inserted_count += 1;
+                let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
+                let index = Index::new(index_meta.id, values, index_meta.ty);
+                transaction.add_index(table_codec, table_name, index, tuple_id)?;
             }
+            let mut state = arena.local_state(plan_arena);
+            let (transaction, table_codec) = state.transaction_codec_mut();
+            transaction.append_tuple(
+                table_codec,
+                table_name,
+                &*tuple,
+                &table.serializers,
+                *is_overwrite,
+            )?;
+            inserted_count += 1;
         }
         arena.produce(TupleBuilder::build_result(inserted_count.to_string()).into());
         arena.resume();

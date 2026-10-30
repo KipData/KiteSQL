@@ -48,7 +48,7 @@ impl ReferenceSerialization for ColumnRef {
         } = &column.summary().relation
         {
             if let Some((_, table_cache)) = drive.and_then(ReferenceDecodeContext::drive) {
-                if let Some(column_ref) = table_cache
+                if let Some((_, column_ref)) = table_cache
                     .get(table_name)
                     .and_then(|table| table.get_column_by_id(column_id))
                 {
