@@ -908,7 +908,7 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
         let mut output = iter.schema(|schema| {
             schema
                 .iter()
-                .map(|column| column.full_name().to_string())
+                .map(|column| schema.full_name(column))
                 .collect::<Vec<_>>()
                 .join("\t")
         });

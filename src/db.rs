@@ -2271,7 +2271,7 @@ pub(crate) mod test {
             let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
-                "Projection [l.a, l.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (l.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [(t1.a) as (l.a), (t1.b) as (l.b)] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => ($3, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
+                "Projection [#0.a, #0.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (#0.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [(t1.a) as (#0.a), (t1.b) as (#0.b)] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => ($3, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
             );
         }
 
