@@ -80,6 +80,8 @@ use crate::storage::table_codec::TableCodec;
 use crate::storage::{IndexIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter};
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::tuple::{ConcatPool, Input, Schema, Tuple, TupleId, TupleImpl};
+use crate::types::value::DataValue;
+use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::mem;
 
@@ -94,6 +96,7 @@ pub(crate) struct ExecResult {
     pub(crate) tuple: TupleImpl,
     pub(crate) status: Option<ExecStatus>,
     concat_pool: ConcatPool,
+    spare_values: Vec<DataValue>,
 }
 
 impl ExecResult {
@@ -818,43 +821,30 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
         arena: &dyn MetaArena,
         input: Option<&TInput>,
     ) -> Result<(), DatabaseError> {
-        let base = {
-            let values = &mut self.buffer.result.tuple.rightmost_mut().values;
-            values.reserve(exprs.len());
-            values.len()
-        };
+        let result = &mut self.buffer.result;
+        let pool = self.buffer.table_codec.bytes_pool();
+        result.spare_values.reserve(exprs.len());
         for expr in exprs {
-            let value = {
-                let expression = expr.expression(arena);
-                match input {
-                    Some(input) => expression.eval(arena, Some(input)),
-                    None => expression.eval(arena, Some(&self.buffer.result.tuple)),
-                }
-                .map(|value| value.into_owned())
+            let expression = expr.expression(arena);
+            let value = match input {
+                Some(input) => expression.eval(arena, Some(input)),
+                None => expression.eval(arena, Some(&result.tuple)),
             };
             match value {
-                Ok(value) => self.buffer.result.tuple.push(value),
+                Ok(Cow::Owned(value)) => result.spare_values.push(value),
+                Ok(Cow::Borrowed(value)) => result.spare_values.push(pool.clone_value(value)),
                 Err(error) => {
-                    self.buffer
-                        .result
-                        .tuple
-                        .rightmost_mut()
-                        .values
-                        .truncate(base);
+                    pool.recycle(&mut result.spare_values);
                     return Err(error);
                 }
             }
         }
 
-        let pk = self.buffer.result.tuple.take_pk();
-        let tuple = self
-            .buffer
-            .result
-            .concat_pool
-            .retain_rightmost(&mut self.buffer.result.tuple);
-        tuple.values.rotate_left(base);
-        tuple.values.truncate(exprs.len());
+        let pk = result.tuple.take_pk();
+        let tuple = result.concat_pool.retain_rightmost(&mut result.tuple);
+        std::mem::swap(&mut tuple.values, &mut result.spare_values);
         tuple.pk = pk;
+        pool.recycle(&mut result.spare_values);
         Ok(())
     }
 
@@ -1206,7 +1196,6 @@ mod test {
     #[test]
     fn rewrite_projects_joined_row() -> Result<(), DatabaseError> {
         use crate::catalog::{ColumnCatalog, ColumnDesc};
-        use crate::types::value::DataValue;
         use crate::types::LogicalType;
 
         let table_arena = TableArenaCell::default();

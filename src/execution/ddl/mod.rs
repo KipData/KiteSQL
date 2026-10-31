@@ -52,14 +52,14 @@ where
     I: IntoIterator<Item = TupleValueSerializableImpl>,
 {
     let lower = if let Some(last_pk) = start_after {
-        table_codec.with_tuple_unchecked(table_id, last_pk, None, |key, _| {
+        table_codec.with_tuple_unchecked(table_id, last_pk, None, |key, _, _| {
             Ok::<_, DatabaseError>(Bound::Excluded(key.to_vec()))
         })?
     } else {
         Bound::Unbounded
     };
 
-    table_codec.with_tuple_bound(table_id, |min, max| {
+    table_codec.with_tuple_bound(table_id, |min, max, pool| {
         let lower = match &lower {
             Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
             Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
@@ -90,6 +90,7 @@ where
                 Some(tuple_id),
                 value,
                 old_values_len,
+                pool,
             )?;
             len += 1;
         }

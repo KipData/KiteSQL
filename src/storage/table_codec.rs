@@ -25,7 +25,7 @@ use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
 use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
-use crate::types::serialize::TupleValueSerializableImpl;
+use crate::types::serialize::{BytesPool, TupleValueSerializableImpl};
 use crate::types::tuple::{Tuple, TupleId, TupleLike};
 use crate::types::value::{DataValue, IndexKeyMapping};
 use crate::types::{ColumnId, LogicalType};
@@ -62,6 +62,7 @@ type TupleValueWriter<'a> = (
 pub struct TableCodec {
     buffers: [Bytes; 2],
     stamp: u64,
+    bytes_pool: BytesPool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -128,6 +129,11 @@ impl IndexStatisticsCodecType {
 }
 
 impl TableCodec {
+    #[inline]
+    pub(crate) fn bytes_pool(&mut self) -> &mut BytesPool {
+        &mut self.bytes_pool
+    }
+
     pub(crate) fn set_stamp(&mut self, stamp: u64) {
         self.stamp = stamp;
     }
@@ -274,7 +280,9 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         Self::check_primary_key(tuple_id, 0)?;
-        self.with_tuple_unchecked(table_id, tuple_id, tuple_value, f)
+        self.with_tuple_unchecked(table_id, tuple_id, tuple_value, |key, value, _| {
+            f(key, value)
+        })
     }
 
     #[inline]
@@ -283,42 +291,42 @@ impl TableCodec {
         table_id: TableId,
         tuple_id: &TupleId,
         tuple_value: Option<TupleValueWriter<'_>>,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        let stamp = self.stamp;
-        self.with_table_buffers(table_id, |lower, prefix, value| {
-            lower.reserve(KEY_PREFIX_LEN_HINT + tuple_id.memcomparable_len_hint());
-            Self::write_key_prefix(lower, CodecType::Tuple, prefix);
-            lower.push(BOUND_MIN_TAG);
-            tuple_id.memcomparable_encode(lower)?;
+        let prefix = table_id.to_be_bytes();
+        let [lower, value] = &mut self.buffers;
+        lower.reserve(KEY_PREFIX_LEN_HINT + tuple_id.memcomparable_len_hint());
+        Self::write_key_prefix(lower, CodecType::Tuple, prefix);
+        lower.push(BOUND_MIN_TAG);
+        tuple_id.memcomparable_encode(lower)?;
 
-            if let Some((len_hint, write_value)) = tuple_value {
-                value.reserve(len_hint + size_of::<u64>());
-                write_value(value)?;
-                value.extend_from_slice(&stamp.to_le_bytes());
-            }
+        if let Some((len_hint, write_value)) = tuple_value {
+            value.reserve(len_hint + size_of::<u64>());
+            write_value(value)?;
+            value.extend_from_slice(&self.stamp.to_le_bytes());
+        }
 
-            f(lower.as_slice(), value.as_slice())
-        })
+        f(lower.as_slice(), value.as_slice(), &mut self.bytes_pool)
     }
 
-    /// Range bounds covering all tuple keys for a table.
-    pub fn with_tuple_bound<R>(
+    /// Range bounds covering all tuple keys for a table. The bytes pool is
+    /// handed over too, since the codec stays borrowed while `f` runs.
+    pub(crate) fn with_tuple_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper| {
-            Self::write_key_prefix(lower, CodecType::Tuple, prefix);
-            lower.push(BOUND_MIN_TAG);
+        let prefix = table_id.to_be_bytes();
+        let [lower, upper] = &mut self.buffers;
+        Self::write_key_prefix(lower, CodecType::Tuple, prefix);
+        lower.push(BOUND_MIN_TAG);
 
-            Self::write_key_prefix(upper, CodecType::Tuple, prefix);
-            upper.push(BOUND_MAX_TAG);
+        Self::write_key_prefix(upper, CodecType::Tuple, prefix);
+        upper.push(BOUND_MAX_TAG);
 
-            f(lower.as_slice(), upper.as_slice())
-        })
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     /// Key: `{TableName}{INDEX_META_TAG}{BOUND_MIN_TAG}{IndexID}`.
@@ -820,19 +828,20 @@ impl TableCodec {
     }
 
     #[inline]
-    pub fn decode_tuple_into<I, S>(
+    pub(crate) fn decode_tuple_into<I, S>(
         tuple: &mut Tuple,
         deserializers: I,
         tuple_id: Option<TupleId>,
         bytes: &[u8],
         total_len: usize,
+        pool: &mut BytesPool,
     ) -> Result<(), DatabaseError>
     where
         I: IntoIterator<Item = S>,
         S: Borrow<TupleValueSerializableImpl>,
     {
         tuple.pk = tuple_id;
-        tuple.deserialize_from_into(deserializers, Self::strip_stamp(bytes)?, total_len)
+        tuple.deserialize_from_into(deserializers, Self::strip_stamp(bytes)?, total_len, pool)
     }
 
     fn encode_index_meta_value_into(
@@ -1166,7 +1175,14 @@ mod tests {
             .collect_vec();
 
         let mut tuple = Tuple::default();
-        TableCodec::decode_tuple_into(&mut tuple, &deserializers, None, &bytes, 2)?;
+        TableCodec::decode_tuple_into(
+            &mut tuple,
+            &deserializers,
+            None,
+            &bytes,
+            2,
+            &mut crate::types::serialize::BytesPool::default(),
+        )?;
         assert_eq!(
             tuple,
             Tuple::new(
@@ -1814,7 +1830,7 @@ mod tests {
         set.insert(op(DataValue::Int32(2), 2));
 
         let (min, max) = table_codec
-            .with_tuple_bound(1, |min, max| {
+            .with_tuple_bound(1, |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
             .unwrap();

@@ -239,7 +239,7 @@ pub trait StorageTransaction: Sized {
     ) -> Result<TupleIter<'a, Self>, DatabaseError> {
         let offset = bounds.0.unwrap_or(0);
 
-        table_codec.with_tuple_bound(table_id, |min, max| {
+        table_codec.with_tuple_bound(table_id, |min, max, _| {
             let iter = self.range(Bound::Included(min), Bound::Included(max))?;
 
             Ok(TupleIter {
@@ -839,7 +839,7 @@ pub trait StorageTransaction: Sized {
         table_codec: &mut TableCodec,
         table_id: TableId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_tuple_bound(table_id, |min, max| {
+        table_codec.with_tuple_bound(table_id, |min, max, _| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
@@ -1460,7 +1460,7 @@ impl<T: StorageTransaction> IndexImplParams<'_, T> {
         tuple_id: &TupleId,
         tuple: &mut Tuple,
     ) -> Result<bool, DatabaseError> {
-        table_codec.with_tuple_unchecked(self.table_id, tuple_id, None, |key, _| {
+        table_codec.with_tuple_unchecked(self.table_id, tuple_id, None, |key, _, pool| {
             let Some(bytes) = self.tx.get_borrowed(key)? else {
                 return Ok(false);
             };
@@ -1470,6 +1470,7 @@ impl<T: StorageTransaction> IndexImplParams<'_, T> {
                 Some(tuple_id.clone()),
                 bytes.as_ref(),
                 self.deserializers.total_len,
+                pool,
             )?;
             Ok(true)
         })
@@ -1598,7 +1599,7 @@ impl<T: StorageTransaction> IndexImpl<T> for IndexImplEnum {
 impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
     fn index_lookup_into(
         &self,
-        _: &mut TableCodec,
+        table_codec: &mut TableCodec,
         tuple: &mut Tuple,
         key: &[u8],
         value: &[u8],
@@ -1614,6 +1615,7 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
             tuple_id,
             value,
             params.deserializers.total_len,
+            table_codec.bytes_pool(),
         )
     }
 
@@ -1626,24 +1628,25 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         _: &mut Bytes,
         _: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        let tuple_id = value.clone();
-        let found = table_codec.with_tuple_unchecked(params.table_id, value, None, |key, _| {
-            let bytes = match &params.cursor {
-                Some(cursor) => params.tx.get_at(cursor, key)?,
-                None => params.tx.get_borrowed(key)?,
-            };
-            let Some(bytes) = bytes else {
-                return Ok(false);
-            };
-            TableCodec::decode_tuple_into(
-                tuple,
-                params.deserializers.deserializers(),
-                params.with_pk.then(|| tuple_id.clone()),
-                bytes.as_ref(),
-                params.deserializers.total_len,
-            )?;
-            Ok(true)
-        })?;
+        let found =
+            table_codec.with_tuple_unchecked(params.table_id, value, None, |key, _, pool| {
+                let bytes = match &params.cursor {
+                    Some(cursor) => params.tx.get_at(cursor, key)?,
+                    None => params.tx.get_borrowed(key)?,
+                };
+                let Some(bytes) = bytes else {
+                    return Ok(false);
+                };
+                TableCodec::decode_tuple_into(
+                    tuple,
+                    params.deserializers.deserializers(),
+                    params.with_pk.then(|| value.clone()),
+                    bytes.as_ref(),
+                    params.deserializers.total_len,
+                    pool,
+                )?;
+                Ok(true)
+            })?;
         Ok(if found {
             IndexResult::Hit
         } else {
@@ -1659,7 +1662,7 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_tuple_unchecked(params.table_id, value, None, |key, _| {
+        table_codec.with_tuple_unchecked(params.table_id, value, None, |key, _, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
         })
@@ -2030,7 +2033,7 @@ impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
         table_codec: &mut TableCodec,
         bounds: Bounds,
     ) -> Result<(), DatabaseError> {
-        self.iter = table_codec.with_tuple_bound(self.table_id, |min, max| {
+        self.iter = table_codec.with_tuple_bound(self.table_id, |min, max, _| {
             tx.range(Bound::Included(min), Bound::Included(max))
         })?;
         self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
@@ -2063,6 +2066,7 @@ impl<'a, T: StorageTransaction + 'a> Iter for TupleIter<'a, T> {
                 tuple_id,
                 value,
                 self.deserializers.total_len,
+                table_codec.bytes_pool(),
             )?;
 
             return Ok(true);
@@ -2264,7 +2268,8 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
                                 )
                             };
                             let iter = if matches!(index_meta.ty, IndexType::PrimaryKey { .. }) {
-                                table_codec.with_tuple_bound(table_id, open_iter)?
+                                table_codec
+                                    .with_tuple_bound(table_id, |min, max, _| open_iter(min, max))?
                             } else {
                                 table_codec.with_index_bound(table_id, index_meta.id, open_iter)?
                             };
@@ -2803,7 +2808,7 @@ mod test {
                 tuples[2]
             );
 
-            let mut iter = table_codec.with_tuple_bound(0, |min, max| {
+            let mut iter = table_codec.with_tuple_bound(0, |min, max, _| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
             })?;
 
@@ -2842,7 +2847,7 @@ mod test {
                 tuples[2]
             );
 
-            let mut iter = table_codec.with_tuple_bound(0, |min, max| {
+            let mut iter = table_codec.with_tuple_bound(0, |min, max, _| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
             })?;
 
