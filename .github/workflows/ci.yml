@@ -45,6 +45,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      # `--all-features` builds the pyo3 bindings, which need a supported Python.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
 
       - name: Run cargo clippy
