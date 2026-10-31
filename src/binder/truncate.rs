@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::binder::Binder;
-use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::operator::Operator;
@@ -22,12 +21,14 @@ use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
-    pub(crate) fn bind_truncate(
-        &mut self,
-        table_name: TableName,
-    ) -> Result<LogicalPlan, DatabaseError> {
+    pub(crate) fn bind_truncate(&mut self, table_name: &str) -> Result<LogicalPlan, DatabaseError> {
+        let table_id = self
+            .context
+            .table(table_name)?
+            .ok_or(DatabaseError::TableNotFound)?
+            .id();
         Ok(LogicalPlan::new(
-            Operator::Truncate(TruncateOperator { table_name }),
+            Operator::Truncate(TruncateOperator { table_id }),
             Childrens::None,
         ))
     }

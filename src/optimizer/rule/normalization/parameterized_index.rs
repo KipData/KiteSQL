@@ -230,9 +230,9 @@ fn pick_parameterized_index_position(
 ) -> Option<usize> {
     let right_column = arena.column(*right_column);
     let column_id = right_column.id()?;
-    let table_name = right_column.table_name()?;
+    let table_id = right_column.table_id()?;
 
-    if &scan_op.table_name != table_name {
+    if scan_op.table_id != table_id {
         return None;
     }
 
@@ -242,7 +242,7 @@ fn pick_parameterized_index_position(
         .enumerate()
         .filter(|(_, index_info)| {
             let index_meta = arena.index(index_info.meta);
-            index_meta.table_name == *table_name
+            index_meta.table_id == table_id
                 && index_meta.column_ids.len() == 1
                 && index_meta.column_ids.first().copied() == Some(column_id)
         })
@@ -343,9 +343,8 @@ pub(crate) fn probe_index(
                 let mut probed_keys = 0u64;
                 'columns: for id in &meta.column_ids {
                     let Some(candidate) = scan
-                        .columns
-                        .iter()
-                        .find(|column| arena.column(**column).id() == Some(*id))
+                        .columns()
+                        .find(|column| arena.column(*column).id() == Some(*id))
                     else {
                         continue 'indexes;
                     };
@@ -355,9 +354,9 @@ pub(crate) fn probe_index(
                         else {
                             continue;
                         };
-                        if arena.same_column(*candidate, *column)
+                        if arena.same_column(candidate, *column)
                             && value.return_type(arena).as_ref()
-                                == arena.column(*candidate).datatype()
+                                == arena.column(candidate).datatype()
                         {
                             probe.push(value);
                             if position < join_key_count {
@@ -405,13 +404,13 @@ fn lookup_work(
     let meta = arena.index(index);
     let rows = match loader {
         Some(loader) => loader
-            .load(&scan.table_name, meta.id)?
+            .load(scan.table_id, meta.id)?
             .map(|statistics| statistics.histogram().values_len()),
         None => None,
     }
     .unwrap_or(DEFAULT_TABLE_ROWS);
     let seeks = if matches!(meta.ty, IndexType::PrimaryKey { .. })
-        || is_index_covers(&scan.columns, index, arena)
+        || is_index_covers(scan.columns(), index, arena)
     {
         1
     } else {
@@ -420,7 +419,7 @@ fn lookup_work(
     let depth = (usize::BITS - rows.saturating_sub(1).leading_zeros()) as usize;
     Ok(PROBE_RESET_WORK
         .saturating_add(seeks * depth * CPU_OPERATOR_WORK)
-        .saturating_add(rows_work(1, scan.columns.len())))
+        .saturating_add(rows_work(1, scan.columns().count())))
 }
 
 fn use_probe_index(plan: &mut LogicalPlan, position: usize, arena: &PlanArena<'_>) {
@@ -431,7 +430,7 @@ fn use_probe_index(plan: &mut LogicalPlan, position: usize, arena: &PlanArena<'_
             info.lookup = Some(IndexLookup::Probe);
             info.residual_predicate = None;
             (info.covered_deserializers, info.cover_mapping) =
-                match index_covering(&scan.columns, info.meta, arena) {
+                match index_covering(scan.deserializers.read_columns(), info.meta, arena) {
                     Some((deserializers, mapping)) => (Some(deserializers), mapping),
                     None => (None, None),
                 };
@@ -755,6 +754,11 @@ mod inner_join_tests {
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
 
+    fn table_id(name: &str) -> crate::catalog::TableId {
+        name.bytes()
+            .fold(0, |id, byte| id << 8 | crate::catalog::TableId::from(byte))
+    }
+
     fn scan(
         arena: &mut PlanArena<'_>,
         name: &str,
@@ -770,7 +774,7 @@ mod inner_join_tests {
                     true,
                     ColumnDesc::new(ty.clone(), None, false, None).unwrap(),
                 );
-                column.set_ref_table(name.into(), id as _, true);
+                column.set_table(table_id(name), id as _);
                 arena.alloc_column(column)
             })
             .collect();
@@ -781,7 +785,7 @@ mod inner_join_tests {
                 meta: arena.alloc_index(IndexMeta {
                     id: id as _,
                     column_ids: keys.iter().map(|id| *id as _).collect(),
-                    table_name: name.into(),
+                    table_id: table_id(name),
                     pk_ty: LogicalType::Integer,
                     value_ty: if keys.len() == 1 {
                         types[keys[0]].clone()
@@ -806,8 +810,8 @@ mod inner_join_tests {
             .collect();
         LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: name.into(),
-                columns,
+                table_id: table_id(name),
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos,
                 with_pk: false,
@@ -839,7 +843,7 @@ mod inner_join_tests {
             panic!("expected scan")
         };
         arena.alloc_expression(ScalarExpression::column_expr(
-            scan.columns[position],
+            scan.columns().nth(position).unwrap(),
             position,
         ))
     }
@@ -898,7 +902,8 @@ mod inner_join_tests {
             let mut composite = arena.index(scan.index_infos[0].meta).clone();
             composite.ty = IndexType::Unique;
             scan.index_infos[0].meta = arena.alloc_index(composite);
-            (scan.columns[0], scan.index_infos.pop().unwrap())
+            let column = scan.columns().next().unwrap();
+            (column, scan.index_infos.pop().unwrap())
         };
         let probe = arena.alloc_expression(ScalarExpression::from(2));
         assert!(parameterize_right_subtree(&mut right, &column, probe, &mut arena)?.is_none());
@@ -933,7 +938,7 @@ mod inner_join_tests {
         let Operator::TableScan(op) = &right.operator else {
             unreachable!()
         };
-        let column = op.columns[0];
+        let column = op.columns().next().unwrap();
         let original = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int32(2)));
         let probe = parameterize_right_subtree(&mut right, &column, original, &mut arena)?.unwrap();
         assert_eq!(probe.return_type(&arena).as_ref(), &LogicalType::Bigint);
@@ -954,7 +959,7 @@ mod inner_join_tests {
             let Operator::TableScan(op) = &right.operator else {
                 unreachable!()
             };
-            let column = op.columns[0];
+            let column = op.columns().next().unwrap();
             let original = arena.alloc_expression(ScalarExpression::Constant(value));
             assert!(
                 parameterize_right_subtree(&mut right, &column, original, &mut arena)?.is_none()
@@ -970,7 +975,7 @@ mod inner_join_tests {
         let Operator::TableScan(op) = &right.operator else {
             unreachable!()
         };
-        let column = op.columns[0];
+        let column = op.columns().next().unwrap();
         let large = arena.alloc_expression(ScalarExpression::Constant(DataValue::Int64(1 << 40)));
         assert!(parameterize_right_subtree(&mut right, &column, large, &mut arena)?.is_none());
         assert!(right.physical_option.is_none());
@@ -1352,8 +1357,8 @@ mod inner_join_tests {
         let Operator::TableScan(inner) = &right.operator else {
             unreachable!()
         };
-        assert_eq!(outer.table_name.as_ref(), "right");
-        assert_eq!(inner.table_name.as_ref(), "left");
+        assert_eq!(outer.table_id, table_id("right"));
+        assert_eq!(inner.table_id, table_id("left"));
         Ok(())
     }
 

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use crate::serdes::DatabaseError;
+use crate::serdes::ReferenceSerialization;
 use crate::serdes::StorageTransaction;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
 use std::io::{Read, Write};
 use std::sync::Arc;
 
@@ -29,17 +29,14 @@ macro_rules! implement_ptr_serialization {
                 &self,
                 writer: &mut W,
                 is_direct: bool,
-                reference_tables: &mut ReferenceTables,
                 arena: &A,
             ) -> Result<(), DatabaseError> {
-                self.as_ref()
-                    .encode(writer, is_direct, reference_tables, arena)
+                self.as_ref().encode(writer, is_direct, arena)
             }
 
             fn decode<T: StorageTransaction, R: Read, A: $crate::planner::MetaArena + ?Sized>(
                 reader: &mut R,
-                drive: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
-                reference_tables: &ReferenceTables,
+                mut drive: Option<&mut $crate::serdes::ReferenceDecodeContext<'_, T>>,
                 arena: &mut A,
             ) -> Result<Self, DatabaseError>
             where
@@ -47,8 +44,7 @@ macro_rules! implement_ptr_serialization {
             {
                 Ok($struct_name::from(V::decode(
                     reader,
-                    drive,
-                    reference_tables,
+                    drive.as_deref_mut(),
                     arena,
                 )?))
             }

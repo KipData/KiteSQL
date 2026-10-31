@@ -1,3 +1,4 @@
+use std::borrow::Borrow;
 // Copyright 2024 KipData/KiteSQL
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +19,7 @@ pub mod kitesql_rocksdb;
 pub mod sqlite;
 
 use crate::TpccError;
-use kite_sql::db::PreparedPlan;
+use kite_sql::db::Program;
 use kite_sql::types::tuple::TupleImpl;
 use kite_sql::types::value::DataValue;
 use kite_sql::types::LogicalType;
@@ -42,7 +43,13 @@ pub trait BackendControl: SimpleExecutor {
         specs: &[Vec<StatementSpec>],
     ) -> Result<Vec<Vec<Self::PreparedStatement<'_>>>, TpccError>;
 
+    type Worker<'a>: Borrow<Self> + Send
+    where
+        Self: 'a;
+
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError>;
+
+    fn worker(&self) -> Result<Self::Worker<'_>, TpccError>;
 
     fn storage_metrics(&self) -> Option<String> {
         None
@@ -91,7 +98,7 @@ pub struct StatementSpec {
 }
 
 pub struct KiteSqlPreparedStatement<'a> {
-    pub plan: PreparedPlan<'a>,
+    pub program: Program<'a>,
     pub spec: StatementSpec,
 }
 

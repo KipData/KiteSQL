@@ -1,59 +1,103 @@
+// Copyright 2024 KipData/KiteSQL
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use super::*;
 // GRCOV_EXCL_START
 #[cfg(test)]
 use crate::planner::operator::{PhysicalOption, PlanImpl, RowCountOption, SortOption};
 // GRCOV_EXCL_STOP
-use crate::planner::{ExprRef, ParamArena, PlanInput};
+use crate::planner::ParamArena;
 // GRCOV_EXCL_START
 #[cfg(test)]
 use crate::types::index::IndexLookup;
 // GRCOV_EXCL_STOP
 use crate::types::LogicalType;
 
-/// A bound and optimized reusable plan.
-#[derive(Clone)]
-pub struct PreparedPlan<'db> {
-    pub(crate) plan: LogicalPlan,
-    pub(crate) arena: PlanArena<'db>,
-    parameter_expressions: Vec<ExprRef>,
-    pub(crate) read_only: bool,
+/// A bound and optimized plan with its executor tree, reused by every execution.
+pub struct Program<'p> {
+    pub(crate) executor: Executor<'p>,
+    pub(crate) arena: ExecMetaArena<ParamArena<'p>>,
 }
 
-impl<'db> PreparedPlan<'db> {
-    pub(crate) fn bind_parameters(
-        &self,
-        params: &[(usize, DataValue)],
-    ) -> Result<ParamArena<'_>, DatabaseError> {
-        ParamArena::new(&self.arena, &self.parameter_expressions, params)
-    }
-}
-
-impl<S: Storage> Database<S> {
-    /// Executes an already prepared SQL or ORM plan with the supplied parameters.
-    pub fn execute<'a>(
-        &'a self,
-        prepared: &'a PreparedPlan<'_>,
+impl<'p> Program<'p> {
+    /// Runs the program with `params` in `transaction`. The returned iterator borrows the
+    /// program until the execution ends.
+    pub fn execute<'a, 'txn, S: Storage>(
+        &'a mut self,
+        transaction: &'a mut Transaction<'txn, S>,
         params: impl AsRef<[(usize, DataValue)]>,
-    ) -> Result<DatabaseIter<'a, S>, DatabaseError> {
-        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
+    ) -> Result<ProgramIter<'a, 'p, S::TransactionType<'txn>>, DatabaseError>
+    where
+        'txn: 'p,
+        'p: 'a,
+    {
+        self.bind(transaction.state.table_arena(), params.as_ref())?;
+        if transaction.read_only && !self.read_only() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "cannot write in a read-only transaction".into(),
+            ));
+        }
+        transaction.inner.begin_statement_scope()?;
+        let inner = std::ptr::from_mut(&mut transaction.inner);
+        let arena = begin_execution(
+            transaction.state.table_cache(),
+            unsafe { &mut *inner },
+            &mut self.executor,
+            &mut self.arena,
+        )?;
+        Ok(ProgramIter {
+            guard: TransactionGuard {
+                arena,
+                transaction: inner,
+                statement_scope_active: true,
+            },
+            program: self,
+        })
+    }
+
+    fn bind(
+        &mut self,
+        table_arena: &TableArenaCell,
+        params: &[(usize, DataValue)],
+    ) -> Result<(), DatabaseError> {
+        if !std::ptr::eq(
+            self.arena.parent().plan_arena().table_arena_cell(),
+            table_arena,
+        ) {
             return Err(DatabaseError::UnsupportedStmt(
                 "plan belongs to another database".into(),
             ));
         }
-        let arena = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, prepared.read_only, |_, _| {
-            Ok((PlanInput::Borrowed(&prepared.plan), arena))
-        })
+        self.arena.parent_mut().bind(params)?;
+        self.arena.reset();
+        Ok(())
     }
 
-    /// Prepare SQL with explicit positional parameter types.
+    pub(crate) fn read_only(&self) -> bool {
+        self.executor.plan().operator.command_type().is_read_only()
+    }
+}
+
+impl<S: Storage> Database<S> {
+    /// Prepares SQL with explicit positional parameter types into a program.
     /// Parameter values are supplied separately for each execution.
     #[cfg(feature = "parser")]
-    pub fn prepare_sql(
+    pub fn program_sql(
         &self,
         sql: &str,
         params: &[(usize, LogicalType)],
-    ) -> Result<PreparedPlan<'_>, DatabaseError> {
+    ) -> Result<Program<'_>, DatabaseError> {
         let statement = self.state.parse_statement(sql)?;
         let transaction = self
             .storage
@@ -63,29 +107,12 @@ impl<S: Storage> Database<S> {
 }
 
 impl<'db, S: Storage> Transaction<'db, S> {
-    /// Executes a prepared SQL or ORM plan inside this transaction.
-    pub fn execute<'a>(
-        &'a mut self,
-        prepared: &'a PreparedPlan<'db>,
-        params: impl AsRef<[(usize, DataValue)]>,
-    ) -> Result<TransactionIter<'a, S::TransactionType<'db>>, DatabaseError> {
-        if !std::ptr::eq(prepared.arena.table_arena_cell(), self.state.table_arena()) {
-            return Err(DatabaseError::UnsupportedStmt(
-                "plan belongs to another database".into(),
-            ));
-        }
-        let arena = prepared.bind_parameters(params.as_ref())?;
-        BindSource::execute(self, prepared.read_only, |_, _| {
-            Ok((PlanInput::Borrowed(&prepared.plan), arena))
-        })
-    }
-
     #[cfg(feature = "parser")]
-    pub fn prepare_sql(
+    pub fn program_sql(
         &self,
         sql: &str,
         params: &[(usize, LogicalType)],
-    ) -> Result<PreparedPlan<'db>, DatabaseError> {
+    ) -> Result<Program<'db>, DatabaseError> {
         let statement = self.state.parse_statement(sql)?;
         self.state.prepare_plan(&statement, params, &self.inner)
     }
@@ -98,7 +125,7 @@ impl<S: Storage> State<S> {
         statement: &Statement,
         params: &[(usize, LogicalType)],
         transaction: &S::TransactionType<'txn>,
-    ) -> Result<PreparedPlan<'a>, DatabaseError>
+    ) -> Result<Program<'a>, DatabaseError>
     where
         S: 'txn,
     {
@@ -125,7 +152,7 @@ impl<S: Storage> State<S> {
         params: A,
         transaction: &T,
         build: F,
-    ) -> Result<PreparedPlan<'a>, DatabaseError>
+    ) -> Result<Program<'a>, DatabaseError>
     where
         F: for<'bind> FnOnce(
             &mut Binder<'bind, '_, T, A>,
@@ -134,13 +161,57 @@ impl<S: Storage> State<S> {
     {
         let (plan, mut arena) = self.build_plan(params, transaction, build)?;
         let parameter_expressions = arena.parameter_expressions();
-        let read_only = plan.operator.command_type().is_read_only();
-        Ok(PreparedPlan {
-            plan,
-            arena,
-            parameter_expressions,
-            read_only,
+        Ok(Program {
+            executor: Executor::new(plan, &arena),
+            arena: ExecMetaArena::new(ParamArena::new(arena, parameter_expressions)),
         })
+    }
+}
+
+/// Rows of one execution of a [`Program`], which it borrows until the execution ends.
+pub struct ProgramIter<'a, 'p, T: StorageTransaction + 'p> {
+    guard: TransactionGuard<'a, 'p, T>,
+    program: &'a mut Program<'p>,
+}
+
+impl<'p, T: StorageTransaction + 'p> ProgramIter<'_, 'p, T> {
+    #[inline]
+    pub fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
+        let Program { executor, arena } = &*self.program;
+        f(&SchemaView::new(&executor.schema, arena))
+    }
+
+    #[inline]
+    pub fn next_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+    ) -> Result<Option<R>, DatabaseError> {
+        let Program { executor, arena } = &mut *self.program;
+        // A program never applies DDL.
+        self.guard.next_tuple(executor, arena, &mut Vec::new(), f)
+    }
+
+    #[inline]
+    pub fn done(mut self) -> Result<(), DatabaseError> {
+        while self.next_tuple(|_, _| ())?.is_some() {}
+        Ok(())
+    }
+}
+
+impl<'p, T: StorageTransaction + 'p> ResultIter for ProgramIter<'_, 'p, T> {
+    fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
+        ProgramIter::schema(self, f)
+    }
+
+    fn next_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+    ) -> Result<Option<R>, DatabaseError> {
+        ProgramIter::next_tuple(self, f)
+    }
+
+    fn done(self) -> Result<(), DatabaseError> {
+        ProgramIter::done(self)
     }
 }
 
@@ -165,12 +236,13 @@ mod tests {
     #[test]
     fn prepare_caches_scalar_output_schema() -> Result<(), DatabaseError> {
         let db = DataBaseBuilder::path(".").build_in_memory()?;
-        let plan = db.prepare_sql(
+        let mut plan = db.program_sql(
             "select (($1 * 3 + 7) % 97) + ($1 / 2)",
             &[(1, LogicalType::Bigint)],
         )?;
+        let mut tx = db.new_transaction(false)?;
         for (value, expected) in [(7, 31_i64), (23, 87_i64)] {
-            let mut iter = db.execute(&plan, [(1, DataValue::Int64(value))])?;
+            let mut iter = plan.execute(&mut tx, [(1, DataValue::Int64(value))])?;
             iter.schema(|schema| {
                 assert_eq!(schema.len(), 1);
                 assert_eq!(
@@ -185,8 +257,7 @@ mod tests {
             assert!(iter.next_tuple(|_, _| ())?.is_none());
             iter.done()?;
         }
-        let mut tx = db.new_transaction(false)?;
-        let mut iter = tx.execute(&plan, [(1, DataValue::Int64(7))])?;
+        let mut iter = plan.execute(&mut tx, [(1, DataValue::Int64(7))])?;
         assert_eq!(
             iter.next_tuple(|_, row| row.clone())?.unwrap(),
             vec![DataValue::Int64(31)]
@@ -205,13 +276,13 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        column.set_ref_table("t".into(), 1, false);
+        column.set_table(0, 1);
         let column = arena.alloc_column(column);
         let col_expr = arena.alloc_expression(ScalarExpression::column_expr(column, 0));
         let meta = arena.alloc_index(IndexMeta {
             id: 1,
             column_ids: vec![1],
-            table_name: "t".into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "pk".into(),
@@ -229,6 +300,10 @@ mod tests {
             fields: vec![SortField::new(col_expr, true, false)],
             ignore_prefix_len: 0,
         };
+        let tables = TableCache::default();
+        let context = &tables;
+        let storage = MemoryStorage::new();
+        let transaction = storage.transaction()?;
         for (lookup, has_residual, parameter, should_change) in [
             (
                 IndexLookup::Static(original.clone()),
@@ -286,7 +361,7 @@ mod tests {
             other.meta = arena.alloc_index(IndexMeta {
                 id: 2,
                 column_ids: vec![1],
-                table_name: "t".into(),
+                table_id: 0,
                 pk_ty: LogicalType::Integer,
                 value_ty: LogicalType::Integer,
                 name: "other".into(),
@@ -294,8 +369,8 @@ mod tests {
             });
             let mut scan = LogicalPlan::new(
                 Operator::TableScan(TableScanOperator {
-                    table_name: "t".into(),
-                    columns: vec![column],
+                    table_id: 0,
+                    deserializers: crate::storage::deserializers_for_test(vec![column]),
                     limit: (None, None),
                     index_infos: vec![index.clone(), other.clone()],
                     with_pk: false,
@@ -336,9 +411,10 @@ mod tests {
             if !matches!(info.lookup, Some(IndexLookup::Static(_))) {
                 continue;
             }
-            let mut execution_arena = crate::execution::ExecArena::<
-                <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
-            >::with_capacity(0);
+            let mut exec_buffer = crate::execution::ExecBuffer::default();
+            let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
+            let mut execution_arena =
+                crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
             let ranges = IndexScan::ranges(
                 info,
                 info.lookup.as_ref().expect("lookup"),
@@ -391,14 +467,15 @@ mod tests {
         db.run("insert into parameter_order values(1),(2),(3),(4)")?
             .done()?;
         db.analyze("parameter_order")?;
+        let mut tx = db.new_transaction(false)?;
 
-        let lower_bounds = db.prepare_sql(
+        let mut lower_bounds = db.program_sql(
             "select id from parameter_order where id >= $1 and id >= $2 order by id",
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
         )?;
-        assert!(has_filter(&lower_bounds.plan));
-        let mut iter = db.execute(
-            &lower_bounds,
+        assert!(has_filter(lower_bounds.executor.plan()));
+        let mut iter = lower_bounds.execute(
+            &mut tx,
             [(1, DataValue::Int32(3)), (2, DataValue::Int32(1))],
         )?;
         let mut rows = Vec::new();
@@ -409,12 +486,12 @@ mod tests {
         iter.done()?;
         assert_eq!(rows, vec![DataValue::Int32(3), DataValue::Int32(4)]);
 
-        let equalities = db.prepare_sql(
+        let mut equalities = db.program_sql(
             "select id from parameter_order where id = $1 and id = $2",
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
         )?;
-        let mut iter = db.execute(
-            &equalities,
+        let mut iter = equalities.execute(
+            &mut tx,
             [(1, DataValue::Int32(2)), (2, DataValue::Int32(2))],
         )?;
         assert_eq!(
@@ -424,14 +501,14 @@ mod tests {
         assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
 
-        let mut iter = db.execute(
-            &equalities,
+        let mut iter = equalities.execute(
+            &mut tx,
             [(1, DataValue::Int32(2)), (2, DataValue::Int32(3))],
         )?;
         assert!(iter.next_tuple(|_, _| ())?.is_none());
         iter.done()?;
 
-        let unions = db.prepare_sql(
+        let mut unions = db.program_sql(
             "select id from parameter_order where (id=$1 or id=$2) and id>$3 order by id",
             &[
                 (1, LogicalType::Integer),
@@ -471,7 +548,7 @@ mod tests {
                 vec![],
             ),
         ] {
-            let mut iter = db.execute(&unions, [(1, first), (2, second), (3, lower)])?;
+            let mut iter = unions.execute(&mut tx, [(1, first), (2, second), (3, lower)])?;
             let mut rows = Vec::new();
             while iter
                 .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
@@ -486,15 +563,17 @@ mod tests {
     #[test]
     fn repeated_execution_and_null_do_not_stale_parameters() -> Result<(), DatabaseError> {
         let db = DataBaseBuilder::path(".").build_in_memory()?;
-        let plan = db.prepare_sql(
+        let mut plan = db.program_sql(
             "values ($1 + $2), ($2)",
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
         )?;
+        let mut tx = db.new_transaction(false)?;
         for (value, expected) in [
             (DataValue::Null, DataValue::Null),
             (DataValue::Int32(3), DataValue::Int32(13)),
         ] {
-            let mut iter = db.execute(&plan, [(1, DataValue::Int32(10)), (2, value.clone())])?;
+            let mut iter =
+                plan.execute(&mut tx, [(1, DataValue::Int32(10)), (2, value.clone())])?;
             assert_eq!(
                 iter.next_tuple(|_, row| row.value_at(0).clone())?,
                 Some(expected)
@@ -508,10 +587,13 @@ mod tests {
         }
 
         assert!(matches!(
-            db.execute(&plan, [(1, DataValue::Int32(10))]),
+            plan.execute(&mut tx, [(1, DataValue::Int32(10))]),
             Err(DatabaseError::ParametersNotFound { name, .. }) if name == "$2"
         ));
-        let mut iter = db.execute(&plan, [(1, DataValue::Int32(10)), (2, DataValue::Int32(4))])?;
+        let mut iter = plan.execute(
+            &mut tx,
+            [(1, DataValue::Int32(10)), (2, DataValue::Int32(4))],
+        )?;
         assert_eq!(
             iter.next_tuple(|_, row| row.value_at(0).clone())?,
             Some(DataValue::Int32(14))
@@ -543,7 +625,8 @@ mod tests {
         db.run("insert into t values(1,1),(1,2),(1,3),(2,1),(2,2),(2,4)")?
             .done()?;
         db.analyze("t")?;
-        let plan = db.prepare_sql(
+        let mut tx = db.new_transaction(false)?;
+        let mut plan = db.program_sql(
             "select k from t where w=$1 and k >= $2 and k < $3 order by k",
             &[
                 (1, LogicalType::Integer),
@@ -551,9 +634,9 @@ mod tests {
                 (3, LogicalType::Integer),
             ],
         )?;
-        assert!(index_range(&plan.plan).is_some());
-        let mut iter = db.execute(
-            &plan,
+        assert!(index_range(plan.executor.plan()).is_some());
+        let mut iter = plan.execute(
+            &mut tx,
             [
                 (1, DataValue::Int32(2)),
                 (2, DataValue::Int32(2)),
@@ -567,8 +650,8 @@ mod tests {
         {}
         iter.done()?;
         assert_eq!(rows, vec![DataValue::Int32(2), DataValue::Int32(4)]);
-        let mut iter = db.execute(
-            &plan,
+        let mut iter = plan.execute(
+            &mut tx,
             [
                 (1, DataValue::Int32(1)),
                 (2, DataValue::Int32(1)),
@@ -585,7 +668,7 @@ mod tests {
         // The lower bound is computed only after binding; it must still be
         // intersected with the prepared upper bound instead of scanning the
         // whole equality prefix and filtering rows afterwards.
-        let plan = db.prepare_sql(
+        let mut plan = db.program_sql(
             "select k from t where w=$1 and k<$2 and k>=($3-20)",
             &[
                 (1, LogicalType::Integer),
@@ -593,7 +676,7 @@ mod tests {
                 (3, LogicalType::Integer),
             ],
         )?;
-        let mut bound_arena = plan.bind_parameters(&[
+        plan.arena.parent_mut().bind(&[
             (1, DataValue::Int32(2)),
             (2, DataValue::Int32(5)),
             (3, DataValue::Int32(22)),
@@ -603,7 +686,7 @@ mod tests {
                 .then_some(plan)
                 .or_else(|| plan.childrens.iter().find_map(find_scan))
         }
-        let scan = find_scan(&plan.plan).expect("table scan");
+        let scan = find_scan(plan.executor.plan()).expect("table scan");
         let Operator::TableScan(_) = &scan.operator else {
             unreachable!()
         };
@@ -614,14 +697,19 @@ mod tests {
         else {
             panic!("expected index scan")
         };
-        let mut execution_arena = crate::execution::ExecArena::<
-            <crate::storage::memory::MemoryStorage as Storage>::TransactionType<'_>,
-        >::with_capacity(0);
+        let tables = TableCache::default();
+        let context = &tables;
+        let storage = MemoryStorage::new();
+        let transaction = storage.transaction()?;
+        let mut exec_buffer = crate::execution::ExecBuffer::default();
+        let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
+        let mut execution_arena =
+            crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let ranges = IndexScan::ranges(
             info,
             info.lookup.as_ref().expect("lookup"),
             &mut execution_arena,
-            &mut bound_arena,
+            &mut plan.arena,
         )?;
         let mut ranges = ranges;
         assert_eq!(

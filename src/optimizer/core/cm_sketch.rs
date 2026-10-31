@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::planner::MetaArena;
 use crate::serdes::stable_hash::{StableHasher, CM_SKETCH_HASH_KEYS};
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -356,35 +356,29 @@ impl<K> ReferenceSerialization for CountMinSketch<K> {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.counters
-            .encode(writer, is_direct, reference_tables, arena)?;
-        self.offsets
-            .encode(writer, is_direct, reference_tables, arena)?;
-        self.hashers[0].encode(writer, is_direct, reference_tables, arena)?;
-        self.hashers[1].encode(writer, is_direct, reference_tables, arena)?;
-        self.mask
-            .encode(writer, is_direct, reference_tables, arena)?;
-        self.k_num
-            .encode(writer, is_direct, reference_tables, arena)?;
+        self.counters.encode(writer, is_direct, arena)?;
+        self.offsets.encode(writer, is_direct, arena)?;
+        self.hashers[0].encode(writer, is_direct, arena)?;
+        self.hashers[1].encode(writer, is_direct, arena)?;
+        self.mask.encode(writer, is_direct, arena)?;
+        self.k_num.encode(writer, is_direct, arena)?;
 
         Ok(())
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let counters = Vec::<Vec<usize>>::decode(reader, drive, reference_tables, arena)?;
-        let offsets = Vec::<usize>::decode(reader, drive, reference_tables, arena)?;
-        let hasher_0 = StableHasher::decode(reader, drive, reference_tables, arena)?;
-        let hasher_1 = StableHasher::decode(reader, drive, reference_tables, arena)?;
-        let mask = usize::decode(reader, drive, reference_tables, arena)?;
-        let k_num = usize::decode(reader, drive, reference_tables, arena)?;
+        let counters = Vec::<Vec<usize>>::decode(reader, drive.as_deref_mut(), arena)?;
+        let offsets = Vec::<usize>::decode(reader, drive.as_deref_mut(), arena)?;
+        let hasher_0 = StableHasher::decode(reader, drive.as_deref_mut(), arena)?;
+        let hasher_1 = StableHasher::decode(reader, drive.as_deref_mut(), arena)?;
+        let mask = usize::decode(reader, drive.as_deref_mut(), arena)?;
+        let k_num = usize::decode(reader, drive, arena)?;
 
         Ok(CountMinSketch {
             counters,
@@ -405,7 +399,7 @@ mod tests {
         CountMinSketch, CountMinSketchMeta, CountMinSketchPage,
     };
     use crate::planner::TableArena;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::value::DataValue;
     use std::collections::Bound;
@@ -559,13 +553,11 @@ mod tests {
 
         cms.add(&7, 23);
         let mut bytes = Vec::new();
-        let mut tables = ReferenceTables::new();
         let mut arena = TableArena::default();
-        cms.encode(&mut bytes, false, &mut tables, &arena).unwrap();
+        cms.encode(&mut bytes, false, &arena).unwrap();
         let decoded = CountMinSketch::<u64>::decode::<RocksTransaction, _, _>(
             &mut Cursor::new(bytes),
             None,
-            &tables,
             &mut arena,
         )
         .unwrap();

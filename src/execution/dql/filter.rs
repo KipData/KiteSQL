@@ -14,52 +14,50 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
-pub struct Filter {
+pub struct Filter<'a> {
     predicate: ExprRef,
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Filter {
+impl<'a> ReadExecutor<'a> for Filter<'a> {
     type Input = (&'a FilterOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (FilterOperator { predicate, .. }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::Filter(Filter {
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::Filter(Box::new(Filter {
             predicate: *predicate,
             input,
         }))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Filter {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Filter<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if !arena.next_tuple(self.input, plan_arena)? {
+            if !self.input.next_tuple(arena, plan_arena)? {
                 arena.finish();
                 return Ok(());
             };

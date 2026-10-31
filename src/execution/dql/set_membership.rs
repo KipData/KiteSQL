@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::set_membership::SetMembershipKind;
 use crate::planner::LogicalPlan;
@@ -23,27 +23,25 @@ use crate::storage::StorageTransaction;
 use crate::types::tuple::TupleImpl;
 use std::collections::HashMap;
 
-pub struct SetMembership {
+pub struct SetMembership<'a> {
     kind: SetMembershipKind,
-    left_input: ExecId,
-    right_input: ExecId,
+    left_input: ExecNode<'a>,
+    right_input: ExecNode<'a>,
     right_counts: HashMap<TupleImpl, usize>,
     built: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SetMembership {
+impl<'a> ReadExecutor<'a> for SetMembership<'a> {
     type Input = (SetMembershipKind, &'a LogicalPlan, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (kind, left_plan, right_plan): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
-        let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
-        arena.push(ExecNode::SetMembership(SetMembership {
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let left_input = build_read(arena, plan_arena, left_plan);
+        let right_input = build_read(arena, plan_arena, right_plan);
+        ExecNode::SetMembership(Box::new(SetMembership {
             kind,
             left_input,
             right_input,
@@ -53,25 +51,25 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SetMembership {
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.built = false;
         self.right_counts.clear();
-        arena.reset(self.left_input, plan_arena)?;
-        arena.reset(self.right_input, plan_arena)
+        self.left_input.reset(arena, plan_arena)?;
+        self.right_input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if !self.built {
-            while arena.next_tuple(self.right_input, plan_arena)? {
+            while self.right_input.next_tuple(arena, plan_arena)? {
                 if let Some(count) = self.right_counts.get_mut(arena.result_tuple()) {
                     *count += 1;
                 } else {
@@ -82,7 +80,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership {
         }
 
         loop {
-            if !arena.next_tuple(self.left_input, plan_arena)? {
+            if !self.left_input.next_tuple(arena, plan_arena)? {
                 arena.finish();
                 return Ok(());
             }
@@ -101,7 +99,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership {
     }
 }
 
-impl SetMembership {
+impl SetMembership<'_> {
     fn consume_right_match(&mut self, tuple: &TupleImpl) -> bool {
         if let Some(count) = self.right_counts.get_mut(tuple) {
             if *count > 0 {

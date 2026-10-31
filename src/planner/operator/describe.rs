@@ -12,20 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
+use crate::planner::{fmt_table, Explain, MetaArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct DescribeOperator {
-    pub table_name: TableName,
+    pub table_id: TableId,
 }
 
-impl fmt::Display for DescribeOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Describe {}", self.table_name)?;
-
-        Ok(())
+impl Explain for DescribeOperator {
+    fn fmt<A: MetaArena + ?Sized>(
+        &self,
+        arena: &A,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        f.write_str("Describe ")?;
+        fmt_table(self.table_id, arena, f)
     }
 }

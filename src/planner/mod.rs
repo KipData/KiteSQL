@@ -17,7 +17,7 @@ pub mod operator;
 mod plan_keeper;
 mod scalar_query_ref;
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprCloner;
 use crate::planner::operator::join::JoinType;
@@ -33,7 +33,7 @@ use std::hash::{Hash, Hasher};
 
 pub(crate) use arena::{ExecMetaArena, ParamArena, PlanRef};
 pub use arena::{ExprRef, MetaArena, PlanArena, TableArena, TableArenaCell};
-pub(crate) use plan_keeper::{PlanInput, PlanKeeper};
+pub(crate) use plan_keeper::PlanKeeper;
 pub use scalar_query_ref::ScalarQueryRef;
 
 pub(crate) trait Explain {
@@ -58,19 +58,36 @@ impl<T: Explain + ?Sized, A: MetaArena + ?Sized> fmt::Display for ExplainDisplay
     }
 }
 
-pub(crate) fn fmt_explain_list<T: Explain, A: MetaArena + ?Sized>(
-    values: &[T],
+impl<T: Explain + ?Sized> Explain for &T {
+    fn fmt<A: MetaArena + ?Sized>(&self, arena: &A, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        (**self).fmt(arena, f)
+    }
+}
+
+pub(crate) fn fmt_explain_list<A: MetaArena + ?Sized>(
+    values: impl IntoIterator<Item = impl Explain>,
     separator: &str,
     arena: &A,
     f: &mut fmt::Formatter<'_>,
 ) -> fmt::Result {
-    for (index, value) in values.iter().enumerate() {
+    for (index, value) in values.into_iter().enumerate() {
         if index > 0 {
             f.write_str(separator)?;
         }
         value.fmt(arena, f)?;
     }
     Ok(())
+}
+
+pub(crate) fn fmt_table<A: MetaArena + ?Sized>(
+    table_id: TableId,
+    arena: &A,
+    f: &mut fmt::Formatter<'_>,
+) -> fmt::Result {
+    match arena.table_name(table_id) {
+        Some(name) => f.write_str(name),
+        None => write!(f, "#{table_id}"),
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
@@ -159,7 +176,6 @@ pub struct LogicalPlan {
     pub(crate) childrens: Box<Childrens>,
     pub(crate) physical_option: Option<PhysicalOption>,
     output_schema: Option<crate::types::tuple::Schema>,
-    exec_capacity_hint: usize,
 }
 
 impl LogicalPlan {
@@ -169,7 +185,6 @@ impl LogicalPlan {
             childrens: Box::new(childrens),
             physical_option: None,
             output_schema: None,
-            exec_capacity_hint: 0,
         }
     }
 
@@ -245,19 +260,13 @@ impl LogicalPlan {
         Some(cost)
     }
 
-    pub fn referenced_table(&self) -> Vec<TableName> {
-        fn collect_table(plan: &LogicalPlan, results: &mut Vec<TableName>) {
-            if let Operator::TableScan(op) = &plan.operator {
-                results.push(op.table_name.clone());
-            }
-            for child in plan.childrens.iter() {
-                collect_table(child, results);
-            }
+    pub fn visit_referenced_tables(&self, f: &mut impl FnMut(TableId)) {
+        if let Operator::TableScan(op) = &self.operator {
+            f(op.table_id);
         }
-
-        let mut tables = Vec::new();
-        collect_table(self, &mut tables);
-        tables
+        for child in self.childrens.iter() {
+            child.visit_referenced_tables(f);
+        }
     }
 
     pub(crate) fn visit_referenced_columns<A: MetaArena + ?Sized>(
@@ -268,16 +277,12 @@ impl LogicalPlan {
         Operator::referenced_columns(operator::ColumnVisitRoot::Plan(self), arena, f)
     }
 
-    pub(crate) fn visit_column_refs<A, F>(
-        &self,
-        arena: &mut A,
-        f: &mut F,
-    ) -> Result<(), DatabaseError>
+    pub(crate) fn visit_column_refs<A, F>(&self, arena: &A, f: &mut F) -> Result<(), DatabaseError>
     where
         A: MetaArena + ?Sized,
         F: FnMut(&crate::catalog::ColumnRef) + ?Sized,
     {
-        self.visit_referenced_columns(&*arena, &mut |_, column| {
+        self.visit_referenced_columns(arena, &mut |_, column| {
             f(column);
             true
         })?;
@@ -362,7 +367,7 @@ impl LogicalPlan {
                 .iter()
                 .map(|expr| expr.output_column_ref(arena))
                 .collect(),
-            Operator::TableScan(op) => op.columns.clone(),
+            Operator::TableScan(op) => op.columns().collect(),
             Operator::FunctionScan(op) => {
                 let mut schema = Vec::new();
                 op.table_function.output_schema_into(&mut schema);
@@ -423,30 +428,20 @@ impl LogicalPlan {
             .expect("output schema must be computed before it is read")
     }
 
-    pub(crate) fn exec_capacity_hint(&self) -> usize {
-        self.exec_capacity_hint
-    }
-
     pub(crate) fn populate_output_schema_recursive(&mut self, arena: &mut (dyn MetaArena + '_)) {
-        let child_nodes = match self.childrens.as_mut() {
-            Childrens::Only(child) => {
-                child.populate_output_schema_recursive(arena);
-                child.exec_capacity_hint
-            }
+        match self.childrens.as_mut() {
+            Childrens::Only(child) => child.populate_output_schema_recursive(arena),
             Childrens::Twins { left, right } => {
                 left.populate_output_schema_recursive(arena);
                 right.populate_output_schema_recursive(arena);
-                left.exec_capacity_hint + right.exec_capacity_hint
             }
-            Childrens::None => 0,
-        };
-        self.exec_capacity_hint = 1 + child_nodes;
+            Childrens::None => (),
+        }
         self.output_schema(arena);
     }
 
     pub fn reset_output_schema_cache(&mut self) {
         self.output_schema = None;
-        self.exec_capacity_hint = 0;
     }
 
     pub fn reset_output_schema_cache_recursive(&mut self) {
@@ -494,7 +489,6 @@ impl Clone for LogicalPlan {
             childrens: self.childrens.clone(),
             physical_option: self.physical_option.clone(),
             output_schema: self.output_schema.clone(),
-            exec_capacity_hint: self.exec_capacity_hint,
         }
     }
 }
@@ -522,56 +516,36 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut crate::serdes::ReferenceTables,
         arena: &A,
     ) -> Result<(), crate::errors::DatabaseError> {
-        crate::serdes::ReferenceSerialization::encode(
-            &self.operator,
-            writer,
-            is_direct,
-            reference_tables,
-            arena,
-        )?;
-        crate::serdes::ReferenceSerialization::encode(
-            &self.childrens,
-            writer,
-            is_direct,
-            reference_tables,
-            arena,
-        )?;
+        crate::serdes::ReferenceSerialization::encode(&self.operator, writer, is_direct, arena)?;
+        crate::serdes::ReferenceSerialization::encode(&self.childrens, writer, is_direct, arena)?;
         crate::serdes::ReferenceSerialization::encode(
             &self.physical_option,
             writer,
             is_direct,
-            reference_tables,
             arena,
         )
     }
 
     fn decode<T: crate::storage::StorageTransaction, R: std::io::Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &crate::serdes::ReferenceTables,
+        mut context: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, crate::errors::DatabaseError> {
         let operator = <Operator as crate::serdes::ReferenceSerialization>::decode(
             reader,
-            context,
-            reference_tables,
+            context.as_deref_mut(),
             arena,
         )?;
         let childrens = <Box<Childrens> as crate::serdes::ReferenceSerialization>::decode(
             reader,
-            context,
-            reference_tables,
+            context.as_deref_mut(),
             arena,
         )?;
         let physical_option =
             <Option<PhysicalOption> as crate::serdes::ReferenceSerialization>::decode(
-                reader,
-                context,
-                reference_tables,
-                arena,
+                reader, context, arena,
             )?;
 
         Ok(Self {
@@ -579,7 +553,6 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
             childrens,
             physical_option,
             output_schema: None,
-            exec_capacity_hint: 0,
         })
     }
 }
@@ -588,7 +561,7 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
+    use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableCatalog};
     use crate::expression::ScalarExpression;
     use crate::optimizer::core::rule::NormalizationRule;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
@@ -615,11 +588,16 @@ mod tests {
         ))
     }
 
+    fn table_id(name: &str) -> TableId {
+        name.bytes()
+            .fold(0, |id, byte| id << 8 | TableId::from(byte))
+    }
+
     fn table_scan(table: &str, columns: Vec<ColumnRef>) -> LogicalPlan {
         LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: table.to_string().into(),
-                columns,
+                table_id: table_id(table),
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: Vec::new(),
                 with_pk: false,
@@ -833,6 +811,21 @@ mod tests {
     #[test]
     fn logical_plan_collects_tables_explains_and_hashes_without_schema_cache() {
         let table_arena = TableArenaCell::default();
+        {
+            let catalog = table_arena.borrow_mut();
+            let users = TableCatalog::new(
+                table_id("users"),
+                "users".to_string(),
+                vec![ColumnCatalog::new(
+                    "id".to_string(),
+                    true,
+                    ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
+                )],
+                catalog,
+            )
+            .unwrap();
+            catalog.names.insert_table(&mut catalog.tables, users);
+        }
         let mut arena = PlanArena::new(&table_arena);
         let id = column("id", LogicalType::Integer, &mut arena);
         let scan = table_scan("users", vec![id]);
@@ -843,11 +836,10 @@ mod tests {
             RowCountOption::Unknown,
         ));
 
-        let tables = plan
-            .referenced_table()
-            .into_iter()
-            .map(|table| table.to_string())
-            .collect::<Vec<_>>();
+        let mut tables = Vec::new();
+        plan.visit_referenced_tables(&mut |table| {
+            tables.push(arena.table_name(table).unwrap().to_string())
+        });
         assert_eq!(tables, vec!["users"]);
         assert_eq!(
             plan.explain(&mut arena, 0),
@@ -883,7 +875,7 @@ mod tests {
 
         if let Childrens::Only(child) = plan.childrens.as_mut() {
             if let Operator::TableScan(scan) = &mut child.operator {
-                scan.columns = vec![name];
+                scan.deserializers = crate::storage::deserializers_for_test([name]);
             }
         }
 
@@ -1067,9 +1059,7 @@ mod tests {
             (Operator::ShowView, vec!["VIEW"]),
             (Operator::Explain, vec!["PLAN"]),
             (
-                Operator::Describe(DescribeOperator {
-                    table_name: "users".into(),
-                }),
+                Operator::Describe(DescribeOperator { table_id: 0 }),
                 vec!["FIELD", "TYPE", "LEN", "NULL", "Key", "DEFAULT"],
             ),
         ];

@@ -4,9 +4,9 @@ use crate::binder::{
     with_query_bind_step, BindPlanFrom, BindPlanSelectList, Binder, JoinConstraintInput,
     QueryBindStep, SetOperatorKind, TableAliasInput,
 };
-use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableName};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog};
 use crate::db::{
-    BindSource, Database, DatabaseIter, OrmIter, ResultIter, Transaction, TransactionIter,
+    BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, Transaction, TransactionIter,
 };
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
@@ -1049,10 +1049,12 @@ where
 {
     static EMPTY_BIND_PARAMS: &[(usize, LogicalType)] = &[];
     executor.execute(read_only, |state, tx| {
-        state.build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
-            let mut context = OrmContext { binder, arena };
-            build(&mut context)
-        })
+        state
+            .build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
+                let mut context = OrmContext { binder, arena };
+                build(&mut context)
+            })
+            .map(Executor::from_plan)
     })
 }
 
@@ -1150,7 +1152,9 @@ where
         mutation_source: bool,
     ) -> Result<BindPlanFrom<'scope, 'bind, 'parent, 'arena, T, A, M>, DatabaseError> {
         if mutation_source {
-            self.binder.with_pk(source.table_name.as_str().into());
+            if let Some(table) = self.binder.context.table(&source.table_name)? {
+                self.binder.with_pk(table.id());
+            }
         }
         let plan = bind_orm_source(self.binder, source, None, self.arena);
         if mutation_source {
@@ -1329,7 +1333,7 @@ where
     }
 
     pub fn truncate<M: Model>(&mut self) -> Result<LogicalPlan, DatabaseError> {
-        self.binder.bind_truncate(M::table_name().into())
+        self.binder.bind_truncate(M::table_name())
     }
 }
 
@@ -1943,16 +1947,13 @@ where
         Ok(())
     }
 
-    fn finish(
-        self,
-        table_name: TableName,
-        plan: LogicalPlan,
-    ) -> Result<LogicalPlan, DatabaseError> {
+    fn finish(self, table_name: &str, plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
         self.binder.context.allow_default = false;
         if self.value_exprs.is_empty() {
             return Err(DatabaseError::ColumnsEmpty);
         }
-        self.binder.bind_update(table_name, self.value_exprs, plan)
+        self.binder
+            .bind_update(table_name, self.value_exprs, plan, self.arena)
     }
 }
 
@@ -1963,10 +1964,6 @@ where
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
-    fn model_table_name(&self) -> Result<TableName, DatabaseError> {
-        Ok(M::table_name().into())
-    }
-
     fn model_relation_name(&self) -> Result<String, DatabaseError> {
         let table_name = M::table_name();
         self.binder
@@ -1974,7 +1971,7 @@ where
             .bind_table
             .iter()
             .rev()
-            .find(|source| source.table_name.as_ref() == table_name)
+            .find(|source| source.table_name == table_name)
             .map(|source| source.visible_name().to_string())
             .ok_or_else(|| DatabaseError::invalid_table(table_name))
     }
@@ -2370,17 +2367,18 @@ where
     }
 
     pub fn delete(self) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = self.model_table_name()?;
-        let primary_keys = self
+        let table_name = M::table_name();
+        let table = self
             .binder
             .context
-            .table(table_name.clone())?
-            .ok_or(DatabaseError::TableNotFound)?
+            .table(table_name)?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let primary_keys = table
             .primary_keys()
             .iter()
             .map(|(_, column)| *column)
             .collect();
-        self.binder.with_pk(table_name.clone());
+        self.binder.with_pk(table.id());
         self.binder.bind_delete(table_name, primary_keys, self.plan)
     }
 
@@ -2390,10 +2388,12 @@ where
             &mut UpdateBindScope<'scope_ctx, 'bind, 'parent, 'arena, T, A>,
         ) -> Result<(), DatabaseError>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = self.model_table_name()?;
+        let table_name = M::table_name();
         let source_name = self.model_relation_name()?;
         self.binder.context.allow_default = true;
-        self.binder.with_pk(table_name.clone());
+        if let Some(table) = self.binder.context.table(table_name)? {
+            self.binder.with_pk(table.id());
+        }
         let mut scope = UpdateBindScope {
             binder: self.binder,
             arena: self.arena,
@@ -2634,14 +2634,12 @@ where
     T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
-    let table_name: TableName = table_name.into();
-    let input_schema = input_plan.output_schema(arena).clone();
-    let input_len = input_schema.len();
+    let input_len = input_plan.output_schema(arena).len();
 
-    let projection = {
+    let targets = {
         let source = binder
             .context
-            .source(&table_name)?
+            .source(table_name)?
             .ok_or(DatabaseError::TableNotFound)?;
 
         if columns.is_empty() {
@@ -2652,45 +2650,23 @@ where
                     input_len,
                 ));
             }
-            table_schema[..input_len]
-                .iter()
-                .copied()
-                .enumerate()
-                .map(|(position, target_column)| {
-                    let expr = arena.alloc_expression(ScalarExpression::column_expr(
-                        input_schema[position],
-                        position,
-                    ));
-                    arena.alloc_expression(ScalarExpression::Alias {
-                        expr,
-                        alias: AliasType::Name(arena.column(target_column).name().to_string()),
-                    })
-                })
-                .collect::<Vec<_>>()
+            table_schema[..input_len].to_vec()
         } else {
             if input_len != columns.len() {
                 return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
             }
-            let mut projection = Vec::with_capacity(columns.len());
-            for (position, column_name) in columns.into_iter().enumerate() {
+            let mut targets = Vec::with_capacity(columns.len());
+            for column_name in columns {
                 let column = source
                     .column(&column_name, arena)
                     .ok_or_else(|| DatabaseError::column_not_found(column_name.clone()))?;
-                let expr = arena.alloc_expression(ScalarExpression::column_expr(
-                    input_schema[position],
-                    position,
-                ));
-                projection.push(arena.alloc_expression(ScalarExpression::Alias {
-                    expr,
-                    alias: AliasType::Name(arena.column(column).name().to_string()),
-                }));
+                targets.push(column);
             }
-            projection
+            targets
         }
     };
-    input_plan = binder.bind_project(input_plan, projection, arena)?;
 
-    binder.bind_insert_query(table_name, input_plan, overwrite)
+    binder.bind_insert_query(table_name, input_plan, &targets, overwrite, arena)
 }
 
 fn bind_orm_insert_model<'bind, 'parent, 'arena, T, A, M>(
@@ -2703,10 +2679,10 @@ where
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
-    let table_name: TableName = M::table_name().into();
+    let table_name = M::table_name();
     let source = binder
         .context
-        .source_and_bind(table_name.clone(), None, None, false, arena)?
+        .source_and_bind(table_name, None, None, false, arena)?
         .ok_or(DatabaseError::TableNotFound)?;
     let params = params.into_iter().collect::<BTreeMap<_, _>>();
     let mut schema_ref = Vec::with_capacity(M::fields().len());
@@ -2732,7 +2708,7 @@ where
         row.push(arena.alloc_expression(ScalarExpression::Constant(value)));
     }
 
-    binder.bind_insert_values(table_name, schema_ref, row, 1, false, true)
+    binder.bind_insert_values(table_name, schema_ref, row, 1, false, arena)
 }
 
 fn describe_text_value(value: Option<DataValue>) -> String {
@@ -3404,9 +3380,11 @@ fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut TupleImpl) -> Result<T
 fn orm_analyze<'a, E: BindSource<'a>, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
         .execute(false, |state, tx| {
-            state.build_plan(&[], tx, |binder, arena| {
-                binder.bind_analyze(M::table_name().into(), arena)
-            })
+            state
+                .build_plan(&[], tx, |binder, arena| {
+                    binder.bind_analyze(M::table_name(), arena)
+                })
+                .map(Executor::from_plan)
         })?
         .done()
 }
@@ -3418,9 +3396,11 @@ fn orm_insert<'a, E: BindSource<'a>, M: Model>(
     let params = model.params();
     executor
         .execute(false, |state, tx| {
-            state.build_plan(&[], tx, |binder, arena| {
-                bind_orm_insert_model::<_, _, M>(binder, params, arena)
-            })
+            state
+                .build_plan(&[], tx, |binder, arena| {
+                    bind_orm_insert_model::<_, _, M>(binder, params, arena)
+                })
+                .map(Executor::from_plan)
         })?
         .done()
 }
@@ -3870,34 +3850,34 @@ mod tests {
         }
         let types = [(1, LogicalType::Integer)];
         assert!(matches!(
-            database.prepare(&types, |ctx| {
+            database.program(&types, |ctx| {
                 ctx.from::<OrmUnitUser>()?
                     .filter(|e| e.column(OrmUnitUser::id())?.eq(e.param(2)?))?
                     .finish()
             }),
             Err(DatabaseError::ParametersNotFound { .. })
         ));
-        let plan = database.prepare(&types, |ctx| {
+        let mut plan = database.program(&types, |ctx| {
             ctx.from::<OrmUnitUser>()?
                 .filter(|e| e.column(OrmUnitUser::id())?.eq(e.param(1)?))?
                 .finish()
         })?;
+        let mut tx = database.new_transaction(false)?;
         for (id, expected) in [(1, "Alice"), (3, "Cara"), (2, "Bob")] {
-            let rows = database
-                .execute(&plan, [(1, DataValue::Int32(id))])?
+            let rows = plan
+                .execute(&mut tx, [(1, DataValue::Int32(id))])?
                 .orm::<OrmUnitUser>()
                 .collect::<Result<Vec<_>, _>>()?;
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].name, expected);
         }
-        let mut tx = database.new_transaction(false)?;
-        let tx_plan = tx.prepare(&types, |ctx| {
+        let mut tx_plan = tx.program(&types, |ctx| {
             ctx.from::<OrmUnitUser>()?
                 .filter(|e| e.column(OrmUnitUser::id())?.eq(e.param(1)?))?
                 .finish()
         })?;
-        let rows = tx
-            .execute(&tx_plan, [(1, DataValue::Int32(2))])?
+        let rows = tx_plan
+            .execute(&mut tx, [(1, DataValue::Int32(2))])?
             .orm::<OrmUnitUser>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(rows[0].name, "Bob");

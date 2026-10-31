@@ -12,26 +12,24 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::table::DmlTable;
+use crate::planner::{fmt_table, Explain, MetaArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct InsertOperator {
-    pub table_name: TableName,
+    pub(crate) table: DmlTable,
     pub is_overwrite: bool,
-    pub is_mapping_by_name: bool,
 }
 
-impl fmt::Display for InsertOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Insert {}, Is Overwrite: {}, Is Mapping By Name: {}",
-            self.table_name, self.is_overwrite, self.is_mapping_by_name
-        )?;
-
-        Ok(())
+impl Explain for InsertOperator {
+    fn fmt<A: MetaArena + ?Sized>(
+        &self,
+        arena: &A,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        f.write_str("Insert ")?;
+        fmt_table(self.table.table_id, arena, f)?;
+        write!(f, ", Is Overwrite: {}", self.is_overwrite)
     }
 }

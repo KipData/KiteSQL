@@ -1107,7 +1107,7 @@ mod test {
     use crate::function::numbers::Numbers;
     use crate::planner::operator::sort::SortField;
     use crate::planner::{ExprRef, MetaArena, PlanArena, TableArenaCell};
-    use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
+    use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
     use crate::storage::rocksdb::RocksStorage;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::{Storage, StorageTransaction};
@@ -1124,15 +1124,14 @@ mod test {
         fn fn_assert(
             cursor: &mut Cursor<Vec<u8>>,
             expr: ScalarExpression,
-            drive: Option<&ReferenceDecodeContext<'_, RocksTransaction>>,
-            reference_tables: &mut ReferenceTables,
+            drive: Option<&mut ReferenceDecodeContext<'_, RocksTransaction>>,
             arena: &mut (dyn MetaArena + '_),
         ) -> Result<(), DatabaseError> {
             let expr = arena.alloc_expression(expr);
-            expr.encode(cursor, false, reference_tables, arena)?;
+            expr.encode(cursor, false, arena)?;
 
             cursor.seek(SeekFrom::Start(0))?;
-            let decoded = ExprRef::decode(cursor, drive, reference_tables, arena)?;
+            let decoded = ExprRef::decode(cursor, drive, arena)?;
             assert!(
                 decoded.eq_ignore_colref_pos(expr, arena),
                 "decoded expression does not match: decoded={decoded:?}, expected={expr:?}",
@@ -1145,6 +1144,7 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
+        let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
         let table_arena = TableArenaCell::default();
         let mut scala_functions = ScalaFunctions::default();
@@ -1162,36 +1162,33 @@ mod test {
             },
         );
         let mut plan_arena = PlanArena::new(&table_arena);
-        build_table(&mut table_cache, &mut transaction, &mut plan_arena)?;
+        build_table(
+            &mut names,
+            &mut table_cache,
+            &mut transaction,
+            &mut plan_arena,
+        )?;
         let mut plan_arena = PlanArena::new(&table_arena);
 
         let mut cursor = Cursor::new(Vec::new());
-        let mut reference_tables = ReferenceTables::new();
         let c3_column = {
-            let table = transaction
-                .table(&table_cache, "t1".to_string().into())?
-                .unwrap();
+            let table = transaction.table(&names, &table_cache, "t1")?.unwrap();
             table.get_column_by_name("c3").unwrap()
         };
-        let context = ReferenceDecodeContext::with_functions(
-            Some((&transaction, &table_cache)),
-            &scala_functions,
-            &table_functions,
-        );
+        let mut context =
+            ReferenceDecodeContext::with_functions(&scala_functions, &table_functions);
         let empty = plan_arena.alloc_expression(ScalarExpression::Empty);
 
         fn_assert(
             &mut cursor,
             ScalarExpression::Constant(DataValue::Null),
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::Constant(DataValue::Int32(42)),
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1201,15 +1198,13 @@ mod test {
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             }),
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::column_expr(c3_column, 0),
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1222,8 +1217,7 @@ mod test {
                 )),
                 1,
             ),
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1232,8 +1226,7 @@ mod test {
                 expr: empty,
                 alias: AliasType::Name("Hello".to_string()),
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1242,8 +1235,7 @@ mod test {
                 expr: empty,
                 alias: AliasType::Expr(empty),
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1253,8 +1245,7 @@ mod test {
                 ty: LogicalType::Integer,
                 evaluator: Some(cast_create(&LogicalType::Integer, &LogicalType::Integer)?),
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1263,8 +1254,7 @@ mod test {
                 negated: true,
                 expr: empty,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1278,8 +1268,7 @@ mod test {
                 )?),
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1290,8 +1279,7 @@ mod test {
                 evaluator: None,
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1305,8 +1293,7 @@ mod test {
                 ),
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1318,8 +1305,7 @@ mod test {
                 evaluator: None,
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1330,8 +1316,7 @@ mod test {
                 args: vec![empty],
                 ty: LogicalType::Double,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1342,8 +1327,7 @@ mod test {
                 args: vec![empty],
                 evaluator: None,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1356,8 +1340,7 @@ mod test {
                 left_evaluator: None,
                 right_evaluator: None,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1367,8 +1350,7 @@ mod test {
                 for_expr: Some(empty),
                 from_expr: Some(empty),
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1378,8 +1360,7 @@ mod test {
                 for_expr: None,
                 from_expr: Some(empty),
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1389,8 +1370,7 @@ mod test {
                 for_expr: None,
                 from_expr: None,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1399,8 +1379,7 @@ mod test {
                 expr: empty,
                 in_expr: empty,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1410,8 +1389,7 @@ mod test {
                 trim_what_expr: Some(empty),
                 trim_where: Some(TrimWhereField::Both),
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1421,8 +1399,7 @@ mod test {
                 trim_what_expr: None,
                 trim_where: Some(TrimWhereField::Both),
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1432,22 +1409,19 @@ mod test {
                 trim_what_expr: None,
                 trim_where: None,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::Empty,
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
             &mut cursor,
             ScalarExpression::Tuple(vec![empty]),
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1456,8 +1430,7 @@ mod test {
                 args: vec![empty],
                 inner: ArcScalarFunctionImpl(CurrentDate::new()),
             }),
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1469,8 +1442,7 @@ mod test {
                     inner: ArcTableFunctionImpl(Numbers::new()),
                 },
             }),
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1481,8 +1453,7 @@ mod test {
                 right_expr: empty,
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1492,8 +1463,7 @@ mod test {
                 right_expr: empty,
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1503,8 +1473,7 @@ mod test {
                 right_expr: empty,
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1513,8 +1482,7 @@ mod test {
                 exprs: vec![empty],
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1525,8 +1493,7 @@ mod test {
                 else_expr: Some(empty),
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         let one = plan_arena.alloc_expression(ScalarExpression::Constant(1.into()));
@@ -1540,8 +1507,7 @@ mod test {
                 else_expr: Some(empty),
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1552,8 +1518,7 @@ mod test {
                 else_expr: None,
                 ty: LogicalType::Integer,
             },
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
         fn_assert(
@@ -1569,8 +1534,7 @@ mod test {
                     order_by: vec![SortField::from(three).desc()],
                 },
             }),
-            Some(&context),
-            &mut reference_tables,
+            Some(&mut context),
             &mut plan_arena,
         )?;
 

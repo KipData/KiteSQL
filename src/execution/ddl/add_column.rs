@@ -14,9 +14,7 @@
 
 use super::rewrite_table_in_batches;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -28,38 +26,43 @@ pub struct AddColumn<'a> {
     op: &'a AddColumnOperator,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for AddColumn<'a> {
+impl<'a> WriteExecutor<'a> for AddColumn<'a> {
     type Input = &'a AddColumnOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         op: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::AddColumn(AddColumn { op }))
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        ExecNode::AddColumn(Box::new(AddColumn { op }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
         let AddColumnOperator {
-            table_name,
+            table_id,
             column,
             if_not_exists,
         } = self.op;
 
+        let table_catalog = table_cache
+            .get(table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
         let (old_schema, pk_ty, column_exists) = {
-            let table_catalog = arena
-                .transaction()
-                .table(table_cache, table_name.clone())?
-                .ok_or(DatabaseError::TableNotFound)?;
             (
                 table_catalog.columns().copied().collect_vec(),
                 table_catalog.primary_keys_type().clone(),
@@ -81,7 +84,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
             let (table, col_id) = transaction.add_column(
                 table_codec,
                 plan_arena,
-                table_name,
+                table_catalog.name(),
                 column,
                 *if_not_exists,
             )?;
@@ -102,7 +105,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
         rewrite_table_in_batches(
             transaction,
             table_codec,
-            table_name,
+            *table_id,
             &pk_ty,
             old_schema.len(),
             || {
@@ -133,7 +136,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
                         std::slice::from_ref(value),
                         IndexType::Unique,
                     );
-                    transaction.add_index(table_codec, table_name, index, tuple_id)?;
+                    transaction.add_index(table_codec, *table_id, index, tuple_id)?;
                 }
                 Ok(())
             },

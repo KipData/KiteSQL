@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -24,26 +24,19 @@ impl ReferenceSerialization for PathBuf {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
         self.to_str()
             .ok_or_else(|| DatabaseError::InvalidValue("path is not valid utf8".to_string()))?
             .to_string()
-            .encode(writer, is_direct, reference_tables, arena)
+            .encode(writer, is_direct, arena)
     }
 
     fn decode<T: StorageTransaction, R: std::io::Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        Ok(PathBuf::from_str(&String::decode(
-            reader,
-            drive,
-            reference_tables,
-            arena,
-        )?)?)
+        Ok(PathBuf::from_str(&String::decode(reader, drive, arena)?)?)
     }
 }

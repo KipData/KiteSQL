@@ -20,7 +20,7 @@ use crate::errors::DatabaseError;
 #[cfg(feature = "spill")]
 use crate::execution::spill::{SpillReader, SpillVec};
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::recursive_cte::RecursiveScanOperator;
 use crate::planner::LogicalPlan;
@@ -209,99 +209,83 @@ enum RecursivePhase {
     Recursive,
 }
 
-pub struct RecursiveCte<'a, T: StorageTransaction + 'a> {
+pub struct RecursiveCte<'a> {
     recursive_plan: &'a LogicalPlan,
-    anchor_input: ExecId,
-    recursive_arena: ExecArena<'a, T>,
-    recursive_root: ExecId,
+    anchor_input: ExecNode<'a>,
+    // Iterator slots below this mark belong to the rest of the tree; the step owns the tail.
+    iter_mark: usize,
+    recursive_root: Option<ExecNode<'a>>,
     working: RecursiveRows,
     next: RecursiveRows,
     phase: RecursivePhase,
 }
 
-impl<'a, T: StorageTransaction + 'a> RecursiveCte<'a, T> {
-    fn new(
-        anchor_input: ExecId,
-        recursive_plan: &'a LogicalPlan,
-        recursive_arena: ExecArena<'a, T>,
-    ) -> Self {
+impl<'a> RecursiveCte<'a> {
+    fn new(anchor_input: ExecNode<'a>, recursive_plan: &'a LogicalPlan) -> Self {
         Self {
             recursive_plan,
             anchor_input,
-            recursive_arena,
-            recursive_root: 0,
+            iter_mark: 0,
+            recursive_root: None,
             working: RecursiveRows::default(),
             next: RecursiveRows::default(),
             phase: RecursivePhase::Anchor,
         }
     }
 
-    fn start_recursive<A: MetaArena + 'a>(
+    fn start_recursive<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<bool, DatabaseError> {
         let Some(input) = mem::take(&mut self.working).into_input()? else {
             return Ok(false);
         };
 
-        self.recursive_arena.reset_for_rebuild();
-        self.recursive_arena.set_recursive_input(input);
-        let cache = self.recursive_arena.context();
-        let transaction = self.recursive_arena.transaction();
-        self.recursive_root = build_read(
-            &mut self.recursive_arena,
-            plan_arena,
-            self.recursive_plan,
-            cache,
-            transaction,
-        );
+        self.iter_mark = arena.iter_len();
+        arena.set_recursive_input(input);
+        self.recursive_root = Some(build_read(arena, plan_arena, self.recursive_plan));
         Ok(true)
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for RecursiveCte<'a, T> {
+impl<'a> ReadExecutor<'a> for RecursiveCte<'a> {
     type Input = (&'a LogicalPlan, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (anchor_plan, recursive_plan): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let mut recursive_arena = ExecArena::with_capacity(recursive_plan.exec_capacity_hint());
-        recursive_arena.init_context(arena.context(), arena.transaction());
-        let anchor_input = build_read(arena, plan_arena, anchor_plan, cache, transaction);
-        arena.push(ExecNode::RecursiveCte(Self::new(
-            anchor_input,
-            recursive_plan,
-            recursive_arena,
-        )))
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let anchor_input = build_read(arena, plan_arena, anchor_plan);
+        ExecNode::RecursiveCte(Box::new(Self::new(anchor_input, recursive_plan)))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.working = RecursiveRows::default();
         self.next = RecursiveRows::default();
         self.phase = RecursivePhase::Anchor;
-        self.recursive_arena.reset_for_rebuild();
-        arena.reset(self.anchor_input, plan_arena)
+        if self.recursive_root.take().is_some() {
+            arena.truncate_iters(self.iter_mark);
+        }
+        self.anchor_input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
             match self.phase {
                 RecursivePhase::Anchor => {
-                    while arena.next_tuple(self.anchor_input, plan_arena)? {
+                    while self.anchor_input.next_tuple(arena, plan_arena)? {
                         self.next.push(arena.take_tuple())?;
                     }
                     self.working = mem::take(&mut self.next).finish()?;
@@ -312,20 +296,22 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a, T>
                         arena.produce(tuple);
                         return Ok(());
                     }
-                    if !self.start_recursive(plan_arena)? {
+                    if !self.start_recursive(arena, plan_arena)? {
                         arena.finish();
                         return Ok(());
                     }
                     self.phase = RecursivePhase::Recursive;
                 }
                 RecursivePhase::Recursive => {
-                    while self
-                        .recursive_arena
-                        .next_tuple(self.recursive_root, plan_arena)?
-                    {
-                        self.next.push(self.recursive_arena.take_tuple())?;
+                    let root = self
+                        .recursive_root
+                        .as_mut()
+                        .expect("recursive step is built before it runs");
+                    while root.next_tuple(arena, plan_arena)? {
+                        self.next.push(arena.take_tuple())?;
                     }
-                    self.recursive_arena.reset_for_rebuild();
+                    self.recursive_root = None;
+                    arena.truncate_iters(self.iter_mark);
                     self.working = mem::take(&mut self.next).finish()?;
                     self.phase = RecursivePhase::Output;
                 }
@@ -338,25 +324,23 @@ pub struct RecursiveScan {
     input: RecursiveInput,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for RecursiveScan {
+impl<'a> ReadExecutor<'a> for RecursiveScan {
     type Input = &'a RecursiveScanOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         _input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _cache: ExecutionContext<'_>,
-        _transaction: &T,
-    ) -> ExecId {
+        arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
         let input = arena.take_recursive_input();
-        arena.push(ExecNode::RecursiveScan(Self { input }))
+        ExecNode::RecursiveScan(Box::new(Self { input }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.input.reset()
@@ -364,7 +348,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         match self.input.next().transpose()? {
@@ -380,7 +364,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
-    use crate::execution::{empty_context, execute_input, try_collect};
+    use crate::execution::{execute_input, try_collect};
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::project::ProjectOperator;
@@ -391,7 +375,7 @@ mod tests {
     use crate::planner::Childrens;
     use crate::planner::LogicalPlan;
     use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
+    use crate::storage::{Storage, TableCache};
     use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -520,11 +504,9 @@ mod tests {
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
         let table_cache = TableCache::default();
-        let view_cache = ViewCache::default();
-        let meta_cache = StatisticsMetaCache::default();
-        let tuples = try_collect(execute_input::<_, RecursiveCte<'_, _>>(
+        let tuples = try_collect(execute_input::<_, RecursiveCte<'_>>(
             (&anchor, &recursive),
-            empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;

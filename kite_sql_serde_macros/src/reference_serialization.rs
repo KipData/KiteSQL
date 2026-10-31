@@ -117,10 +117,10 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 let ty = process_type(&field_opts.ty);
 
                 encode_fields.push(quote! {
-                    #field_name.encode(writer, is_direct, reference_tables, arena)?;
+                    #field_name.encode(writer, is_direct, arena)?;
                 });
                 decode_fields.push(quote! {
-                    let #field_name = #ty::decode(reader, drive, reference_tables, arena)?;
+                    let #field_name = #ty::decode(reader, drive.as_deref_mut(), arena)?;
                 });
                 init_fields.push(quote! {
                     #field_name,
@@ -138,7 +138,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         &self,
                         writer: &mut W,
                         is_direct: bool,
-                        reference_tables: &mut crate::serdes::ReferenceTables,
                         arena: &A,
                     ) -> Result<(), crate::errors::DatabaseError> {
                         let #init_stream = self;
@@ -150,8 +149,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
                     fn decode<Tx: crate::storage::StorageTransaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
                         reader: &mut R,
-                        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, Tx>>,
-                        reference_tables: &crate::serdes::ReferenceTables,
+                        mut drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, Tx>>,
                         arena: &mut A,
                     ) -> Result<Self, crate::errors::DatabaseError> {
                         #(#decode_fields)*
@@ -182,10 +180,10 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                     let ty = process_type(&field_opts.ty);
 
                     encode_fields.push(quote! {
-                        #field_name.encode(writer, is_direct, reference_tables, arena)?;
+                        #field_name.encode(writer, is_direct, arena)?;
                     });
                     decode_fields.push(quote! {
-                        let #field_name = #ty::decode(reader, drive, reference_tables, arena)?;
+                        let #field_name = #ty::decode(reader, drive.as_deref_mut(), arena)?;
                     });
                     init_fields.push(quote! {
                         #field_name,
@@ -219,7 +217,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                         &self,
                         writer: &mut W,
                         is_direct: bool,
-                        reference_tables: &mut crate::serdes::ReferenceTables,
                         arena: &A,
                     ) -> Result<(), crate::errors::DatabaseError> {
                         match self {
@@ -231,8 +228,7 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
 
                     fn decode<Tx: crate::storage::StorageTransaction, R: std::io::Read, A: crate::planner::MetaArena + ?Sized>(
                         reader: &mut R,
-                        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, Tx>>,
-                        reference_tables: &crate::serdes::ReferenceTables,
+                        mut drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, Tx>>,
                         arena: &mut A,
                     ) -> Result<Self, crate::errors::DatabaseError> {
                         let mut type_bytes = [0u8; 1];

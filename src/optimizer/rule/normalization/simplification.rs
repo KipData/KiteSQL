@@ -183,10 +183,14 @@ mod test {
         }
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
-            let range = RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &mut arena)
-                .detach(filter_op.predicate)?
-                .map(|detached| detached.range)
-                .unwrap();
+            let range = RangeDetacher::new(
+                table_state.table.id(),
+                table_state.column_id_by_name("c1"),
+                &mut arena,
+            )
+            .detach(filter_op.predicate)?
+            .map(|detached| detached.range)
+            .unwrap();
             assert_eq!(
                 range,
                 Range::Scope {
@@ -319,11 +323,13 @@ mod test {
 
             let filter_op = best_plan.childrens.pop_only();
             if let Operator::Filter(filter_op) = filter_op.operator {
-                Ok(
-                    RangeDetacher::new("t1", table_state.column_id_by_name("c1"), &mut arena)
-                        .detach(filter_op.predicate)?
-                        .map(|detached| detached.range),
+                Ok(RangeDetacher::new(
+                    table_state.table.id(),
+                    table_state.column_id_by_name("c1"),
+                    &mut arena,
                 )
+                .detach(filter_op.predicate)?
+                .map(|detached| detached.range))
             } else {
                 Ok(None)
             }
@@ -487,7 +493,7 @@ mod test {
 
         let filter_op = best_plan.childrens.pop_only();
         if let Operator::Filter(filter_op) = filter_op.operator {
-            Ok(RangeDetacher::new("t1", column_id, arena)
+            Ok(RangeDetacher::new(0, column_id, arena)
                 .detach(filter_op.predicate)?
                 .map(|detached| detached.range))
         } else {

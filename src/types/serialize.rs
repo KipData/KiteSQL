@@ -38,25 +38,27 @@ macro_rules! impl_tuple_value_serializable {
                 Ok(())
             }
 
-            fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
-                Ok(DataValue::$variant(($read_fn)(reader)?))
+            fn filling_value(
+                &self,
+                reader: &mut Cursor<&[u8]>,
+                values: &mut Vec<DataValue>,
+                _: &mut BytesPool,
+            ) -> Result<(), DatabaseError> {
+                values.push(DataValue::$variant(($read_fn)(reader)?));
+                Ok(())
             }
         }
     };
 }
 
-pub trait TupleValueSerializable: Debug {
+pub(crate) trait TupleValueSerializable: Debug {
     fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError>;
-    #[allow(clippy::wrong_self_convention)]
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError>;
     fn filling_value(
         &self,
         reader: &mut Cursor<&[u8]>,
-        values: &mut std::vec::Vec<DataValue>,
-    ) -> Result<(), DatabaseError> {
-        values.push(self.from_raw(reader)?);
-        Ok(())
-    }
+        values: &mut Vec<DataValue>,
+        pool: &mut BytesPool,
+    ) -> Result<(), DatabaseError>;
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
@@ -141,107 +143,148 @@ impl TupleValueSerializable for TupleValueSerializableImpl {
         }
     }
 
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
-        match self {
-            TupleValueSerializableImpl::Varbinary { len } => {
-                VarbinarySerializable { len: *len }.from_raw(reader)
-            }
-            TupleValueSerializableImpl::Boolean => BooleanSerializable.from_raw(reader),
-            TupleValueSerializableImpl::Int8 => Int8Serializable.from_raw(reader),
-            TupleValueSerializableImpl::Int16 => Int16Serializable.from_raw(reader),
-            TupleValueSerializableImpl::Int32 => Int32Serializable.from_raw(reader),
-            TupleValueSerializableImpl::Int64 => Int64Serializable.from_raw(reader),
-            TupleValueSerializableImpl::UInt8 => UInt8Serializable.from_raw(reader),
-            TupleValueSerializableImpl::UInt16 => UInt16Serializable.from_raw(reader),
-            TupleValueSerializableImpl::UInt32 => UInt32Serializable.from_raw(reader),
-            TupleValueSerializableImpl::UInt64 => UInt64Serializable.from_raw(reader),
-            TupleValueSerializableImpl::Float32 => Float32Serializable.from_raw(reader),
-            TupleValueSerializableImpl::Float64 => Float64Serializable.from_raw(reader),
-            TupleValueSerializableImpl::Char { len, unit } => CharSerializable {
-                len: *len,
-                unit: *unit,
-            }
-            .from_raw(reader),
-            TupleValueSerializableImpl::Varchar { len, unit } => VarcharSerializable {
-                len: *len,
-                unit: *unit,
-            }
-            .from_raw(reader),
-            TupleValueSerializableImpl::Date => DateSerializable.from_raw(reader),
-            TupleValueSerializableImpl::DateTime => DateTimeSerializable.from_raw(reader),
-            TupleValueSerializableImpl::Time { precision } => TimeSerializable {
-                precision: *precision,
-            }
-            .from_raw(reader),
-            TupleValueSerializableImpl::Timestamp { precision, zone } => TimeStampSerializable {
-                precision: *precision,
-                zone: *zone,
-            }
-            .from_raw(reader),
-            TupleValueSerializableImpl::Decimal => DecimalSerializable.from_raw(reader),
-            TupleValueSerializableImpl::SkipFixed(len) => SkipFixed(*len).from_raw(reader),
-            TupleValueSerializableImpl::SkipVariable => SkipVariable.from_raw(reader),
-        }
-    }
-
+    #[inline]
     fn filling_value(
         &self,
         reader: &mut Cursor<&[u8]>,
-        values: &mut std::vec::Vec<DataValue>,
+        values: &mut Vec<DataValue>,
+        pool: &mut BytesPool,
     ) -> Result<(), DatabaseError> {
         match self {
             TupleValueSerializableImpl::Varbinary { len } => {
-                VarbinarySerializable { len: *len }.filling_value(reader, values)
+                VarbinarySerializable { len: *len }.filling_value(reader, values, pool)
             }
             TupleValueSerializableImpl::Boolean => {
-                BooleanSerializable.filling_value(reader, values)
+                BooleanSerializable.filling_value(reader, values, pool)
             }
-            TupleValueSerializableImpl::Int8 => Int8Serializable.filling_value(reader, values),
-            TupleValueSerializableImpl::Int16 => Int16Serializable.filling_value(reader, values),
-            TupleValueSerializableImpl::Int32 => Int32Serializable.filling_value(reader, values),
-            TupleValueSerializableImpl::Int64 => Int64Serializable.filling_value(reader, values),
-            TupleValueSerializableImpl::UInt8 => UInt8Serializable.filling_value(reader, values),
-            TupleValueSerializableImpl::UInt16 => UInt16Serializable.filling_value(reader, values),
-            TupleValueSerializableImpl::UInt32 => UInt32Serializable.filling_value(reader, values),
-            TupleValueSerializableImpl::UInt64 => UInt64Serializable.filling_value(reader, values),
+            TupleValueSerializableImpl::Int8 => {
+                Int8Serializable.filling_value(reader, values, pool)
+            }
+            TupleValueSerializableImpl::Int16 => {
+                Int16Serializable.filling_value(reader, values, pool)
+            }
+            TupleValueSerializableImpl::Int32 => {
+                Int32Serializable.filling_value(reader, values, pool)
+            }
+            TupleValueSerializableImpl::Int64 => {
+                Int64Serializable.filling_value(reader, values, pool)
+            }
+            TupleValueSerializableImpl::UInt8 => {
+                UInt8Serializable.filling_value(reader, values, pool)
+            }
+            TupleValueSerializableImpl::UInt16 => {
+                UInt16Serializable.filling_value(reader, values, pool)
+            }
+            TupleValueSerializableImpl::UInt32 => {
+                UInt32Serializable.filling_value(reader, values, pool)
+            }
+            TupleValueSerializableImpl::UInt64 => {
+                UInt64Serializable.filling_value(reader, values, pool)
+            }
             TupleValueSerializableImpl::Float32 => {
-                Float32Serializable.filling_value(reader, values)
+                Float32Serializable.filling_value(reader, values, pool)
             }
             TupleValueSerializableImpl::Float64 => {
-                Float64Serializable.filling_value(reader, values)
+                Float64Serializable.filling_value(reader, values, pool)
             }
             TupleValueSerializableImpl::Char { len, unit } => CharSerializable {
                 len: *len,
                 unit: *unit,
             }
-            .filling_value(reader, values),
+            .filling_value(reader, values, pool),
             TupleValueSerializableImpl::Varchar { len, unit } => VarcharSerializable {
                 len: *len,
                 unit: *unit,
             }
-            .filling_value(reader, values),
-            TupleValueSerializableImpl::Date => DateSerializable.filling_value(reader, values),
+            .filling_value(reader, values, pool),
+            TupleValueSerializableImpl::Date => {
+                DateSerializable.filling_value(reader, values, pool)
+            }
             TupleValueSerializableImpl::DateTime => {
-                DateTimeSerializable.filling_value(reader, values)
+                DateTimeSerializable.filling_value(reader, values, pool)
             }
             TupleValueSerializableImpl::Time { precision } => TimeSerializable {
                 precision: *precision,
             }
-            .filling_value(reader, values),
+            .filling_value(reader, values, pool),
             TupleValueSerializableImpl::Timestamp { precision, zone } => TimeStampSerializable {
                 precision: *precision,
                 zone: *zone,
             }
-            .filling_value(reader, values),
+            .filling_value(reader, values, pool),
             TupleValueSerializableImpl::Decimal => {
-                DecimalSerializable.filling_value(reader, values)
+                DecimalSerializable.filling_value(reader, values, pool)
             }
             TupleValueSerializableImpl::SkipFixed(len) => {
-                SkipFixed(*len).filling_value(reader, values)
+                SkipFixed(*len).filling_value(reader, values, pool)
             }
-            TupleValueSerializableImpl::SkipVariable => SkipVariable.filling_value(reader, values),
+            TupleValueSerializableImpl::SkipVariable => {
+                SkipVariable.filling_value(reader, values, pool)
+            }
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BytesPool(Vec<Vec<u8>>);
+
+impl BytesPool {
+    const CAPACITY: usize = 64;
+    const MAX_BUFFER_LEN: usize = 4096;
+
+    pub(crate) fn bytes(&mut self, bytes: &[u8]) -> Vec<u8> {
+        match self.0.pop() {
+            Some(mut buffer) => {
+                buffer.extend_from_slice(bytes);
+                buffer
+            }
+            None => bytes.to_vec(),
+        }
+    }
+
+    pub(crate) fn string(&mut self, bytes: &[u8]) -> Result<String, DatabaseError> {
+        Ok(String::from_utf8(self.bytes(bytes))?)
+    }
+
+    pub(crate) fn clone_value(&mut self, value: &DataValue) -> DataValue {
+        match value {
+            DataValue::Utf8 { value, ty, unit } => DataValue::Utf8 {
+                // SAFETY: the bytes are copied from a `str`.
+                value: unsafe { String::from_utf8_unchecked(self.bytes(value.as_bytes())) },
+                ty: ty.clone(),
+                unit: *unit,
+            },
+            DataValue::Binary { value, len } => DataValue::Binary {
+                value: self.bytes(value),
+                len: *len,
+            },
+            value => value.clone(),
+        }
+    }
+
+    pub(crate) fn recycle(&mut self, values: &mut Vec<DataValue>) {
+        for value in values.drain(..) {
+            let mut buffer = match value {
+                DataValue::Utf8 { value, .. } => value.into_bytes(),
+                DataValue::Binary { value, .. } => value,
+                _ => continue,
+            };
+            if self.0.len() < Self::CAPACITY && buffer.capacity() <= Self::MAX_BUFFER_LEN {
+                buffer.clear();
+                self.0.push(buffer);
+            }
+        }
+    }
+}
+
+fn read_slice<'a>(reader: &mut Cursor<&'a [u8]>, len: usize) -> Result<&'a [u8], DatabaseError> {
+    let start = reader.position() as usize;
+    let bytes = start
+        .checked_add(len)
+        .and_then(|end| reader.get_ref().get(start..end))
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::UnexpectedEof))?;
+    reader.set_position((start + len) as u64);
+    Ok(bytes)
 }
 
 #[derive(Debug)]
@@ -453,25 +496,26 @@ impl TupleValueSerializable for CharSerializable {
         Ok(())
     }
 
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
+    fn filling_value(
+        &self,
+        reader: &mut Cursor<&[u8]>,
+        values: &mut Vec<DataValue>,
+        pool: &mut BytesPool,
+    ) -> Result<(), DatabaseError> {
         // https://dev.mysql.com/doc/refman/8.0/en/char.html#:~:text=If%20a%20given%20value%20is%20stored%20into%20the%20CHAR(4)%20and%20VARCHAR(4)%20columns%2C%20the%20values%20retrieved%20from%20the%20columns%20are%20not%20always%20the%20same%20because%20trailing%20spaces%20are%20removed%20from%20CHAR%20columns%20upon%20retrieval.%20The%20following%20example%20illustrates%20this%20difference%3A
         let len = match self.unit {
             CharLengthUnits::Characters => read_u32_le(reader)?,
             CharLengthUnits::Octets => self.len,
         } as usize;
-        let mut bytes = vec![0; len];
-        reader.read_exact(&mut bytes)?;
-        let last_non_zero_index = match bytes.iter().rposition(|&x| x != b' ') {
-            Some(index) => index + 1,
-            None => 0,
-        };
-        bytes.truncate(last_non_zero_index);
+        let bytes = read_slice(reader, len)?;
+        let trimmed_len = bytes.iter().rposition(|&x| x != b' ').map_or(0, |i| i + 1);
 
-        Ok(DataValue::Utf8 {
-            value: String::from_utf8(bytes)?,
+        values.push(DataValue::Utf8 {
+            value: pool.string(&bytes[..trimmed_len])?,
             ty: Utf8Type::Fixed(self.len),
             unit: self.unit,
-        })
+        });
+        Ok(())
     }
 }
 
@@ -492,16 +536,19 @@ impl TupleValueSerializable for VarcharSerializable {
         Ok(())
     }
 
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
+    fn filling_value(
+        &self,
+        reader: &mut Cursor<&[u8]>,
+        values: &mut Vec<DataValue>,
+        pool: &mut BytesPool,
+    ) -> Result<(), DatabaseError> {
         let len = read_u32_le(reader)? as usize;
-        let mut bytes = vec![0; len];
-        reader.read_exact(&mut bytes)?;
-
-        Ok(DataValue::Utf8 {
-            value: String::from_utf8(bytes)?,
+        values.push(DataValue::Utf8 {
+            value: pool.string(read_slice(reader, len)?)?,
             ty: Utf8Type::Variable(self.len),
             unit: self.unit,
-        })
+        });
+        Ok(())
     }
 }
 
@@ -515,14 +562,18 @@ impl TupleValueSerializable for VarbinarySerializable {
         Ok(())
     }
 
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
-        let size = read_u32_le(reader)? as usize;
-        let mut value = vec![0; size];
-        reader.read_exact(&mut value)?;
-        Ok(DataValue::Binary {
-            value,
+    fn filling_value(
+        &self,
+        reader: &mut Cursor<&[u8]>,
+        values: &mut Vec<DataValue>,
+        pool: &mut BytesPool,
+    ) -> Result<(), DatabaseError> {
+        let len = read_u32_le(reader)? as usize;
+        values.push(DataValue::Binary {
+            value: pool.bytes(read_slice(reader, len)?),
             len: self.len,
-        })
+        });
+        Ok(())
     }
 }
 
@@ -548,9 +599,15 @@ impl TupleValueSerializable for TimeSerializable {
         Ok(())
     }
 
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
+    fn filling_value(
+        &self,
+        reader: &mut Cursor<&[u8]>,
+        values: &mut Vec<DataValue>,
+        _: &mut BytesPool,
+    ) -> Result<(), DatabaseError> {
         let precision = self.precision.unwrap_or_default();
-        Ok(DataValue::Time32(read_u32_le(reader)?, precision))
+        values.push(DataValue::Time32(read_u32_le(reader)?, precision));
+        Ok(())
     }
 }
 
@@ -563,13 +620,19 @@ impl TupleValueSerializable for TimeStampSerializable {
         Ok(())
     }
 
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
+    fn filling_value(
+        &self,
+        reader: &mut Cursor<&[u8]>,
+        values: &mut Vec<DataValue>,
+        _: &mut BytesPool,
+    ) -> Result<(), DatabaseError> {
         let precision = self.precision.unwrap_or_default();
-        Ok(DataValue::Time64(
+        values.push(DataValue::Time64(
             read_i64_le(reader)?,
             precision,
             self.zone,
-        ))
+        ));
+        Ok(())
     }
 }
 
@@ -593,7 +656,12 @@ impl TupleValueSerializable for DecimalSerializable {
         ))
     }
 
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
+    fn filling_value(
+        &self,
+        reader: &mut Cursor<&[u8]>,
+        _: &mut Vec<DataValue>,
+        _: &mut BytesPool,
+    ) -> Result<(), DatabaseError> {
         reader.seek(SeekFrom::Current(16))?;
         Err(DatabaseError::UnsupportedStmt(
             "DECIMAL requires the `decimal` feature".to_string(),
@@ -606,17 +674,13 @@ impl TupleValueSerializable for SkipFixed {
         unreachable!();
     }
 
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
-        reader.seek(SeekFrom::Current(self.0 as i64))?;
-        Ok(DataValue::Null)
-    }
-
     fn filling_value(
         &self,
         reader: &mut Cursor<&[u8]>,
-        _: &mut std::vec::Vec<DataValue>,
+        _: &mut Vec<DataValue>,
+        _: &mut BytesPool,
     ) -> Result<(), DatabaseError> {
-        let _ = self.from_raw(reader)?;
+        reader.seek(SeekFrom::Current(self.0 as i64))?;
         Ok(())
     }
 }
@@ -626,18 +690,14 @@ impl TupleValueSerializable for SkipVariable {
         unreachable!();
     }
 
-    fn from_raw(&self, reader: &mut Cursor<&[u8]>) -> Result<DataValue, DatabaseError> {
-        let len = read_u32_le(reader)? as usize;
-        reader.seek(SeekFrom::Current(len as i64))?;
-        Ok(DataValue::Null)
-    }
-
     fn filling_value(
         &self,
         reader: &mut Cursor<&[u8]>,
-        _: &mut std::vec::Vec<DataValue>,
+        _: &mut Vec<DataValue>,
+        _: &mut BytesPool,
     ) -> Result<(), DatabaseError> {
-        let _ = self.from_raw(reader)?;
+        let len = read_u32_le(reader)? as usize;
+        reader.seek(SeekFrom::Current(len as i64))?;
         Ok(())
     }
 }
@@ -697,11 +757,64 @@ mod tests {
     ) -> Result<DataValue, DatabaseError> {
         let mut bytes = Vec::new();
         serializer.to_raw(&value, &mut bytes)?;
-        serializer.from_raw(&mut Cursor::new(bytes.as_slice()))
+        let mut values = Vec::new();
+        serializer.filling_value(
+            &mut Cursor::new(bytes.as_slice()),
+            &mut values,
+            &mut BytesPool::default(),
+        )?;
+        assert_eq!(values.len(), 1);
+        Ok(values.pop().unwrap())
     }
 
     fn assert_panics(f: impl FnOnce() + std::panic::UnwindSafe) {
         assert!(std::panic::catch_unwind(f).is_err());
+    }
+
+    #[test]
+    fn bytes_pool_reuses_recycled_buffers() -> Result<(), DatabaseError> {
+        let mut pool = BytesPool::default();
+        let value = pool.string(b"abc")?;
+        let buffer = value.as_ptr();
+        let large = vec![0; BytesPool::MAX_BUFFER_LEN + 1];
+        let mut values = vec![
+            DataValue::Binary {
+                value: large,
+                len: None,
+            },
+            DataValue::Utf8 {
+                value,
+                ty: Utf8Type::Variable(None),
+                unit: CharLengthUnits::Characters,
+            },
+            DataValue::Int32(1),
+        ];
+        pool.recycle(&mut values);
+        assert!(values.is_empty());
+        // Only the small buffer is kept.
+        assert_eq!(pool.0.len(), 1);
+
+        let reused = pool.bytes(b"xy");
+        assert_eq!(reused, b"xy");
+        assert_eq!(reused.as_ptr(), buffer);
+        assert!(pool.0.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn pooled_char_decode_trims_padding() -> Result<(), DatabaseError> {
+        let serializer = TupleValueSerializableImpl::Char {
+            len: 5,
+            unit: CharLengthUnits::Octets,
+        };
+        let mut values = Vec::new();
+        serializer.filling_value(
+            &mut Cursor::new(b"ab   ".as_slice()),
+            &mut values,
+            &mut BytesPool::default(),
+        )?;
+        assert!(matches!(&values[..], [DataValue::Utf8 { value, .. }] if value == "ab"));
+        Ok(())
     }
 
     #[test]
@@ -807,29 +920,29 @@ mod tests {
         serializer.to_raw(&value, &mut bytes)?;
 
         let mut values = Vec::new();
-        serializer.filling_value(&mut Cursor::new(bytes.as_slice()), &mut values)?;
+        serializer.filling_value(
+            &mut Cursor::new(bytes.as_slice()),
+            &mut values,
+            &mut BytesPool::default(),
+        )?;
         assert_eq!(values, vec![value]);
 
         let skip_fixed = TupleValueSerializableImpl::SkipFixed(2);
-        assert_eq!(
-            skip_fixed.from_raw(&mut Cursor::new([1_u8, 2, 3].as_slice()))?,
-            DataValue::Null
-        );
         let mut values = vec![DataValue::Int32(1)];
-        skip_fixed.filling_value(&mut Cursor::new([1_u8, 2, 3].as_slice()), &mut values)?;
+        let mut cursor = Cursor::new([1_u8, 2, 3].as_slice());
+        skip_fixed.filling_value(&mut cursor, &mut values, &mut BytesPool::default())?;
         assert_eq!(values, vec![DataValue::Int32(1)]);
+        assert_eq!(cursor.position(), 2);
 
         let skip_variable = TupleValueSerializableImpl::SkipVariable;
         let mut bytes = Vec::new();
         write_u32_le(&mut bytes, 3)?;
         bytes.extend_from_slice(&[1, 2, 3, 4]);
-        assert_eq!(
-            skip_variable.from_raw(&mut Cursor::new(bytes.as_slice()))?,
-            DataValue::Null
-        );
         let mut values = vec![DataValue::Int32(2)];
-        skip_variable.filling_value(&mut Cursor::new(bytes.as_slice()), &mut values)?;
+        let mut cursor = Cursor::new(bytes.as_slice());
+        skip_variable.filling_value(&mut cursor, &mut values, &mut BytesPool::default())?;
         assert_eq!(values, vec![DataValue::Int32(2)]);
+        assert_eq!(cursor.position(), 7);
 
         Ok(())
     }

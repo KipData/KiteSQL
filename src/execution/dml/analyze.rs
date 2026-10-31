@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode,
-    WriteExecutor,
+    build_read, DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
@@ -35,24 +34,27 @@ use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId};
 use ordered_float::OrderedFloat;
 use std::fmt::{self, Formatter};
+use std::mem;
 
 const DEFAULT_NUM_OF_BUCKETS: usize = 10;
 
 pub struct Analyze<'a> {
-    table_name: &'a TableName,
-    input: Option<ExecId>,
+    table_id: TableId,
+    input: ExecNode<'a>,
+    // Set once the statement ran; cleared when the executor is reset.
+    done: bool,
     histogram_buckets: Option<usize>,
     hll_precision: Option<u8>,
     statistics_relative_error: Option<OrderedFloat<f64>>,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
+impl<'a> WriteExecutor<'a> for Analyze<'a> {
     type Input = (&'a AnalyzeOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (
             AnalyzeOperator {
-                table_name,
+                table_id,
                 histogram_buckets,
                 hll_precision,
                 statistics_relative_error,
@@ -60,21 +62,14 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
             },
             input_plan,
         ): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = Some(build_read(
-            arena,
-            plan_arena,
-            input_plan,
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::Analyze(Analyze {
-            table_name,
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input_plan);
+        ExecNode::Analyze(Box::new(Analyze {
+            table_id: *table_id,
             input,
+            done: false,
             histogram_buckets: *histogram_buckets,
             hll_precision: *hll_precision,
             statistics_relative_error: *statistics_relative_error,
@@ -83,25 +78,35 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Analyze<'a> {
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
-    fn next_tuple<A: MetaArena + 'a>(
+    fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(input) = self.input.take() else {
+        self.done = false;
+        self.input.reset(arena, plan_arena)
+    }
+
+    fn next_tuple<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        if mem::replace(&mut self.done, true) {
             arena.finish();
             return Ok(());
-        };
+        }
+        let input = &mut self.input;
 
         let hll_precision = self.hll_precision.unwrap_or(DEFAULT_HLL_PRECISION);
         let relative_error = self
             .statistics_relative_error
             .map_or(DEFAULT_STATISTICS_RELATIVE_ERROR, |error| error.0);
+        let table = arena
+            .table_cache()
+            .get(&self.table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
         let (mut columns, mut builders) = {
-            let table = arena
-                .transaction()
-                .table(arena.table_cache(), self.table_name.clone())?
-                .ok_or(DatabaseError::TableNotFound)?;
             let columns = table
                 .columns()
                 .enumerate()
@@ -135,7 +140,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
             (columns, indexes)
         };
 
-        while arena.next_tuple(input, plan_arena)? {
+        while input.next_tuple(arena, plan_arena)? {
             let tuple = arena.take_tuple();
             for (_, position, builder) in &mut columns {
                 builder.append(tuple.value_at(*position));
@@ -154,7 +159,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
         let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec, ddl_apply) = state.write_transaction_codec_ddl_apply_mut();
         let values = Self::persist_statistics(
-            self.table_name,
+            self.table_id,
+            table.name(),
             columns,
             builders,
             ddl_apply,
@@ -176,8 +182,10 @@ struct State {
 }
 
 impl<'a> Analyze<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn persist_statistics<U: StorageTransaction>(
-        table_name: &TableName,
+        table_id: TableId,
+        table_name: &str,
         columns: Vec<(ColumnId, usize, HistogramMetaBuilder)>,
         builders: Vec<State>,
         applies: &mut Vec<DDLApply>,
@@ -190,13 +198,13 @@ impl<'a> Analyze<'a> {
             let meta = builder.build();
             transaction.save_column_statistics(
                 table_codec,
-                table_name,
+                table_id,
                 column_id,
                 &meta,
                 plan_arena,
             )?;
             applies.push(DDLApply::UpsertColumnStatistics {
-                table_name: table_name.clone(),
+                table_id,
                 column_id,
                 meta,
             });
@@ -213,9 +221,9 @@ impl<'a> Analyze<'a> {
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
             let meta = IndexStatistics::new(histogram, sketch, top_n);
 
-            transaction.save_index_statistics(table_codec, table_name, meta.clone(), plan_arena)?;
+            transaction.save_index_statistics(table_codec, table_id, meta.clone(), plan_arena)?;
             applies.push(DDLApply::UpsertIndexStatistics {
-                table_name: table_name.clone(),
+                table_id,
                 index_id,
                 meta,
             });
@@ -234,7 +242,7 @@ impl fmt::Display for AnalyzeOperator {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         let indexes = self.index_metas.iter().join(", ");
 
-        write!(f, "Analyze {} -> [{}]", self.table_name, indexes)?;
+        write!(f, "Analyze {} -> [{}]", self.table_id, indexes)?;
 
         Ok(())
     }
@@ -293,18 +301,24 @@ mod test {
                 .done()?;
             kite_sql.analyze("t1")?;
 
-            let table_name = "t1".to_string().into();
+            let table_name = "t1".to_string();
+            let table_id = kite_sql
+                .state
+                .names()
+                .table(kite_sql.state.table_cache(), "t1")
+                .unwrap()
+                .id();
             let a_id = *kite_sql
                 .state
-                .table_cache()
-                .get(&table_name)
+                .names()
+                .table(kite_sql.state.table_cache(), &table_name)
                 .unwrap()
                 .get_column_id_by_name("a")
                 .unwrap();
             let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
-            let column = loader.load_column(&table_name, a_id).unwrap();
+            let column = loader.load_column(table_id, a_id).unwrap();
             assert_eq!(column.distinct_values_len(), expected);
-            let index = loader.load(&table_name, 0)?.unwrap();
+            let index = loader.load(table_id, 0)?.unwrap();
             assert_eq!(index.histogram().distinct_values_len(), expected);
         }
         Ok(())
@@ -331,9 +345,14 @@ mod test {
                 .done()?;
             kite_sql.analyze("t1")?;
 
-            let table_name = "t1".to_string().into();
+            let table_id = kite_sql
+                .state
+                .names()
+                .table(kite_sql.state.table_cache(), "t1")
+                .unwrap()
+                .id();
             let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
-            let index = loader.load(&table_name, 0)?.unwrap();
+            let index = loader.load(table_id, 0)?.unwrap();
             assert_eq!(index.sketch().error_bound(width), 2);
         }
         Ok(())
@@ -375,39 +394,49 @@ mod test {
         }
         kite_sql.analyze("t1")?;
 
-        let table_name = "t1".to_string().into();
+        let table_name = "t1".to_string();
+        let table_id = kite_sql
+            .state
+            .names()
+            .table(kite_sql.state.table_cache(), "t1")
+            .unwrap()
+            .id();
         let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
 
-        let table = kite_sql.state.table_cache().get(&table_name).unwrap();
+        let table = kite_sql
+            .state
+            .names()
+            .table(kite_sql.state.table_cache(), &table_name)
+            .unwrap();
         let a_id = *table.get_column_id_by_name("a").unwrap();
         let b_id = *table.get_column_id_by_name("b").unwrap();
         let c_id = *table.get_column_id_by_name("c").unwrap();
-        let statistics_meta_pk_index = loader.load(&table_name, 0)?.unwrap();
+        let statistics_meta_pk_index = loader.load(table_id, 0)?.unwrap();
         assert_eq!(statistics_meta_pk_index.index_id(), 0);
         assert_eq!(statistics_meta_pk_index.histogram().values_len(), 101);
         assert_eq!(statistics_meta_pk_index.histogram().buckets_len(), buckets);
 
-        let statistics_meta_b_index = loader.load(&table_name, 1)?.unwrap();
+        let statistics_meta_b_index = loader.load(table_id, 1)?.unwrap();
         assert_eq!(statistics_meta_b_index.index_id(), 1);
         assert_eq!(statistics_meta_b_index.histogram().values_len(), 101);
         assert_eq!(statistics_meta_b_index.histogram().buckets_len(), buckets);
 
-        let statistics_meta_p_index = loader.load(&table_name, 2)?.unwrap();
+        let statistics_meta_p_index = loader.load(table_id, 2)?.unwrap();
         assert_eq!(statistics_meta_p_index.index_id(), 2);
         assert_eq!(statistics_meta_p_index.histogram().values_len(), 101);
         assert_eq!(statistics_meta_p_index.histogram().buckets_len(), buckets);
         for (column, distinct) in [(a_id, 101), (b_id, 20)] {
-            let meta = loader.load_column(&table_name, column).unwrap();
+            let meta = loader.load_column(table_id, column).unwrap();
             assert_eq!(meta.values_len(), 101);
             assert_eq!(meta.distinct_values_len(), distinct);
             assert_eq!(meta.buckets_len(), 0);
         }
-        let unindexed = loader.load_column(&table_name, c_id).unwrap();
+        let unindexed = loader.load_column(table_id, c_id).unwrap();
         assert_eq!(unindexed.values_len(), 0);
         assert_eq!(unindexed.null_count(), 101);
         assert_eq!(unindexed.distinct_values_len(), 0);
         let expected_frequency = loader.collect_count(
-            &table_name,
+            table_id,
             1,
             &Range::Eq(DataValue::Int32(7)),
             &mut Vec::new(),
@@ -419,14 +448,14 @@ mod test {
         reopened.load(CatalogKind::Table(table_name.clone()))?;
         let loader = StatisticMetaLoader::new(reopened.state.meta_cache());
         for index in 0..=2 {
-            let meta = loader.load(&table_name, index)?.unwrap();
+            let meta = loader.load(table_id, index)?.unwrap();
             assert_eq!(meta.index_id(), index);
             assert_eq!(meta.histogram().values_len(), 101);
             assert_eq!(meta.histogram().buckets_len(), buckets);
         }
         assert_eq!(
             loader.collect_count(
-                &table_name,
+                table_id,
                 1,
                 &Range::Eq(DataValue::Int32(7)),
                 &mut Vec::new()
@@ -435,28 +464,28 @@ mod test {
         );
         assert_eq!(
             loader
-                .load_column(&table_name, a_id)
+                .load_column(table_id, a_id)
                 .unwrap()
                 .distinct_values_len(),
             101
         );
         assert_eq!(
             loader
-                .load_column(&table_name, b_id)
+                .load_column(table_id, b_id)
                 .unwrap()
                 .distinct_values_len(),
             20
         );
         assert_eq!(
-            loader.load_column(&table_name, c_id).unwrap().null_count(),
+            loader.load_column(table_id, c_id).unwrap().null_count(),
             101
         );
         reopened.ddl("drop index t1.b_index")?;
         let loader = StatisticMetaLoader::new(reopened.state.meta_cache());
-        assert!(loader.load(&table_name, 1)?.is_none());
+        assert!(loader.load(table_id, 1)?.is_none());
         assert_eq!(
             loader
-                .load_column(&table_name, b_id)
+                .load_column(table_id, b_id)
                 .unwrap()
                 .distinct_values_len(),
             20
@@ -465,7 +494,7 @@ mod test {
         assert!(tx
             .index_statistics(
                 &mut TableCodec::default(),
-                "t1",
+                0,
                 1,
                 reopened.state.table_arena().borrow_mut()
             )?
@@ -473,7 +502,7 @@ mod test {
         assert_eq!(
             tx.column_statistics(
                 &mut TableCodec::default(),
-                "t1",
+                0,
                 b_id,
                 reopened.state.table_arena().borrow_mut()
             )?
@@ -487,7 +516,7 @@ mod test {
         assert!(tx
             .column_statistics(
                 &mut TableCodec::default(),
-                "t1",
+                0,
                 c_id,
                 reopened.state.table_arena().borrow_mut()
             )?
@@ -495,7 +524,7 @@ mod test {
         assert!(tx
             .column_statistics(
                 &mut TableCodec::default(),
-                "t1",
+                0,
                 a_id,
                 reopened.state.table_arena().borrow_mut()
             )?
@@ -514,7 +543,7 @@ mod test {
         let mut codec = TableCodec::default();
         let mut tx = reopened.storage.transaction()?;
         codec.with_index_statistics(
-            "t1",
+            0,
             2,
             None,
             reopened.state.table_arena().borrow(),
@@ -544,13 +573,18 @@ mod test {
         }
         kite_sql.analyze("t1")?;
 
-        let table_name = "t1".to_string().into();
+        let table_id = kite_sql
+            .state
+            .names()
+            .table(kite_sql.state.table_cache(), "t1")
+            .unwrap()
+            .id();
         let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
-        assert!(loader.load(&table_name, 1)?.is_some());
+        assert!(loader.load(table_id, 1)?.is_some());
         assert_eq!(
             loader
                 .collect_count(
-                    &table_name,
+                    table_id,
                     1,
                     &Range::Eq(DataValue::Int32(7)),
                     &mut Vec::new()
@@ -560,7 +594,7 @@ mod test {
         );
         let mut transaction = kite_sql.storage.transaction()?;
         let mut table_codec = TableCodec::default();
-        let keys: Vec<Vec<u8>> = table_codec.with_index_statistics_bound("t1", 1, |min, max| {
+        let keys: Vec<Vec<u8>> = table_codec.with_index_statistics_bound(0, 1, |min, max| {
             let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
             let mut keys = Vec::new();
             while let Some((key, _)) = iter.try_next()? {
@@ -573,11 +607,11 @@ mod test {
         }
 
         let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
-        assert!(loader.load(&table_name, 1)?.is_some());
+        assert!(loader.load(table_id, 1)?.is_some());
         assert_eq!(
             loader
                 .collect_count(
-                    &table_name,
+                    table_id,
                     1,
                     &Range::Eq(DataValue::Int32(7)),
                     &mut Vec::new()
@@ -596,15 +630,20 @@ mod test {
         create_table(&mut kite_sql, "create table t1 (a int primary key, b int)")?;
         create_index(&mut kite_sql, "create index b_index on t1 (b)")?;
 
-        let table_name = "t1".to_string().into();
+        let table_id = kite_sql
+            .state
+            .names()
+            .table(kite_sql.state.table_cache(), "t1")
+            .unwrap()
+            .id();
         let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
-        assert!(loader.load(&table_name, 1)?.is_none());
+        assert!(loader.load(table_id, 1)?.is_none());
 
         assert!(!kite_sql
             .state
             .meta_cache()
             .indexes
-            .contains_key(&(table_name, 1)));
+            .contains_key(&(table_id, 1)));
 
         Ok(())
     }
@@ -627,7 +666,7 @@ mod test {
         let count = {
             let transaction = kite_sql.storage.transaction()?;
             let mut table_codec = TableCodec::default();
-            table_codec.with_statistics_bound("t1", |min, max| {
+            table_codec.with_statistics_bound(0, |min, max| {
                 let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
                 let mut count = 0;
                 while iter.try_next()?.is_some() {
@@ -643,7 +682,7 @@ mod test {
 
         let transaction = kite_sql.storage.transaction()?;
         let mut table_codec = TableCodec::default();
-        let keys = table_codec.with_statistics_bound("t1", |min, max| {
+        let keys = table_codec.with_statistics_bound(0, |min, max| {
             let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
             let mut keys = 0;
             while iter.try_next()?.is_some() {
@@ -651,9 +690,14 @@ mod test {
             }
             Ok(keys)
         })?;
-        let table_name = "t1".to_string().into();
+        let table_id = kite_sql
+            .state
+            .names()
+            .table(kite_sql.state.table_cache(), "t1")
+            .unwrap()
+            .id();
         let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
-        let index_statistics = loader.load(&table_name, 0)?.unwrap();
+        let index_statistics = loader.load(table_id, 0)?.unwrap();
         let expected_keys = 2
             + 1
             + index_statistics
@@ -667,7 +711,7 @@ mod test {
         assert!(kite_sql.state.meta_cache().columns.is_empty());
         assert!(kite_sql.state.meta_cache().indexes.is_empty());
         let transaction = kite_sql.storage.transaction()?;
-        table_codec.with_statistics_bound("t1", |min, max| {
+        table_codec.with_statistics_bound(0, |min, max| {
             assert!(transaction
                 .range(Bound::Included(min), Bound::Included(max))?
                 .try_next()?

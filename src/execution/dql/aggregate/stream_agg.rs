@@ -17,7 +17,7 @@ use crate::execution::dql::aggregate::{
     create_accumulators, update_accumulators, write_aggregate_output, Accumulator,
 };
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
@@ -33,13 +33,13 @@ pub struct StreamAggExecutor<'a> {
     groupby_exprs: &'a [ExprRef],
     group_keys: Option<Vec<DataValue>>,
     accs: Vec<Box<dyn Accumulator>>,
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor<'a> {
+impl<'a> ReadExecutor<'a> for StreamAggExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (
             AggregateOperator {
                 agg_calls,
@@ -48,13 +48,11 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor<'
             },
             input,
         ): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::StreamAgg(StreamAggExecutor {
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::StreamAgg(Box::new(StreamAggExecutor {
             agg_calls,
             groupby_exprs,
             group_keys: None,
@@ -67,21 +65,21 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamAggExecutor<'
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.group_keys = None;
         self.accs.clear();
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if !arena.next_tuple(self.input, plan_arena)? {
+            if !self.input.next_tuple(arena, plan_arena)? {
                 let Some(group_keys) = self.group_keys.take() else {
                     arena.finish();
                     return Ok(());
@@ -135,7 +133,7 @@ mod tests {
     use super::StreamAggExecutor;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
-    use crate::execution::{empty_context, execute_input, try_collect};
+    use crate::execution::{execute_input, try_collect};
     use crate::expression::agg::AggKind;
     use crate::expression::ScalarExpression;
     use crate::planner::operator::aggregate::AggregateOperator;
@@ -193,14 +191,12 @@ mod tests {
             force_spill: false,
         };
         let table_cache = crate::storage::TableCache::default();
-        let view_cache = crate::storage::ViewCache::default();
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
         let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
 
         let rows = try_collect(execute_input::<_, StreamAggExecutor>(
             (&operator, &input),
-            empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;
@@ -239,14 +235,12 @@ mod tests {
             force_spill: false,
         };
         let table_cache = crate::storage::TableCache::default();
-        let view_cache = crate::storage::ViewCache::default();
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
         let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
 
         let rows = try_collect(execute_input::<_, StreamAggExecutor>(
             (&operator, &input),
-            empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;

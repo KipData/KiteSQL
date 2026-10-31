@@ -33,12 +33,14 @@ use kite_sql::types::LogicalType;
 use pprof::ProfilerGuard;
 use rand::prelude::ThreadRng;
 use rand::Rng;
+use std::borrow::Borrow;
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::path::Path;
 #[cfg(any(feature = "pprof", test))]
 use std::path::PathBuf;
+use std::thread;
 use std::time::{Duration, Instant};
 
 mod backend;
@@ -108,6 +110,9 @@ struct Args {
     measure_time: u64,
     #[clap(long, default_value = "1")]
     num_ware: usize,
+    /// Concurrent terminals, each on its own connection.
+    #[clap(long, default_value = "1")]
+    threads: usize,
     #[clap(long, default_value = "false")]
     rocksdb_stats: bool,
     #[clap(long, default_value = "false")]
@@ -129,7 +134,6 @@ enum BackendKind {
     Dual,
 }
 
-// TODO: Support multi-threaded TPCC
 fn main() -> Result<(), TpccError> {
     let args = Args::parse();
     let mut rng = rand::thread_rng();
@@ -188,7 +192,49 @@ fn run_tpcc<B: BackendControl>(
     Load::load_warehouses(rng, backend, args.num_ware)?;
     Load::load_custs(rng, backend, args.num_ware)?;
     Load::load_ord(rng, backend, args.num_ware)?;
+    let backend = &*backend;
 
+    let tpcc_start = Instant::now();
+    #[cfg(all(unix, feature = "pprof"))]
+    let pprof = PprofSession::start(args)?;
+    let counters = thread::scope(|scope| {
+        let threads = (1..args.threads)
+            .map(|_| {
+                let worker = backend.worker()?;
+                Ok(scope.spawn(move || {
+                    measure(worker.borrow(), args, tpcc_start, ProgressBar::hidden())
+                }))
+            })
+            .collect::<Result<Vec<_>, TpccError>>()?;
+        let mut total = measure(backend, args, tpcc_start, ProgressBar::new_spinner())?;
+        for thread in threads {
+            let (success, late, failure, rt_hist) = thread.join().expect("tpcc thread panicked")?;
+            for i in 0..5 {
+                total.0[i] += success[i];
+                total.1[i] += late[i];
+                total.2[i] += failure[i];
+            }
+            total.3.merge(&rt_hist);
+        }
+        Ok::<_, TpccError>(total)
+    })?;
+    report(backend, counters, tpcc_start)?;
+    #[cfg(all(unix, feature = "pprof"))]
+    if let Some(pprof) = pprof {
+        pprof.finish()?;
+    }
+    Ok(())
+}
+
+type Counters = ([usize; 5], [usize; 5], [usize; 5], RtHist);
+
+fn measure<B: BackendControl>(
+    backend: &B,
+    args: &Args,
+    tpcc_start: Instant,
+    progress: ProgressBar,
+) -> Result<Counters, TpccError> {
+    let rng = &mut rand::thread_rng();
     let statement_specs = statement_specs();
     let mut test_statements = backend.prepare_statements(&statement_specs)?;
 
@@ -201,10 +247,6 @@ fn run_tpcc<B: BackendControl>(
     let duration = Duration::new(args.measure_time, 0);
     let mut round_count = 0;
     let mut seq_gen = SeqGen::new(10, 10, 1, 1, 1);
-    let tpcc_start = Instant::now();
-    #[cfg(all(unix, feature = "pprof"))]
-    let pprof = PprofSession::start(args)?;
-    let progress = ProgressBar::new_spinner();
     progress.set_style(ProgressStyle::with_template("{spinner:.green} [TPCC] {msg}").unwrap());
     progress.enable_steady_tick(Duration::from_millis(120));
     update_progress_bar(
@@ -228,11 +270,11 @@ fn run_tpcc<B: BackendControl>(
 
             if let Err(err) =
                 do_tpcc_transaction::<B>(i, rng, &mut tx, args.num_ware, &tpcc_args, statement)
+                    .and_then(|()| tx.commit())
             {
                 failure[i] += 1;
                 last_error = Some(err);
             } else {
-                tx.commit()?;
                 let rt = transaction_start.elapsed();
                 rt_hist.hist_inc(i, rt);
                 is_succeed = true;
@@ -282,15 +324,15 @@ fn run_tpcc<B: BackendControl>(
         round_count += 1;
     }
     progress.finish_and_clear();
+    Ok((success, late, failure, rt_hist))
+}
+
+fn report<B: BackendControl>(
+    backend: &B,
+    (success, late, failure, rt_hist): Counters,
+    tpcc_start: Instant,
+) -> Result<(), TpccError> {
     let actual_tpcc_time = tpcc_start.elapsed();
-    update_progress_bar(
-        &progress,
-        round_count,
-        &success,
-        &late,
-        &failure,
-        tpcc_start,
-    );
     print_summary_table(&success, &late, &failure, actual_tpcc_time);
     print_constraint_checks(&success, &late);
     print_response_checks(&success, &late);
@@ -302,10 +344,6 @@ fn run_tpcc<B: BackendControl>(
     if let Some(metrics) = backend.storage_metrics() {
         println!();
         println!("{metrics}");
-    }
-    #[cfg(all(unix, feature = "pprof"))]
-    if let Some(pprof) = pprof {
-        pprof.finish()?;
     }
 
     Ok(())
@@ -785,7 +823,7 @@ fn other_ware(rng: &mut ThreadRng, home_ware: usize, num_ware: usize) -> usize {
     }
 
     loop {
-        let tmp = rng.gen_range(1..num_ware);
+        let tmp = rng.gen_range(1..=num_ware);
         if tmp != home_ware {
             return tmp;
         }
@@ -870,7 +908,7 @@ fn explain_tpcc() -> Result<(), DatabaseError> {
         let mut output = iter.schema(|schema| {
             schema
                 .iter()
-                .map(|column| column.full_name().to_string())
+                .map(|column| schema.full_name(column))
                 .collect::<Vec<_>>()
                 .join("\t")
         });

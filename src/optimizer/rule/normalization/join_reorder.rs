@@ -165,7 +165,7 @@ struct JoinInputStatistics<'a> {
 
 fn index_column(column: ColumnRef, index: &IndexMeta, arena: &PlanArena) -> bool {
     let column = arena.column(column);
-    column.table_name() == Some(&index.table_name)
+    column.table_id() == Some(index.table_id)
         && column.id().is_some_and(|id| index.column_ids.contains(&id))
 }
 
@@ -730,19 +730,30 @@ mod tests {
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
 
+    fn referenced_tables(plan: &LogicalPlan) -> Vec<crate::catalog::TableId> {
+        let mut tables = Vec::new();
+        plan.visit_referenced_tables(&mut |table| tables.push(table));
+        tables
+    }
+
+    fn table_id(name: &str) -> crate::catalog::TableId {
+        name.bytes()
+            .fold(0, |id, byte| id << 8 | crate::catalog::TableId::from(byte))
+    }
+
     fn input(name: &str, rows: usize, arena: &mut PlanArena) -> (LogicalPlan, ExprRef) {
         let mut column = ColumnCatalog::new(
             name.into(),
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
         );
-        column.set_ref_table(name.into(), 0, false);
+        column.set_table(table_id(name), 0);
         let column = arena.alloc_column(column);
         let key = arena.alloc_expression(ScalarExpression::column_expr(column, 0));
         let mut plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: name.into(),
-                columns: vec![column],
+                table_id: table_id(name),
+                deserializers: crate::storage::deserializers_for_test(vec![column]),
                 limit: (None, None),
                 index_infos: Vec::new(),
                 with_pk: false,
@@ -766,7 +777,7 @@ mod tests {
         let (mut plan, key) = input(name, rows, arena);
         let meta = arena.alloc_index(IndexMeta {
             id: 1,
-            table_name: name.into(),
+            table_id: table_id(name),
             name: format!("idx_{name}"),
             column_ids: vec![0],
             ty: IndexType::Normal,
@@ -884,7 +895,7 @@ mod tests {
             for value in 0..rows {
                 builder.append(&DataValue::Int32(value % 100));
             }
-            cache.columns.insert((table.into(), 0), builder.build());
+            cache.columns.insert((table_id(table), 0), builder.build());
         }
         let loader = StatisticMetaLoader::new(&cache);
         assert_eq!(
@@ -914,7 +925,7 @@ mod tests {
         };
         let mut nulls = HistogramMetaBuilder::new(DEFAULT_HLL_PRECISION)?;
         nulls.append(&DataValue::Null);
-        cache.columns.insert(("r".into(), 0), nulls.build());
+        cache.columns.insert((table_id("r"), 0), nulls.build());
         assert_eq!(
             column_ndv(
                 &left,
@@ -925,7 +936,7 @@ mod tests {
             )?,
             Some((100, 0))
         );
-        cache.columns.remove(&("r".into(), 0));
+        cache.columns.remove(&(table_id("r"), 0));
         assert_eq!(
             column_ndv(
                 &left,
@@ -1039,14 +1050,14 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        lc.set_ref_table("l".into(), 1, false);
+        lc.set_table(table_id("l"), 1);
         let lc = arena.alloc_column(lc);
         let mut rc = ColumnCatalog::new(
             "r_second".into(),
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        rc.set_ref_table("r".into(), 1, false);
+        rc.set_table(table_id("r"), 1);
         let rc = arena.alloc_column(rc);
         let l2 = arena.alloc_expression(ScalarExpression::column_expr(lc, 1));
         let r2 = arena.alloc_expression(ScalarExpression::column_expr(rc, 1));
@@ -1206,8 +1217,8 @@ mod tests {
         }
         let join = plan.childrens.only();
         let (left, right) = join.childrens.twins();
-        assert_eq!(left.referenced_table(), vec!["b".into(), "c".into()]);
-        assert_eq!(right.referenced_table(), vec!["a".into()]);
+        assert_eq!(referenced_tables(left), vec![table_id("b"), table_id("c")]);
+        assert_eq!(referenced_tables(right), vec![table_id("a")]);
         let mut join = join.clone();
         assert!(!GreedyJoinReorder.apply(&mut join, &mut arena, None)?);
         Ok(())
@@ -1253,8 +1264,8 @@ mod tests {
         assert_eq!(plan.estimated_rows(), Some(200000));
         // BC (200 rows) is merged first and builds against A (1000 rows).
         let (bc, a) = plan.childrens.only().childrens.twins();
-        assert_eq!(a.referenced_table(), vec!["a".into()]);
-        assert_eq!(bc.referenced_table(), vec!["b".into(), "c".into()]);
+        assert_eq!(referenced_tables(a), vec![table_id("a")]);
+        assert_eq!(referenced_tables(bc), vec![table_id("b"), table_id("c")]);
         assert_eq!(bc.estimated_rows(), Some(200));
         let Operator::Join(op) = &bc.operator else {
             unreachable!()
@@ -1313,8 +1324,8 @@ mod tests {
         }
         let join = plan.childrens.only();
         let (left, right) = join.childrens.twins();
-        assert_eq!(left.referenced_table(), vec!["a".into(), "c".into()]);
-        assert_eq!(right.referenced_table(), vec!["b".into()]);
+        assert_eq!(referenced_tables(left), vec![table_id("a"), table_id("c")]);
+        assert_eq!(referenced_tables(right), vec![table_id("b")]);
         let Operator::Join(op) = &join.operator else {
             unreachable!()
         };
@@ -1375,13 +1386,13 @@ mod tests {
                 Operator::Join(join) if join.join_type == JoinType::Cross
             ));
             let (abc, d) = cross.childrens.twins();
-            assert_eq!(d.referenced_table(), vec!["d".into()]);
+            assert_eq!(referenced_tables(d), vec![table_id("d")]);
             // Without estimates, the narrower C becomes the build side of AB.
             let (c, ab) = abc.childrens.twins();
-            assert_eq!(c.referenced_table(), vec!["c".into()]);
-            let mut tables = ab.referenced_table();
+            assert_eq!(referenced_tables(c), vec![table_id("c")]);
+            let mut tables = referenced_tables(ab);
             tables.sort();
-            assert_eq!(tables, vec!["a".into(), "b".into()]);
+            assert_eq!(tables, vec![table_id("a"), table_id("b")]);
             for join in [cross, abc, ab] {
                 assert_eq!(join.row_count_option(), None);
             }

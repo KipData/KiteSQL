@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 use crate::types::value::Utf8Type;
@@ -50,40 +50,32 @@ impl ReferenceSerialization for Utf8Type {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
         match self {
             Utf8Type::Variable(len) => {
-                0u8.encode(writer, is_direct, reference_tables, arena)?;
-                len.encode(writer, is_direct, reference_tables, arena)
+                0u8.encode(writer, is_direct, arena)?;
+                len.encode(writer, is_direct, arena)
             }
             Utf8Type::Fixed(len) => {
-                1u8.encode(writer, is_direct, reference_tables, arena)?;
-                len.encode(writer, is_direct, reference_tables, arena)
+                1u8.encode(writer, is_direct, arena)?;
+                len.encode(writer, is_direct, arena)
             }
         }
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        match u8::decode(reader, drive, reference_tables, arena)? {
+        match u8::decode(reader, drive.as_deref_mut(), arena)? {
             0 => Ok(Utf8Type::Variable(Option::<u32>::decode(
                 reader,
-                drive,
-                reference_tables,
+                drive.as_deref_mut(),
                 arena,
             )?)),
-            1 => Ok(Utf8Type::Fixed(u32::decode(
-                reader,
-                drive,
-                reference_tables,
-                arena,
-            )?)),
+            1 => Ok(Utf8Type::Fixed(u32::decode(reader, drive, arena)?)),
             tag => Err(DatabaseError::InvalidValue(format!(
                 "invalid utf8 type tag: {tag}"
             ))),
@@ -269,7 +261,6 @@ impl ReferenceSerialization for DataValue {
         &self,
         writer: &mut W,
         _: bool,
-        _: &mut ReferenceTables,
         _: &A,
     ) -> Result<(), DatabaseError> {
         self.encode_reference_value(writer)
@@ -277,8 +268,7 @@ impl ReferenceSerialization for DataValue {
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        _: &ReferenceTables,
+        _: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &mut A,
     ) -> Result<Self, DatabaseError> {
         DataValue::decode_reference_value(reader)
@@ -427,7 +417,7 @@ fn read_char_length_units<R: Read>(reader: &mut R) -> Result<CharLengthUnits, Da
 pub(crate) mod test {
     use super::{TAG_BINARY, TAG_BOOLEAN, TAG_INT64, TAG_TIME64, TAG_TUPLE, TAG_UTF8};
     use crate::errors::DatabaseError;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
@@ -483,24 +473,19 @@ pub(crate) mod test {
             DataValue::Tuple(vec![DataValue::Null, DataValue::Int32(42)]),
         ];
 
-        let mut reference_tables = ReferenceTables::new();
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
         let mut arena = crate::planner::TableArena::default();
 
         for source in &sources {
-            source.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+            source.encode(&mut cursor, false, &arena)?;
         }
 
         cursor.seek(SeekFrom::Start(0))?;
 
         for source in sources {
-            let decoded = DataValue::decode::<RocksTransaction, _, _>(
-                &mut cursor,
-                None,
-                &reference_tables,
-                &mut arena,
-            )?;
+            let decoded =
+                DataValue::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena)?;
             assert_eq!(source, decoded);
         }
 
@@ -562,16 +547,14 @@ pub(crate) mod test {
             Utf8Type::Variable(Some(32)),
             Utf8Type::Fixed(8),
         ];
-        let mut tables = ReferenceTables::new();
         let mut arena = crate::planner::TableArena::default();
 
         for (index, value) in values.into_iter().enumerate() {
             let mut bytes = Vec::new();
-            value.encode(&mut bytes, false, &mut tables, &arena)?;
+            value.encode(&mut bytes, false, &arena)?;
             let decoded = Utf8Type::decode::<RocksTransaction, _, _>(
                 &mut Cursor::new(bytes),
                 None,
-                &tables,
                 &mut arena,
             )?;
             assert!(matches!(
@@ -582,12 +565,8 @@ pub(crate) mod test {
             ));
         }
 
-        let result = Utf8Type::decode::<RocksTransaction, _, _>(
-            &mut Cursor::new([2]),
-            None,
-            &tables,
-            &mut arena,
-        );
+        let result =
+            Utf8Type::decode::<RocksTransaction, _, _>(&mut Cursor::new([2]), None, &mut arena);
         let Err(err) = result else {
             panic!("invalid tag should fail")
         };

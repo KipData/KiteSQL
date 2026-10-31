@@ -441,9 +441,8 @@ pub(crate) fn apply_scan_order_hint(
         };
         if !expr.all_referenced_columns(arena, |arena, column, _| {
             scan_op
-                .columns
-                .iter()
-                .any(|scan_column| arena.same_column(*scan_column, *column))
+                .columns()
+                .any(|scan_column| arena.same_column(scan_column, *column))
         })? {
             required_from_table = false;
             break;
@@ -777,7 +776,7 @@ mod tests {
         UseStreamAggregate,
     };
     use crate::binder::test::build_t1_table;
-    use crate::catalog::{ColumnCatalog, TableName};
+    use crate::catalog::ColumnCatalog;
     use crate::errors::DatabaseError;
     use crate::expression::agg::AggKind;
     use crate::expression::range_detacher::Range;
@@ -1322,11 +1321,10 @@ mod tests {
             fields: index_fields,
             ignore_prefix_len,
         };
-        let table_name: TableName = ::std::sync::Arc::from("t1");
         let meta = arena.alloc_index(IndexMeta {
             id: 1,
             column_ids: (1..=len as ColumnId).collect(),
-            table_name,
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "idx".to_string(),
@@ -1367,8 +1365,8 @@ mod tests {
 
         let mut scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: ::std::sync::Arc::from("t1"),
-                columns: vec![column],
+                table_id: 0,
+                deserializers: crate::storage::deserializers_for_test(vec![column]),
                 limit: (None, None),
                 index_infos: vec![index_info.clone()],
                 with_pk: false,
@@ -1400,7 +1398,6 @@ mod tests {
     fn build_distinct_scan_plan(
         arena: &mut crate::planner::PlanArena,
     ) -> (LogicalPlan, SortOption) {
-        let table_name: TableName = ::std::sync::Arc::from("t1");
         let c1 = arena.alloc_column(ColumnCatalog::new_dummy("c1".to_string()));
         let c1_id = 1;
         let columns = vec![c1];
@@ -1415,7 +1412,7 @@ mod tests {
             meta: arena.alloc_index(IndexMeta {
                 id: 1,
                 column_ids: vec![c1_id],
-                table_name: table_name.clone(),
+                table_id: 0,
                 pk_ty: LogicalType::Integer,
                 value_ty: LogicalType::Integer,
                 name: "idx".to_string(),
@@ -1432,8 +1429,8 @@ mod tests {
 
         let scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name,
-                columns,
+                table_id: 0,
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: vec![index_info],
                 with_pk: false,
@@ -1745,11 +1742,10 @@ mod tests {
         let (index_info, _) = build_index_info(&mut arena, vec![sort_field.clone()], 0);
 
         let columns = vec![column];
-        let table_name: TableName = ::std::sync::Arc::from("t");
         let table_scan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name,
-                columns,
+                table_id: 0,
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: vec![index_info],
                 with_pk: false,
@@ -1996,8 +1992,8 @@ mod tests {
 
         let mut scan_plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: ::std::sync::Arc::from("t"),
-                columns,
+                table_id: 0,
+                deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: vec![index_info],
                 with_pk: false,

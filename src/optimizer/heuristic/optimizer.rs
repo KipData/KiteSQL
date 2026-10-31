@@ -839,7 +839,7 @@ mod tests {
 
         let transaction = database.storage.transaction()?;
         let c1_column = transaction
-            .table(database.state.table_cache(), "t1".to_string().into())?
+            .table(database.state.names(), database.state.table_cache(), "t1")?
             .unwrap()
             .get_column_by_name("c1")
             .unwrap();
@@ -853,6 +853,7 @@ mod tests {
         let table_functions = Default::default();
         let mut binder = Binder::new(
             BinderContext::new(
+                database.state.names(),
                 database.state.table_cache(),
                 database.state.view_cache(),
                 &transaction,

@@ -82,7 +82,7 @@ impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_,
     ) -> (ScalarExpression, ExprRef) {
         let output_column = expr.output_column_ref(arena);
         let mut alias_column = arena.clone_column(output_column);
-        alias_column.set_ref_table(arena.temp_table(), 0, true);
+        alias_column.set_source(arena.alloc_source(), 0, true);
 
         let alias_column = arena.alloc_column(alias_column);
         let alias_ref =

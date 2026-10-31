@@ -22,7 +22,7 @@ use crate::execution::dql::join::hash::{
 };
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
@@ -36,7 +36,7 @@ use bumpalo::Bump;
 use std::collections::HashMap;
 use std::mem::transmute;
 
-pub struct HashJoin {
+pub struct HashJoin<'a> {
     state: HashJoinState,
     ty: JoinType,
     on_left_keys: Vec<ExprRef>,
@@ -44,8 +44,8 @@ pub struct HashJoin {
     filter: Option<ExprRef>,
     left_schema_len: usize,
     right_schema_len: usize,
-    left_input: ExecId,
-    right_input: ExecId,
+    left_input: ExecNode<'a>,
+    right_input: ExecNode<'a>,
     bump: Box<Bump>,
     init_error: Option<DatabaseError>,
 }
@@ -65,13 +65,13 @@ enum HashJoinState {
     End,
 }
 
-impl HashJoin {
+impl<'a> HashJoin<'a> {
     fn new(
         JoinOperator { on, join_type, .. }: &JoinOperator,
         left_schema_len: usize,
         right_schema_len: usize,
-        left_input: ExecId,
-        right_input: ExecId,
+        left_input: ExecNode<'a>,
+        right_input: ExecNode<'a>,
     ) -> Self {
         let ((on_left_keys, on_right_keys), filter_expr) = match on {
             JoinCondition::On { on, filter } => (on.iter().copied().unzip(), *filter),
@@ -107,7 +107,7 @@ impl HashJoin {
     }
 }
 
-impl HashJoin {
+impl<'a> HashJoin<'a> {
     #[allow(clippy::mutable_key_type)]
     fn own_bump_vec(buf: BumpVec<'_, DataValue>) -> BumpVec<'static, DataValue> {
         unsafe { transmute::<BumpVec<'_, DataValue>, BumpVec<'static, DataValue>>(buf) }
@@ -143,9 +143,9 @@ impl HashJoin {
         Ok(())
     }
 
-    fn initialize_build<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    fn initialize_build<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if !matches!(self.state, HashJoinState::Build) {
@@ -162,7 +162,7 @@ impl HashJoin {
         let mut build_buf = BumpVec::with_capacity_in(self.on_left_keys.len(), &self.bump);
         let mut build_count = 0usize;
 
-        while arena.next_tuple(self.left_input, plan_arena)? {
+        while self.left_input.next_tuple(arena, plan_arena)? {
             let tuple = arena.take_tuple();
             Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf, plan_arena)?;
 
@@ -229,20 +229,18 @@ pub(crate) struct BuildState {
     pub(crate) tuples: Vec<(usize, TupleImpl)>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashJoin {
+impl<'a> ReadExecutor<'a> for HashJoin<'a> {
     type Input = (&'a JoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, left_plan, right_plan): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
         let left_schema_len = left_plan.read_schema().len();
         let right_schema_len = right_plan.read_schema().len();
-        let left_input = build_read(arena, plan_arena, left_plan, cache, transaction);
-        let right_input = build_read(arena, plan_arena, right_plan, cache, transaction);
+        let left_input = build_read(arena, plan_arena, left_plan);
+        let right_input = build_read(arena, plan_arena, right_plan);
         let executor = HashJoin::new(
             op,
             left_schema_len,
@@ -250,25 +248,25 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for HashJoin {
             left_input,
             right_input,
         );
-        arena.push(ExecNode::HashJoin(executor))
+        ExecNode::HashJoin(Box::new(executor))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = HashJoinState::Build;
         self.bump.reset();
-        arena.reset(self.left_input, plan_arena)?;
-        arena.reset(self.right_input, plan_arena)
+        self.left_input.reset(arena, plan_arena)?;
+        self.right_input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if let Some(err) = self.init_error.take() {
@@ -289,7 +287,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin {
                 } => {
                     let probe_finished = loop {
                         if probe_state.is_none() {
-                            if !arena.next_tuple(self.right_input, plan_arena)? {
+                            if !self.right_input.next_tuple(arena, plan_arena)? {
                                 break true;
                             }
                             let tuple = arena.take_tuple();
@@ -501,8 +499,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -533,7 +529,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, HashJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -562,8 +558,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -595,7 +589,7 @@ mod test {
         {
             let tuples = try_collect(crate::execution::execute_input::<_, HashJoin>(
                 (&op, &left, &right),
-                crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+                &table_cache,
                 plan_arena,
                 &transaction,
             ))?;
@@ -628,8 +622,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -660,7 +652,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, HashJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -693,8 +685,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -770,7 +760,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, HashJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );
@@ -794,8 +784,6 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -826,7 +814,7 @@ mod test {
         right.populate_output_schema_recursive(&mut plan_arena);
         let executor = crate::execution::execute_input::<_, HashJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );

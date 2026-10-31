@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::expression::window::WindowFunctionKind;
 use crate::planner::operator::sort::SortField;
@@ -81,20 +81,18 @@ pub struct Window<'a> {
     partition_by_len: usize,
     functions: Vec<Box<dyn WindowFunction>>,
     input_exhausted: bool,
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Window<'a> {
+impl<'a> ReadExecutor<'a> for Window<'a> {
     type Input = (&'a WindowOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (operator, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
         let WindowOperator {
             sort_fields,
             partition_by_len,
@@ -117,7 +115,7 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Window<'a> {
                 function::new(function.kind, function.args.clone(), function.ty.clone())
             })
             .collect();
-        arena.push(ExecNode::Window(Window {
+        ExecNode::Window(Box::new(Window {
             state: WindowState::default(),
             retention,
             sort_fields,
@@ -228,18 +226,18 @@ impl<'a> Window<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state.clear();
         self.input_exhausted = false;
         self.reset_functions()?;
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut output_ready = true;
@@ -257,7 +255,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
 
             let (tuple, boundary) = if let Some((tuple, boundary)) = self.state.pending.take() {
                 (tuple, Some(boundary))
-            } else if arena.next_tuple(self.input, plan_arena)? {
+            } else if self.input.next_tuple(arena, plan_arena)? {
                 (arena.take_tuple(), None)
             } else {
                 self.eval_functions(plan_arena)?;
@@ -301,7 +299,7 @@ mod tests {
             partition_by_len,
             functions,
             input_exhausted: false,
-            input: 0,
+            input: ExecNode::Dummy(Box::default()),
         }
     }
 

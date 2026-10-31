@@ -98,7 +98,7 @@ mod test {
     use super::*;
     use crate::errors::DatabaseError;
     use crate::expression::UnaryOperator;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::evaluator::UnaryEvaluatorRef;
     use crate::types::value::DataValue;
@@ -246,19 +246,13 @@ mod test {
     fn test_unary_evaluator_serialization() -> Result<(), DatabaseError> {
         let evaluator = create(LogicalType::Boolean, UnaryOperator::Not)?;
         let mut cursor = Cursor::new(Vec::new());
-        let mut reference_tables = ReferenceTables::new();
         let mut arena = crate::planner::TableArena::default();
 
-        evaluator.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        evaluator.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            UnaryEvaluatorRef::decode::<RocksTransaction, _, _>(
-                &mut cursor,
-                None,
-                &reference_tables,
-                &mut arena
-            )?,
+            UnaryEvaluatorRef::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena)?,
             evaluator
         );
 

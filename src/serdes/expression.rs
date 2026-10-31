@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::{ExprRef, MetaArena};
-use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
+use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
 use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 
@@ -24,21 +24,17 @@ impl ReferenceSerialization for ExprRef {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        arena
-            .expression(*self)
-            .encode(writer, is_direct, reference_tables, arena)
+        arena.expression(*self).encode(writer, is_direct, arena)
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        context: Option<&mut ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let expression = ScalarExpression::decode(reader, context, reference_tables, arena)?;
+        let expression = ScalarExpression::decode(reader, context, arena)?;
         Ok(arena.alloc_expression(expression))
     }
 }

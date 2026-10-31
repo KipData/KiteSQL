@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableId};
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -41,7 +41,7 @@ static EMPTY_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {
 });
 
 pub struct Describe {
-    table_name: TableName,
+    table_id: TableId,
     columns: Option<Vec<ColumnRef>>,
     cursor: usize,
 }
@@ -49,32 +49,30 @@ pub struct Describe {
 impl From<&DescribeOperator> for Describe {
     fn from(op: &DescribeOperator) -> Self {
         Describe {
-            table_name: op.table_name.clone(),
+            table_id: op.table_id,
             columns: None,
             cursor: 0,
         }
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Describe {
+impl<'a> ReadExecutor<'a> for Describe {
     type Input = &'a DescribeOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
         let executor = Describe::from(input);
-        arena.push(ExecNode::Describe(executor))
+        ExecNode::Describe(Box::new(executor))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Describe {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.columns = None;
@@ -84,13 +82,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Describe {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.columns.is_none() {
             let table = arena
-                .transaction()
-                .table(arena.table_cache(), self.table_name.clone())?
+                .table_cache()
+                .get(&self.table_id)
                 .ok_or(DatabaseError::TableNotFound)?;
             self.columns = Some(table.columns().copied().collect());
         }

@@ -16,19 +16,22 @@ use crate::catalog::{ColumnCatalog, ColumnRef, ColumnRelation};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
-use crate::planner::{MetaArena, PlanArena};
+use crate::planner::{ExprRef, MetaArena, PlanArena};
 use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
+use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::{slice, vec};
 
-pub type TableName = Arc<str>;
+pub type TableName = String;
+/// Allocated once per table or view, in creation order; it prefixes the table's keys.
+pub type TableId = u64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableCatalog {
+    pub(crate) id: TableId,
     pub(crate) name: TableName,
     /// Mapping from column names to column ids
     column_idxs: BTreeMap<String, (ColumnId, usize)>,
@@ -41,20 +44,30 @@ pub struct TableCatalog {
     primary_key_type: LogicalType,
 }
 
-pub(crate) struct DmlTableSnapshot<'a> {
+/// What a write needs of its table, worked out once when the statement is bound.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default, ReferenceSerialization)]
+pub struct DmlTable {
+    pub(crate) table_id: TableId,
     pub(crate) columns: Schema,
-    pub(crate) primary_key_indices: &'a [usize],
+    pub(crate) serializers: Vec<TupleValueSerializableImpl>,
+    pub(crate) primary_key_indices: Vec<usize>,
     pub(crate) columns_len: usize,
-    pub(crate) index_metas: Vec<(IndexMetaRef, Vec<ScalarExpression>)>,
+    pub(crate) index_exprs: Vec<(IndexMetaRef, Vec<ExprRef>)>,
 }
 
 //TODO: can add some like Table description and other information as attributes
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
 pub struct TableMeta {
     pub(crate) table_name: TableName,
+    pub(crate) id: TableId,
+    pub(crate) is_view: bool,
 }
 
 impl TableCatalog {
+    pub(crate) fn id(&self) -> TableId {
+        self.id
+    }
+
     pub(crate) fn name(&self) -> &TableName {
         &self.name
     }
@@ -70,8 +83,8 @@ impl TableCatalog {
         })
     }
 
-    pub(crate) fn get_column_by_id(&self, id: &ColumnId) -> Option<ColumnRef> {
-        self.columns.get(id).map(|i| self.column_refs[*i])
+    pub(crate) fn get_column_by_id(&self, id: &ColumnId) -> Option<(usize, ColumnRef)> {
+        self.columns.get(id).map(|i| (*i, self.column_refs[*i]))
     }
 
     // GRCOV_EXCL_START
@@ -116,36 +129,46 @@ impl TableCatalog {
         &self.primary_key_type
     }
 
-    #[cfg(feature = "copy")]
     pub(crate) fn primary_key_indices(&self) -> &[usize] {
         &self.primary_key_indices
     }
 
-    pub(crate) fn dml_snapshot(
+    /// `keep_index` picks the secondary indexes the write maintains.
+    pub(crate) fn dml_table(
         &self,
-        arena: &(dyn MetaArena + '_),
-    ) -> Result<DmlTableSnapshot<'_>, DatabaseError> {
-        let index_metas = self
-            .indexes()
-            .filter(|index_meta| {
-                !matches!(arena.index(**index_meta).ty, IndexType::PrimaryKey { .. })
-            })
-            .map(|index_meta| {
-                Ok((
-                    *index_meta,
-                    arena
-                        .index(*index_meta)
-                        .column_exprs(self)
-                        .collect::<Result<Vec<_>, _>>()?,
-                ))
-            })
-            .collect::<Result<Vec<_>, DatabaseError>>()?;
+        arena: &mut (dyn MetaArena + '_),
+        keep_index: impl Fn(&IndexMeta) -> bool,
+    ) -> Result<DmlTable, DatabaseError> {
+        let mut index_exprs = Vec::with_capacity(self.indexes.len());
+        for &index_meta in self.indexes() {
+            let index = arena.index(index_meta);
+            if matches!(index.ty, IndexType::PrimaryKey { .. }) || !keep_index(index) {
+                continue;
+            }
+            let len = index.column_ids.len();
+            let mut exprs = Vec::with_capacity(len);
+            for i in 0..len {
+                let column_id = arena.index(index_meta).column_ids[i];
+                let (position, column_ref) = self
+                    .get_column_by_id(&column_id)
+                    .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?;
+                let expr = ScalarExpression::column_expr(column_ref, position);
+                exprs.push(arena.alloc_expression(expr));
+            }
+            index_exprs.push((index_meta, exprs));
+        }
 
-        Ok(DmlTableSnapshot {
+        Ok(DmlTable {
+            table_id: self.id,
             columns: self.column_refs.clone(),
-            primary_key_indices: &self.primary_key_indices,
+            serializers: self
+                .column_refs
+                .iter()
+                .map(|column| arena.column(*column).datatype().serializable())
+                .collect(),
+            primary_key_indices: self.primary_key_indices.clone(),
             columns_len: self.columns_len(),
-            index_metas,
+            index_exprs,
         })
     }
 
@@ -165,9 +188,8 @@ impl TableCatalog {
             .ok_or(DatabaseError::OverFlow)?;
 
         col.summary_mut().relation = ColumnRelation::Table {
+            table_id: self.id,
             column_id: col_id,
-            table_name: self.name.clone(),
-            is_temp: false,
         };
 
         self.column_idxs
@@ -203,7 +225,7 @@ impl TableCatalog {
         for column_id in column_ids.iter() {
             let val_ty = self
                 .get_column_by_id(column_id)
-                .map(|column| arena.column(column))
+                .map(|(_, column)| arena.column(column))
                 .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?
                 .datatype()
                 .clone();
@@ -218,7 +240,7 @@ impl TableCatalog {
         let index = IndexMeta {
             id: index_id,
             column_ids,
-            table_name: self.name.clone(),
+            table_id: self.id,
             pk_ty,
             value_ty,
             name,
@@ -230,6 +252,7 @@ impl TableCatalog {
     }
 
     pub fn new(
+        id: TableId,
         name: TableName,
         columns: Vec<ColumnCatalog>,
         arena: &mut (impl MetaArena + ?Sized),
@@ -238,6 +261,7 @@ impl TableCatalog {
             return Err(DatabaseError::ColumnsEmpty);
         }
         let mut table_catalog = TableCatalog {
+            id,
             name,
             column_idxs: BTreeMap::new(),
             columns: BTreeMap::new(),
@@ -277,6 +301,7 @@ impl TableCatalog {
     }
 
     pub(crate) fn reload<I, I2>(
+        id: TableId,
         name: TableName,
         column_catalogs: I,
         indexes: I2,
@@ -305,6 +330,7 @@ impl TableCatalog {
         let primary_key_type = Self::build_primary_key_type(&primary_keys, arena);
 
         Ok(TableCatalog {
+            id,
             name,
             column_idxs,
             columns,
@@ -331,6 +357,7 @@ impl TableCatalog {
 
         source_arena.materialize_expressions_into_table_arena();
         Self::reload(
+            self.id,
             self.name.clone(),
             column_catalogs.into_iter(),
             index_metas.into_iter(),
@@ -367,8 +394,12 @@ impl TableCatalog {
 }
 
 impl TableMeta {
-    pub(crate) fn empty(table_name: TableName) -> Self {
-        TableMeta { table_name }
+    pub(crate) fn new(table_name: TableName, id: TableId, is_view: bool) -> Self {
+        TableMeta {
+            table_name,
+            id,
+            is_view,
+        }
     }
 }
 
@@ -386,7 +417,7 @@ mod tests {
     ) -> (TableArenaCell, TableCatalog) {
         let table_arena = TableArenaCell::default();
         let table_catalog =
-            TableCatalog::new(name.to_string().into(), columns, table_arena.borrow_mut()).unwrap();
+            TableCatalog::new(0, name.to_string(), columns, table_arena.borrow_mut()).unwrap();
         (table_arena, table_catalog)
     }
 
@@ -419,13 +450,13 @@ mod tests {
 
         let column_catalog = table_arena
             .borrow()
-            .column(table_catalog.get_column_by_id(col_a_id).unwrap());
+            .column(table_catalog.get_column_by_id(col_a_id).unwrap().1);
         assert_eq!(column_catalog.name(), "a");
         assert_eq!(*column_catalog.datatype(), LogicalType::Integer,);
 
         let column_catalog = table_arena
             .borrow()
-            .column(table_catalog.get_column_by_id(col_b_id).unwrap());
+            .column(table_catalog.get_column_by_id(col_b_id).unwrap().1);
         assert_eq!(column_catalog.name(), "b");
         assert_eq!(*column_catalog.datatype(), LogicalType::Boolean,);
     }

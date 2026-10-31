@@ -37,27 +37,26 @@ mod string;
 mod trim;
 mod vec;
 
-use crate::catalog::TableName;
+use crate::catalog::SourceId;
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::storage::{StorageTransaction, TableCache};
-use std::io;
+use crate::storage::StorageTransaction;
+use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::marker::PhantomData;
 
 pub trait ReferenceSerialization {
     fn encode<W: Write, A: MetaArena + ?Sized>(
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError>;
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        context: Option<&mut ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError>
     where
@@ -65,34 +64,38 @@ pub trait ReferenceSerialization {
 }
 
 pub struct ReferenceDecodeContext<'a, T: StorageTransaction> {
-    drive: Option<(&'a T, &'a TableCache)>,
+    _transaction: PhantomData<&'a T>,
     scala_functions: Option<&'a ScalaFunctions>,
     table_functions: Option<&'a TableFunctions>,
+    sources: HashMap<SourceId, SourceId>,
+}
+
+impl<'a, T: StorageTransaction> Default for ReferenceDecodeContext<'a, T> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<'a, T: StorageTransaction> ReferenceDecodeContext<'a, T> {
-    pub fn new(drive: Option<(&'a T, &'a TableCache)>) -> Self {
+    pub fn new() -> Self {
         Self {
-            drive,
+            _transaction: PhantomData,
             scala_functions: None,
             table_functions: None,
+            sources: HashMap::new(),
         }
     }
 
     pub fn with_functions(
-        drive: Option<(&'a T, &'a TableCache)>,
         scala_functions: &'a ScalaFunctions,
         table_functions: &'a TableFunctions,
     ) -> Self {
         Self {
-            drive,
+            _transaction: PhantomData,
             scala_functions: Some(scala_functions),
             table_functions: Some(table_functions),
+            sources: HashMap::new(),
         }
-    }
-
-    pub fn drive(&self) -> Option<(&'a T, &'a TableCache)> {
-        self.drive
     }
 
     pub(crate) fn scala_functions(&self) -> Option<&'a ScalaFunctions> {
@@ -102,78 +105,13 @@ impl<'a, T: StorageTransaction> ReferenceDecodeContext<'a, T> {
     pub(crate) fn table_functions(&self) -> Option<&'a TableFunctions> {
         self.table_functions
     }
-}
 
-#[derive(Debug, Default)]
-pub struct ReferenceTables {
-    tables: Vec<TableName>,
-}
-
-impl PartialEq for ReferenceTables {
-    fn eq(&self, other: &Self) -> bool {
-        self.tables == other.tables
-    }
-}
-
-impl Eq for ReferenceTables {}
-
-impl ReferenceTables {
-    pub fn new() -> Self {
-        ReferenceTables { tables: vec![] }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.tables.is_empty()
-    }
-
-    pub fn clear(&mut self) {
-        self.tables.clear();
-    }
-
-    pub fn len(&self) -> usize {
-        self.tables.len()
-    }
-
-    pub fn get(&self, i: usize) -> &TableName {
-        &self.tables[i]
-    }
-
-    pub fn push_or_replace(&mut self, table_name: &TableName) -> usize {
-        for (i, item) in self.tables.iter().enumerate() {
-            if item == table_name {
-                return i;
-            }
-        }
-        self.tables.push(table_name.clone());
-        self.tables.len() - 1
-    }
-
-    pub fn to_raw<W: Write>(&self, mut writer: W) -> io::Result<()> {
-        writer.write_all(&(self.tables.len() as u32).to_le_bytes())?;
-        for table_name in self.tables.iter() {
-            writer.write_all(&(table_name.len() as u32).to_le_bytes())?;
-            writer.write_all(table_name.as_bytes())?
-        }
-
-        Ok(())
-    }
-
-    pub fn from_raw<R: Read>(reader: &mut R) -> io::Result<Self> {
-        let mut bytes = [0u8; 4];
-        reader.read_exact(&mut bytes)?;
-        let tables_len = u32::from_le_bytes(bytes) as usize;
-        let mut tables = Vec::with_capacity(tables_len);
-
-        for _ in 0..tables_len {
-            let mut bytes = [0u8; 4];
-            reader.read_exact(&mut bytes)?;
-            let len = u32::from_le_bytes(bytes) as usize;
-            let mut bytes = vec![0u8; len];
-            reader.read_exact(&mut bytes)?;
-            tables.push(String::from_utf8(bytes).unwrap().into());
-        }
-
-        Ok(ReferenceTables { tables })
+    pub(crate) fn source_id(
+        &mut self,
+        encoded: SourceId,
+        alloc: impl FnOnce() -> SourceId,
+    ) -> SourceId {
+        *self.sources.entry(encoded).or_insert_with(alloc)
     }
 }
 
@@ -183,12 +121,11 @@ mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::planner::TableArena;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::value::DataValue;
     use std::collections::{BTreeMap, Bound};
     use std::fmt::Debug;
-    use std::io;
     use std::io::{Cursor, Seek, SeekFrom};
     use std::marker::PhantomData;
     use std::path::PathBuf;
@@ -197,39 +134,13 @@ mod tests {
     where
         S: ReferenceSerialization + PartialEq + Debug,
     {
-        let mut reference_tables = ReferenceTables::new();
         let mut arena = TableArena::default();
         let mut cursor = Cursor::new(Vec::new());
 
-        source.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        source.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        S::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-    }
-
-    #[test]
-    fn test_to_raw() -> io::Result<()> {
-        let mut reference_tables = ReferenceTables::new();
-        assert!(reference_tables.is_empty());
-        reference_tables.push_or_replace(&"t1".to_string().into());
-        reference_tables.push_or_replace(&"t2".to_string().into());
-        assert_eq!(
-            reference_tables.push_or_replace(&"t1".to_string().into()),
-            0
-        );
-        assert_eq!(reference_tables.len(), 2);
-        assert_eq!(reference_tables.get(1).as_ref(), "t2");
-
-        let mut cursor = io::Cursor::new(Vec::new());
-        reference_tables.to_raw(&mut cursor)?;
-
-        cursor.seek(SeekFrom::Start(0))?;
-        assert_eq!(reference_tables, ReferenceTables::from_raw(&mut cursor)?);
-
-        reference_tables.clear();
-        assert!(reference_tables.is_empty());
-
-        Ok(())
+        S::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena)
     }
 
     #[test]

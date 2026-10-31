@@ -270,14 +270,6 @@ mod test {
         }
     }
 
-    #[derive(Default, Debug, PartialEq, Projection)]
-    struct UserOrderSummary {
-        #[projection(from = "users", rename = "user_name")]
-        display_name: String,
-        #[projection(from = "orders")]
-        amount: i32,
-    }
-
     #[derive(Default, Debug, PartialEq, Model)]
     #[model(table = "migrating_users")]
     struct MigratingUserV1 {

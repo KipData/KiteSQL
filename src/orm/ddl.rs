@@ -10,7 +10,7 @@ impl<S: Storage> Database<S> {
     fn table_catalog(&self, table_name: &str) -> Result<Option<TableCatalog>, DatabaseError> {
         let transaction = self.storage.transaction()?;
         transaction
-            .table(self.state.table_cache(), table_name.into())
+            .table(self.state.names(), self.state.table_cache(), table_name)
             .map(|table| table.cloned())
     }
 
@@ -451,7 +451,7 @@ fn execute_create_index<S: Storage>(
     let index_name = index_name.to_string();
     let column_names = index_columns.to_vec();
     database.execute_mut("ORM CREATE INDEX", &[], move |binder, arena| {
-        let mut input = binder.bind_create_index_source(table_name.into(), arena)?;
+        let mut input = binder.bind_create_index_source(table_name, arena)?;
         let schema = input.output_schema(arena).clone();
         let mut columns = Vec::with_capacity(column_names.len());
         for column_name in column_names {
@@ -463,7 +463,7 @@ fn execute_create_index<S: Storage>(
             columns.push(column);
         }
         binder.bind_create_index(
-            table_name.into(),
+            table_name,
             index_name,
             columns,
             if_not_exists,
@@ -536,7 +536,7 @@ fn execute_change_column<S: Storage>(
             OrmDefaultChange::NoChange => DefaultChange::NoChange,
         };
         binder.bind_change_column(
-            table_name.into(),
+            table_name,
             old_column_name,
             new_column_name,
             data_type,
@@ -553,7 +553,7 @@ fn execute_drop_column<S: Storage>(
 ) -> Result<(), DatabaseError> {
     let column_name = column_name.to_string();
     database.execute_mut("ORM DROP COLUMN", &[], move |binder, _| {
-        binder.bind_drop_column(table_name.into(), column_name, false)
+        binder.bind_drop_column(table_name, column_name, false)
     })
 }
 
@@ -564,7 +564,7 @@ fn execute_add_column<S: Storage>(
 ) -> Result<(), DatabaseError> {
     let field = field.clone();
     database.execute_mut("ORM ADD COLUMN", &[], move |binder, arena| {
-        binder.bind_add_column(table_name.into(), field.to_column_catalog(arena)?, false)
+        binder.bind_add_column(table_name, field.to_column_catalog(arena)?, false)
     })
 }
 

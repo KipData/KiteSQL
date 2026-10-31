@@ -16,7 +16,7 @@ use crate::errors::DatabaseError;
 use crate::execution::dql::sort::compare_sort_keys;
 use crate::execution::spill::{SegmentOffset, SegmentReader, SortRow, SpillReader, SpillVec};
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
@@ -46,21 +46,19 @@ impl Run {
 pub struct ExternalSort<'a> {
     rows: Option<SpillReader<SortRow>>,
     sort_fields: &'a [SortField],
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
+impl<'a> ReadExecutor<'a> for ExternalSort<'a> {
     type Input = (&'a SortOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (SortOperator { sort_fields }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::ExternalSort(ExternalSort {
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::ExternalSort(Box::new(ExternalSort {
             rows: None,
             sort_fields,
             input,
@@ -71,16 +69,16 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ExternalSort<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows = None;
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
@@ -102,7 +100,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
             let sort_fields = self.sort_fields;
             let mut rows = SpillVec::new().on_flush(move |_, rows| sort_segment(sort_fields, rows));
             let mut runs = Vec::new();
-            while arena.next_tuple(self.input, plan_arena)? {
+            while self.input.next_tuple(arena, plan_arena)? {
                 let tuple = arena.take_tuple();
                 let row = SortRow::new(sort_fields, tuple, plan_arena)?;
                 if let Some(segment) = rows.push(row)? {

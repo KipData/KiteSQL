@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 use ordered_float::OrderedFloat;
 use std::io::Read;
@@ -29,7 +29,6 @@ macro_rules! implement_num_serialization {
                 &self,
                 writer: &mut W,
                 _: bool,
-                _: &mut ReferenceTables,
                 _: &A,
             ) -> Result<(), DatabaseError> {
                 writer.write_all(&self.to_le_bytes()[..])?;
@@ -39,8 +38,7 @@ macro_rules! implement_num_serialization {
 
             fn decode<T: StorageTransaction, R: Read, A: $crate::planner::MetaArena + ?Sized>(
                 reader: &mut R,
-                _: Option<&$crate::serdes::ReferenceDecodeContext<'_, T>>,
-                _: &ReferenceTables,
+                _: Option<&mut $crate::serdes::ReferenceDecodeContext<'_, T>>,
                 _: &mut A,
             ) -> Result<Self, DatabaseError> {
                 let mut bytes = [0u8; size_of::<Self>()];
@@ -69,19 +67,17 @@ impl ReferenceSerialization for OrderedFloat<f64> {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.0.encode(writer, is_direct, reference_tables, arena)
+        self.0.encode(writer, is_direct, arena)
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        f64::decode(reader, drive, reference_tables, arena).map(OrderedFloat)
+        f64::decode(reader, drive, arena).map(OrderedFloat)
     }
 }
 
@@ -90,19 +86,17 @@ impl ReferenceSerialization for usize {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        (*self as u32).encode(writer, is_direct, reference_tables, arena)
+        (*self as u32).encode(writer, is_direct, arena)
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        Ok(u32::decode(reader, drive, reference_tables, arena)? as usize)
+        Ok(u32::decode(reader, drive, arena)? as usize)
     }
 }
 
@@ -110,7 +104,7 @@ impl ReferenceSerialization for usize {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use std::io::{Cursor, Seek, SeekFrom};
 
@@ -128,62 +122,46 @@ pub(crate) mod test {
         let source_9 = 64.0f64;
         let source_10 = 32usize;
 
-        let mut reference_tables = ReferenceTables::new();
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
         let mut arena = crate::planner::TableArena::default();
 
-        source_0.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_1.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_2.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_3.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_4.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_5.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_6.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_7.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_8.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_9.encode(&mut cursor, false, &mut reference_tables, &arena)?;
-        source_10.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        source_0.encode(&mut cursor, false, &arena)?;
+        source_1.encode(&mut cursor, false, &arena)?;
+        source_2.encode(&mut cursor, false, &arena)?;
+        source_3.encode(&mut cursor, false, &arena)?;
+        source_4.encode(&mut cursor, false, &arena)?;
+        source_5.encode(&mut cursor, false, &arena)?;
+        source_6.encode(&mut cursor, false, &arena)?;
+        source_7.encode(&mut cursor, false, &arena)?;
+        source_8.encode(&mut cursor, false, &arena)?;
+        source_9.encode(&mut cursor, false, &arena)?;
+        source_10.encode(&mut cursor, false, &arena)?;
 
         cursor.seek(SeekFrom::Start(0))?;
 
         let decoded_0 =
-            u8::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
+            u8::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_1 =
-            u16::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
+            u16::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_2 =
-            u32::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
+            u32::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_3 =
-            u64::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
+            u64::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_4 =
-            i8::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
+            i8::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_5 =
-            i16::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
+            i16::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_6 =
-            i32::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
+            i32::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_7 =
-            i64::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
+            i64::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_8 =
-            f32::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
+            f32::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_9 =
-            f64::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, &mut arena)
-                .unwrap();
-        let decoded_10 = usize::decode::<RocksTransaction, _, _>(
-            &mut cursor,
-            None,
-            &reference_tables,
-            &mut arena,
-        )
-        .unwrap();
+            f64::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+        let decoded_10 =
+            usize::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
 
         assert_eq!(source_0, decoded_0);
         assert_eq!(source_1, decoded_1);

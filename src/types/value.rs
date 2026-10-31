@@ -1267,6 +1267,20 @@ impl DataValue {
         self.memcomparable_encode_with_null_order(b, false)
     }
 
+    pub(crate) fn memcomparable_len_hint(&self) -> usize {
+        1 + match self {
+            DataValue::Utf8 { value, .. } => Self::encoded_string_len(value.len()),
+            DataValue::Binary { value, .. } => Self::encoded_string_len(value.len()),
+            DataValue::Tuple(values) => values.iter().map(Self::memcomparable_len_hint).sum(),
+            // Fixed-width values and decimals.
+            _ => 16,
+        }
+    }
+
+    fn encoded_string_len(len: usize) -> usize {
+        (len / ENCODE_GROUP_SIZE + 1) * (ENCODE_GROUP_SIZE + 1)
+    }
+
     pub(crate) fn memcomparable_skip<R: Read>(
         reader: &mut R,
         ty: &LogicalType,

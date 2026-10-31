@@ -19,7 +19,7 @@ use crate::errors::DatabaseError;
 use crate::expression::{AliasType, ScalarExpression};
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::planner::operator::Operator;
-use crate::planner::{Childrens, ExprRef, LogicalPlan};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 
@@ -34,13 +34,13 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         fn projection_exprs(
-            view_name: &TableName,
             mapping_schema: &[ColumnRef],
             arena: &mut crate::planner::PlanArena,
             mut column_name: impl FnMut(usize, ColumnRef, &crate::planner::PlanArena) -> String,
         ) -> Vec<ExprRef> {
             let mapping_schema_len = mapping_schema.len();
             let mut exprs = Vec::with_capacity(mapping_schema_len);
+            let source_id = arena.alloc_source();
             for (i, mapping_column) in mapping_schema.iter().copied().enumerate() {
                 let output_name = column_name(i, mapping_column, arena);
                 let (nullable, desc) = {
@@ -51,7 +51,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
                     )
                 };
                 let mut column = ColumnCatalog::new(output_name, nullable, desc);
-                column.set_ref_table(view_name.clone(), 0, true);
+                column.set_source(source_id, 0, true);
                 let output_column = arena.alloc_column(column);
 
                 let expr = arena.alloc_expression(ScalarExpression::column_expr(mapping_column, i));
@@ -75,19 +75,16 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
         }
 
         let exprs = if column_names.is_empty() {
-            projection_exprs(&view_name, mapping_schema, arena, |i, column, arena| {
+            projection_exprs(mapping_schema, arena, |i, column, arena| {
                 output_aliases
                     .get(i)
                     .and_then(Clone::clone)
                     .unwrap_or_else(|| arena.column(column).name().to_string())
             })
         } else {
-            projection_exprs(
-                &view_name,
-                &mapping_schema[..column_names.len()],
-                arena,
-                |i, _, _| column_names[i].clone(),
-            )
+            projection_exprs(&mapping_schema[..column_names.len()], arena, |i, _, _| {
+                column_names[i].clone()
+            })
         };
         plan = self.bind_project(plan, exprs, arena)?;
         let schema = plan.output_schema(arena).clone();

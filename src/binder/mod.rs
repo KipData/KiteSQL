@@ -58,17 +58,18 @@ pub use parser::{command_type, Statement};
 pub use select::{BindPlanFrom, BindPlanSelectList};
 #[cfg(feature = "orm")]
 pub(crate) use select::{JoinConstraintInput, TableAliasInput};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::catalog::view::View;
-use crate::catalog::{ColumnRef, TableCatalog, TableName};
+use crate::catalog::{ColumnRef, TableCatalog, TableId, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::expression::{ScalarExpression, TypeCast};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena, PlanRef, ScalarQueryRef};
-use crate::storage::{StorageTransaction, TableCache, ViewCache};
+use crate::storage::{NameMapping, StorageTransaction, TableCache, ViewCache};
 use crate::types::tuple::Schema;
 use crate::types::LogicalType;
 
@@ -125,7 +126,7 @@ pub enum Source<'a> {
 
 #[derive(Debug, Clone)]
 pub struct BoundSource<'a> {
-    pub(crate) table_name: TableName,
+    pub(crate) table_name: Cow<'a, str>,
     pub(crate) alias: Option<TableName>,
     pub(crate) join_type: Option<JoinType>,
     pub(crate) source: Source<'a>,
@@ -148,7 +149,7 @@ impl NameBinding {
         sources: &'n [BoundSource<'_>],
         arena: &'n PlanArena<'_>,
     ) -> (&'n str, Option<&'n str>) {
-        let source_name = sources[self.source].visible_name().as_ref();
+        let source_name = sources[self.source].visible_name();
         match self.column {
             Some(column) => (arena.column(column).name(), Some(source_name)),
             None => (source_name, None),
@@ -172,17 +173,15 @@ pub(crate) struct CteCheckpoint {
 impl BoundSource<'_> {
     pub(crate) fn same_binding(
         &self,
-        table_name: &TableName,
+        table_name: &str,
         alias: Option<&TableName>,
         join_type: Option<JoinType>,
     ) -> bool {
-        self.table_name == *table_name
-            && self.alias.as_ref() == alias
-            && self.join_type == join_type
+        self.table_name == table_name && self.alias.as_ref() == alias && self.join_type == join_type
     }
 
-    pub(crate) fn visible_name(&self) -> &TableName {
-        self.alias.as_ref().unwrap_or(&self.table_name)
+    pub(crate) fn visible_name(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.table_name)
     }
 }
 
@@ -262,6 +261,7 @@ pub(crate) struct BoundScalarQuery {
 pub struct BinderContext<'a, T: StorageTransaction> {
     pub(crate) scala_functions: &'a ScalaFunctions,
     pub(crate) table_functions: &'a TableFunctions,
+    pub(crate) names: &'a NameMapping,
     pub(crate) table_cache: &'a TableCache,
     pub(crate) view_cache: &'a ViewCache,
     pub(crate) transaction: &'a T,
@@ -276,7 +276,6 @@ pub struct BinderContext<'a, T: StorageTransaction> {
     pub(crate) cte_depth: usize,
     // alias
     expr_aliases: BTreeMap<(Option<String>, String), ExprRef>,
-    table_aliases: HashMap<TableName, TableName>,
     // agg
     group_by_exprs: Vec<ExprRef>,
     pub(crate) agg_calls: Vec<ExprRef>,
@@ -328,6 +327,7 @@ impl Source<'_> {
 
 impl<'a, T: StorageTransaction> BinderContext<'a, T> {
     pub fn new(
+        names: &'a NameMapping,
         table_cache: &'a TableCache,
         view_cache: &'a ViewCache,
         transaction: &'a T,
@@ -337,6 +337,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
         BinderContext {
             scala_functions,
             table_functions,
+            names,
             table_cache,
             view_cache,
             transaction,
@@ -346,7 +347,6 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             ctes: Default::default(),
             cte_depth: 0,
             expr_aliases: Default::default(),
-            table_aliases: Default::default(),
             group_by_exprs: vec![],
             agg_calls: Default::default(),
             using: Default::default(),
@@ -368,6 +368,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
         BinderContext {
             scala_functions: self.scala_functions,
             table_functions: self.table_functions,
+            names: self.names,
             table_cache: self.table_cache,
             view_cache: self.view_cache,
             transaction: self.transaction,
@@ -377,7 +378,6 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             ctes: self.ctes.clone(),
             cte_depth: self.cte_depth,
             expr_aliases: self.expr_aliases.clone(),
-            table_aliases: self.table_aliases.clone(),
             group_by_exprs: self.group_by_exprs.clone(),
             agg_calls: self.agg_calls.clone(),
             using: self.using.clone(),
@@ -397,6 +397,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
     /// of a join, before merging its newly bound sources into the parent scope.
     pub(crate) fn fork_empty(&self) -> Self {
         let mut context = BinderContext::new(
+            self.names,
             self.table_cache,
             self.view_cache,
             self.transaction,
@@ -468,103 +469,68 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
         self.has_join_outer_ref
     }
 
-    pub fn table(&self, table_name: TableName) -> Result<Option<&TableCatalog>, DatabaseError> {
-        if let Some(real_name) = self.table_aliases.get(table_name.as_ref()) {
-            self.transaction.table(self.table_cache, real_name.clone())
-        } else {
-            self.transaction.table(self.table_cache, table_name)
-        }
+    pub fn table(&self, table_name: &str) -> Result<Option<&'a TableCatalog>, DatabaseError> {
+        self.transaction
+            .table(self.names, self.table_cache, table_name)
     }
 
-    pub fn view(&self, view_name: TableName) -> Result<Option<&View>, DatabaseError> {
-        if let Some(real_name) = self.table_aliases.get(view_name.as_ref()) {
-            self.transaction.view(
-                self.table_cache,
-                self.view_cache,
-                self.scala_functions,
-                self.table_functions,
-                real_name.clone(),
-            )
-        } else {
-            self.transaction.view(
-                self.table_cache,
-                self.view_cache,
-                self.scala_functions,
-                self.table_functions,
-                view_name.clone(),
-            )
-        }
+    pub(crate) fn table_id(&self, table_name: &str) -> Result<TableId, DatabaseError> {
+        self.table(table_name)?
+            .map(TableCatalog::id)
+            .ok_or(DatabaseError::TableNotFound)
+    }
+
+    pub fn view(&self, view_name: &str) -> Result<Option<&'a View>, DatabaseError> {
+        self.transaction.view(
+            self.names,
+            self.table_cache,
+            self.view_cache,
+            self.scala_functions,
+            self.table_functions,
+            view_name,
+        )
     }
 
     pub fn source_and_bind(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         alias: Option<&TableName>,
         join_type: Option<JoinType>,
         only_table: bool,
         arena: &PlanArena,
-    ) -> Result<Option<Source<'_>>, DatabaseError> {
-        if let Some(source) = self.bound_source(&table_name, alias, join_type) {
+    ) -> Result<Option<Source<'a>>, DatabaseError> {
+        if let Some(source) = self.bound_source(table_name, alias, join_type) {
             if !only_table || matches!(source, Source::Table(_)) {
                 return Ok(Some(source.clone()));
             }
         }
         let source = if only_table {
-            let name = self.table_aliases.get(&table_name).unwrap_or(&table_name);
-            self.transaction
-                .table(self.table_cache, name.clone())?
-                .map(Source::Table)
+            self.table(table_name)?.map(Source::Table)
         } else {
-            self.source(&table_name)?
+            self.source(table_name)?
         };
         if let Some(source) = &source {
-            self.add_bound_source(
-                table_name.clone(),
-                alias.cloned(),
-                join_type,
-                source.clone(),
-                arena,
-            );
+            let name = match source {
+                Source::Table(table) => Cow::Borrowed(table.name().as_str()),
+                Source::View(view) => Cow::Borrowed(view.name.as_str()),
+                Source::Schema(_) => Cow::Owned(table_name.to_string()),
+            };
+            self.add_bound_source(name, alias.cloned(), join_type, source.clone(), arena);
         }
         Ok(source)
     }
 
-    pub fn source(&self, table_name: &TableName) -> Result<Option<Source<'a>>, DatabaseError> {
-        let mut source = if let Some(real_name) = self.table_aliases.get(table_name.as_ref()) {
-            self.transaction.table(self.table_cache, real_name.clone())
-        } else {
-            self.transaction.table(self.table_cache, table_name.clone())
-        }?
-        .map(Source::Table);
-
-        if source.is_none() {
-            source = if let Some(real_name) = self.table_aliases.get(table_name.as_ref()) {
-                self.transaction.view(
-                    self.table_cache,
-                    self.view_cache,
-                    self.scala_functions,
-                    self.table_functions,
-                    real_name.clone(),
-                )
-            } else {
-                self.transaction.view(
-                    self.table_cache,
-                    self.view_cache,
-                    self.scala_functions,
-                    self.table_functions,
-                    table_name.clone(),
-                )
-            }?
-            .map(Source::View);
+    pub fn source(&self, table_name: &str) -> Result<Option<Source<'a>>, DatabaseError> {
+        if let Some(table) = self.table(table_name)? {
+            return Ok(Some(Source::Table(table)));
         }
-
-        Ok(source)
+        Ok(self.view(table_name)?.map(Source::View))
     }
 
     /// Rejects a FROM source whose visible name is already bound in the current
     /// FROM namespace. Two such sources would also expose identical column
     /// identities, which later stages cannot tell apart.
-    pub(crate) fn ensure_unique_source_name(&self, name: &TableName) -> Result<(), DatabaseError> {
+    pub(crate) fn ensure_unique_source_name(&self, name: &str) -> Result<(), DatabaseError> {
         if self.bind_table[self.source_scope_start..]
             .iter()
             .any(|bound_source| bound_source.visible_name() == name)
@@ -576,7 +542,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
 
     fn bound_source(
         &self,
-        table_name: &TableName,
+        table_name: &str,
         alias: Option<&TableName>,
         join_type: Option<JoinType>,
     ) -> Option<&Source<'a>> {
@@ -588,7 +554,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
 
     pub fn add_bound_source(
         &mut self,
-        table_name: TableName,
+        table_name: Cow<'a, str>,
         alias: Option<TableName>,
         join_type: Option<JoinType>,
         source: Source<'a>,
@@ -607,7 +573,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             .sum::<usize>();
         let index = self.bind_table.len();
         let qualified_visible = self
-            .name_binding(alias.as_ref().unwrap_or(&table_name), None, arena)
+            .name_binding(alias.as_deref().unwrap_or(&table_name), None, arena)
             .is_none();
         self.bind_table.push(BoundSource {
             table_name,
@@ -680,7 +646,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
         // Fast path for single source
         if let [bound] = self.bind_table.as_slice() {
             if let Some(source) = source {
-                if bound.visible_name().as_ref() != source {
+                if bound.visible_name() != source {
                     return Err(DatabaseError::invalid_table(source));
                 }
             }
@@ -758,10 +724,6 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
         self.expr_aliases.insert((alias_table, alias_column), expr);
     }
 
-    pub fn add_table_alias(&mut self, alias: TableName, table: TableName) {
-        self.table_aliases.insert(alias.clone(), table.clone());
-    }
-
     pub fn has_agg_call(&self, expr: &ExprRef) -> bool {
         self.group_by_exprs.contains(expr)
     }
@@ -772,7 +734,7 @@ pub struct Binder<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalT
     pub(crate) args: &'a A,
     pub(crate) force_spill: bool,
     pub(crate) force_nested_loop: bool,
-    with_pk: Option<TableName>,
+    with_pk: Option<TableId>,
     pub(crate) parent: Option<&'parent BinderContext<'a, T>>,
 }
 
@@ -794,19 +756,16 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         }
     }
 
-    pub fn with_pk(&mut self, table_name: TableName) {
-        self.with_pk = Some(table_name);
+    pub fn with_pk(&mut self, table_id: TableId) {
+        self.with_pk = Some(table_id);
     }
 
     pub fn clear_with_pk(&mut self) {
         self.with_pk = None;
     }
 
-    pub fn is_scan_with_pk(&self, table_name: &TableName) -> bool {
-        if let Some(with_pk_table) = self.with_pk.as_ref() {
-            return with_pk_table == table_name;
-        }
-        false
+    pub fn is_scan_with_pk(&self, table_id: TableId) -> bool {
+        self.with_pk == Some(table_id)
     }
 
     pub(crate) fn extend(
@@ -828,9 +787,6 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         for (key, expr) in context.expr_aliases {
             self.context.expr_aliases.insert(key, expr);
         }
-        for (key, table_name) in context.table_aliases {
-            self.context.table_aliases.insert(key, table_name);
-        }
         Ok(())
     }
 }
@@ -849,9 +805,7 @@ pub mod test {
     use crate::errors::DatabaseError;
     use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::{
-        table_codec::TableCodec, Storage, StorageTransaction, TableCache, ViewCache,
-    };
+    use crate::storage::{table_codec::TableCodec, Storage, StorageTransaction};
     use crate::types::ColumnId;
     use crate::types::LogicalType::Integer;
     use std::path::PathBuf;
@@ -859,8 +813,6 @@ pub mod test {
 
     pub(crate) struct TableState<S: Storage> {
         pub(crate) table: TableCatalog,
-        pub(crate) table_cache: TableCache,
-        pub(crate) view_cache: ViewCache,
         pub(crate) table_arena: TableArenaCell,
         pub(crate) storage: S,
     }
@@ -879,10 +831,12 @@ pub mod test {
             let scala_functions = Default::default();
             let table_functions = Default::default();
             let transaction = self.storage.transaction()?;
+            let catalog = self.table_arena.borrow();
             let mut binder = Binder::new(
                 BinderContext::new(
-                    &self.table_cache,
-                    &self.view_cache,
+                    &catalog.names,
+                    &catalog.tables,
+                    &catalog.views,
                     &transaction,
                     &scala_functions,
                     &table_functions,
@@ -903,29 +857,21 @@ pub mod test {
 
     pub(crate) fn build_t1_table() -> Result<TableState<RocksStorage>, DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut table_cache = crate::storage::TableCache::default();
-        let view_cache = crate::storage::ViewCache::default();
         let table_arena = TableArenaCell::default();
-        let storage = build_test_catalog(&mut table_cache, temp_dir.path(), &table_arena)?;
+        let storage = build_test_catalog(temp_dir.path(), &table_arena)?;
         let table = {
-            let transaction = storage.transaction()?;
-            transaction
-                .table(&table_cache, "t1".to_string().into())?
-                .unwrap()
-                .clone()
+            let catalog = table_arena.borrow();
+            catalog.names.table(&catalog.tables, "t1").unwrap().clone()
         };
 
         Ok(TableState {
             table,
-            table_cache,
-            view_cache,
             table_arena,
             storage,
         })
     }
 
     pub(crate) fn build_test_catalog(
-        table_cache: &mut TableCache,
         path: impl Into<PathBuf> + Send,
         table_arena: &TableArenaCell,
     ) -> Result<RocksStorage, DatabaseError> {
@@ -937,7 +883,7 @@ pub mod test {
         if let Some(table) = transaction.create_table(
             &mut table_codec,
             &mut plan_arena,
-            "t1".to_string().into(),
+            "t1".to_string(),
             vec![
                 ColumnCatalog::new(
                     "c1".to_string(),
@@ -953,14 +899,14 @@ pub mod test {
             false,
         )? {
             let table = table.transplant_to_table_arena(&plan_arena)?;
-            table_cache.insert(table.name().clone(), table);
+            table_arena.borrow_mut().insert_table(table);
         }
 
         let mut plan_arena = PlanArena::new(table_arena);
         if let Some(table) = transaction.create_table(
             &mut table_codec,
             &mut plan_arena,
-            "t2".to_string().into(),
+            "t2".to_string(),
             vec![
                 ColumnCatalog::new(
                     "c3".to_string(),
@@ -976,7 +922,7 @@ pub mod test {
             false,
         )? {
             let table = table.transplant_to_table_arena(&plan_arena)?;
-            table_cache.insert(table.name().clone(), table);
+            table_arena.borrow_mut().insert_table(table);
         }
         transaction.commit()?;
 
@@ -989,13 +935,15 @@ pub mod test {
         use crate::expression::ScalarExpression;
 
         let state = build_t1_table()?;
+        let catalog = state.table_arena.borrow();
         let arena = PlanArena::new(&state.table_arena);
         let transaction = state.storage.transaction()?;
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let mut context = BinderContext::new(
-            &state.table_cache,
-            &state.view_cache,
+            &catalog.names,
+            &catalog.tables,
+            &catalog.views,
             &transaction,
             &scala_functions,
             &table_functions,

@@ -16,7 +16,7 @@ use crate::catalog::{ColumnCatalog, ColumnRef};
 use crate::errors::DatabaseError;
 use crate::iter_ext::Itertools;
 use crate::planner::MetaArena;
-use crate::types::serialize::{TupleValueSerializable, TupleValueSerializableImpl};
+use crate::types::serialize::{BytesPool, TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
 use std::borrow::Borrow;
 use std::borrow::Cow;
@@ -61,6 +61,10 @@ impl<'a, 'p> SchemaView<'a, 'p> {
 
     pub fn len(&self) -> usize {
         self.schema.len()
+    }
+
+    pub fn full_name(&self, column: &ColumnCatalog) -> String {
+        column.full_name(self.arena)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -397,6 +401,11 @@ impl TupleImpl {
         }
     }
 
+    /// Empties the tuple, keeping the buffer of its leftmost part.
+    pub fn clear(&mut self) {
+        self.output_mut().clear();
+    }
+
     pub fn push(&mut self, value: DataValue) {
         self.rightmost_mut().values.push(value);
     }
@@ -469,6 +478,19 @@ impl TupleImpl {
 
     /// e.g.: bits(u8)..|data_0(len for utf8_1)|utf8_0|data_1|
     /// Tips: all len is u32
+    /// A rough bound of the bytes `serialize_to` writes: the null bitmap and the values.
+    pub(crate) fn serialized_len_hint(&self) -> usize {
+        Self::null_bits_len(self.len())
+            + self
+                .iter()
+                .map(DataValue::serialized_len_hint)
+                .sum::<usize>()
+    }
+
+    fn null_bits_len(values_len: usize) -> usize {
+        (values_len + BITS_MAX_INDEX) / BITS_MAX_INDEX
+    }
+
     pub fn serialize_to<I, S>(
         &self,
         serializers: I,
@@ -482,14 +504,9 @@ impl TupleImpl {
             bits | (1 << (7 - i))
         }
 
-        let values_len = self.len();
-        let bits_len = (values_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
-        let values_bytes_len = self
-            .iter()
-            .map(DataValue::serialized_len_hint)
-            .sum::<usize>();
+        let bits_len = Self::null_bits_len(self.len());
         bytes.clear();
-        bytes.reserve(bits_len + values_bytes_len);
+        bytes.reserve(self.serialized_len_hint());
         bytes.resize(bits_len, 0u8);
 
         for (i, (value, serializer)) in self.iter().zip(serializers).enumerate() {
@@ -715,11 +732,12 @@ impl Tuple {
     }
 
     #[inline]
-    pub fn deserialize_from_into<I, S>(
+    pub(crate) fn deserialize_from_into<I, S>(
         &mut self,
         deserializers: I,
         bytes: &[u8],
         total_len: usize,
+        pool: &mut BytesPool,
     ) -> Result<(), DatabaseError>
     where
         I: IntoIterator<Item = S>,
@@ -730,7 +748,7 @@ impl Tuple {
         }
 
         let bits_len = (total_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
-        self.values.clear();
+        pool.recycle(&mut self.values);
         self.values.reserve(total_len);
 
         let mut cursor = Cursor::new(&bytes[bits_len..]);
@@ -750,7 +768,7 @@ impl Tuple {
             }
             deserializer
                 .borrow()
-                .filling_value(&mut cursor, &mut self.values)?;
+                .filling_value(&mut cursor, &mut self.values, pool)?;
         }
         Ok(())
     }
@@ -1014,7 +1032,12 @@ mod tests {
             };
             tuples[0].serialize_to(&serializers, &mut bytes).unwrap();
             tuple_0
-                .deserialize_from_into(&serializers, &bytes, columns.len())
+                .deserialize_from_into(
+                    &serializers,
+                    &bytes,
+                    columns.len(),
+                    &mut crate::types::serialize::BytesPool::default(),
+                )
                 .unwrap();
 
             assert_eq!(tuples[0], TupleImpl::from(tuple_0));
@@ -1026,7 +1049,12 @@ mod tests {
             };
             tuples[1].serialize_to(&serializers, &mut bytes).unwrap();
             tuple_1
-                .deserialize_from_into(&serializers, &bytes, columns.len())
+                .deserialize_from_into(
+                    &serializers,
+                    &bytes,
+                    columns.len(),
+                    &mut crate::types::serialize::BytesPool::default(),
+                )
                 .unwrap();
 
             assert_eq!(tuples[1], TupleImpl::from(tuple_1));
@@ -1045,7 +1073,12 @@ mod tests {
             };
             tuples[0].serialize_to(&serializers, &mut bytes).unwrap();
             tuple_2
-                .deserialize_from_into(&projection_serializers, &bytes, columns.len())
+                .deserialize_from_into(
+                    &projection_serializers,
+                    &bytes,
+                    columns.len(),
+                    &mut crate::types::serialize::BytesPool::default(),
+                )
                 .unwrap();
 
             assert_eq!(
@@ -1061,7 +1094,12 @@ mod tests {
             null_skipped[1] = DataValue::Null;
             null_skipped.serialize_to(&serializers, &mut bytes).unwrap();
             tuple_2
-                .deserialize_from_into(&projection_serializers, &bytes, columns.len())
+                .deserialize_from_into(
+                    &projection_serializers,
+                    &bytes,
+                    columns.len(),
+                    &mut crate::types::serialize::BytesPool::default(),
+                )
                 .unwrap();
 
             assert_eq!(
@@ -1088,7 +1126,12 @@ mod tests {
                 .serialize_to(&serializers, &mut bytes)
                 .unwrap();
             tuple_3
-                .deserialize_from_into(&multiple_pk_serializers, &bytes, columns.len())
+                .deserialize_from_into(
+                    &multiple_pk_serializers,
+                    &bytes,
+                    columns.len(),
+                    &mut crate::types::serialize::BytesPool::default(),
+                )
                 .unwrap();
 
             assert_eq!(
@@ -1231,7 +1274,12 @@ mod tests {
 
         let mut tuple = Tuple::default();
         tuple
-            .deserialize_from_into(serializers.iter(), &bytes, 2)
+            .deserialize_from_into(
+                serializers.iter(),
+                &bytes,
+                2,
+                &mut crate::types::serialize::BytesPool::default(),
+            )
             .unwrap();
         assert_eq!(tuple.values, vec![DataValue::Null, DataValue::Int32(7)]);
 

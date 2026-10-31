@@ -529,11 +529,13 @@ mod tests {
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let transaction = tables.storage.transaction()?;
+        let catalog = tables.table_arena.borrow();
         let args: [(usize, LogicalType); 0] = [];
         let mut binder = Binder::new(
             BinderContext::new(
-                &tables.table_cache,
-                &tables.view_cache,
+                &catalog.names,
+                &catalog.tables,
+                &catalog.views,
                 &transaction,
                 &scala_functions,
                 &table_functions,

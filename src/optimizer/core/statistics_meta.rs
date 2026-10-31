@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::optimizer::core::cm_sketch::CountMinSketch;
@@ -36,29 +36,25 @@ impl<'a> StatisticMetaLoader<'a> {
 
     pub fn load(
         &self,
-        table_name: &TableName,
+        table_id: TableId,
         index_id: IndexId,
     ) -> Result<Option<&IndexStatistics>, DatabaseError> {
-        let key = (table_name.clone(), index_id);
+        let key = (table_id, index_id);
         Ok(self.cache.indexes.get(&key))
     }
 
-    pub fn load_column(
-        &self,
-        table_name: &TableName,
-        column_id: ColumnId,
-    ) -> Option<&HistogramMeta> {
-        self.cache.columns.get(&(table_name.clone(), column_id))
+    pub fn load_column(&self, table_id: TableId, column_id: ColumnId) -> Option<&HistogramMeta> {
+        self.cache.columns.get(&(table_id, column_id))
     }
 
     pub fn collect_count(
         &self,
-        table_name: &TableName,
+        table_id: TableId,
         index_id: IndexId,
         range: &Range,
         buf: &mut Vec<u8>,
     ) -> Result<Option<(usize, usize)>, DatabaseError> {
-        let Some(entry) = self.load(table_name, index_id)? else {
+        let Some(entry) = self.load(table_id, index_id)? else {
             return Ok(None);
         };
         let ranges = if let Range::SortedRanges(ranges) = range {
@@ -184,7 +180,7 @@ mod tests {
         let index = IndexMeta {
             id: 0,
             column_ids: vec![1],
-            table_name: "t1".to_string().into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "pk_c1".to_string(),
@@ -223,14 +219,13 @@ mod tests {
         let index_statistics = IndexStatistics::from_parts(root, buckets, sketch, Some(top_n))?;
 
         let mut cache = StatisticsMetaCache::default();
-        cache.indexes.insert(
-            (index.table_name.clone(), index.id),
-            index_statistics.clone(),
-        );
+        cache
+            .indexes
+            .insert((index.table_id, index.id), index_statistics.clone());
         let loader = StatisticMetaLoader::new(&cache);
         assert_eq!(
             loader.collect_count(
-                &index.table_name,
+                index.table_id,
                 index.id,
                 &Range::Eq(DataValue::Int32(7)),
                 &mut Vec::new()
@@ -238,7 +233,7 @@ mod tests {
             Some((1, histogram.distinct_values_len()))
         );
         assert_eq!(
-            loader.collect_count(&index.table_name, 1, &Range::Dummy, &mut Vec::new())?,
+            loader.collect_count(index.table_id, 1, &Range::Dummy, &mut Vec::new())?,
             None
         );
         assert_eq!(histogram, index_statistics.histogram);
