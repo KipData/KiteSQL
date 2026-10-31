@@ -69,7 +69,6 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
         let table = transaction
             .table(table_cache, op.table.clone())?
             .ok_or(DatabaseError::TableNotFound)?;
-        let table_name = table.name().to_string();
 
         let file = File::open(&op.source.path)?;
         let mut buf_reader = BufReader::new(file);
@@ -102,7 +101,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
             tuple_builder.build_with_row(chunk.output_mut(), record.iter().take(column_count))?;
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.append_tuple(table_codec, &table_name, &chunk, &serializers, false)?;
+            transaction.append_tuple(table_codec, table.id(), &chunk, &serializers, false)?;
         }
 
         arena.finish();

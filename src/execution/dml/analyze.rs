@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::{TableId, TableName};
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
@@ -102,7 +102,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
         let relative_error = self
             .statistics_relative_error
             .map_or(DEFAULT_STATISTICS_RELATIVE_ERROR, |error| error.0);
-        let (mut columns, mut builders) = {
+        let (table_id, mut columns, mut builders) = {
             let table = arena
                 .transaction()
                 .table(arena.table_cache(), self.table_name.clone())?
@@ -137,7 +137,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
                     })
                 })
                 .collect::<Result<Vec<_>, DatabaseError>>()?;
-            (columns, indexes)
+            (table.id(), columns, indexes)
         };
 
         while input.next_tuple(arena, plan_arena)? {
@@ -159,6 +159,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
         let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec, ddl_apply) = state.write_transaction_codec_ddl_apply_mut();
         let values = Self::persist_statistics(
+            table_id,
             self.table_name,
             columns,
             builders,
@@ -181,7 +182,9 @@ struct State {
 }
 
 impl<'a> Analyze<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn persist_statistics<U: StorageTransaction>(
+        table_id: TableId,
         table_name: &TableName,
         columns: Vec<(ColumnId, usize, HistogramMetaBuilder)>,
         builders: Vec<State>,
@@ -195,7 +198,7 @@ impl<'a> Analyze<'a> {
             let meta = builder.build();
             transaction.save_column_statistics(
                 table_codec,
-                table_name,
+                table_id,
                 column_id,
                 &meta,
                 plan_arena,
@@ -218,7 +221,7 @@ impl<'a> Analyze<'a> {
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
             let meta = IndexStatistics::new(histogram, sketch, top_n);
 
-            transaction.save_index_statistics(table_codec, table_name, meta.clone(), plan_arena)?;
+            transaction.save_index_statistics(table_codec, table_id, meta.clone(), plan_arena)?;
             applies.push(DDLApply::UpsertIndexStatistics {
                 table_name: table_name.clone(),
                 index_id,
@@ -470,7 +473,7 @@ mod test {
         assert!(tx
             .index_statistics(
                 &mut TableCodec::default(),
-                "t1",
+                0,
                 1,
                 reopened.state.table_arena().borrow_mut()
             )?
@@ -478,7 +481,7 @@ mod test {
         assert_eq!(
             tx.column_statistics(
                 &mut TableCodec::default(),
-                "t1",
+                0,
                 b_id,
                 reopened.state.table_arena().borrow_mut()
             )?
@@ -492,7 +495,7 @@ mod test {
         assert!(tx
             .column_statistics(
                 &mut TableCodec::default(),
-                "t1",
+                0,
                 c_id,
                 reopened.state.table_arena().borrow_mut()
             )?
@@ -500,7 +503,7 @@ mod test {
         assert!(tx
             .column_statistics(
                 &mut TableCodec::default(),
-                "t1",
+                0,
                 a_id,
                 reopened.state.table_arena().borrow_mut()
             )?
@@ -519,7 +522,7 @@ mod test {
         let mut codec = TableCodec::default();
         let mut tx = reopened.storage.transaction()?;
         codec.with_index_statistics(
-            "t1",
+            0,
             2,
             None,
             reopened.state.table_arena().borrow(),
@@ -565,7 +568,7 @@ mod test {
         );
         let mut transaction = kite_sql.storage.transaction()?;
         let mut table_codec = TableCodec::default();
-        let keys: Vec<Vec<u8>> = table_codec.with_index_statistics_bound("t1", 1, |min, max| {
+        let keys: Vec<Vec<u8>> = table_codec.with_index_statistics_bound(0, 1, |min, max| {
             let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
             let mut keys = Vec::new();
             while let Some((key, _)) = iter.try_next()? {
@@ -632,7 +635,7 @@ mod test {
         let count = {
             let transaction = kite_sql.storage.transaction()?;
             let mut table_codec = TableCodec::default();
-            table_codec.with_statistics_bound("t1", |min, max| {
+            table_codec.with_statistics_bound(0, |min, max| {
                 let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
                 let mut count = 0;
                 while iter.try_next()?.is_some() {
@@ -648,7 +651,7 @@ mod test {
 
         let transaction = kite_sql.storage.transaction()?;
         let mut table_codec = TableCodec::default();
-        let keys = table_codec.with_statistics_bound("t1", |min, max| {
+        let keys = table_codec.with_statistics_bound(0, |min, max| {
             let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
             let mut keys = 0;
             while iter.try_next()?.is_some() {
@@ -672,7 +675,7 @@ mod test {
         assert!(kite_sql.state.meta_cache().columns.is_empty());
         assert!(kite_sql.state.meta_cache().indexes.is_empty());
         let transaction = kite_sql.storage.transaction()?;
-        table_codec.with_statistics_bound("t1", |min, max| {
+        table_codec.with_statistics_bound(0, |min, max| {
             assert!(transaction
                 .range(Bound::Included(min), Bound::Included(max))?
                 .try_next()?

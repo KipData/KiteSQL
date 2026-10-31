@@ -1036,7 +1036,7 @@ mod test {
 
         transaction.append_tuple(
             &mut table_codec,
-            "test",
+            0,
             &Tuple::new(
                 Some(DataValue::Int32(1)),
                 vec![DataValue::Int32(1), DataValue::Boolean(true)],
@@ -1050,7 +1050,7 @@ mod test {
         )?;
         transaction.append_tuple(
             &mut table_codec,
-            "test",
+            0,
             &Tuple::new(
                 Some(DataValue::Int32(2)),
                 vec![DataValue::Int32(2), DataValue::Boolean(true)],
@@ -1143,7 +1143,7 @@ mod test {
             params: IndexImplParams {
                 index_meta,
                 meta_arena: plan_arena.table_arena_cell().borrow(),
-                table_name: table.name.clone(),
+                table_id: table.id(),
                 deserializers: &deserializers,
                 tx: &transaction,
                 cursor: None,
@@ -1448,7 +1448,7 @@ mod test {
         let covered_value = DataValue::Int32(4);
         let covered_ranges = [Range::Eq(covered_value.clone())];
         let mut table_codec = TableCodec::default();
-        transaction.remove_tuple(&mut table_codec, "t1", &target_pk)?;
+        transaction.remove_tuple(&mut table_codec, 0, &target_pk)?;
 
         let deserializers = crate::storage::project_deserializers_for_test(
             kite_sql.state.table_cache(),

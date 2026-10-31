@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::catalog::table::DmlTable;
-use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
@@ -29,7 +28,6 @@ use crate::types::value::DataValue;
 use std::mem;
 
 pub struct Insert<'a> {
-    table_name: &'a TableName,
     table: &'a DmlTable,
     // Its rows hold all columns of the table, in table order.
     input: ExecNode<'a>,
@@ -46,7 +44,7 @@ impl<'a> WriteExecutor<'a> for Insert<'a> {
     fn into_executor<B: ExecBuilder>(
         (
             InsertOperator {
-                table_name,
+                table_name: _,
                 table,
                 is_overwrite,
             },
@@ -57,7 +55,6 @@ impl<'a> WriteExecutor<'a> for Insert<'a> {
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input_plan);
         ExecNode::Insert(Box::new(Insert {
-            table_name,
             table,
             input,
             tuple: TupleImpl::from(Tuple::new(None, Vec::with_capacity(table.columns_len))),
@@ -87,7 +84,6 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
             return Ok(());
         }
         let Insert {
-            table_name,
             table,
             input,
             tuple,
@@ -122,13 +118,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let index = Index::new(index_meta.id, values, index_meta.ty);
-                transaction.add_index(table_codec, table_name, index, tuple_id)?;
+                transaction.add_index(table_codec, table.table_id, index, tuple_id)?;
             }
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
             transaction.append_tuple(
                 table_codec,
-                table_name,
+                table.table_id,
                 &*tuple,
                 &table.serializers,
                 *is_overwrite,

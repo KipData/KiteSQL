@@ -105,11 +105,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
                 column_ids,
                 *ty,
             )?;
+            let table_id = table.id();
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
-            Ok(index_id)
+            Ok((table_id, index_id))
         };
-        let index_id = match index_id_result {
-            Ok(index_id) => index_id,
+        let (table_id, index_id) = match index_id_result {
+            Ok(ids) => ids,
             Err(DatabaseError::DuplicateIndex(index_name)) => {
                 if *if_not_exists {
                     arena.finish();
@@ -131,7 +132,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
                 let (tuple, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let tuple_pk = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
                 let index = Index::new(index_id, tuple, *ty);
-                transaction.add_index(table_codec, table_name.as_ref(), index, tuple_pk)?;
+                transaction.add_index(table_codec, table_id, index, tuple_pk)?;
             }
         }
 

@@ -59,12 +59,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
             if_not_exists,
         } = self.op;
 
-        let (old_schema, pk_ty, column_exists) = {
+        let (table_id, old_schema, pk_ty, column_exists) = {
             let table_catalog = arena
                 .transaction()
                 .table(table_cache, table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
             (
+                table_catalog.id(),
                 table_catalog.columns().copied().collect_vec(),
                 table_catalog.primary_keys_type().clone(),
                 table_catalog.get_column_by_name(column.name()).is_some(),
@@ -106,7 +107,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
         rewrite_table_in_batches(
             transaction,
             table_codec,
-            table_name,
+            table_id,
             &pk_ty,
             old_schema.len(),
             || {
@@ -137,7 +138,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
                         std::slice::from_ref(value),
                         IndexType::Unique,
                     );
-                    transaction.add_index(table_codec, table_name, index, tuple_id)?;
+                    transaction.add_index(table_codec, table_id, index, tuple_id)?;
                 }
                 Ok(())
             },

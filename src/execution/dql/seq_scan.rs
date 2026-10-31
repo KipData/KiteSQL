@@ -48,12 +48,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
         let transaction = state.transaction();
         let iter = &mut state.iters[self.iter];
         if !iter.is_empty() {
-            iter.as_tuple().reset(
-                transaction,
-                state.table_codec,
-                &self.op.table_name,
-                self.op.limit,
-            )?;
+            iter.as_tuple()
+                .reset(transaction, state.table_codec, self.op.limit)?;
         }
         Ok(())
     }
@@ -122,7 +118,7 @@ mod tests {
         for id in 1..=4 {
             tx.append_tuple(
                 &mut codec,
-                "t1",
+                0,
                 &Tuple::new(
                     Some(DataValue::Int32(id)),
                     vec![

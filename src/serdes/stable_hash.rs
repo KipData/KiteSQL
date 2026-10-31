@@ -17,7 +17,6 @@ use std::hash::Hasher;
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
-pub(crate) const TABLE_NAME_HASH_KEYS: (u64, u64) = (0x9e37_79b9_7f4a_7c15, 0xbf58_476d_1ce4_e5b9);
 pub(crate) const CM_SKETCH_HASH_KEYS: [(u64, u64); 2] = [
     (0x94d0_49bb_1331_11eb, 0xd6e8_feb8_6659_fd93),
     (0xa076_1d64_78bd_642f, 0xe703_7ed1_a0b4_28db),

@@ -27,9 +27,12 @@ use std::sync::Arc;
 use std::{slice, vec};
 
 pub type TableName = Arc<str>;
+/// Allocated once per table or view, in creation order; it prefixes the table's keys.
+pub type TableId = u64;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TableCatalog {
+    pub(crate) id: TableId,
     pub(crate) name: TableName,
     /// Mapping from column names to column ids
     column_idxs: BTreeMap<String, (ColumnId, usize)>,
@@ -45,6 +48,7 @@ pub struct TableCatalog {
 /// What a write needs of its table, worked out once when the statement is bound.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, ReferenceSerialization)]
 pub struct DmlTable {
+    pub(crate) table_id: TableId,
     pub(crate) columns: Schema,
     pub(crate) serializers: Vec<TupleValueSerializableImpl>,
     pub(crate) primary_key_indices: Vec<usize>,
@@ -56,9 +60,15 @@ pub struct DmlTable {
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
 pub struct TableMeta {
     pub(crate) table_name: TableName,
+    pub(crate) id: TableId,
+    pub(crate) is_view: bool,
 }
 
 impl TableCatalog {
+    pub(crate) fn id(&self) -> TableId {
+        self.id
+    }
+
     pub(crate) fn name(&self) -> &TableName {
         &self.name
     }
@@ -120,7 +130,6 @@ impl TableCatalog {
         &self.primary_key_type
     }
 
-    #[cfg(feature = "copy")]
     pub(crate) fn primary_key_indices(&self) -> &[usize] {
         &self.primary_key_indices
     }
@@ -151,6 +160,7 @@ impl TableCatalog {
         }
 
         Ok(DmlTable {
+            table_id: self.id,
             columns: self.column_refs.clone(),
             serializers: self
                 .column_refs
@@ -244,6 +254,7 @@ impl TableCatalog {
     }
 
     pub fn new(
+        id: TableId,
         name: TableName,
         columns: Vec<ColumnCatalog>,
         arena: &mut (impl MetaArena + ?Sized),
@@ -252,6 +263,7 @@ impl TableCatalog {
             return Err(DatabaseError::ColumnsEmpty);
         }
         let mut table_catalog = TableCatalog {
+            id,
             name,
             column_idxs: BTreeMap::new(),
             columns: BTreeMap::new(),
@@ -291,6 +303,7 @@ impl TableCatalog {
     }
 
     pub(crate) fn reload<I, I2>(
+        id: TableId,
         name: TableName,
         column_catalogs: I,
         indexes: I2,
@@ -319,6 +332,7 @@ impl TableCatalog {
         let primary_key_type = Self::build_primary_key_type(&primary_keys, arena);
 
         Ok(TableCatalog {
+            id,
             name,
             column_idxs,
             columns,
@@ -345,6 +359,7 @@ impl TableCatalog {
 
         source_arena.materialize_expressions_into_table_arena();
         Self::reload(
+            self.id,
             self.name.clone(),
             column_catalogs.into_iter(),
             index_metas.into_iter(),
@@ -381,8 +396,12 @@ impl TableCatalog {
 }
 
 impl TableMeta {
-    pub(crate) fn empty(table_name: TableName) -> Self {
-        TableMeta { table_name }
+    pub(crate) fn new(table_name: TableName, id: TableId, is_view: bool) -> Self {
+        TableMeta {
+            table_name,
+            id,
+            is_view,
+        }
     }
 }
 
@@ -399,8 +418,13 @@ mod tests {
         columns: Vec<ColumnCatalog>,
     ) -> (TableArenaCell, TableCatalog) {
         let table_arena = TableArenaCell::default();
-        let table_catalog =
-            TableCatalog::new(name.to_string().into(), columns, table_arena.borrow_mut()).unwrap();
+        let table_catalog = TableCatalog::new(
+            0,
+            name.to_string().into(),
+            columns,
+            table_arena.borrow_mut(),
+        )
+        .unwrap();
         (table_arena, table_catalog)
     }
 

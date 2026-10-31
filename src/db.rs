@@ -1037,7 +1037,7 @@ impl<S: Storage> Database<S> {
                     let index_id = self.state.table_arena.borrow().index(*index).id;
                     if let Some(meta) = transaction.index_statistics(
                         &mut table_codec,
-                        name.as_ref(),
+                        table.id(),
                         index_id,
                         self.state.table_arena.borrow_mut(),
                     )? {
@@ -1054,7 +1054,7 @@ impl<S: Storage> Database<S> {
                     };
                     if let Some(meta) = transaction.column_statistics(
                         &mut table_codec,
-                        name.as_ref(),
+                        table.id(),
                         column_id,
                         self.state.table_arena.borrow_mut(),
                     )? {

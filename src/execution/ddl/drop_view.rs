@@ -46,7 +46,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropView<'a> {
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
-        _: &mut ExecMetaArena<A>,
+        plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let DropViewOperator {
             view_name,
@@ -54,7 +54,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropView<'a> {
         } = self.op;
 
         let (transaction, table_codec) = arena.transaction_codec_mut();
-        if transaction.drop_view(table_codec, view_name.clone(), *if_exists)? {
+        if transaction.drop_view(table_codec, plan_arena, view_name.clone(), *if_exists)? {
             arena.push_ddl_apply(DDLApply::DropView {
                 name: view_name.clone(),
             });

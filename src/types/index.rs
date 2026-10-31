@@ -426,7 +426,7 @@ mod tests {
                 None,
             )?,
         );
-        let table = TableCatalog::new("t".into(), vec![id_col, name_col], &mut arena)?;
+        let table = TableCatalog::new(0, "t".into(), vec![id_col, name_col], &mut arena)?;
         let id_column = arena.column(*table.columns().next().unwrap()).id().unwrap();
         let meta = IndexMeta {
             id: 1,

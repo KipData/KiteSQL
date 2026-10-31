@@ -201,7 +201,7 @@ mod tests {
         for id in 1..=4 {
             tx.append_tuple(
                 &mut codec,
-                "t1",
+                0,
                 &Tuple::new(
                     Some(DataValue::Int32(id)),
                     vec![

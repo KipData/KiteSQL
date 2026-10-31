@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::catalog::table::DmlTable;
-use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
@@ -29,7 +28,6 @@ use crate::types::tuple_builder::TupleBuilder;
 use std::mem;
 
 pub struct Update<'a> {
-    table_name: &'a TableName,
     table: &'a DmlTable,
     value_exprs: &'a [(usize, ExprRef)],
     input: ExecNode<'a>,
@@ -43,7 +41,7 @@ impl<'a> WriteExecutor<'a> for Update<'a> {
     fn into_executor<B: ExecBuilder>(
         (
             UpdateOperator {
-                table_name,
+                table_name: _,
                 table,
                 value_exprs,
             },
@@ -54,7 +52,6 @@ impl<'a> WriteExecutor<'a> for Update<'a> {
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input_plan);
         ExecNode::Update(Box::new(Update {
-            table_name,
             table,
             value_exprs,
             input,
@@ -83,13 +80,11 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
             return Ok(());
         }
         let Update {
-            table_name,
             table,
             value_exprs,
             input,
             ..
         } = self;
-        let table_name = *table_name;
         let mut updated_count = 0;
         let mut values = Vec::with_capacity(value_exprs.len());
 
@@ -107,7 +102,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let old_index = Index::new(index_meta.id, values, index_meta.ty);
-                transaction.del_index(table_codec, table_name, &old_index, &old_pk)?;
+                transaction.del_index(table_codec, table.table_id, &old_index, &old_pk)?;
             }
             // Every expression reads the old row, so evaluate them all before writing.
             for (_, expr) in value_exprs.iter() {
@@ -125,7 +120,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
             if primary_key_changed {
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
-                transaction.remove_tuple(table_codec, table_name, &old_pk)?;
+                transaction.remove_tuple(table_codec, table.table_id, &old_pk)?;
                 is_overwrite = false;
             }
 
@@ -135,7 +130,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let new_index = Index::new(index_meta.id, values, index_meta.ty);
-                transaction.add_index(table_codec, table_name, new_index, &new_pk)?;
+                transaction.add_index(table_codec, table.table_id, new_index, &new_pk)?;
             }
 
             tuple.set_pk(Some(new_pk));
@@ -145,7 +140,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
             table_codec.with_stamp(stamp, |table_codec| {
                 transaction.append_tuple(
                     table_codec,
-                    table_name,
+                    table.table_id,
                     &tuple,
                     &table.serializers,
                     is_overwrite,

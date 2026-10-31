@@ -23,7 +23,7 @@ pub(crate) mod drop_table;
 pub(crate) mod drop_view;
 pub(crate) mod truncate;
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{InnerIter, StorageTransaction};
@@ -38,7 +38,7 @@ const REWRITE_BATCH_SIZE: usize = 1024;
 fn read_tuple_batch<T, D, I>(
     transaction: &T,
     table_codec: &mut TableCodec,
-    table_name: &TableName,
+    table_id: TableId,
     pk_ty: &LogicalType,
     old_values_len: usize,
     old_deserializers: &mut D,
@@ -52,14 +52,14 @@ where
     I: IntoIterator<Item = TupleValueSerializableImpl>,
 {
     let lower = if let Some(last_pk) = start_after {
-        table_codec.with_tuple_unchecked(table_name.as_ref(), last_pk, None, |key, _| {
+        table_codec.with_tuple_unchecked(table_id, last_pk, None, |key, _| {
             Ok::<_, DatabaseError>(Bound::Excluded(key.to_vec()))
         })?
     } else {
         Bound::Unbounded
     };
 
-    table_codec.with_tuple_bound(table_name.as_ref(), |min, max| {
+    table_codec.with_tuple_bound(table_id, |min, max| {
         let lower = match &lower {
             Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
             Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
@@ -101,7 +101,7 @@ where
 pub(crate) fn visit_table_in_batches<T, D, I, F>(
     transaction: &T,
     table_codec: &mut TableCodec,
-    table_name: &TableName,
+    table_id: TableId,
     pk_ty: &LogicalType,
     old_values_len: usize,
     mut old_deserializers: D,
@@ -120,7 +120,7 @@ where
         let batch_len = read_tuple_batch(
             transaction,
             table_codec,
-            table_name,
+            table_id,
             pk_ty,
             old_values_len,
             &mut old_deserializers,
@@ -151,7 +151,7 @@ where
 pub(crate) fn rewrite_table_in_batches<T, D, I, S, J, F, G>(
     transaction: &mut T,
     table_codec: &mut TableCodec,
-    table_name: &TableName,
+    table_id: TableId,
     pk_ty: &LogicalType,
     old_values_len: usize,
     mut old_deserializers: D,
@@ -175,7 +175,7 @@ where
         let batch_len = read_tuple_batch(
             transaction,
             table_codec,
-            table_name,
+            table_id,
             pk_ty,
             old_values_len,
             &mut old_deserializers,
@@ -192,13 +192,7 @@ where
 
         for tuple in batch.iter_mut().take(batch_len) {
             rewrite(tuple)?;
-            transaction.append_tuple(
-                table_codec,
-                table_name.as_ref(),
-                tuple,
-                new_serializers(),
-                true,
-            )?;
+            transaction.append_tuple(table_codec, table_id, tuple, new_serializers(), true)?;
             after_write(transaction, table_codec, tuple)?;
         }
 

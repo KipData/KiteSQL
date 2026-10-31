@@ -57,7 +57,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
             if_exists,
         } = self.op;
 
-        let (old_schema, pk_ty, column_info) = {
+        let (table_id, old_schema, pk_ty, column_info) = {
             let table_catalog = arena
                 .transaction()
                 .table(table_cache, table_name.clone())?
@@ -70,6 +70,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                     (column.name() == column_name).then(|| (index, column.desc().is_primary()))
                 });
             (
+                table_catalog.id(),
                 table_catalog.columns().copied().collect_vec(),
                 table_catalog.primary_keys_type().clone(),
                 column_info,
@@ -88,7 +89,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                 rewrite_table_in_batches(
                     transaction,
                     table_codec,
-                    table_name,
+                    table_id,
                     &pk_ty,
                     old_schema.len(),
                     || {

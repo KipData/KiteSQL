@@ -61,7 +61,15 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             not_null_change,
         } = self.op;
 
-        let (old_schema, pk_ty, column_index, old_column_type, old_column_id, affected_index_name) = {
+        let (
+            table_id,
+            old_schema,
+            pk_ty,
+            column_index,
+            old_column_type,
+            old_column_id,
+            affected_index_name,
+        ) = {
             let table_catalog = arena
                 .transaction()
                 .table(table_cache, table_name.clone())?
@@ -83,6 +91,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
                     .map(|index_meta| index_meta.name.clone())
             });
             (
+                table_catalog.id(),
                 table_catalog.columns().copied().collect_vec(),
                 table_catalog.primary_keys_type().clone(),
                 column_index,
@@ -114,7 +123,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             rewrite_table_in_batches(
                 transaction,
                 table_codec,
-                table_name,
+                table_id,
                 &pk_ty,
                 old_schema.len(),
                 || {
@@ -149,7 +158,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             visit_table_in_batches(
                 transaction,
                 table_codec,
-                table_name,
+                table_id,
                 &pk_ty,
                 old_schema.len(),
                 || {

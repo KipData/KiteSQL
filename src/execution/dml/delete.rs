@@ -70,12 +70,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
         }
         let input = &mut self.input;
 
-        let index_templates = {
+        let (table_id, index_templates) = {
             let table = arena
                 .transaction()
                 .table(arena.table_cache(), self.table_name.clone())?
                 .ok_or(DatabaseError::TableNotFound)?;
-            table
+            let index_templates = table
                 .indexes()
                 .filter(|index_meta| {
                     !matches!(
@@ -93,7 +93,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
                             .collect::<Result<Vec<_>, _>>()?,
                     ))
                 })
-                .collect::<Result<Vec<_>, DatabaseError>>()?
+                .collect::<Result<Vec<_>, DatabaseError>>()?;
+            (table.id(), index_templates)
         };
         let mut deleted_count = 0;
 
@@ -107,12 +108,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let index = Index::new(*index_id, values, *index_ty);
-                transaction.del_index(table_codec, self.table_name, &index, tuple_id)?;
+                transaction.del_index(table_codec, table_id, &index, tuple_id)?;
             }
 
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.remove_tuple(table_codec, self.table_name, tuple_id)?;
+            transaction.remove_tuple(table_codec, table_id, tuple_id)?;
             deleted_count += 1;
         }
 

@@ -20,7 +20,7 @@ pub mod rocksdb;
 pub(crate) mod table_codec;
 
 use crate::catalog::view::View;
-use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableMeta, TableName};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableId, TableMeta, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
@@ -199,14 +199,17 @@ pub trait StorageTransaction: Sized {
         table_name: &TableName,
         bounds: Bounds,
     ) -> Result<TupleIter<'a, Self>, DatabaseError> {
-        self.table(table_cache, table_name.clone())?
-            .ok_or(DatabaseError::TableNotFound)?;
+        let table_id = self
+            .table(table_cache, table_name.clone())?
+            .ok_or(DatabaseError::TableNotFound)?
+            .id();
         let offset = bounds.0.unwrap_or(0);
 
-        table_codec.with_tuple_bound(table_name, |min, max| {
+        table_codec.with_tuple_bound(table_id, |min, max| {
             let iter = self.range(Bound::Included(min), Bound::Included(max))?;
 
             Ok(TupleIter {
+                table_id,
                 bounds: IterBounds::new(offset, bounds.1),
                 deserializers,
                 iter,
@@ -231,8 +234,10 @@ pub trait StorageTransaction: Sized {
     where
         R: Into<IndexRanges<'a>>,
     {
-        self.table(table_cache, table_name.clone())?
-            .ok_or(DatabaseError::TableNotFound)?;
+        let table_id = self
+            .table(table_cache, table_name)?
+            .ok_or(DatabaseError::TableNotFound)?
+            .id();
         let meta = arena.index(index_meta);
         let (inner, cover_mapping) = if covered && !matches!(meta.ty, IndexType::PrimaryKey { .. })
         {
@@ -260,7 +265,7 @@ pub trait StorageTransaction: Sized {
             params: IndexImplParams {
                 index_meta,
                 meta_arena: arena.table_arena_cell().borrow(),
-                table_name,
+                table_id,
                 deserializers,
                 tx: self,
                 cursor: None,
@@ -292,7 +297,7 @@ pub trait StorageTransaction: Sized {
         let index_meta = plan_arena.index(index_meta);
         let index_id = index_meta.id;
         table_codec.with_index_meta(
-            table_name,
+            table.id(),
             index_id,
             Some(index_meta),
             plan_arena,
@@ -305,14 +310,14 @@ pub trait StorageTransaction: Sized {
     fn add_index<V: TupleLike + ?Sized>(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &str,
+        table_id: TableId,
         index: Index<'_, V>,
         tuple_id: &TupleId,
     ) -> Result<(), DatabaseError> {
         if matches!(index.ty, IndexType::PrimaryKey { .. }) {
             return Ok(());
         }
-        table_codec.with_index(table_name, &index, Some(tuple_id), |key, value| {
+        table_codec.with_index(table_id, &index, Some(tuple_id), |key, value| {
             if matches!(index.ty, IndexType::Unique) {
                 if let Some(bytes) = self.get_borrowed(key)? {
                     return if TableCodec::strip_stamp(bytes.as_ref())?
@@ -331,14 +336,14 @@ pub trait StorageTransaction: Sized {
     fn del_index<V: TupleLike + ?Sized>(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &str,
+        table_id: TableId,
         index: &Index<'_, V>,
         tuple_id: &TupleId,
     ) -> Result<(), DatabaseError> {
         if matches!(index.ty, IndexType::PrimaryKey { .. }) {
             return Ok(());
         }
-        table_codec.with_index(table_name, index, Some(tuple_id), |key, _| self.remove(key))?;
+        table_codec.with_index(table_id, index, Some(tuple_id), |key, _| self.remove(key))?;
 
         Ok(())
     }
@@ -346,7 +351,7 @@ pub trait StorageTransaction: Sized {
     fn append_tuple<I, S>(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &str,
+        table_id: TableId,
         tuple: &TupleImpl,
         serializers: I,
         is_overwrite: bool,
@@ -359,7 +364,7 @@ pub trait StorageTransaction: Sized {
         let mut serializers = serializers.into_iter();
         let mut write_value = |value: &mut Bytes| tuple.serialize_to(&mut serializers, value);
         table_codec.with_tuple(
-            table_name,
+            table_id,
             tuple_id,
             Some((tuple.serialized_len_hint(), &mut write_value)),
             |key, value| {
@@ -374,10 +379,10 @@ pub trait StorageTransaction: Sized {
     fn remove_tuple(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &str,
+        table_id: TableId,
         tuple_id: &TupleId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_tuple(table_name, tuple_id, None, |key, _| self.remove(key))
+        table_codec.with_tuple(table_id, tuple_id, None, |key, _| self.remove(key))
     }
 
     fn rewrite_table_metadata(
@@ -386,22 +391,24 @@ pub trait StorageTransaction: Sized {
         arena: &(impl MetaArena + ?Sized),
         table: &TableCatalog,
     ) -> Result<(), DatabaseError> {
-        let table_name = table.name().clone();
-        table_codec.with_columns_bound(table_name.as_ref(), |min, max| {
+        let table_id = table.id();
+        table_codec.with_columns_bound(table_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        table_codec.with_index_meta_bound(table_name.as_ref(), |min, max| {
+        table_codec.with_index_meta_bound(table_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
         for column in table.columns().map(|column| arena.column(*column)) {
-            table_codec.with_column(column, true, arena, |key, value| self.set(key, value))?;
+            table_codec.with_column(table_id, column, true, arena, |key, value| {
+                self.set(key, value)
+            })?;
         }
         for index_meta in table.indexes() {
             let index_meta = arena.index(*index_meta);
             table_codec.with_index_meta(
-                table_name.as_ref(),
+                table_id,
                 index_meta.id,
                 Some(index_meta),
                 arena,
@@ -472,6 +479,7 @@ pub trait StorageTransaction: Sized {
         }
 
         let temp_table = TableCatalog::reload(
+            table.id(),
             table_name.clone(),
             column_catalogs.clone().into_iter(),
             std::iter::empty(),
@@ -493,13 +501,14 @@ pub trait StorageTransaction: Sized {
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
         let updated_table = TableCatalog::reload(
+            table.id(),
             table_name.clone(),
             column_catalogs.into_iter(),
             index_metas.into_iter(),
             plan_arena,
         )?;
         self.rewrite_table_metadata(table_codec, plan_arena, &updated_table)?;
-        table_codec.with_statistics_bound(table_name.as_ref(), |min, max| {
+        table_codec.with_statistics_bound(updated_table.id(), |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
@@ -541,7 +550,7 @@ pub trait StorageTransaction: Sized {
             )?;
             let meta = plan_arena.index(meta_ref);
             table_codec.with_index_meta(
-                table_name,
+                table.id(),
                 meta.id,
                 Some(meta),
                 plan_arena,
@@ -550,7 +559,9 @@ pub trait StorageTransaction: Sized {
         }
 
         let column = plan_arena.column(table.get_column_by_id(&col_id).unwrap().1);
-        table_codec.with_column(column, true, plan_arena, |key, value| self.set(key, value))?;
+        table_codec.with_column(table.id(), column, true, plan_arena, |key, value| {
+            self.set(key, value)
+        })?;
 
         Ok((table, col_id))
     }
@@ -568,29 +579,28 @@ pub trait StorageTransaction: Sized {
         let column_id = {
             let column = plan_arena.column(table_catalog.get_column_by_name(column_name).unwrap());
             let column_id = column.id().unwrap();
-            table_codec.with_column(column, false, plan_arena, |key, _| self.remove(key))?;
+            table_codec.with_column(table_catalog.id(), column, false, plan_arena, |key, _| {
+                self.remove(key)
+            })?;
             column_id
         };
 
-        self.remove_column_statistics(table_codec, table_name, column_id, plan_arena)?;
+        let table_id = table_catalog.id();
+        self.remove_column_statistics(table_codec, table_id, column_id, plan_arena)?;
         for index_meta in table_catalog.indexes.iter() {
             let index_meta = plan_arena.index(*index_meta);
             if !index_meta.column_ids.contains(&column_id) {
                 continue;
             }
-            table_codec.with_index_meta(
-                table_name,
-                index_meta.id,
-                None,
-                plan_arena,
-                |key, _| self.remove(key),
-            )?;
+            table_codec.with_index_meta(table_id, index_meta.id, None, plan_arena, |key, _| {
+                self.remove(key)
+            })?;
 
-            table_codec.with_index_bound(table_name, index_meta.id, |min, max| {
+            table_codec.with_index_bound(table_id, index_meta.id, |min, max| {
                 self.remove_range(Bound::Included(min), Bound::Included(max))
             })?;
 
-            self.remove_index_statistics(table_codec, table_name, index_meta.id)?;
+            self.remove_index_statistics(table_codec, table_id, index_meta.id)?;
         }
         self.load_table(table_codec, plan_arena, table_name.clone())?
             .ok_or(DatabaseError::TableNotFound)
@@ -599,18 +609,17 @@ pub trait StorageTransaction: Sized {
     fn create_view(
         &mut self,
         table_codec: &mut TableCodec,
-        arena: &(dyn MetaArena + '_),
+        arena: &mut (dyn MetaArena + '_),
         view: View,
         or_replace: bool,
     ) -> Result<View, DatabaseError> {
-        let already_exists = table_codec.with_view(&view.name, |key, _| self.exists(key))?;
-        if !or_replace && already_exists {
-            return Err(DatabaseError::ViewExists);
-        }
-        if !already_exists {
-            self.check_name_hash(table_codec, &view.name)?;
-        }
-        table_codec.with_view_value(&view.name, &view, arena, |key, value| self.set(key, value))?;
+        let view_id = match self.root_table(table_codec, &view.name, arena)? {
+            Some(meta) if !meta.is_view => return Err(DatabaseError::TableExists),
+            Some(_) if !or_replace => return Err(DatabaseError::ViewExists),
+            Some(meta) => meta.id,
+            None => self.create_root_table(table_codec, arena, view.name.clone(), true)?,
+        };
+        table_codec.with_view_value(view_id, &view, arena, |key, value| self.set(key, value))?;
 
         Ok(view)
     }
@@ -623,78 +632,95 @@ pub trait StorageTransaction: Sized {
         columns: Vec<ColumnCatalog>,
         if_not_exists: bool,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
-        let mut table_catalog = TableCatalog::new(table_name.clone(), columns, plan_arena)?;
+        match self.root_table(table_codec, &table_name, plan_arena)? {
+            Some(meta) if meta.is_view => return Err(DatabaseError::ViewExists),
+            Some(_) if if_not_exists => return Ok(None),
+            Some(_) => return Err(DatabaseError::TableExists),
+            None => (),
+        }
+        let table_id =
+            self.create_root_table(table_codec, plan_arena, table_name.clone(), false)?;
+        let mut table_catalog = TableCatalog::new(table_id, table_name, columns, plan_arena)?;
 
         for (_, column) in table_catalog.primary_keys() {
             TableCodec::check_primary_key_type(plan_arena.column(*column).datatype())?;
         }
-
-        let exists =
-            table_codec.with_root_table(table_name.as_ref(), None, plan_arena, |key, _| {
-                self.exists(key)
-            })?;
-        if exists {
-            if if_not_exists {
-                return Ok(None);
-            }
-            return Err(DatabaseError::TableExists);
-        }
-        self.check_name_hash(table_codec, &table_name)?;
         self.create_index_meta_from_column(table_codec, plan_arena, &mut table_catalog)?;
-        let table_meta = TableMeta::empty(table_name.clone());
-        table_codec.with_root_table(
-            table_name.as_ref(),
-            Some(&table_meta),
-            plan_arena,
-            |key, value| self.set(key, value),
-        )?;
 
         for column in table_catalog
             .columns()
             .map(|column| plan_arena.column(*column))
         {
-            table_codec.with_column(column, true, plan_arena, |key, value| self.set(key, value))?;
+            table_codec.with_column(table_id, column, true, plan_arena, |key, value| {
+                self.set(key, value)
+            })?;
         }
 
         Ok(Some(table_catalog))
     }
 
-    fn check_name_hash(
-        &mut self,
+    /// The table or view registered under `table_name`.
+    fn root_table(
+        &self,
         table_codec: &mut TableCodec,
-        table_name: &TableName,
-    ) -> Result<(), DatabaseError> {
-        if table_codec.with_table_hash(table_name, |key, _| self.exists(key))? {
-            return Err(DatabaseError::DuplicateSourceHash(table_name.to_string()));
-        }
-        table_codec.with_table_hash(table_name, |key, _| self.set(key, &[]))
+        table_name: &str,
+        arena: &mut (impl MetaArena + ?Sized),
+    ) -> Result<Option<TableMeta>, DatabaseError> {
+        let bytes = table_codec
+            .with_root_table(table_name, None, arena, |key, _| self.get_borrowed(key))?;
+        bytes
+            .map(|bytes| TableCodec::decode_root_table::<Self>(bytes.as_ref(), arena))
+            .transpose()
     }
 
-    fn drop_name_hash(
+    /// Registers a new table or view under `table_name` with the next id.
+    fn create_root_table(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &TableName,
-    ) -> Result<(), DatabaseError> {
-        table_codec.with_table_hash(table_name, |key, _| self.remove(key))
+        arena: &(impl MetaArena + ?Sized),
+        table_name: TableName,
+        is_view: bool,
+    ) -> Result<TableId, DatabaseError> {
+        let table_id = table_codec.with_next_table_id(|key| {
+            let table_id = match self.get_borrowed(key)? {
+                Some(bytes) => TableId::from_le_bytes(
+                    bytes
+                        .as_ref()
+                        .try_into()
+                        .map_err(|_| DatabaseError::InvalidValue("next table id".to_string()))?,
+                ),
+                None => 0,
+            };
+            self.set(key, &(table_id + 1).to_le_bytes())?;
+            Ok(table_id)
+        })?;
+        let meta = TableMeta::new(table_name.clone(), table_id, is_view);
+        table_codec.with_root_table(&table_name, Some(&meta), arena, |key, value| {
+            self.set(key, value)
+        })?;
+        Ok(table_id)
     }
 
     fn drop_view(
         &mut self,
         table_codec: &mut TableCodec,
+        arena: &mut (dyn MetaArena + '_),
         view_name: TableName,
         if_exists: bool,
     ) -> Result<bool, DatabaseError> {
-        self.drop_name_hash(table_codec, &view_name)?;
-        let exists = table_codec.with_view(&view_name, |key, _| self.exists(key))?;
-        if !exists {
+        let Some(meta) = self
+            .root_table(table_codec, &view_name, arena)?
+            .filter(|meta| meta.is_view)
+        else {
             if if_exists {
                 return Ok(false);
             } else {
                 return Err(DatabaseError::ViewNotFound);
             }
-        }
+        };
 
-        table_codec.with_view(view_name.as_ref(), |key, _| self.remove(key))?;
+        table_codec.with_view(meta.id, |key, _| self.remove(key))?;
+        table_codec.with_root_table(&view_name, None, arena, |key, _| self.remove(key))?;
 
         Ok(true)
     }
@@ -729,19 +755,15 @@ pub trait StorageTransaction: Sized {
         }
 
         let index_id = index_meta.id;
-        table_codec.with_index_meta(
-            table_name.as_ref(),
-            index_id,
-            None,
-            plan_arena,
-            |key, _| self.remove(key),
-        )?;
+        table_codec.with_index_meta(table.id(), index_id, None, plan_arena, |key, _| {
+            self.remove(key)
+        })?;
 
-        table_codec.with_index_bound(table_name.as_ref(), index_id, |min, max| {
+        table_codec.with_index_bound(table.id(), index_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        self.remove_index_statistics(table_codec, &table_name, index_id)?;
+        self.remove_index_statistics(table_codec, table.id(), index_id)?;
 
         self.load_table(table_codec, plan_arena, table_name.clone())?
             .map(|table| (table, index_id))
@@ -756,25 +778,23 @@ pub trait StorageTransaction: Sized {
         table_name: TableName,
         if_exists: bool,
     ) -> Result<bool, DatabaseError> {
-        let exists =
-            table_codec.with_root_table(table_name.as_ref(), None, plan_arena, |key, _| {
-                self.exists(key)
-            })?;
-        if !exists {
+        let Some(meta) = self
+            .root_table(table_codec, &table_name, plan_arena)?
+            .filter(|meta| !meta.is_view)
+        else {
             if if_exists {
                 return Ok(false);
             } else {
                 return Err(DatabaseError::TableNotFound);
             }
-        }
-        self.drop_name_hash(table_codec, &table_name)?;
-        self.drop_data(table_codec, table_name.as_ref())?;
+        };
+        self.drop_data(table_codec, meta.id)?;
 
-        table_codec.with_columns_bound(table_name.as_ref(), |min, max| {
+        table_codec.with_columns_bound(meta.id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        table_codec.with_index_meta_bound(table_name.as_ref(), |min, max| {
+        table_codec.with_index_meta_bound(meta.id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
@@ -788,17 +808,17 @@ pub trait StorageTransaction: Sized {
     fn drop_data(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &str,
+        table_id: TableId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_tuple_bound(table_name, |min, max| {
+        table_codec.with_tuple_bound(table_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        table_codec.with_all_index_bound(table_name, |min, max| {
+        table_codec.with_all_index_bound(table_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
-        table_codec.with_statistics_bound(table_name, |min, max| {
+        table_codec.with_statistics_bound(table_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })
     }
@@ -824,7 +844,13 @@ pub trait StorageTransaction: Sized {
         table_functions: &TableFunctions,
         view_name: TableName,
     ) -> Result<Option<View>, DatabaseError> {
-        table_codec.with_view(&view_name, |key, _| {
+        let Some(meta) = self
+            .root_table(table_codec, &view_name, &mut *table_arena.borrow_mut())?
+            .filter(|meta| meta.is_view)
+        else {
+            return Ok(None);
+        };
+        table_codec.with_view(meta.id, |key, _| {
             let Some(bytes) = self.get_borrowed(key)? else {
                 return Ok(None);
             };
@@ -864,9 +890,21 @@ pub trait StorageTransaction: Sized {
         arena: &mut (impl MetaArena + ?Sized),
         table_name: TableName,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
-        self.table_collect(table_codec, &table_name, arena)?
+        let Some(meta) = self
+            .root_table(table_codec, &table_name, arena)?
+            .filter(|meta| !meta.is_view)
+        else {
+            return Ok(None);
+        };
+        self.table_collect(table_codec, meta.id, &table_name, arena)?
             .map(|(columns, indexes)| {
-                TableCatalog::reload(table_name, columns.into_iter(), indexes.into_iter(), arena)
+                TableCatalog::reload(
+                    meta.id,
+                    table_name,
+                    columns.into_iter(),
+                    indexes.into_iter(),
+                    arena,
+                )
             })
             .transpose()
     }
@@ -885,29 +923,25 @@ pub trait StorageTransaction: Sized {
     fn save_column_statistics(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &TableName,
+        table_id: TableId,
         column_id: ColumnId,
         meta: &HistogramMeta,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        table_codec.with_column_statistics(
-            table_name,
-            column_id,
-            Some(meta),
-            arena,
-            |key, value| self.set(key, value),
-        )
+        table_codec.with_column_statistics(table_id, column_id, Some(meta), arena, |key, value| {
+            self.set(key, value)
+        })
     }
 
     fn column_statistics(
         &self,
         table_codec: &mut TableCodec,
-        table_name: &str,
+        table_id: TableId,
         column_id: ColumnId,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<HistogramMeta>, DatabaseError> {
         let value =
-            table_codec.with_column_statistics(table_name, column_id, None, arena, |key, _| {
+            table_codec.with_column_statistics(table_id, column_id, None, arena, |key, _| {
                 self.get_borrowed(key)
             })?;
         value
@@ -918,26 +952,25 @@ pub trait StorageTransaction: Sized {
     fn remove_column_statistics(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &TableName,
+        table_id: TableId,
         column_id: ColumnId,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        table_codec.with_column_statistics(table_name, column_id, None, arena, |key, _| {
-            self.remove(key)
-        })
+        table_codec
+            .with_column_statistics(table_id, column_id, None, arena, |key, _| self.remove(key))
     }
 
     fn save_index_statistics(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &TableName,
+        table_id: TableId,
         index_statistics: IndexStatistics,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         let index_id = index_statistics.index_id();
         let (root, buckets, cm_sketch, top_n) = index_statistics.into_parts();
         table_codec.with_index_statistics(
-            table_name.as_ref(),
+            table_id,
             index_id,
             Some(&root),
             arena,
@@ -946,7 +979,7 @@ pub trait StorageTransaction: Sized {
         let (sketch_meta, sketch_pages) =
             cm_sketch.into_storage_parts(COUNT_MIN_SKETCH_STORAGE_PAGE_LEN);
         table_codec.with_index_statistics_sketch_meta(
-            table_name.as_ref(),
+            table_id,
             index_id,
             Some(&sketch_meta),
             arena,
@@ -954,7 +987,7 @@ pub trait StorageTransaction: Sized {
         )?;
         for sketch_page in sketch_pages {
             table_codec.with_index_statistics_sketch_page(
-                table_name.as_ref(),
+                table_id,
                 index_id,
                 &sketch_page,
                 true,
@@ -965,7 +998,7 @@ pub trait StorageTransaction: Sized {
 
         for (ordinal, bucket) in buckets.iter().enumerate() {
             table_codec.with_index_statistics_bucket(
-                table_name.as_ref(),
+                table_id,
                 index_id,
                 ordinal as u32,
                 Some(bucket),
@@ -974,7 +1007,7 @@ pub trait StorageTransaction: Sized {
             )?;
         }
         table_codec.with_index_statistics_top_n(
-            table_name.as_ref(),
+            table_id,
             index_id,
             Some(&top_n),
             arena,
@@ -987,11 +1020,11 @@ pub trait StorageTransaction: Sized {
     fn index_statistics(
         &self,
         table_codec: &mut TableCodec,
-        table_name: &str,
+        table_id: TableId,
         index_id: IndexId,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<IndexStatistics>, DatabaseError> {
-        table_codec.with_index_statistics_bound(table_name, index_id, |min, max| {
+        table_codec.with_index_statistics_bound(table_id, index_id, |min, max| {
             let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
             let mut root = None;
             let mut buckets = Vec::new();
@@ -1047,10 +1080,10 @@ pub trait StorageTransaction: Sized {
     fn remove_index_statistics(
         &mut self,
         table_codec: &mut TableCodec,
-        table_name: &TableName,
+        table_id: TableId,
         index_id: IndexId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_index_statistics_bound(table_name.as_ref(), index_id, |min, max| {
+        table_codec.with_index_statistics_bound(table_id, index_id, |min, max| {
             self.remove_range(Bound::Included(min), Bound::Included(max))
         })?;
 
@@ -1061,10 +1094,11 @@ pub trait StorageTransaction: Sized {
     fn table_collect(
         &self,
         table_codec: &mut TableCodec,
+        table_id: TableId,
         table_name: &TableName,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<(Vec<ColumnCatalog>, Vec<IndexMeta>)>, DatabaseError> {
-        table_codec.with_table_bound(table_name, |table_min, table_max| {
+        table_codec.with_table_bound(table_id, |table_min, table_max| {
             let mut column_iter =
                 self.range(Bound::Included(table_min), Bound::Included(table_max))?;
 
@@ -1097,7 +1131,7 @@ pub trait StorageTransaction: Sized {
         arena: &mut (impl MetaArena + ?Sized),
         table: &mut TableCatalog,
     ) -> Result<(), DatabaseError> {
-        let table_name = table.name.clone();
+        let table_id = table.id();
         let mut primary_keys = Vec::new();
 
         let mut i = 0;
@@ -1117,13 +1151,9 @@ pub trait StorageTransaction: Sized {
             let index_name = format!("uk_{}_index", col.name());
             let meta_ref = table.add_index_meta(index_name, vec![col_id], index_ty, arena)?;
             let meta = arena.index(meta_ref);
-            table_codec.with_index_meta(
-                &table_name,
-                meta.id,
-                Some(meta),
-                arena,
-                |key, value| self.set(key, value),
-            )?;
+            table_codec.with_index_meta(table_id, meta.id, Some(meta), arena, |key, value| {
+                self.set(key, value)
+            })?;
         }
         let primary_keys = table
             .primary_keys()
@@ -1136,7 +1166,7 @@ pub trait StorageTransaction: Sized {
         let meta_ref =
             table.add_index_meta("pk_index".to_string(), primary_keys, pk_index_ty, arena)?;
         let meta = arena.index(meta_ref);
-        table_codec.with_index_meta(&table_name, meta.id, Some(meta), arena, |key, value| {
+        table_codec.with_index_meta(table_id, meta.id, Some(meta), arena, |key, value| {
             self.set(key, value)
         })?;
 
@@ -1380,7 +1410,7 @@ impl TupleMapping {
 struct IndexImplParams<'a, T: StorageTransaction> {
     index_meta: IndexMetaRef,
     meta_arena: &'a dyn MetaArena,
-    table_name: TableName,
+    table_id: TableId,
     deserializers: &'a TupleDeserializers,
     tx: &'a T,
     cursor: Option<T::PointCursor<'a>>,
@@ -1407,7 +1437,7 @@ impl<T: StorageTransaction> IndexImplParams<'_, T> {
         tuple_id: &TupleId,
         tuple: &mut Tuple,
     ) -> Result<bool, DatabaseError> {
-        table_codec.with_tuple_unchecked(self.table_name.as_ref(), tuple_id, None, |key, _| {
+        table_codec.with_tuple_unchecked(self.table_id, tuple_id, None, |key, _| {
             let Some(bytes) = self.tx.get_borrowed(key)? else {
                 return Ok(false);
             };
@@ -1574,28 +1604,23 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         _: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let tuple_id = value.clone();
-        let found = table_codec.with_tuple_unchecked(
-            params.table_name.as_ref(),
-            value,
-            None,
-            |key, _| {
-                let bytes = match &params.cursor {
-                    Some(cursor) => params.tx.get_at(cursor, key)?,
-                    None => params.tx.get_borrowed(key)?,
-                };
-                let Some(bytes) = bytes else {
-                    return Ok(false);
-                };
-                TableCodec::decode_tuple_into(
-                    tuple,
-                    params.deserializers.deserializers(),
-                    params.with_pk.then(|| tuple_id.clone()),
-                    bytes.as_ref(),
-                    params.deserializers.total_len,
-                )?;
-                Ok(true)
-            },
-        )?;
+        let found = table_codec.with_tuple_unchecked(params.table_id, value, None, |key, _| {
+            let bytes = match &params.cursor {
+                Some(cursor) => params.tx.get_at(cursor, key)?,
+                None => params.tx.get_borrowed(key)?,
+            };
+            let Some(bytes) = bytes else {
+                return Ok(false);
+            };
+            TableCodec::decode_tuple_into(
+                tuple,
+                params.deserializers.deserializers(),
+                params.with_pk.then(|| tuple_id.clone()),
+                bytes.as_ref(),
+                params.deserializers.total_len,
+            )?;
+            Ok(true)
+        })?;
         Ok(if found {
             IndexResult::Hit
         } else {
@@ -1611,7 +1636,7 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_tuple_unchecked(params.table_name.as_ref(), value, None, |key, _| {
+        table_codec.with_tuple_unchecked(params.table_id, value, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
         })
@@ -1659,10 +1684,9 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
             index_values(value),
             IndexType::Unique,
         );
-        let Some(bytes) =
-            table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
-                params.tx.get_borrowed(key)
-            })?
+        let Some(bytes) = table_codec.with_index(params.table_id, &index, None, |key, _| {
+            params.tx.get_borrowed(key)
+        })?
         else {
             return Ok(IndexResult::Miss);
         };
@@ -1688,7 +1712,7 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
             IndexType::Unique,
         );
 
-        table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
+        table_codec.with_index(params.table_id, &index, None, |key, _| {
             if index.values.len() < params.index_meta().column_ids.len() {
                 // A partial UNIQUE key bounds a prefix, not one exact index entry.
                 encode_bound_key(out, key, is_upper);
@@ -1746,7 +1770,7 @@ impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
             index_values(value),
             IndexType::Normal,
         );
-        table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
+        table_codec.with_index(params.table_id, &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
         })
@@ -1798,7 +1822,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
             index_values(value),
             IndexType::Composite,
         );
-        table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
+        table_codec.with_index(params.table_id, &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
         })
@@ -1865,7 +1889,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
             index_values(value),
             params.index_meta().ty,
         );
-        table_codec.with_index(params.table_name.as_ref(), &index, None, |key, _| {
+        table_codec.with_index(params.table_id, &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
         })
@@ -1970,6 +1994,7 @@ impl TupleDeserializers {
 }
 
 pub struct TupleIter<'a, T: StorageTransaction + 'a> {
+    table_id: TableId,
     bounds: IterBounds,
     deserializers: &'a TupleDeserializers,
     iter: T::IterType<'a>,
@@ -1980,10 +2005,9 @@ impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
         &mut self,
         tx: &'a T,
         table_codec: &mut TableCodec,
-        table_name: &TableName,
         bounds: Bounds,
     ) -> Result<(), DatabaseError> {
-        self.iter = table_codec.with_tuple_bound(table_name, |min, max| {
+        self.iter = table_codec.with_tuple_bound(self.table_id, |min, max| {
             tx.range(Bound::Included(min), Bound::Included(max))
         })?;
         self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
@@ -2187,7 +2211,7 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
                     };
                     match binary {
                         Range::Scope { min, max } => {
-                            let table_name = &self.params.table_name;
+                            let table_id = self.params.table_id;
                             let index_meta = self.params.index_meta();
                             let encode_min = encode_bound(
                                 table_codec,
@@ -2217,13 +2241,9 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
                                 )
                             };
                             let iter = if matches!(index_meta.ty, IndexType::PrimaryKey { .. }) {
-                                table_codec.with_tuple_bound(table_name, open_iter)?
+                                table_codec.with_tuple_bound(table_id, open_iter)?
                             } else {
-                                table_codec.with_index_bound(
-                                    table_name,
-                                    index_meta.id,
-                                    open_iter,
-                                )?
+                                table_codec.with_index_bound(table_id, index_meta.id, open_iter)?
                             };
                             self.state = IndexIterState::Range(iter);
                         }
@@ -2302,11 +2322,14 @@ impl<T: StorageTransaction> TableIter<'_, T> {
         &mut self,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<TableMeta>, DatabaseError> {
-        let Some((_, value)) = self.iter.try_next()? else {
-            return Ok(None);
-        };
-
-        Ok(Some(TableCodec::decode_root_table::<T>(value, arena)?))
+        // Views share the root namespace.
+        while let Some((_, value)) = self.iter.try_next()? {
+            let meta = TableCodec::decode_root_table::<T>(value, arena)?;
+            if !meta.is_view {
+                return Ok(Some(meta));
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -2693,7 +2716,7 @@ mod test {
         for tuple in build_tuples() {
             transaction.append_tuple(
                 &mut table_codec,
-                "t1",
+                0,
                 &tuple.into(),
                 &[
                     LogicalType::Integer.serializable(),
@@ -2732,7 +2755,7 @@ mod test {
                 tuples[2]
             );
 
-            let mut iter = table_codec.with_tuple_bound("t1", |min, max| {
+            let mut iter = table_codec.with_tuple_bound(0, |min, max| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
             })?;
 
@@ -2745,7 +2768,7 @@ mod test {
             assert!(iter.try_next()?.is_none());
         }
 
-        transaction.remove_tuple(&mut table_codec, "t1", &tuples[1].values[0])?;
+        transaction.remove_tuple(&mut table_codec, 0, &tuples[1].values[0])?;
         {
             let deserializers = project_deserializers_for_test(
                 &table_cache,
@@ -2771,7 +2794,7 @@ mod test {
                 tuples[2]
             );
 
-            let mut iter = table_codec.with_tuple_bound("t1", |min, max| {
+            let mut iter = table_codec.with_tuple_bound(0, |min, max| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
             })?;
 
@@ -2866,7 +2889,7 @@ mod test {
         let mut plan_arena = PlanArena::new(&table_arena);
         fn_assert(&mut transaction, &reloaded_table_cache)?;
         {
-            let mut iter = table_codec.with_index_meta_bound("t1", |min, max| {
+            let mut iter = table_codec.with_index_meta_bound(0, |min, max| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
             })?;
 
@@ -2910,7 +2933,7 @@ mod test {
             assert_eq!(i2_meta.name, "i2".to_string());
             assert_eq!(i2_meta.ty, IndexType::Composite);
 
-            let mut iter = table_codec.with_index_meta_bound("t1", |min, max| {
+            let mut iter = table_codec.with_index_meta_bound(0, |min, max| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
             })?;
 
@@ -3014,12 +3037,12 @@ mod test {
             ),
         ];
         for (tuple_id, index) in indexes.iter().cloned() {
-            transaction.add_index(&mut table_codec, "t1", index, &tuple_id)?;
+            transaction.add_index(&mut table_codec, 0, index, &tuple_id)?;
         }
         for tuple in build_tuples() {
             transaction.append_tuple(
                 &mut table_codec,
-                "t1",
+                0,
                 &tuple.into(),
                 &[
                     LogicalType::Integer.serializable(),
@@ -3053,7 +3076,7 @@ mod test {
                 tuples[1]
             );
 
-            let mut iter = table_codec.with_index_bound("t1", 1, |min, max| {
+            let mut iter = table_codec.with_index_bound(0, 1, |min, max| {
                 transaction.range(Bound::Included(min), Bound::Included(max))
             })?;
 
@@ -3065,7 +3088,7 @@ mod test {
             dbg!(value);
             assert!(iter.try_next()?.is_none());
         }
-        transaction.del_index(&mut table_codec, "t1", &indexes[0].1, &indexes[0].0)?;
+        transaction.del_index(&mut table_codec, 0, &indexes[0].1, &indexes[0].0)?;
 
         let deserializers = project_deserializers_for_test(
             &table_cache,
@@ -3087,7 +3110,7 @@ mod test {
             tuples[1]
         );
 
-        let mut iter = table_codec.with_index_bound("t1", 1, |min, max| {
+        let mut iter = table_codec.with_index_bound(0, 1, |min, max| {
             transaction.range(Bound::Included(min), Bound::Included(max))
         })?;
 
@@ -3207,7 +3230,7 @@ mod test {
         let mut transaction = table_state.storage.transaction()?;
         let mut view_cache = table_state.view_cache.clone();
         let mut table_codec = TableCodec::default();
-        let view = transaction.create_view(&mut table_codec, &plan_arena, view, true)?;
+        let view = transaction.create_view(&mut table_codec, &mut plan_arena, view, true)?;
         view_cache.insert(view.name.clone(), view.clone());
 
         assert_eq!(
@@ -3235,10 +3258,10 @@ mod test {
                 .unwrap()
         );
 
-        if transaction.drop_view(&mut table_codec, view_name.clone(), false)? {
+        if transaction.drop_view(&mut table_codec, &mut plan_arena, view_name.clone(), false)? {
             view_cache.remove(&view_name);
         }
-        if transaction.drop_view(&mut table_codec, view_name.clone(), true)? {
+        if transaction.drop_view(&mut table_codec, &mut plan_arena, view_name.clone(), true)? {
             view_cache.remove(&view_name);
         }
         assert!(transaction
