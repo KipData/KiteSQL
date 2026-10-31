@@ -863,7 +863,7 @@ mod tests {
         scans: &mut Vec<Vec<String>>,
     ) {
         if let Operator::TableScan(op) = &plan.operator {
-            if op.table_name.to_string() == table_name {
+            if crate::planner::MetaArena::table_name(arena, op.table_id) == Some(table_name) {
                 scans.push(
                     op.columns()
                         .map(|column| arena.column(column).name().to_string())

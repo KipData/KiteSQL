@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use super::Binder;
-use crate::catalog::{ColumnCatalog, TableName};
+use crate::catalog::ColumnCatalog;
 use crate::errors::DatabaseError;
 use crate::planner::operator::alter_table::add_column::AddColumnOperator;
 use crate::planner::operator::alter_table::change_column::{
@@ -28,13 +28,13 @@ use crate::types::LogicalType;
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_add_column(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         column: ColumnCatalog,
         if_not_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         Ok(LogicalPlan::new(
             Operator::AddColumn(AddColumnOperator {
-                table_name,
+                table_id: self.context.table_id(table_name)?,
                 if_not_exists,
                 column,
             }),
@@ -44,13 +44,13 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
     pub(crate) fn bind_drop_column(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         column_name: String,
         if_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         Ok(LogicalPlan::new(
             Operator::DropColumn(DropColumnOperator {
-                table_name,
+                table_id: self.context.table_id(table_name)?,
                 if_exists,
                 column_name,
             }),
@@ -60,7 +60,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
     pub(crate) fn bind_change_column(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         old_column_name: String,
         new_column_name: String,
         data_type: LogicalType,
@@ -69,7 +69,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
     ) -> Result<LogicalPlan, DatabaseError> {
         Ok(LogicalPlan::new(
             Operator::ChangeColumn(ChangeColumnOperator {
-                table_name,
+                table_id: self.context.table_id(table_name)?,
                 old_column_name,
                 new_column_name,
                 data_type,

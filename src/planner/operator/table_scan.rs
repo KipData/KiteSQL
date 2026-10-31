@@ -13,19 +13,19 @@
 // limitations under the License.
 
 use super::{Operator, SortOption};
-use crate::catalog::{ColumnRef, TableCatalog, TableName};
+use crate::catalog::{ColumnRef, TableCatalog, TableId};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::sort::SortField;
 use crate::planner::MetaArena;
-use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan};
+use crate::planner::{fmt_explain_list, fmt_table, Childrens, Explain, LogicalPlan};
 use crate::storage::{Bounds, TupleDeserializers};
 use crate::types::index::IndexInfo;
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct TableScanOperator {
-    pub(crate) table_name: TableName,
+    pub(crate) table_id: TableId,
     pub(crate) deserializers: TupleDeserializers,
     // Support push down limit.
     pub(crate) limit: Bounds,
@@ -42,7 +42,6 @@ impl TableScanOperator {
     }
 
     pub fn build(
-        table_name: TableName,
         table_catalog: &TableCatalog,
         with_pk: bool,
         arena: &mut (dyn MetaArena + '_),
@@ -84,7 +83,7 @@ impl TableScanOperator {
         Ok(LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 index_infos,
-                table_name,
+                table_id: table_catalog.id(),
                 deserializers,
                 limit: (None, None),
                 with_pk,
@@ -100,7 +99,9 @@ impl Explain for TableScanOperator {
         arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        write!(f, "TableScan {} -> [", self.table_name)?;
+        f.write_str("TableScan ")?;
+        fmt_table(self.table_id, arena, f)?;
+        f.write_str(" -> [")?;
         fmt_explain_list(self.columns(), ", ", arena, f)?;
         f.write_str("]")?;
         let (offset, limit) = self.limit;

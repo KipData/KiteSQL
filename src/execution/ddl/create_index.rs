@@ -65,19 +65,21 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let CreateIndexOperator {
-            table_name,
+            table_id,
             index_name,
             columns,
             if_not_exists,
             ty,
         } = self.op;
 
+        let table_catalog = arena
+            .table_cache()
+            .get(table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
         if *if_not_exists
-            && arena.table_cache().get(table_name).is_some_and(|table| {
-                table
-                    .indexes()
-                    .any(|index| plan_arena.index(*index).name == *index_name)
-            })
+            && table_catalog
+                .indexes()
+                .any(|index| plan_arena.index(*index).name == *index_name)
         {
             arena.finish();
             return Ok(());
@@ -100,7 +102,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             let (table, index_id) = transaction.add_index_meta(
                 table_codec,
                 plan_arena,
-                table_name,
+                table_catalog.name(),
                 index_name.clone(),
                 column_ids,
                 *ty,

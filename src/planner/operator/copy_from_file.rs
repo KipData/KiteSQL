@@ -13,15 +13,15 @@
 // limitations under the License.
 
 use crate::binder::copy::ExtSource;
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::planner::MetaArena;
-use crate::planner::{fmt_explain_list, Explain};
+use crate::planner::{fmt_explain_list, fmt_table, Explain};
 use crate::types::tuple::Schema;
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct CopyFromFileOperator {
-    pub table: TableName,
+    pub table_id: TableId,
     pub source: ExtSource,
     pub schema_ref: Schema,
 }
@@ -32,7 +32,9 @@ impl Explain for CopyFromFileOperator {
         arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        write!(f, "Copy {} -> {} [", self.source.path.display(), self.table)?;
+        write!(f, "Copy {} -> ", self.source.path.display())?;
+        fmt_table(self.table_id, arena, f)?;
+        f.write_str(" [")?;
         fmt_explain_list(&self.schema_ref, ", ", arena, f)?;
         f.write_str("]")
     }

@@ -237,6 +237,7 @@ mod wasm_tests {
     fn memory_storage_roundtrip() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
+        let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
         let mut table_codec = TableCodec::default();
         let table_arena = TableArenaCell::default();
@@ -261,7 +262,7 @@ mod wasm_tests {
             false,
         )? {
             let table = table.transplant_to_table_arena(&plan_arena)?;
-            table_cache.insert(table.name().clone(), table);
+            names.insert_table(&mut table_cache, table);
         }
         let plan_arena = PlanArena::new(&table_arena);
         let table_name: TableName = "test".to_string().into();
@@ -295,8 +296,8 @@ mod wasm_tests {
             false,
         )?;
 
-        let read_column = table_cache
-            .get(&table_name)
+        let read_column = names
+            .table(&table_cache, &table_name)
             .unwrap()
             .columns()
             .next()
@@ -305,6 +306,7 @@ mod wasm_tests {
         let read_columns = vec![read_column];
 
         let deserializers = crate::storage::project_deserializers_for_test(
+            &names,
             &table_cache,
             "test",
             &read_columns,
@@ -313,9 +315,8 @@ mod wasm_tests {
         );
         let mut iter = transaction.read(
             &mut table_codec,
-            &table_cache,
             &deserializers,
-            &"test".to_string().into(),
+            names.table(&table_cache, "test").unwrap().id(),
             (Some(1), Some(1)),
         )?;
 
@@ -340,12 +341,17 @@ mod wasm_tests {
         let transaction = kite_sql.storage.transaction()?;
         let table_name: TableName = "t1".to_string().into();
         let table = transaction
-            .table(kite_sql.state.table_cache(), table_name.clone())?
+            .table(
+                kite_sql.state.names(),
+                kite_sql.state.table_cache(),
+                &table_name,
+            )?
             .unwrap()
             .clone();
         let pk_index = table.indexes().next().unwrap().clone();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.names(),
             kite_sql.state.table_cache(),
             &table_name,
             &table.columns().cloned().collect::<Vec<_>>(),
@@ -353,9 +359,13 @@ mod wasm_tests {
             true,
         );
         let mut iter = transaction.read_by_index(
-            kite_sql.state.table_cache(),
             &plan_arena,
-            table_name,
+            kite_sql
+                .state
+                .names()
+                .table(kite_sql.state.table_cache(), &table_name)
+                .unwrap()
+                .id(),
             (Some(0), None),
             pk_index,
             &[Range::Scope {
@@ -416,6 +426,7 @@ mod native_tests {
     fn memory_storage_roundtrip() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
+        let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
         let mut table_codec = TableCodec::default();
         let table_arena = TableArenaCell::default();
@@ -435,15 +446,15 @@ mod native_tests {
         if let Some(table) = transaction.create_table(
             &mut table_codec,
             &mut plan_arena,
-            "test".to_string().into(),
+            "test".to_string(),
             source_columns,
             false,
         )? {
             let table = table.transplant_to_table_arena(&plan_arena)?;
-            table_cache.insert(table.name().clone(), table);
+            names.insert_table(&mut table_cache, table);
         }
         let plan_arena = PlanArena::new(&table_arena);
-        let table_name: TableName = "test".to_string().into();
+        let table_name: TableName = "test".to_string();
 
         transaction.append_tuple(
             &mut table_codec,
@@ -474,8 +485,8 @@ mod native_tests {
             false,
         )?;
 
-        let read_column = table_cache
-            .get(&table_name)
+        let read_column = names
+            .table(&table_cache, &table_name)
             .unwrap()
             .columns()
             .next()
@@ -484,6 +495,7 @@ mod native_tests {
         let read_columns = vec![read_column];
 
         let deserializers = crate::storage::project_deserializers_for_test(
+            &names,
             &table_cache,
             "test",
             &read_columns,
@@ -492,9 +504,8 @@ mod native_tests {
         );
         let mut iter = transaction.read(
             &mut table_codec,
-            &table_cache,
             &deserializers,
-            &"test".to_string().into(),
+            names.table(&table_cache, "test").unwrap().id(),
             (Some(1), Some(1)),
         )?;
 
@@ -511,20 +522,25 @@ mod native_tests {
     fn memory_storage_read_by_index() -> Result<(), DatabaseError> {
         let mut kite_sql = DataBaseBuilder::path("./memory").build_in_memory()?;
         kite_sql.ddl("create table t1 (a int primary key, b int)")?;
-        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
+        kite_sql.load(CatalogKind::Table("t1".to_string()))?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
 
         let transaction = kite_sql.storage.transaction()?;
-        let table_name: TableName = "t1".to_string().into();
+        let table_name: TableName = "t1".to_string();
         let table = transaction
-            .table(kite_sql.state.table_cache(), table_name.clone())?
+            .table(
+                kite_sql.state.names(),
+                kite_sql.state.table_cache(),
+                &table_name,
+            )?
             .unwrap()
             .clone();
         let pk_index = *table.indexes().next().unwrap();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.names(),
             kite_sql.state.table_cache(),
             &table_name,
             &table.columns().cloned().collect::<Vec<_>>(),
@@ -532,9 +548,13 @@ mod native_tests {
             true,
         );
         let mut iter = transaction.read_by_index(
-            kite_sql.state.table_cache(),
             &plan_arena,
-            table_name,
+            kite_sql
+                .state
+                .names()
+                .table(kite_sql.state.table_cache(), &table_name)
+                .unwrap()
+                .id(),
             (Some(0), None),
             pk_index,
             &[Range::Scope {

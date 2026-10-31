@@ -64,10 +64,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
             .iter()
             .map(|ty| ty.serializable())
             .collect_vec();
-        let table_cache = arena.table_cache();
-        let transaction = arena.transaction();
-        let table = transaction
-            .table(table_cache, op.table.clone())?
+        let table = arena
+            .table_cache()
+            .get(&op.table_id)
             .ok_or(DatabaseError::TableNotFound)?;
 
         let file = File::open(&op.source.path)?;
@@ -133,7 +132,7 @@ mod tests {
         let tmp_dir = TempDir::new()?;
         let mut db = DataBaseBuilder::path(tmp_dir.path()).build_rocksdb()?;
         db.ddl("create table test_copy (a int primary key, b float, c varchar(10))")?;
-        db.load(CatalogKind::Table("test_copy".to_string().into()))?;
+        db.load(CatalogKind::Table("test_copy".to_string()))?;
 
         fn test_column(
             name: &str,
@@ -145,7 +144,7 @@ mod tests {
                 false,
                 ColumnDesc::new(ty, primary_key, false, None)?,
             );
-            column.set_ref_table("t1".to_string().into(), 1, false);
+            column.set_table(0, 1);
             Ok(column)
         }
 
@@ -161,7 +160,7 @@ mod tests {
         ];
 
         let op = CopyFromFileOperator {
-            table: "test_copy".to_string().into(),
+            table_id: 0,
             source: ExtSource {
                 path: file.path().into(),
                 format: FileFormat::Csv {

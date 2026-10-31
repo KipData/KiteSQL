@@ -48,13 +48,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let TruncateOperator { table_name } = self.op;
-        // FIXME
-        let table_id = arena
-            .transaction()
-            .table(arena.table_cache(), table_name.clone())?
-            .ok_or(DatabaseError::TableNotFound)?
-            .id();
+        let TruncateOperator { table_id } = *self.op;
         let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec) = state.transaction_codec_mut();
         transaction.drop_data(table_codec, table_id)?;

@@ -44,7 +44,6 @@ impl<'a> WriteExecutor<'a> for Insert<'a> {
     fn into_executor<B: ExecBuilder>(
         (
             InsertOperator {
-                table_name: _,
                 table,
                 is_overwrite,
             },

@@ -13,14 +13,12 @@
 // limitations under the License.
 
 use crate::catalog::table::DmlTable;
-use crate::catalog::TableName;
 use crate::planner::MetaArena;
-use crate::planner::{Explain, ExprRef};
+use crate::planner::{fmt_table, Explain, ExprRef};
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct UpdateOperator {
-    pub table_name: TableName,
     pub(crate) table: DmlTable,
     pub value_exprs: Vec<(usize, ExprRef)>,
 }
@@ -31,7 +29,9 @@ impl Explain for UpdateOperator {
         arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        write!(f, "Update {} set ", self.table_name)?;
+        f.write_str("Update ")?;
+        fmt_table(self.table.table_id, arena, f)?;
+        f.write_str(" set ")?;
         for (index, (position, expr)) in self.value_exprs.iter().enumerate() {
             if index > 0 {
                 f.write_str(", ")?;

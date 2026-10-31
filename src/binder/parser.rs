@@ -448,7 +448,7 @@ where
                     ..
                 } => self
                     .binder
-                    .bind_describe(sql_table_name(table_name.clone())?)?,
+                    .bind_describe(&sql_table_name(table_name.clone())?)?,
                 Statement::CreateIndex(create) => self.create_index(create.clone())?,
                 Statement::CreateView(create) => self.create_view(create.clone())?,
                 _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
@@ -476,7 +476,7 @@ where
     ) -> Result<LogicalPlan, DatabaseError> {
         self.binder
             .context
-            .table(table_name.clone())?
+            .table(&table_name)?
             .ok_or(DatabaseError::TableNotFound)?;
 
         match operation {
@@ -497,7 +497,7 @@ where
                 }
 
                 self.binder
-                    .bind_add_column(table_name, column, if_not_exists)
+                    .bind_add_column(&table_name, column, if_not_exists)
             }
             AlterTableOperation::DropColumn {
                 column_names,
@@ -512,7 +512,7 @@ where
                 let column_name = column_names[0].value.clone();
 
                 self.binder
-                    .bind_drop_column(table_name, column_name, if_exists)
+                    .bind_drop_column(&table_name, column_name, if_exists)
             }
             AlterTableOperation::RenameColumn {
                 old_column_name,
@@ -524,7 +524,7 @@ where
                     let table = self
                         .binder
                         .context
-                        .table(table_name.clone())?
+                        .table(&table_name)?
                         .ok_or(DatabaseError::TableNotFound)?;
                     table
                         .get_column_by_name(old_column_name.as_ref())
@@ -541,7 +541,7 @@ where
                 }
 
                 self.binder.bind_change_column(
-                    table_name,
+                    &table_name,
                     old_column_name.into_owned(),
                     new_column_name,
                     data_type,
@@ -555,7 +555,7 @@ where
                     let table = self
                         .binder
                         .context
-                        .table(table_name.clone())?
+                        .table(&table_name)?
                         .ok_or(DatabaseError::TableNotFound)?;
                     table
                         .get_column_by_name(old_column_name.as_ref())
@@ -608,7 +608,7 @@ where
                 };
 
                 self.binder.bind_change_column(
-                    table_name,
+                    &table_name,
                     old_column_name.to_string(),
                     old_column_name.into_owned(),
                     data_type,
@@ -632,7 +632,7 @@ where
                     let table = self
                         .binder
                         .context
-                        .table(table_name.clone())?
+                        .table(&table_name)?
                         .ok_or(DatabaseError::TableNotFound)?;
                     let _ = table
                         .get_column_by_name(old_column_name.as_ref())
@@ -646,7 +646,7 @@ where
                     self.bind_change_column_options(options, &data_type)?;
 
                 self.binder.bind_change_column(
-                    table_name,
+                    &table_name,
                     old_column_name.clone(),
                     old_column_name,
                     data_type,
@@ -672,7 +672,7 @@ where
                     let table = self
                         .binder
                         .context
-                        .table(table_name.clone())?
+                        .table(&table_name)?
                         .ok_or(DatabaseError::TableNotFound)?;
                     let _ = table
                         .get_column_by_name(old_column_name.as_ref())
@@ -691,7 +691,7 @@ where
                     self.bind_change_column_options(options, &data_type)?;
 
                 self.binder.bind_change_column(
-                    table_name,
+                    &table_name,
                     old_column_name.into_owned(),
                     new_column_name,
                     data_type,
@@ -903,7 +903,7 @@ where
             .and_then(sql_object_name)?;
         let input = self
             .binder
-            .bind_create_index_source(table_name.clone(), self.arena)?;
+            .bind_create_index_source(&table_name, self.arena)?;
         let mut columns = Vec::with_capacity(create.columns.len());
 
         for index_column in create.columns {
@@ -930,7 +930,7 @@ where
         }
 
         self.binder.bind_create_index(
-            table_name,
+            &table_name,
             index_name,
             columns,
             create.if_not_exists,
@@ -1017,10 +1017,12 @@ where
         let ext_source = copy_ext_source(target, options)?;
 
         match source {
-            CopySource::Table { table_name, .. } => {
-                self.binder
-                    .bind_copy_table(sql_table_name(table_name)?, to, ext_source, self.arena)
-            }
+            CopySource::Table { table_name, .. } => self.binder.bind_copy_table(
+                &sql_table_name(table_name)?,
+                to,
+                ext_source,
+                self.arena,
+            ),
             CopySource::Query(query) => {
                 if !to {
                     return Err(DatabaseError::UnsupportedStmt(
@@ -1075,7 +1077,7 @@ where
         let source = self
             .binder
             .context
-            .source_and_bind(table_name.clone(), None, None, false, self.arena)?
+            .source_and_bind(&table_name, None, None, false, self.arena)?
             .ok_or(DatabaseError::TableNotFound)?;
         let values_len = expr_rows[0].len();
 
@@ -1128,7 +1130,7 @@ where
         self.binder.context.allow_default = false;
 
         self.binder.bind_insert_values(
-            table_name,
+            &table_name,
             schema_ref,
             rows,
             expr_rows.len(),
@@ -1183,7 +1185,7 @@ where
         };
 
         self.binder
-            .bind_insert_query(table_name, input_plan, &targets, is_overwrite, self.arena)
+            .bind_insert_query(&table_name, input_plan, &targets, is_overwrite, self.arena)
     }
 
     fn update(self, update: &sqlparser::ast::Update) -> Result<LogicalPlan, DatabaseError> {
@@ -1192,10 +1194,8 @@ where
         if let TableFactor::Table { name, .. } = &to.relation {
             let is_joined_update = !to.joins.is_empty();
             let table_name = sql_table_name(name.clone())?;
-            if self.binder.context.table(table_name.clone())?.is_none() {
-                return Err(DatabaseError::TableNotFound);
-            }
-            self.binder.with_pk(table_name.clone());
+            let table_id = self.binder.context.table_id(&table_name)?;
+            self.binder.with_pk(table_id);
 
             let mut plan = self.binder.bind_table_ref_sql(to, self.arena)?;
             let (target_source, target_offset) =
@@ -1316,7 +1316,7 @@ where
             ];
             plan = self.binder.bind_scalar_queries(plan, &steps, self.arena)?;
             self.binder
-                .bind_update(table_name, value_exprs, plan, self.arena)
+                .bind_update(&table_name, value_exprs, plan, self.arena)
         } else {
             Err(DatabaseError::UnsupportedStmt(format!(
                 "UPDATE target must be a table: {:?}",
@@ -1336,23 +1336,24 @@ where
 
         if let TableFactor::Table { name, .. } = &table.relation {
             let table_name = sql_table_name(name.clone())?;
-            let primary_keys = self
+            let target = self
                 .binder
                 .context
-                .table(table_name.clone())?
-                .ok_or(DatabaseError::TableNotFound)?
+                .table(&table_name)?
+                .ok_or(DatabaseError::TableNotFound)?;
+            let primary_keys = target
                 .primary_keys()
                 .iter()
                 .map(|(_, column)| *column)
                 .collect();
-            self.binder.with_pk(table_name.clone());
+            self.binder.with_pk(target.id());
             let mut plan = self.binder.bind_table_ref_sql(table, self.arena)?;
 
             if let Some(predicate) = delete.selection.as_ref() {
                 plan = self.binder.bind_where(plan, predicate, self.arena)?;
             }
 
-            self.binder.bind_delete(table_name, primary_keys, plan)
+            self.binder.bind_delete(&table_name, primary_keys, plan)
         } else {
             Err(DatabaseError::UnsupportedStmt(format!(
                 "DELETE target must be a table: {:?}",
@@ -1366,7 +1367,7 @@ where
             DatabaseError::UnsupportedStmt("ANALYZE without table is not supported".to_string())
         })?;
         self.binder
-            .bind_analyze(sql_table_name(table_name)?, self.arena)
+            .bind_analyze(&sql_table_name(table_name)?, self.arena)
     }
 
     fn truncate(self, truncate: sqlparser::ast::Truncate) -> Result<LogicalPlan, DatabaseError> {
@@ -1375,7 +1376,7 @@ where
                 "only truncate a single table is supported".to_string(),
             ));
         }
-        self.binder.bind_truncate(sql_table_name(
+        self.binder.bind_truncate(&sql_table_name(
             truncate.table_names.into_iter().next().unwrap().name,
         )?)
     }
@@ -1594,10 +1595,10 @@ where
         self,
         into: Option<&SelectInto>,
     ) -> Result<BindPlanComplete, DatabaseError> {
-        self.insert_into(
-            into.map(|SelectInto { name, .. }| lower_case_name(name).map(Into::into))
-                .transpose()?,
-        )
+        let table_name = into
+            .map(|SelectInto { name, .. }| lower_case_name(name))
+            .transpose()?;
+        self.insert_into(table_name.as_deref())
     }
 }
 
@@ -2935,7 +2936,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             }
         }
 
-        let value_name = arena.temp_table();
+        let value_source = arena.alloc_source();
         let column_refs: Vec<ColumnRef> = inferred_types
             .into_iter()
             .enumerate()
@@ -2946,7 +2947,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                     false,
                     ColumnDesc::new(typ, None, false, None)?,
                 );
-                column_ref.set_ref_table(value_name.clone(), ColumnId::default(), true);
+                column_ref.set_source(value_source, ColumnId::default(), true);
                 Ok(arena.alloc_column(column_ref))
             })
             .collect::<Result<_, DatabaseError>>()?;
@@ -3040,35 +3041,26 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                             "SELECT * with no tables specified is not valid".to_string(),
                         ));
                     }
-                    let visible_names = self
-                        .context
-                        .bind_table
-                        .iter()
-                        .filter(|bound_source| {
-                            !Self::is_joined_values_source(
-                                bound_source.join_type,
-                                &bound_source.source,
-                                arena,
-                            )
-                        })
-                        .map(|bound_source| bound_source.visible_name())
-                        .cloned()
-                        .collect_vec();
-                    for visible_name in visible_names {
+                    for bound_source in &self.context.bind_table {
+                        if Self::is_joined_values_source(
+                            bound_source.join_type,
+                            &bound_source.source,
+                            arena,
+                        ) {
+                            continue;
+                        }
                         Self::bind_table_column_refs(
                             &self.context,
                             arena,
                             &mut select_items,
-                            visible_name,
+                            bound_source.visible_name(),
                             false,
                         )?;
                     }
                 }
                 SelectItem::QualifiedWildcard(table_name, _) => {
-                    let table_name: TableName = match table_name {
-                        SelectItemQualifiedWildcardKind::ObjectName(name) => {
-                            lower_case_name(name)?.into()
-                        }
+                    let table_name = match table_name {
+                        SelectItemQualifiedWildcardKind::ObjectName(name) => lower_case_name(name)?,
                         SelectItemQualifiedWildcardKind::Expr(expr) => {
                             return Err(DatabaseError::UnsupportedStmt(format!(
                                 "qualified wildcard expr: {expr}"
@@ -3079,7 +3071,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                         &self.context,
                         arena,
                         &mut select_items,
-                        table_name,
+                        &table_name,
                         true,
                     )?;
                 }
@@ -3097,12 +3089,10 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
         let plan = binder.bind_query(&cte.query, arena)?;
-        let source_name = arena.temp_table();
         binder.bind_alias(
             plan,
             &alias.columns,
-            alias.name.clone(),
-            source_name,
+            &alias.name,
             AliasPurpose::Output,
             arena,
         )
@@ -3151,22 +3141,20 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
 
         let mut anchor_binder = Binder::new(self.context.fork(), self.args, Some(&self.context));
         let anchor = anchor_binder.bind_set_expr(left, arena)?;
-        if anchor
-            .referenced_table()
-            .iter()
-            .any(|table| table == &alias.name)
-        {
+        let mut self_referenced = false;
+        anchor.visit_referenced_tables(&mut |table| {
+            self_referenced |= arena.table_name(table) == Some(alias.name.as_ref())
+        });
+        if self_referenced {
             return Err(DatabaseError::UnsupportedStmt(
                 "the recursive CTE cannot be referenced by its anchor".to_string(),
             ));
         }
 
-        let source_name = arena.temp_table();
         let mut anchor = anchor_binder.bind_alias(
             anchor,
             &alias.columns,
-            alias.name.clone(),
-            source_name,
+            &alias.name,
             AliasPurpose::Output,
             arena,
         )?;
@@ -3590,10 +3578,12 @@ mod tests {
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let transaction = tables.storage.transaction()?;
+        let catalog = tables.table_arena.borrow();
         let mut binder = Binder::new(
             BinderContext::new(
-                &tables.table_cache,
-                &tables.view_cache,
+                &catalog.names,
+                &catalog.tables,
+                &catalog.views,
                 &transaction,
                 &scala_functions,
                 &table_functions,

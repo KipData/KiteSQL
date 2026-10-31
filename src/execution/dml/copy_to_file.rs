@@ -148,7 +148,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let mut db = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         db.ddl("create table t1 (a int primary key, b float, c varchar(10))")?;
-        db.load(CatalogKind::Table("t1".to_string().into()))?;
+        db.load(CatalogKind::Table("t1".to_string()))?;
         db.run("insert into t1 values (1, 1.1, 'foo')")?.done()?;
         db.run("insert into t1 values (2, 2.0, 'fooo')")?.done()?;
         db.run("insert into t1 values (3, 2.1, 'Kite')")?.done()?;
@@ -156,11 +156,10 @@ mod tests {
         let mut plan_arena = crate::planner::PlanArena::new(db.state.table_arena());
         let transaction = db.storage.transaction()?;
         let table = transaction
-            .table(db.state.table_cache(), "t1".to_string().into())?
+            .table(db.state.names(), db.state.table_cache(), "t1")?
             .unwrap();
 
-        let mut input_plan =
-            TableScanOperator::build("t1".to_string().into(), table, true, &mut plan_arena)?;
+        let mut input_plan = TableScanOperator::build(table, true, &mut plan_arena)?;
         input_plan.populate_output_schema_recursive(&mut plan_arena);
         let mut executor = crate::execution::execute_input::<_, CopyToFile>(
             (&op, &input_plan),

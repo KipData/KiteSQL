@@ -1180,9 +1180,9 @@ mod test {
             if sql.starts_with("DROP ") || sql.starts_with("CREATE ") {
                 db.ddl(sql)?;
                 if sql.starts_with("CREATE TABLE str1") {
-                    db.load(CatalogKind::Table("str1".to_string().into()))?;
+                    db.load(CatalogKind::Table("str1".to_string()))?;
                 } else if sql.starts_with("CREATE TABLE str2") {
-                    db.load(CatalogKind::Table("str2".to_string().into()))?;
+                    db.load(CatalogKind::Table("str2".to_string()))?;
                 }
             } else {
                 db.run(sql)?.done()?;

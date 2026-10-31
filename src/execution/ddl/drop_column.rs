@@ -52,16 +52,15 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
         let DropColumnOperator {
-            table_name,
+            table_id,
             column_name,
             if_exists,
         } = self.op;
 
-        let (table_id, old_schema, pk_ty, column_info) = {
-            let table_catalog = arena
-                .transaction()
-                .table(table_cache, table_name.clone())?
-                .ok_or(DatabaseError::TableNotFound)?;
+        let table_catalog = table_cache
+            .get(table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
+        let (old_schema, pk_ty, column_info) = {
             let column_info = table_catalog
                 .columns()
                 .enumerate()
@@ -70,7 +69,6 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                     (column.name() == column_name).then(|| (index, column.desc().is_primary()))
                 });
             (
-                table_catalog.id(),
                 table_catalog.columns().copied().collect_vec(),
                 table_catalog.primary_keys_type().clone(),
                 column_info,
@@ -89,7 +87,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                 rewrite_table_in_batches(
                     transaction,
                     table_codec,
-                    table_id,
+                    *table_id,
                     &pk_ty,
                     old_schema.len(),
                     || {
@@ -113,8 +111,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
             }
             {
                 let (transaction, table_codec) = arena.transaction_codec_mut();
-                let table =
-                    transaction.drop_column(table_codec, plan_arena, table_name, column_name)?;
+                let table = transaction.drop_column(
+                    table_codec,
+                    plan_arena,
+                    table_catalog.name(),
+                    column_name,
+                )?;
                 arena.push_ddl_apply(DDLApply::upsert_table(table, true));
             }
 

@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
+use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
 use crate::storage::StorageTransaction;
 use crate::types::evaluator::{
     BinaryEvaluatorParams, BinaryEvaluatorRef, CastEvaluatorParams, CastEvaluatorRef,
@@ -27,33 +27,29 @@ impl ReferenceSerialization for BinaryEvaluatorParams {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
         match self {
-            BinaryEvaluatorParams::Unit => 0u8.encode(writer, is_direct, reference_tables, arena),
+            BinaryEvaluatorParams::Unit => 0u8.encode(writer, is_direct, arena),
             BinaryEvaluatorParams::Like { escape_char } => {
-                1u8.encode(writer, is_direct, reference_tables, arena)?;
-                escape_char.encode(writer, is_direct, reference_tables, arena)
+                1u8.encode(writer, is_direct, arena)?;
+                escape_char.encode(writer, is_direct, arena)
             }
         }
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut context: Option<&mut ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        Ok(
-            match u8::decode(reader, context, reference_tables, arena)? {
-                0 => BinaryEvaluatorParams::Unit,
-                1 => BinaryEvaluatorParams::Like {
-                    escape_char: Option::<char>::decode(reader, context, reference_tables, arena)?,
-                },
-                _ => unreachable!(),
+        Ok(match u8::decode(reader, context.as_deref_mut(), arena)? {
+            0 => BinaryEvaluatorParams::Unit,
+            1 => BinaryEvaluatorParams::Like {
+                escape_char: Option::<char>::decode(reader, context, arena)?,
             },
-        )
+            _ => unreachable!(),
+        })
     }
 }
 
@@ -62,96 +58,82 @@ impl ReferenceSerialization for CastEvaluatorParams {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
         match self {
-            CastEvaluatorParams::Identity => 0u8.encode(writer, is_direct, reference_tables, arena),
-            CastEvaluatorParams::Unit => 1u8.encode(writer, is_direct, reference_tables, arena),
+            CastEvaluatorParams::Identity => 0u8.encode(writer, is_direct, arena),
+            CastEvaluatorParams::Unit => 1u8.encode(writer, is_direct, arena),
             CastEvaluatorParams::String { len, unit } => {
-                2u8.encode(writer, is_direct, reference_tables, arena)?;
-                len.encode(writer, is_direct, reference_tables, arena)?;
-                unit.encode(writer, is_direct, reference_tables, arena)
+                2u8.encode(writer, is_direct, arena)?;
+                len.encode(writer, is_direct, arena)?;
+                unit.encode(writer, is_direct, arena)
             }
             #[cfg(feature = "decimal")]
             CastEvaluatorParams::Decimal { precision, scale } => {
-                3u8.encode(writer, is_direct, reference_tables, arena)?;
-                precision.encode(writer, is_direct, reference_tables, arena)?;
-                scale.encode(writer, is_direct, reference_tables, arena)
+                3u8.encode(writer, is_direct, arena)?;
+                precision.encode(writer, is_direct, arena)?;
+                scale.encode(writer, is_direct, arena)
             }
             CastEvaluatorParams::Precision { precision } => {
-                4u8.encode(writer, is_direct, reference_tables, arena)?;
-                precision.encode(writer, is_direct, reference_tables, arena)
+                4u8.encode(writer, is_direct, arena)?;
+                precision.encode(writer, is_direct, arena)
             }
             CastEvaluatorParams::Timestamp { precision, zone } => {
-                5u8.encode(writer, is_direct, reference_tables, arena)?;
-                precision.encode(writer, is_direct, reference_tables, arena)?;
-                zone.encode(writer, is_direct, reference_tables, arena)
+                5u8.encode(writer, is_direct, arena)?;
+                precision.encode(writer, is_direct, arena)?;
+                zone.encode(writer, is_direct, arena)
             }
             CastEvaluatorParams::Binary { len } => {
-                7u8.encode(writer, is_direct, reference_tables, arena)?;
-                len.encode(writer, is_direct, reference_tables, arena)
+                7u8.encode(writer, is_direct, arena)?;
+                len.encode(writer, is_direct, arena)
             }
             CastEvaluatorParams::Tuple { evaluators } => {
-                6u8.encode(writer, is_direct, reference_tables, arena)?;
-                evaluators.encode(writer, is_direct, reference_tables, arena)
+                6u8.encode(writer, is_direct, arena)?;
+                evaluators.encode(writer, is_direct, arena)
             }
         }
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut context: Option<&mut ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        Ok(
-            match u8::decode(reader, context, reference_tables, arena)? {
-                0 => CastEvaluatorParams::Identity,
-                1 => CastEvaluatorParams::Unit,
-                2 => CastEvaluatorParams::String {
-                    len: Option::<u32>::decode(reader, context, reference_tables, arena)?,
-                    unit: crate::types::CharLengthUnits::decode(
-                        reader,
-                        context,
-                        reference_tables,
-                        arena,
-                    )?,
-                },
-                #[cfg(feature = "decimal")]
-                3 => CastEvaluatorParams::Decimal {
-                    precision: Option::<u8>::decode(reader, context, reference_tables, arena)?,
-                    scale: Option::<u8>::decode(reader, context, reference_tables, arena)?,
-                },
-                #[cfg(not(feature = "decimal"))]
-                3 => {
-                    let _ = Option::<u8>::decode(reader, context, reference_tables, arena)?;
-                    let _ = Option::<u8>::decode(reader, context, reference_tables, arena)?;
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "DECIMAL requires the `decimal` feature".to_string(),
-                    ));
-                }
-                4 => CastEvaluatorParams::Precision {
-                    precision: Option::<u64>::decode(reader, context, reference_tables, arena)?,
-                },
-                5 => CastEvaluatorParams::Timestamp {
-                    precision: Option::<u64>::decode(reader, context, reference_tables, arena)?,
-                    zone: bool::decode(reader, context, reference_tables, arena)?,
-                },
-                7 => CastEvaluatorParams::Binary {
-                    len: Option::<u32>::decode(reader, context, reference_tables, arena)?,
-                },
-                6 => CastEvaluatorParams::Tuple {
-                    evaluators: Vec::<CastEvaluatorRef>::decode(
-                        reader,
-                        context,
-                        reference_tables,
-                        arena,
-                    )?,
-                },
-                _ => unreachable!(),
+        Ok(match u8::decode(reader, context.as_deref_mut(), arena)? {
+            0 => CastEvaluatorParams::Identity,
+            1 => CastEvaluatorParams::Unit,
+            2 => CastEvaluatorParams::String {
+                len: Option::<u32>::decode(reader, context.as_deref_mut(), arena)?,
+                unit: crate::types::CharLengthUnits::decode(reader, context.as_deref_mut(), arena)?,
             },
-        )
+            #[cfg(feature = "decimal")]
+            3 => CastEvaluatorParams::Decimal {
+                precision: Option::<u8>::decode(reader, context.as_deref_mut(), arena)?,
+                scale: Option::<u8>::decode(reader, context.as_deref_mut(), arena)?,
+            },
+            #[cfg(not(feature = "decimal"))]
+            3 => {
+                let _ = Option::<u8>::decode(reader, context.as_deref_mut(), arena)?;
+                let _ = Option::<u8>::decode(reader, context.as_deref_mut(), arena)?;
+                return Err(DatabaseError::UnsupportedStmt(
+                    "DECIMAL requires the `decimal` feature".to_string(),
+                ));
+            }
+            4 => CastEvaluatorParams::Precision {
+                precision: Option::<u64>::decode(reader, context.as_deref_mut(), arena)?,
+            },
+            5 => CastEvaluatorParams::Timestamp {
+                precision: Option::<u64>::decode(reader, context.as_deref_mut(), arena)?,
+                zone: bool::decode(reader, context.as_deref_mut(), arena)?,
+            },
+            7 => CastEvaluatorParams::Binary {
+                len: Option::<u32>::decode(reader, context.as_deref_mut(), arena)?,
+            },
+            6 => CastEvaluatorParams::Tuple {
+                evaluators: Vec::<CastEvaluatorRef>::decode(reader, context, arena)?,
+            },
+            _ => unreachable!(),
+        })
     }
 }
 
@@ -160,24 +142,17 @@ impl ReferenceSerialization for UnaryEvaluatorRef {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.pos.encode(writer, is_direct, reference_tables, arena)
+        self.pos.encode(writer, is_direct, arena)
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        context: Option<&mut ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        Ok(UnaryEvaluatorRef::new(u16::decode(
-            reader,
-            context,
-            reference_tables,
-            arena,
-        )?))
+        Ok(UnaryEvaluatorRef::new(u16::decode(reader, context, arena)?))
     }
 }
 
@@ -186,24 +161,20 @@ impl ReferenceSerialization for BinaryEvaluatorRef {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.pos
-            .encode(writer, is_direct, reference_tables, arena)?;
-        self.params
-            .encode(writer, is_direct, reference_tables, arena)
+        self.pos.encode(writer, is_direct, arena)?;
+        self.params.encode(writer, is_direct, arena)
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut context: Option<&mut ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
         Ok(BinaryEvaluatorRef::new(
-            u16::decode(reader, context, reference_tables, arena)?,
-            BinaryEvaluatorParams::decode(reader, context, reference_tables, arena)?,
+            u16::decode(reader, context.as_deref_mut(), arena)?,
+            BinaryEvaluatorParams::decode(reader, context, arena)?,
         ))
     }
 }
@@ -213,24 +184,20 @@ impl ReferenceSerialization for CastEvaluatorRef {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.pos
-            .encode(writer, is_direct, reference_tables, arena)?;
-        self.params
-            .encode(writer, is_direct, reference_tables, arena)
+        self.pos.encode(writer, is_direct, arena)?;
+        self.params.encode(writer, is_direct, arena)
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut context: Option<&mut ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
         Ok(CastEvaluatorRef::new(
-            u16::decode(reader, context, reference_tables, arena)?,
-            CastEvaluatorParams::decode(reader, context, reference_tables, arena)?,
+            u16::decode(reader, context.as_deref_mut(), arena)?,
+            CastEvaluatorParams::decode(reader, context, arena)?,
         ))
     }
 }
@@ -248,20 +215,14 @@ mod tests {
         expected_tag: u8,
     ) -> Result<(), DatabaseError> {
         let mut cursor = Cursor::new(Vec::new());
-        let mut reference_tables = ReferenceTables::new();
         let mut arena = crate::planner::TableArena::default();
 
-        params.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        params.encode(&mut cursor, false, &arena)?;
         assert_eq!(cursor.get_ref()[0], expected_tag);
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            CastEvaluatorParams::decode::<RocksTransaction, _, _>(
-                &mut cursor,
-                None,
-                &reference_tables,
-                &mut arena,
-            )?,
+            CastEvaluatorParams::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena,)?,
             params
         );
 
@@ -270,19 +231,13 @@ mod tests {
 
     fn roundtrip_cast_ref(evaluator: CastEvaluatorRef) -> Result<(), DatabaseError> {
         let mut cursor = Cursor::new(Vec::new());
-        let mut reference_tables = ReferenceTables::new();
         let mut arena = crate::planner::TableArena::default();
 
-        evaluator.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        evaluator.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            CastEvaluatorRef::decode::<RocksTransaction, _, _>(
-                &mut cursor,
-                None,
-                &reference_tables,
-                &mut arena,
-            )?,
+            CastEvaluatorRef::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena,)?,
             evaluator
         );
 

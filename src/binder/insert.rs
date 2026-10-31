@@ -14,7 +14,7 @@
 
 use crate::binder::Binder;
 use crate::catalog::table::DmlTable;
-use crate::catalog::{ColumnRef, TableName};
+use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::insert::InsertOperator;
@@ -29,25 +29,25 @@ use crate::types::LogicalType;
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn dml_table(
         &self,
-        table_name: &TableName,
+        table_name: &str,
         arena: &mut PlanArena<'_>,
     ) -> Result<DmlTable, DatabaseError> {
         self.context
-            .table(table_name.clone())?
+            .table(table_name)?
             .ok_or(DatabaseError::TableNotFound)?
             .dml_table(arena, |_| true)
     }
 
     pub(crate) fn bind_insert_values(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         targets: Schema,
         rows: Vec<ExprRef>,
         row_count: usize,
         is_overwrite: bool,
         arena: &mut PlanArena<'_>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table = self.dml_table(&table_name, arena)?;
+        let table = self.dml_table(table_name, arena)?;
         let mut values = Vec::with_capacity(row_count * table.columns.len());
         for row in rows.chunks(targets.len()) {
             for &column in table.columns.iter() {
@@ -61,7 +61,6 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
         Ok(LogicalPlan::new(
             Operator::Insert(InsertOperator {
-                table_name,
                 table,
                 is_overwrite,
             }),
@@ -71,13 +70,13 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
     pub(crate) fn bind_insert_query(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         mut input_plan: LogicalPlan,
         targets: &[ColumnRef],
         is_overwrite: bool,
         arena: &mut PlanArena<'_>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table = self.dml_table(&table_name, arena)?;
+        let table = self.dml_table(table_name, arena)?;
         // Project the input to all columns in table order, filling in defaults.
         let mut projection = Vec::with_capacity(table.columns.len());
         for &column in table.columns.iter() {
@@ -93,7 +92,6 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
         Ok(LogicalPlan::new(
             Operator::Insert(InsertOperator {
-                table_name,
                 table,
                 is_overwrite,
             }),

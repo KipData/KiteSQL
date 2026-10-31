@@ -50,8 +50,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateView<'a> {
     ) -> Result<(), DatabaseError> {
         let CreateViewOperator { view, or_replace } = self.op;
         let (transaction, table_codec) = arena.transaction_codec_mut();
-        let view = transaction.create_view(table_codec, plan_arena, view.clone(), *or_replace)?;
-        arena.push_ddl_apply(DDLApply::upsert_view(view));
+        let view_id = transaction.create_view(table_codec, plan_arena, view, *or_replace)?;
+        arena.push_ddl_apply(DDLApply::upsert_view(view_id, view.clone()));
 
         arena.finish();
         Ok(())

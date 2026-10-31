@@ -4,7 +4,7 @@ use crate::binder::{
     with_query_bind_step, BindPlanFrom, BindPlanSelectList, Binder, JoinConstraintInput,
     QueryBindStep, SetOperatorKind, TableAliasInput,
 };
-use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableName};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog};
 use crate::db::{
     BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, Transaction, TransactionIter,
 };
@@ -1152,7 +1152,9 @@ where
         mutation_source: bool,
     ) -> Result<BindPlanFrom<'scope, 'bind, 'parent, 'arena, T, A, M>, DatabaseError> {
         if mutation_source {
-            self.binder.with_pk(source.table_name.as_str().into());
+            if let Some(table) = self.binder.context.table(&source.table_name)? {
+                self.binder.with_pk(table.id());
+            }
         }
         let plan = bind_orm_source(self.binder, source, None, self.arena);
         if mutation_source {
@@ -1331,7 +1333,7 @@ where
     }
 
     pub fn truncate<M: Model>(&mut self) -> Result<LogicalPlan, DatabaseError> {
-        self.binder.bind_truncate(M::table_name().into())
+        self.binder.bind_truncate(M::table_name())
     }
 }
 
@@ -1945,11 +1947,7 @@ where
         Ok(())
     }
 
-    fn finish(
-        self,
-        table_name: TableName,
-        plan: LogicalPlan,
-    ) -> Result<LogicalPlan, DatabaseError> {
+    fn finish(self, table_name: &str, plan: LogicalPlan) -> Result<LogicalPlan, DatabaseError> {
         self.binder.context.allow_default = false;
         if self.value_exprs.is_empty() {
             return Err(DatabaseError::ColumnsEmpty);
@@ -1966,10 +1964,6 @@ where
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
-    fn model_table_name(&self) -> Result<TableName, DatabaseError> {
-        Ok(M::table_name().into())
-    }
-
     fn model_relation_name(&self) -> Result<String, DatabaseError> {
         let table_name = M::table_name();
         self.binder
@@ -1977,7 +1971,7 @@ where
             .bind_table
             .iter()
             .rev()
-            .find(|source| source.table_name.as_ref() == table_name)
+            .find(|source| source.table_name == table_name)
             .map(|source| source.visible_name().to_string())
             .ok_or_else(|| DatabaseError::invalid_table(table_name))
     }
@@ -2373,17 +2367,18 @@ where
     }
 
     pub fn delete(self) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = self.model_table_name()?;
-        let primary_keys = self
+        let table_name = M::table_name();
+        let table = self
             .binder
             .context
-            .table(table_name.clone())?
-            .ok_or(DatabaseError::TableNotFound)?
+            .table(table_name)?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let primary_keys = table
             .primary_keys()
             .iter()
             .map(|(_, column)| *column)
             .collect();
-        self.binder.with_pk(table_name.clone());
+        self.binder.with_pk(table.id());
         self.binder.bind_delete(table_name, primary_keys, self.plan)
     }
 
@@ -2393,10 +2388,12 @@ where
             &mut UpdateBindScope<'scope_ctx, 'bind, 'parent, 'arena, T, A>,
         ) -> Result<(), DatabaseError>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = self.model_table_name()?;
+        let table_name = M::table_name();
         let source_name = self.model_relation_name()?;
         self.binder.context.allow_default = true;
-        self.binder.with_pk(table_name.clone());
+        if let Some(table) = self.binder.context.table(table_name)? {
+            self.binder.with_pk(table.id());
+        }
         let mut scope = UpdateBindScope {
             binder: self.binder,
             arena: self.arena,
@@ -2637,13 +2634,12 @@ where
     T: StorageTransaction,
     A: AsRef<[(usize, LogicalType)]>,
 {
-    let table_name: TableName = table_name.into();
     let input_len = input_plan.output_schema(arena).len();
 
     let targets = {
         let source = binder
             .context
-            .source(&table_name)?
+            .source(table_name)?
             .ok_or(DatabaseError::TableNotFound)?;
 
         if columns.is_empty() {
@@ -2683,10 +2679,10 @@ where
     A: AsRef<[(usize, LogicalType)]>,
     M: Model,
 {
-    let table_name: TableName = M::table_name().into();
+    let table_name = M::table_name();
     let source = binder
         .context
-        .source_and_bind(table_name.clone(), None, None, false, arena)?
+        .source_and_bind(table_name, None, None, false, arena)?
         .ok_or(DatabaseError::TableNotFound)?;
     let params = params.into_iter().collect::<BTreeMap<_, _>>();
     let mut schema_ref = Vec::with_capacity(M::fields().len());
@@ -3386,7 +3382,7 @@ fn orm_analyze<'a, E: BindSource<'a>, M: Model>(executor: E) -> Result<(), Datab
         .execute(false, |state, tx| {
             state
                 .build_plan(&[], tx, |binder, arena| {
-                    binder.bind_analyze(M::table_name().into(), arena)
+                    binder.bind_analyze(M::table_name(), arena)
                 })
                 .map(Executor::from_plan)
         })?

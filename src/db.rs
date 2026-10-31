@@ -16,7 +16,6 @@ mod program;
 #[cfg(feature = "parser")]
 pub use crate::binder::Statement;
 use crate::binder::{Binder, BinderContext};
-use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 pub use crate::execution::Executor;
 use crate::execution::{DDLApply, ExecArena};
@@ -52,8 +51,8 @@ use crate::storage::memory::MemoryStorage;
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{
-    CheckpointableStorage, StatisticsMetaCache, Storage, StorageTransaction, TableCache,
-    TransactionIsolationLevel, ViewCache,
+    CheckpointableStorage, NameMapping, StatisticsMetaCache, Storage, StorageTransaction,
+    TableCache, TransactionIsolationLevel, ViewCache,
 };
 use crate::types::tuple::{Schema, SchemaView, TupleImpl};
 use crate::types::value::DataValue;
@@ -401,16 +400,12 @@ impl DataBaseBuilder {
             transaction_isolation.unwrap_or_else(|| storage.default_transaction_isolation());
         storage.validate_transaction_isolation(transaction_isolation)?;
         let meta_cache = StatisticsMetaCache::default();
-        let table_cache = HashMap::default();
-        let view_cache = HashMap::default();
         let table_arena = TableArenaCell::default();
 
         let mut state = State {
             scala_functions: Default::default(),
             table_functions: Default::default(),
             meta_cache,
-            table_cache,
-            view_cache,
             table_arena,
             optimizer_pipeline: optimizer_pipeline(),
             histogram_buckets,
@@ -637,8 +632,6 @@ pub(crate) struct State<S> {
     scala_functions: ScalaFunctions,
     table_functions: TableFunctions,
     meta_cache: StatisticsMetaCache,
-    table_cache: TableCache,
-    view_cache: ViewCache,
     table_arena: TableArenaCell,
     optimizer_pipeline: HepOptimizerPipeline,
     histogram_buckets: Option<usize>,
@@ -664,11 +657,14 @@ impl<S: Storage> State<S> {
     pub(crate) fn meta_cache(&self) -> &StatisticsMetaCache {
         &self.meta_cache
     }
+    pub(crate) fn names(&self) -> &NameMapping {
+        &self.table_arena.borrow().names
+    }
     pub(crate) fn table_cache(&self) -> &TableCache {
-        &self.table_cache
+        &self.table_arena.borrow().tables
     }
     pub(crate) fn view_cache(&self) -> &ViewCache {
-        &self.view_cache
+        &self.table_arena.borrow().views
     }
     pub(crate) fn table_arena(&self) -> &TableArenaCell {
         &self.table_arena
@@ -703,14 +699,13 @@ impl<S: Storage> State<S> {
                 live_columns.insert(column.pos());
             };
 
-            for table in self.table_cache.values() {
+            let table_arena = self.table_arena.borrow();
+            for table in table_arena.tables.values() {
                 for column in table.columns() {
                     live(column);
                 }
             }
-
-            let table_arena = self.table_arena.borrow_mut();
-            for view in self.view_cache.values() {
+            for view in table_arena.views.values() {
                 view.visit_column_refs(table_arena, &mut live)?;
             }
 
@@ -741,6 +736,7 @@ impl<S: Storage> State<S> {
         let mut arena = PlanArena::new(self.table_arena());
         let mut binder = Binder::new(
             BinderContext::new(
+                self.names(),
                 self.table_cache(),
                 self.view_cache(),
                 transaction,
@@ -784,7 +780,7 @@ impl<S: Storage> State<S> {
         'txn: 'p,
         'p: 'a,
     {
-        start_execution(&self.table_cache, transaction, executor, plan_arena)
+        start_execution(self.table_cache(), transaction, executor, plan_arena)
     }
 
     pub(crate) fn execute_mut<'a, 'txn, A, F>(
@@ -806,8 +802,6 @@ impl<S: Storage> State<S> {
             scala_functions,
             table_functions,
             meta_cache,
-            table_cache,
-            view_cache,
             table_arena,
             optimizer_pipeline,
             histogram_buckets,
@@ -815,11 +809,14 @@ impl<S: Storage> State<S> {
             statistics_relative_error,
             ..
         } = self;
+        let catalog = table_arena.borrow();
+        let table_cache = &catalog.tables;
         let mut plan_arena = PlanArena::new(table_arena);
         let mut binder = Binder::new(
             BinderContext::new(
+                &catalog.names,
                 table_cache,
-                view_cache,
+                &catalog.views,
                 transaction,
                 scala_functions,
                 table_functions,
@@ -870,54 +867,49 @@ impl DDLApply {
                 table,
                 clear_statistics,
             } => {
-                let name = table.name().clone();
                 let table = table.transplant_to_table_arena(plan_arena)?;
-                state.table_cache.insert(name.clone(), table);
                 if clear_statistics {
-                    state.meta_cache.remove_table(&name);
+                    state.meta_cache.remove_table(table.id());
                 }
+                state.table_arena.borrow_mut().insert_table(table);
                 catalog_changed = true;
             }
             DDLApply::DropTable { name } => {
-                state.table_cache.remove(&name);
-                state.meta_cache.remove_table(&name);
+                let catalog = state.table_arena.borrow_mut();
+                if let Some(meta) = catalog.names.remove(&name) {
+                    catalog.tables.remove(&meta.id);
+                    state.meta_cache.remove_table(meta.id);
+                }
                 catalog_changed = true;
             }
-            DDLApply::UpsertView { view } => {
-                let name = view.name.clone();
+            DDLApply::UpsertView { id, view } => {
                 plan_arena.materialize_into_table_arena();
-                state.view_cache.insert(name, view);
+                state.table_arena.borrow_mut().insert_view(id, view);
                 catalog_changed = true;
             }
             DDLApply::DropView { name } => {
-                state.view_cache.remove(&name);
+                let catalog = state.table_arena.borrow_mut();
+                if let Some(meta) = catalog.names.remove(&name) {
+                    catalog.views.remove(&meta.id);
+                }
                 catalog_changed = true;
             }
             DDLApply::UpsertIndexStatistics {
-                table_name,
+                table_id,
                 index_id,
                 meta,
             } => {
-                state
-                    .meta_cache
-                    .indexes
-                    .insert((table_name, index_id), meta);
+                state.meta_cache.indexes.insert((table_id, index_id), meta);
             }
-            DDLApply::RemoveIndexStatistics {
-                table_name,
-                index_id,
-            } => {
-                state.meta_cache.indexes.remove(&(table_name, index_id));
+            DDLApply::RemoveIndexStatistics { table_id, index_id } => {
+                state.meta_cache.indexes.remove(&(table_id, index_id));
             }
             DDLApply::UpsertColumnStatistics {
-                table_name,
+                table_id,
                 column_id,
                 meta,
             } => {
-                state
-                    .meta_cache
-                    .columns
-                    .insert((table_name, column_id), meta);
+                state.meta_cache.columns.insert((table_id, column_id), meta);
             }
         }
         Ok(catalog_changed)
@@ -1001,7 +993,7 @@ impl<S: Storage> Database<S> {
 
     pub fn analyze(&mut self, table_name: impl AsRef<str>) -> Result<(), DatabaseError> {
         let context = "ANALYZE";
-        let table_name: TableName = table_name.as_ref().into();
+        let table_name = table_name.as_ref();
         self.execute_mut(context, &[], move |binder, arena| {
             binder.bind_analyze(table_name, arena)
         })
@@ -1025,11 +1017,7 @@ impl<S: Storage> Database<S> {
                 )?;
                 let mut table_codec = TableCodec::default();
                 let table = transaction
-                    .load_table(
-                        &mut table_codec,
-                        self.state.table_arena.borrow_mut(),
-                        name.clone(),
-                    )?
+                    .load_table(&mut table_codec, self.state.table_arena.borrow_mut(), &name)?
                     .ok_or(DatabaseError::TableNotFound)?;
                 let mut indexes = Vec::new();
                 let mut columns = Vec::new();
@@ -1061,18 +1049,17 @@ impl<S: Storage> Database<S> {
                         columns.push((column_id, meta));
                     }
                 }
-                self.state.meta_cache.remove_table(&name);
-                self.state.meta_cache.indexes.extend(
-                    indexes
-                        .into_iter()
-                        .map(|(id, meta)| ((name.clone(), id), meta)),
-                );
-                self.state.meta_cache.columns.extend(
-                    columns
-                        .into_iter()
-                        .map(|(id, meta)| ((name.clone(), id), meta)),
-                );
-                self.state.table_cache.insert(name, table);
+                let table_id = table.id();
+                self.state.meta_cache.remove_table(table_id);
+                self.state
+                    .meta_cache
+                    .indexes
+                    .extend(indexes.into_iter().map(|(id, meta)| ((table_id, id), meta)));
+                self.state
+                    .meta_cache
+                    .columns
+                    .extend(columns.into_iter().map(|(id, meta)| ((table_id, id), meta)));
+                self.state.table_arena.borrow_mut().insert_table(table);
                 self.state.recycle_table_arena()?;
                 Ok(())
             }
@@ -1082,17 +1069,19 @@ impl<S: Storage> Database<S> {
                     true,
                 )?;
                 let mut table_codec = TableCodec::default();
-                let view = transaction
+                let (view_id, view) = transaction
                     .load_view(
                         &mut table_codec,
-                        &self.state.table_cache,
                         &self.state.table_arena,
                         &self.state.scala_functions,
                         &self.state.table_functions,
                         name.clone(),
                     )?
                     .ok_or(DatabaseError::ViewNotFound)?;
-                self.state.view_cache.insert(name, view);
+                self.state
+                    .table_arena
+                    .borrow_mut()
+                    .insert_view(view_id, view);
                 self.state.recycle_table_arena()?;
                 Ok(())
             }
@@ -1558,8 +1547,8 @@ pub(crate) mod test {
     use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::memory::MemoryStorage;
     use crate::storage::{
-        table_codec::TableCodec, StatisticsMetaCache, Storage, StorageTransaction, TableCache,
-        TransactionIsolationLevel,
+        table_codec::TableCodec, NameMapping, StatisticsMetaCache, Storage, StorageTransaction,
+        TableCache, TransactionIsolationLevel,
     };
     use crate::types::tuple::{Tuple, TupleImpl};
     use crate::types::value::DataValue;
@@ -1578,6 +1567,11 @@ pub(crate) mod test {
     use std::time::Duration;
     use tempfile::TempDir;
 
+    fn table_id(name: &str) -> crate::catalog::TableId {
+        name.bytes()
+            .fold(0, |id, byte| id << 8 | crate::catalog::TableId::from(byte))
+    }
+
     fn literal_input(
         name: &str,
         values: &[i32],
@@ -1589,7 +1583,7 @@ pub(crate) mod test {
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        column.set_ref_table(name.into(), 0, false);
+        column.set_table(table_id(name), 0);
         let column = arena.alloc_column(column);
         let key = arena.alloc_expression(ScalarExpression::column_expr(column, position));
         let rows = values
@@ -1788,6 +1782,7 @@ pub(crate) mod test {
     }
 
     pub(crate) fn build_table<T: StorageTransaction>(
+        names: &mut NameMapping,
         table_cache: &mut TableCache,
         transaction: &mut T,
         plan_arena: &mut PlanArena,
@@ -1813,12 +1808,12 @@ pub(crate) mod test {
         if let Some(table) = transaction.create_table(
             &mut table_codec,
             plan_arena,
-            "t1".to_string().into(),
+            "t1".to_string(),
             columns,
             false,
         )? {
             let table = table.transplant_to_table_arena(plan_arena)?;
-            table_cache.insert(table.name().clone(), table);
+            names.insert_table(table_cache, table);
         }
 
         Ok(())
@@ -1946,6 +1941,7 @@ pub(crate) mod test {
         let transaction = kite_sql.storage.transaction()?;
         let mut binder = Binder::new(
             BinderContext::new(
+                kite_sql.state.names(),
                 kite_sql.state.table_cache(),
                 kite_sql.state.view_cache(),
                 &transaction,
@@ -2029,6 +2025,7 @@ pub(crate) mod test {
         let transaction = kite_sql.storage.transaction()?;
         let mut binder = Binder::new(
             BinderContext::new(
+                kite_sql.state.names(),
                 kite_sql.state.table_cache(),
                 kite_sql.state.view_cache(),
                 &transaction,
@@ -2730,7 +2727,7 @@ pub(crate) mod test {
             .done()?;
 
         let mut snapshot = DataBaseBuilder::path(&checkpoint_path).build_rocksdb()?;
-        snapshot.load(CatalogKind::Table("t_checkpoint".to_string().into()))?;
+        snapshot.load(CatalogKind::Table("t_checkpoint".to_string()))?;
         assert_eq!(
             query_i32(&snapshot, "select count(*) from t_checkpoint")?,
             2
@@ -2891,9 +2888,7 @@ pub(crate) mod test {
 
         let total = writer.join().expect("writer thread should not panic")?;
         let mut snapshot = DataBaseBuilder::path(&checkpoint_path).build_rocksdb()?;
-        snapshot.load(CatalogKind::Table(
-            "t_checkpoint_concurrent".to_string().into(),
-        ))?;
+        snapshot.load(CatalogKind::Table("t_checkpoint_concurrent".to_string()))?;
         let snapshot_count = query_i32(&snapshot, "select count(*) from t_checkpoint_concurrent")?;
         let consistent_count = query_i32(
             &snapshot,

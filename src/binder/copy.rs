@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use super::*;
-use crate::catalog::TableName;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::planner::operator::copy_to_file::CopyToFileOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
@@ -79,18 +78,16 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
     pub(super) fn bind_copy_table(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         to: bool,
         ext_source: ExtSource,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        if let Some(table) = self.context.table(table_name.clone())?.cloned() {
+        if let Some(table) = self.context.table(table_name)? {
             if to {
                 Ok(LogicalPlan::new(
                     Operator::CopyToFile(CopyToFileOperator { target: ext_source }),
-                    Childrens::Only(Box::new(TableScanOperator::build(
-                        table_name, &table, false, arena,
-                    )?)),
+                    Childrens::Only(Box::new(TableScanOperator::build(table, false, arena)?)),
                 ))
             } else {
                 let schema_ref = table.columns().copied().collect();
@@ -98,7 +95,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
                     Operator::CopyFromFile(CopyFromFileOperator {
                         source: ext_source,
                         schema_ref,
-                        table: table_name,
+                        table_id: table.id(),
                     }),
                     Childrens::None,
                 ))

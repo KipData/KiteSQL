@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnRef, TableName};
+use crate::catalog::{ColumnRef, ColumnRelation, TableId};
 use crate::errors::DatabaseError;
 use crate::expression::visitor::ExprVisitor;
 use crate::expression::{AliasType, ScalarExpression};
@@ -142,13 +142,13 @@ fn take_childrens(plan: &mut LogicalPlan) -> Childrens {
     mem::replace(&mut *plan.childrens, Childrens::None)
 }
 
-struct ScanColumnVisitor<'plan, 'arena, A> {
+struct ScanColumnVisitor<'arena, A> {
     column: Option<ColumnRef>,
-    source: Option<(&'plan TableName, ColumnId)>,
+    source: Option<(TableId, ColumnId)>,
     arena: &'arena A,
 }
 
-impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'plan, '_, A> {
+impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'_, A> {
     fn visit_plan(&mut self, plan: &'plan LogicalPlan) -> Result<(), DatabaseError> {
         if self.column.is_none() {
             return Ok(());
@@ -187,11 +187,7 @@ impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'plan, '_
                 scan.columns()
                     .find(|source| self.arena.same_column(*source, column))
             }) {
-                self.source = self
-                    .arena
-                    .column(source)
-                    .id()
-                    .map(|id| (&scan.table_name, id));
+                self.source = self.arena.column(source).id().map(|id| (scan.table_id, id));
             }
         }
         self.column = None;
@@ -213,7 +209,10 @@ impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'plan, '_
                     expr,
                     alias: AliasType::Name(_),
                 } if arena.column(column).id().is_none()
-                    && arena.column(column).table_name().is_none()
+                    && matches!(
+                        arena.column(column).summary().relation,
+                        ColumnRelation::None
+                    )
                     && candidate.output_name(arena) == arena.column(column).name() =>
                 {
                     *expr
@@ -239,7 +238,7 @@ impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'plan, '_
     }
 }
 
-impl<A: MetaArena> ExprVisitor<A> for ScanColumnVisitor<'_, '_, A> {
+impl<A: MetaArena> ExprVisitor<A> for ScanColumnVisitor<'_, A> {
     fn visit_expression(
         &mut self,
         expr: &ScalarExpression,
@@ -257,11 +256,11 @@ impl<A: MetaArena> ExprVisitor<A> for ScanColumnVisitor<'_, '_, A> {
     }
 }
 
-pub(crate) fn scan_column<'plan>(
-    plan: &'plan LogicalPlan,
+pub(crate) fn scan_column(
+    plan: &LogicalPlan,
     column: ColumnRef,
     arena: &PlanArena,
-) -> Result<Option<(&'plan TableName, ColumnId)>, DatabaseError> {
+) -> Result<Option<(TableId, ColumnId)>, DatabaseError> {
     let mut visitor = ScanColumnVisitor {
         column: Some(column),
         source: None,

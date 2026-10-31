@@ -887,7 +887,7 @@ mod test {
             .storage_statistics(true)
             .build_rocksdb()?;
         kite_sql.ddl("create table t_metrics (a int primary key, b int)")?;
-        kite_sql.load(CatalogKind::Table("t_metrics".to_string().into()))?;
+        kite_sql.load(CatalogKind::Table("t_metrics".to_string()))?;
         kite_sql
             .run("insert into t_metrics values (1, 10), (2, 20), (3, 30)")?
             .done()?;
@@ -1001,6 +1001,7 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let mut transaction = storage.transaction()?;
+        let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
         let mut table_codec = TableCodec::default();
         let table_arena = TableArenaCell::default();
@@ -1020,17 +1021,17 @@ mod test {
         if let Some(table) = transaction.create_table(
             &mut table_codec,
             &mut plan_arena,
-            "test".to_string().into(),
+            "test".to_string(),
             source_columns,
             false,
         )? {
             let table = table.transplant_to_table_arena(&plan_arena)?;
-            table_cache.insert(table.name().clone(), table);
+            names.insert_table(&mut table_cache, table);
         }
         let plan_arena = PlanArena::new(&table_arena);
-        let table_name: TableName = "test".to_string().into();
+        let table_name: TableName = "test".to_string();
 
-        let table_catalog = transaction.table(&table_cache, "test".to_string().into())?;
+        let table_catalog = transaction.table(&names, &table_cache, "test")?;
         assert!(table_catalog.is_some());
         assert!(table_catalog.unwrap().get_column_id_by_name("c1").is_some());
 
@@ -1063,8 +1064,8 @@ mod test {
             false,
         )?;
 
-        let read_column = table_cache
-            .get(&table_name)
+        let read_column = names
+            .table(&table_cache, &table_name)
             .unwrap()
             .columns()
             .next()
@@ -1073,6 +1074,7 @@ mod test {
         let read_columns = vec![read_column];
 
         let deserializers = crate::storage::project_deserializers_for_test(
+            &names,
             &table_cache,
             "test",
             &read_columns,
@@ -1081,9 +1083,8 @@ mod test {
         );
         let mut iter = transaction.read(
             &mut table_codec,
-            &table_cache,
             &deserializers,
-            &"test".to_string().into(),
+            names.table(&table_cache, "test").unwrap().id(),
             (Some(1), Some(1)),
         )?;
 
@@ -1102,15 +1103,19 @@ mod test {
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
 
         kite_sql.ddl("create table t1 (a int primary key)")?;
-        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
+        kite_sql.load(CatalogKind::Table("t1".to_string()))?;
         kite_sql
             .run("insert into t1 (a) values (0), (1), (2), (3), (4)")?
             .done()?;
         let transaction = kite_sql.storage.transaction()?;
 
-        let table_name: TableName = "t1".to_string().into();
+        let table_name: TableName = "t1".to_string();
         let table = transaction
-            .table(kite_sql.state.table_cache(), table_name.clone())?
+            .table(
+                kite_sql.state.names(),
+                kite_sql.state.table_cache(),
+                &table_name,
+            )?
             .unwrap()
             .clone();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
@@ -1173,19 +1178,20 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         kite_sql.ddl("create table t1 (a int primary key, b int unique)")?;
-        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
+        kite_sql.load(CatalogKind::Table("t1".to_string()))?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
         let transaction = kite_sql.storage.transaction().unwrap();
 
         let table = transaction
-            .table(kite_sql.state.table_cache(), "t1".to_string().into())?
+            .table(kite_sql.state.names(), kite_sql.state.table_cache(), "t1")?
             .unwrap()
             .clone();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
         {
             let deserializers = crate::storage::project_deserializers_for_test(
+                kite_sql.state.names(),
                 kite_sql.state.table_cache(),
                 "t1",
                 &table.columns().cloned().collect::<Vec<_>>(),
@@ -1194,9 +1200,13 @@ mod test {
             );
             let mut iter = transaction
                 .read_by_index(
-                    kite_sql.state.table_cache(),
                     &plan_arena,
-                    "t1".to_string().into(),
+                    kite_sql
+                        .state
+                        .names()
+                        .table(kite_sql.state.table_cache(), "t1")
+                        .unwrap()
+                        .id(),
                     (Some(0), Some(1)),
                     table.indexes[0],
                     &[Range::Scope {
@@ -1221,6 +1231,7 @@ mod test {
             let _ = columns.pop();
 
             let deserializers = crate::storage::project_deserializers_for_test(
+                kite_sql.state.names(),
                 kite_sql.state.table_cache(),
                 "t1",
                 &columns,
@@ -1229,9 +1240,13 @@ mod test {
             );
             let mut iter = transaction
                 .read_by_index(
-                    kite_sql.state.table_cache(),
                     &plan_arena,
-                    "t1".to_string().into(),
+                    kite_sql
+                        .state
+                        .names()
+                        .table(kite_sql.state.table_cache(), "t1")
+                        .unwrap()
+                        .id(),
                     (Some(0), Some(1)),
                     table.indexes[0],
                     &[Range::Scope {
@@ -1259,16 +1274,16 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         kite_sql.ddl("create table t1 (id int primary key, c1 int)")?;
-        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
+        kite_sql.load(CatalogKind::Table("t1".to_string()))?;
         kite_sql
             .run("insert into t1 values (0, 0), (1, 1), (2, 2), (9, 9), (10, 10)")?
             .done()?;
         kite_sql.ddl("create index idx_c1 on t1(c1)")?;
-        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
+        kite_sql.load(CatalogKind::Table("t1".to_string()))?;
 
         let transaction = kite_sql.storage.transaction()?;
         let table = transaction
-            .table(kite_sql.state.table_cache(), "t1".to_string().into())?
+            .table(kite_sql.state.names(), kite_sql.state.table_cache(), "t1")?
             .unwrap()
             .clone();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
@@ -1286,6 +1301,7 @@ mod test {
             max: Bound::Excluded(DataValue::Int32(10)),
         }];
         let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.names(),
             kite_sql.state.table_cache(),
             "t1",
             &[c1_column],
@@ -1293,9 +1309,13 @@ mod test {
             false,
         );
         let mut iter = transaction.read_by_index(
-            kite_sql.state.table_cache(),
             &plan_arena,
-            "t1".to_string().into(),
+            kite_sql
+                .state
+                .names()
+                .table(kite_sql.state.table_cache(), "t1")
+                .unwrap()
+                .id(),
             (None, None),
             idx_c1,
             &c1_ranges[..],
@@ -1326,16 +1346,16 @@ mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
         kite_sql.ddl("create table t1 (a int primary key, b int unique)")?;
-        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
+        kite_sql.load(CatalogKind::Table("t1".to_string()))?;
         kite_sql
             .run("insert into t1 (a, b) values (0, 0), (1, 1), (2, 2), (3, 4)")?
             .done()?;
         kite_sql.ddl("create index idx_b_a on t1(b, a)")?;
-        kite_sql.load(CatalogKind::Table("t1".to_string().into()))?;
+        kite_sql.load(CatalogKind::Table("t1".to_string()))?;
 
         let mut transaction = kite_sql.storage.transaction().unwrap();
         let table = transaction
-            .table(kite_sql.state.table_cache(), "t1".to_string().into())?
+            .table(kite_sql.state.names(), kite_sql.state.table_cache(), "t1")?
             .unwrap()
             .clone();
         let plan_arena = PlanArena::new(kite_sql.state.table_arena());
@@ -1385,6 +1405,7 @@ mod test {
         ];
 
         let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.names(),
             kite_sql.state.table_cache(),
             "t1",
             &reordered_columns,
@@ -1392,9 +1413,13 @@ mod test {
             false,
         );
         let mut iter = transaction.read_by_index(
-            kite_sql.state.table_cache(),
             &plan_arena,
-            "t1".to_string().into(),
+            kite_sql
+                .state
+                .names()
+                .table(kite_sql.state.table_cache(), "t1")
+                .unwrap()
+                .id(),
             (None, None),
             composite_index,
             &[Range::Scope {
@@ -1416,6 +1441,7 @@ mod test {
         // An identity prefix projection still skips the remaining key fields;
         // omitted mapping must not widen the output back to the full index.
         let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.names(),
             kite_sql.state.table_cache(),
             "t1",
             &[b_cover_column],
@@ -1423,9 +1449,13 @@ mod test {
             false,
         );
         let mut iter = transaction.read_by_index(
-            kite_sql.state.table_cache(),
             &plan_arena,
-            "t1".to_string().into(),
+            kite_sql
+                .state
+                .names()
+                .table(kite_sql.state.table_cache(), "t1")
+                .unwrap()
+                .id(),
             (None, None),
             composite_index,
             &[Range::Scope {
@@ -1451,6 +1481,7 @@ mod test {
         transaction.remove_tuple(&mut table_codec, 0, &target_pk)?;
 
         let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.names(),
             kite_sql.state.table_cache(),
             "t1",
             &columns,
@@ -1458,9 +1489,13 @@ mod test {
             false,
         );
         let mut iter = transaction.read_by_index(
-            kite_sql.state.table_cache(),
             &plan_arena,
-            "t1".to_string().into(),
+            kite_sql
+                .state
+                .names()
+                .table(kite_sql.state.table_cache(), "t1")
+                .unwrap()
+                .id(),
             (Some(0), Some(1)),
             unique_index,
             &covered_ranges[..],
@@ -1487,6 +1522,7 @@ mod test {
             .unwrap();
         let pk_columns = vec![a_cover_column];
         let deserializers = crate::storage::project_deserializers_for_test(
+            kite_sql.state.names(),
             kite_sql.state.table_cache(),
             "t1",
             &pk_columns,
@@ -1494,9 +1530,13 @@ mod test {
             false,
         );
         let mut iter = transaction.read_by_index(
-            kite_sql.state.table_cache(),
             &plan_arena,
-            "t1".to_string().into(),
+            kite_sql
+                .state
+                .names()
+                .table(kite_sql.state.table_cache(), "t1")
+                .unwrap()
+                .id(),
             (None, None),
             pk_index,
             &[Range::Scope {

@@ -51,7 +51,7 @@ impl<'p> Program<'p> {
         transaction.inner.begin_statement_scope()?;
         let inner = std::ptr::from_mut(&mut transaction.inner);
         let arena = begin_execution(
-            &transaction.state.table_cache,
+            transaction.state.table_cache(),
             unsafe { &mut *inner },
             &mut self.executor,
             &mut self.arena,
@@ -276,13 +276,13 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        column.set_ref_table("t".into(), 1, false);
+        column.set_table(0, 1);
         let column = arena.alloc_column(column);
         let col_expr = arena.alloc_expression(ScalarExpression::column_expr(column, 0));
         let meta = arena.alloc_index(IndexMeta {
             id: 1,
             column_ids: vec![1],
-            table_name: "t".into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "pk".into(),
@@ -361,7 +361,7 @@ mod tests {
             other.meta = arena.alloc_index(IndexMeta {
                 id: 2,
                 column_ids: vec![1],
-                table_name: "t".into(),
+                table_id: 0,
                 pk_ty: LogicalType::Integer,
                 value_ty: LogicalType::Integer,
                 name: "other".into(),
@@ -369,7 +369,7 @@ mod tests {
             });
             let mut scan = LogicalPlan::new(
                 Operator::TableScan(TableScanOperator {
-                    table_name: "t".into(),
+                    table_id: 0,
                     deserializers: crate::storage::deserializers_for_test(vec![column]),
                     limit: (None, None),
                     index_infos: vec![index.clone(), other.clone()],

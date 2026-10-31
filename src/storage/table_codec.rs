@@ -22,15 +22,15 @@ use crate::optimizer::core::histogram::HistogramMeta;
 use crate::optimizer::core::statistics_meta::IndexStatisticsRoot;
 use crate::optimizer::core::top_n::ColumnTopN;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
-use crate::storage::{StorageTransaction, TableCache};
+use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
+use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId, TupleLike};
 use crate::types::value::{DataValue, IndexKeyMapping};
 use crate::types::{ColumnId, LogicalType};
 use std::borrow::Borrow;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read};
 use std::sync::LazyLock;
 
 pub(crate) const BOUND_MIN_TAG: u8 = u8::MIN;
@@ -50,7 +50,6 @@ const STAMP_LEN: usize = 8;
 static ROOT_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"Root".to_vec());
 static VIEW_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"View".to_vec());
 static NEXT_TABLE_ID_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"NextTableId".to_vec());
-static EMPTY_REFERENCE_TABLES: LazyLock<ReferenceTables> = LazyLock::new(ReferenceTables::new);
 
 pub type Bytes = Vec<u8>;
 pub type BumpBytes<'bump> = bumpalo::collections::Vec<'bump, u8>;
@@ -62,7 +61,6 @@ type TupleValueWriter<'a> = (
 #[derive(Default)]
 pub struct TableCodec {
     buffers: [Bytes; 2],
-    reference_tables: ReferenceTables,
     stamp: u64,
 }
 
@@ -167,13 +165,12 @@ impl TableCodec {
     fn clear_buffers(&mut self) {
         self.buffers[CodecSlot::S0.index()].clear();
         self.buffers[CodecSlot::S1.index()].clear();
-        self.reference_tables.clear();
     }
 
     #[inline]
-    fn slots_mut(&mut self) -> (&mut Bytes, &mut Bytes, &mut ReferenceTables) {
+    fn slots_mut(&mut self) -> (&mut Bytes, &mut Bytes) {
         let [s0, s1] = &mut self.buffers;
-        (s0, s1, &mut self.reference_tables)
+        (s0, s1)
     }
 
     pub fn check_primary_key(value: &DataValue, indentation: usize) -> Result<(), DatabaseError> {
@@ -261,16 +258,11 @@ impl TableCodec {
     fn with_table_buffers<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(
-            &mut Bytes,
-            [u8; TABLE_ID_LEN],
-            &mut Bytes,
-            &mut ReferenceTables,
-        ) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&mut Bytes, [u8; TABLE_ID_LEN], &mut Bytes) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         let prefix = table_id.to_be_bytes();
-        let (s0, s1, reference_tables) = self.slots_mut();
-        f(s0, prefix, s1, reference_tables)
+        let (s0, s1) = self.slots_mut();
+        f(s0, prefix, s1)
     }
 
     /// Key: `{TableName}{TUPLE_TAG}{BOUND_MIN_TAG}{RowID}`.
@@ -295,7 +287,7 @@ impl TableCodec {
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let stamp = self.stamp;
-        self.with_table_buffers(table_id, |lower, prefix, value, _| {
+        self.with_table_buffers(table_id, |lower, prefix, value| {
             lower.reserve(KEY_PREFIX_LEN_HINT + tuple_id.memcomparable_len_hint());
             Self::write_key_prefix(lower, CodecType::Tuple, prefix);
             lower.push(BOUND_MIN_TAG);
@@ -318,7 +310,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper, _| {
+        self.with_table_buffers(table_id, |lower, prefix, upper| {
             Self::write_key_prefix(lower, CodecType::Tuple, prefix);
             lower.push(BOUND_MIN_TAG);
 
@@ -339,13 +331,13 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, value, refs| {
+        self.with_table_buffers(table_id, |lower, prefix, value| {
             Self::write_key_prefix(lower, CodecType::IndexMeta, prefix);
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index_id.to_le_bytes());
 
             if let Some(index_meta) = index_meta {
-                Self::encode_index_meta_value_into(index_meta, refs, value, arena)?;
+                Self::encode_index_meta_value_into(index_meta, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -359,7 +351,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper, _| {
+        self.with_table_buffers(table_id, |lower, prefix, upper| {
             Self::write_key_prefix(lower, CodecType::IndexMeta, prefix);
             lower.push(BOUND_MIN_TAG);
 
@@ -378,7 +370,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper, _| {
+        self.with_table_buffers(table_id, |lower, prefix, upper| {
             Self::write_key_prefix(lower, CodecType::Index, prefix);
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index_id.to_le_bytes());
@@ -400,7 +392,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper, _| {
+        self.with_table_buffers(table_id, |lower, prefix, upper| {
             Self::write_key_prefix(lower, CodecType::Index, prefix);
             lower.push(BOUND_MIN_TAG);
 
@@ -425,7 +417,7 @@ impl TableCodec {
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let stamp = self.stamp;
-        self.with_table_buffers(table_id, |lower, prefix, value, _| {
+        self.with_table_buffers(table_id, |lower, prefix, value| {
             let values_len = (0..index.values.len())
                 .map(|i| index.values.value_at(i).memcomparable_len_hint())
                 .sum::<usize>();
@@ -470,21 +462,15 @@ impl TableCodec {
         arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
-        if let ColumnRelation::Table {
-            column_id,
-            table_name,
-            is_temp: false,
-        } = &col.summary().relation
-        {
+        if let ColumnRelation::Table { column_id, .. } = &col.summary().relation {
             self.clear_buffers();
-            self.with_table_buffers(table_id, |lower, prefix, value, refs| {
+            self.with_table_buffers(table_id, |lower, prefix, value| {
                 Self::write_key_prefix(lower, CodecType::Column, prefix);
                 lower.push(BOUND_MIN_TAG);
                 lower.extend_from_slice(&column_id.to_be_bytes());
 
                 if encode_value {
-                    let _ = refs.push_or_replace(table_name);
-                    Self::encode_column_value_into(col, refs, value, arena)?;
+                    Self::encode_column_value_into(col, value, arena)?;
                 }
 
                 f(lower.as_slice(), value.as_slice())
@@ -503,7 +489,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper, _| {
+        self.with_table_buffers(table_id, |lower, prefix, upper| {
             Self::write_key_prefix(lower, CodecType::Column, prefix);
             lower.push(BOUND_MIN_TAG);
 
@@ -521,7 +507,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper, _| {
+        self.with_table_buffers(table_id, |lower, prefix, upper| {
             Self::write_key_prefix(lower, CodecType::Column, prefix);
             lower.push(BOUND_MIN_TAG);
 
@@ -539,7 +525,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper, _| {
+        self.with_table_buffers(table_id, |lower, prefix, upper| {
             Self::write_key_prefix(lower, CodecType::Statistics, prefix);
             lower.push(BOUND_MIN_TAG);
 
@@ -558,7 +544,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper, _| {
+        self.with_table_buffers(table_id, |lower, prefix, upper| {
             Self::write_key_prefix(lower, CodecType::Statistics, prefix);
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index_id.to_le_bytes());
@@ -582,13 +568,13 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |key, prefix, value, refs| {
+        self.with_table_buffers(table_id, |key, prefix, value| {
             Self::write_key_prefix(key, CodecType::Statistics, prefix);
             key.push(BOUND_MIN_TAG);
             key.extend_from_slice(id);
             key.extend_from_slice(suffix);
             if let Some(statistics) = statistics {
-                statistics.encode(value, true, refs, arena)?;
+                statistics.encode(value, true, arena)?;
             }
             f(key.as_slice(), value.as_slice())
         })
@@ -616,12 +602,7 @@ impl TableCodec {
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<HistogramMeta, DatabaseError> {
-        HistogramMeta::decode::<T, _, _>(
-            &mut Cursor::new(bytes),
-            None,
-            &ReferenceTables::new(),
-            arena,
-        )
+        HistogramMeta::decode::<T, _, _>(&mut Cursor::new(bytes), None, arena)
     }
 
     /// Key: `{TableName}{STATISTICS_TAG}{BOUND_MIN_TAG}{INDEX_ID}{INDEX_STATISTICS_TAG}{ROOT_TAG}`.
@@ -653,7 +634,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, value, refs| {
+        self.with_table_buffers(table_id, |lower, prefix, value| {
             Self::write_key_prefix(lower, CodecType::Statistics, prefix);
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index_id.to_le_bytes());
@@ -661,7 +642,7 @@ impl TableCodec {
             lower.push(IndexStatisticsCodecType::SketchMeta.tag());
 
             if let Some(sketch_meta) = sketch_meta {
-                Self::encode_statistics_sketch_meta_value_into(sketch_meta, refs, value, arena)?;
+                Self::encode_statistics_sketch_meta_value_into(sketch_meta, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -679,7 +660,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, value, refs| {
+        self.with_table_buffers(table_id, |lower, prefix, value| {
             Self::write_key_prefix(lower, CodecType::Statistics, prefix);
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index_id.to_le_bytes());
@@ -691,7 +672,7 @@ impl TableCodec {
             lower.extend_from_slice(&(sketch_page.page_idx() as u32).to_be_bytes());
 
             if encode_value {
-                Self::encode_statistics_sketch_page_value_into(sketch_page, refs, value, arena)?;
+                Self::encode_statistics_sketch_page_value_into(sketch_page, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -709,7 +690,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, value, refs| {
+        self.with_table_buffers(table_id, |lower, prefix, value| {
             Self::write_key_prefix(lower, CodecType::Statistics, prefix);
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index_id.to_le_bytes());
@@ -719,7 +700,7 @@ impl TableCodec {
             lower.extend_from_slice(&ordinal.to_be_bytes());
 
             if let Some(bucket) = bucket {
-                Self::encode_statistics_bucket_value_into(bucket, refs, value, arena)?;
+                Self::encode_statistics_bucket_value_into(bucket, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -736,7 +717,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, value, refs| {
+        self.with_table_buffers(table_id, |lower, prefix, value| {
             Self::write_key_prefix(lower, CodecType::Statistics, prefix);
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index_id.to_le_bytes());
@@ -744,7 +725,7 @@ impl TableCodec {
             lower.push(IndexStatisticsCodecType::TopN.tag());
 
             if let Some(top_n) = top_n {
-                Self::encode_statistics_top_n_value_into(top_n, refs, value, arena)?;
+                Self::encode_statistics_top_n_value_into(top_n, value, arena)?;
             }
 
             f(lower.as_slice(), value.as_slice())
@@ -758,7 +739,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(view_id, |lower, prefix, value, _| {
+        self.with_table_buffers(view_id, |lower, prefix, value| {
             Self::write_key_prefix(lower, CodecType::View, prefix);
             f(lower.as_slice(), value.as_slice())
         })
@@ -773,9 +754,9 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(view_id, |lower, prefix, value, refs| {
+        self.with_table_buffers(view_id, |lower, prefix, value| {
             Self::write_key_prefix(lower, CodecType::View, prefix);
-            Self::encode_view_value_into(view, refs, value, arena)?;
+            Self::encode_view_value_into(view, value, arena)?;
             f(lower.as_slice(), value.as_slice())
         })
     }
@@ -786,7 +767,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        let (lower, upper, _) = self.slots_mut();
+        let (lower, upper) = self.slots_mut();
         Self::write_global_bound_prefix(lower, VIEW_BYTES.as_slice(), BOUND_MIN_TAG);
         Self::write_global_bound_prefix(upper, VIEW_BYTES.as_slice(), BOUND_MAX_TAG);
 
@@ -802,12 +783,12 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        let (lower, value, refs) = self.slots_mut();
+        let (lower, value) = self.slots_mut();
         Self::write_global_bound_prefix(lower, ROOT_BYTES.as_slice(), BOUND_MIN_TAG);
         lower.extend_from_slice(table_name.as_bytes());
 
         if let Some(meta) = meta {
-            Self::encode_root_table_value_into(meta, refs, value, arena)?;
+            Self::encode_root_table_value_into(meta, value, arena)?;
         }
 
         f(lower.as_slice(), value.as_slice())
@@ -819,7 +800,7 @@ impl TableCodec {
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        let (lower, upper, _) = self.slots_mut();
+        let (lower, upper) = self.slots_mut();
         Self::write_global_bound_prefix(lower, ROOT_BYTES.as_slice(), BOUND_MIN_TAG);
         Self::write_global_bound_prefix(upper, ROOT_BYTES.as_slice(), BOUND_MAX_TAG);
 
@@ -856,23 +837,17 @@ impl TableCodec {
 
     fn encode_index_meta_value_into(
         index_meta: &IndexMeta,
-        reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        index_meta.encode(value, true, reference_tables, arena)
+        index_meta.encode(value, true, arena)
     }
 
     pub fn decode_index_meta<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<IndexMeta, DatabaseError> {
-        IndexMeta::decode::<T, _, _>(
-            &mut Cursor::new(bytes),
-            None,
-            &EMPTY_REFERENCE_TABLES,
-            arena,
-        )
+        IndexMeta::decode::<T, _, _>(&mut Cursor::new(bytes), None, arena)
     }
 
     pub fn decode_index_key_into<M: IndexKeyMapping>(
@@ -914,83 +889,63 @@ impl TableCodec {
 
     fn encode_column_value_into(
         col: &ColumnCatalog,
-        reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        col.encode(value, true, reference_tables, arena)
+        col.encode(value, true, arena)
     }
 
     pub fn decode_column<T: StorageTransaction, R: Read>(
         reader: &mut R,
-        reference_tables: &ReferenceTables,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<ColumnCatalog, DatabaseError> {
         // `TableCache` is not theoretically used in `table_collect` because `ColumnCatalog` should not depend on other Column
-        ColumnCatalog::decode::<T, R, _>(reader, None, reference_tables, arena)
+        ColumnCatalog::decode::<T, R, _>(reader, None, arena)
     }
 
     pub fn decode_index_statistics<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<IndexStatisticsRoot, DatabaseError> {
-        IndexStatisticsRoot::decode::<T, _, _>(
-            &mut Cursor::new(bytes),
-            None,
-            &EMPTY_REFERENCE_TABLES,
-            arena,
-        )
+        IndexStatisticsRoot::decode::<T, _, _>(&mut Cursor::new(bytes), None, arena)
     }
 
     fn encode_statistics_sketch_meta_value_into(
         sketch_meta: &CountMinSketchMeta,
-        reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        sketch_meta.encode(value, true, reference_tables, arena)
+        sketch_meta.encode(value, true, arena)
     }
 
     pub fn decode_index_statistics_sketch_meta<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<CountMinSketchMeta, DatabaseError> {
-        CountMinSketchMeta::decode::<T, _, _>(
-            &mut Cursor::new(bytes),
-            None,
-            &EMPTY_REFERENCE_TABLES,
-            arena,
-        )
+        CountMinSketchMeta::decode::<T, _, _>(&mut Cursor::new(bytes), None, arena)
     }
 
     fn encode_statistics_sketch_page_value_into(
         sketch_page: &CountMinSketchPage,
-        reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        sketch_page.encode(value, true, reference_tables, arena)
+        sketch_page.encode(value, true, arena)
     }
 
     pub fn decode_index_statistics_sketch_page<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<CountMinSketchPage, DatabaseError> {
-        CountMinSketchPage::decode::<T, _, _>(
-            &mut Cursor::new(bytes),
-            None,
-            &EMPTY_REFERENCE_TABLES,
-            arena,
-        )
+        CountMinSketchPage::decode::<T, _, _>(&mut Cursor::new(bytes), None, arena)
     }
 
     fn encode_statistics_bucket_value_into(
         bucket: &Bucket,
-        reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        bucket.encode(value, true, reference_tables, arena)
+        bucket.encode(value, true, arena)
     }
 
     pub(crate) fn decode_index_statistics_codec_type(
@@ -1010,33 +965,22 @@ impl TableCodec {
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Bucket, DatabaseError> {
-        Bucket::decode::<T, _, _>(
-            &mut Cursor::new(bytes),
-            None,
-            &EMPTY_REFERENCE_TABLES,
-            arena,
-        )
+        Bucket::decode::<T, _, _>(&mut Cursor::new(bytes), None, arena)
     }
 
     fn encode_statistics_top_n_value_into(
         top_n: &ColumnTopN,
-        reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        top_n.encode(value, true, reference_tables, arena)
+        top_n.encode(value, true, arena)
     }
 
     pub fn decode_index_statistics_top_n<T: StorageTransaction>(
         bytes: &[u8],
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<ColumnTopN, DatabaseError> {
-        ColumnTopN::decode::<T, _, _>(
-            &mut Cursor::new(bytes),
-            None,
-            &EMPTY_REFERENCE_TABLES,
-            arena,
-        )
+        ColumnTopN::decode::<T, _, _>(&mut Cursor::new(bytes), None, arena)
     }
 
     pub fn decode_index_statistics_bucket_ordinal(bytes: &[u8]) -> Result<u32, DatabaseError> {
@@ -1052,44 +996,24 @@ impl TableCodec {
 
     fn encode_view_value_into(
         view: &View,
-        reference_tables: &mut ReferenceTables,
         bytes: &mut Bytes,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         bytes.clear();
-        bytes.resize(4, 0u8);
-
-        let reference_tables_pos = {
-            view.encode(&mut *bytes, false, reference_tables, arena)?;
-            let pos = bytes.len();
-            reference_tables.to_raw(&mut *bytes)?;
-            pos
-        };
-        bytes[..4].copy_from_slice(&(reference_tables_pos as u32).to_le_bytes());
-
-        Ok(())
+        view.encode(&mut *bytes, false, arena)
     }
 
     pub fn decode_view<T: StorageTransaction>(
         bytes: &[u8],
-        drive: (&T, &TableCache),
         scala_functions: &ScalaFunctions,
         table_functions: &TableFunctions,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<View, DatabaseError> {
         let mut cursor = Cursor::new(bytes);
-        let reference_tables_pos = {
-            let mut bytes = [0u8; 4];
-            cursor.read_exact(&mut bytes)?;
-            u32::from_le_bytes(bytes) as u64
-        };
-        cursor.seek(SeekFrom::Start(reference_tables_pos))?;
-        let reference_tables = ReferenceTables::from_raw(&mut cursor)?;
-        cursor.seek(SeekFrom::Start(4))?;
 
-        let context =
-            ReferenceDecodeContext::with_functions(Some(drive), scala_functions, table_functions);
-        View::decode(&mut cursor, Some(&context), &reference_tables, arena)
+        let mut context =
+            ReferenceDecodeContext::<T>::with_functions(scala_functions, table_functions);
+        View::decode(&mut cursor, Some(&mut context), arena)
     }
 
     pub fn decode_view_name<T: StorageTransaction>(
@@ -1097,17 +1021,15 @@ impl TableCodec {
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<TableName, DatabaseError> {
         let mut cursor = Cursor::new(bytes);
-        cursor.seek(SeekFrom::Start(4))?;
-        TableName::decode::<T, _, _>(&mut cursor, None, &EMPTY_REFERENCE_TABLES, arena)
+        TableName::decode::<T, _, _>(&mut cursor, None, arena)
     }
 
     fn encode_root_table_value_into(
         meta: &TableMeta,
-        reference_tables: &mut ReferenceTables,
         value: &mut Bytes,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        meta.encode(value, true, reference_tables, arena)
+        meta.encode(value, true, arena)
     }
 
     pub fn decode_root_table<T: StorageTransaction>(
@@ -1116,7 +1038,7 @@ impl TableCodec {
     ) -> Result<TableMeta, DatabaseError> {
         let mut bytes = Cursor::new(bytes);
 
-        TableMeta::decode::<T, _, _>(&mut bytes, None, &EMPTY_REFERENCE_TABLES, arena)
+        TableMeta::decode::<T, _, _>(&mut bytes, None, arena)
     }
 }
 
@@ -1135,10 +1057,8 @@ mod tests {
     };
     use crate::optimizer::core::statistics_meta::IndexStatistics;
     use crate::planner::{PlanArena, TableArenaCell};
-    use crate::serdes::ReferenceTables;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::storage::table_codec::{Bytes, TableCodec};
-    use crate::storage::Storage;
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef, Utf8Type};
@@ -1163,13 +1083,7 @@ mod tests {
                 ColumnDesc::new(LogicalType::Decimal(None, None), None, false, None).unwrap(),
             ),
         ];
-        TableCatalog::new(
-            0,
-            "t1".to_string().into(),
-            columns,
-            table_arena.borrow_mut(),
-        )
-        .unwrap()
+        TableCatalog::new(0, "t1".to_string(), columns, table_arena.borrow_mut()).unwrap()
     }
 
     #[test]
@@ -1294,7 +1208,7 @@ mod tests {
         let index_meta = IndexMeta {
             id: 0,
             column_ids: vec![1],
-            table_name: "t1".to_string().into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "pk_c1".to_string(),
@@ -1463,7 +1377,7 @@ mod tests {
         let index_meta = IndexMeta {
             id: 0,
             column_ids: vec![1],
-            table_name: "t1".to_string().into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "index_1".to_string(),
@@ -1502,14 +1416,10 @@ mod tests {
             ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
         );
         col.summary_mut().relation = ColumnRelation::Table {
+            table_id: 0,
             column_id: 1,
-            table_name: "t1".to_string().into(),
-            is_temp: false,
         };
         let expected_col = col.clone();
-
-        let mut reference_tables = ReferenceTables::new();
-        reference_tables.push_or_replace(&"t1".to_string().into());
 
         let mut table_codec = TableCodec::default();
         let table_arena = TableArenaCell::default();
@@ -1520,11 +1430,8 @@ mod tests {
             })
             .unwrap();
         let mut cursor = Cursor::new(bytes);
-        let decode_col = TableCodec::decode_column::<RocksTransaction, _>(
-            &mut cursor,
-            &reference_tables,
-            &mut plan_arena,
-        )?;
+        let decode_col =
+            TableCodec::decode_column::<RocksTransaction, _>(&mut cursor, &mut plan_arena)?;
 
         assert_eq!(decode_col, expected_col);
 
@@ -1571,7 +1478,7 @@ mod tests {
             let schema = plan.output_schema(&mut plan_arena).clone();
             Ok((
                 View {
-                    name: name.to_string().into(),
+                    name: name.to_string(),
                     plan: Box::new(plan),
                     schema,
                 },
@@ -1586,12 +1493,10 @@ mod tests {
                 "select * from t1 where c1 in (select c1 from t1 where c1 > 1)",
             )?;
             println!("{:#?}", view.plan);
-            let transaction = table_state.storage.transaction()?;
             let mut decode_arena = PlanArena::new(&table_state.table_arena);
             let decoded = table_codec.with_view_value(0, &view, &plan_arena, |_, value| {
-                TableCodec::decode_view(
+                TableCodec::decode_view::<RocksTransaction>(
                     value,
-                    (&transaction, &table_state.table_cache),
                     &scala_functions,
                     &table_functions,
                     &mut decode_arena,
@@ -1609,12 +1514,10 @@ mod tests {
             println!("==== No Join");
             let (view, mut plan_arena) =
                 build_view("view_filter", "select * from t1 where c1 > 1")?;
-            let transaction = table_state.storage.transaction()?;
             let mut decode_arena = PlanArena::new(&table_state.table_arena);
             let decoded = table_codec.with_view_value(0, &view, &plan_arena, |_, value| {
-                TableCodec::decode_view(
+                TableCodec::decode_view::<RocksTransaction>(
                     value,
-                    (&transaction, &table_state.table_cache),
                     &scala_functions,
                     &table_functions,
                     &mut decode_arena,
@@ -1632,12 +1535,10 @@ mod tests {
             println!("==== Join");
             let (view, mut plan_arena) =
                 build_view("view_join", "select * from t1 left join t2 on c1 = c3")?;
-            let transaction = table_state.storage.transaction()?;
             let mut decode_arena = PlanArena::new(&table_state.table_arena);
             let decoded = table_codec.with_view_value(0, &view, &plan_arena, |_, value| {
-                TableCodec::decode_view(
+                TableCodec::decode_view::<RocksTransaction>(
                     value,
-                    (&transaction, &table_state.table_cache),
                     &scala_functions,
                     &table_functions,
                     &mut decode_arena,
@@ -1668,9 +1569,8 @@ mod tests {
             );
 
             col.summary_mut().relation = ColumnRelation::Table {
+                table_id,
                 column_id: col_id as ColumnId,
-                table_name: format!("T{table_id}").into(),
-                is_temp: false,
             };
 
             let table_arena = TableArenaCell::default();
@@ -1724,7 +1624,7 @@ mod tests {
             let index_meta = IndexMeta {
                 id: index_id as u32,
                 column_ids: vec![],
-                table_name: format!("T{table_id}").into(),
+                table_id,
                 pk_ty: LogicalType::Integer,
                 value_ty: LogicalType::Integer,
                 name: format!("{index_id}_index"),
@@ -1783,13 +1683,8 @@ mod tests {
             ColumnDesc::new(LogicalType::Boolean, None, false, None).unwrap(),
         );
         let table_arena = TableArenaCell::default();
-        let table_catalog = TableCatalog::new(
-            0,
-            "T0".to_string().into(),
-            vec![column],
-            table_arena.borrow_mut(),
-        )
-        .unwrap();
+        let table_catalog =
+            TableCatalog::new(0, "T0".to_string(), vec![column], table_arena.borrow_mut()).unwrap();
 
         let op = |value: DataValue, index_id: usize, table_id: TableId| {
             let mut table_codec = TableCodec::default();

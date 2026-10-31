@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::binder::Binder;
-use crate::catalog::{ColumnRef, TableName};
+use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::operator::Operator;
@@ -24,13 +24,18 @@ use crate::types::LogicalType;
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_delete(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         primary_keys: Vec<ColumnRef>,
         input: LogicalPlan,
     ) -> Result<LogicalPlan, DatabaseError> {
+        let table_id = self
+            .context
+            .table(table_name)?
+            .ok_or(DatabaseError::TableNotFound)?
+            .id();
         Ok(LogicalPlan::new(
             Operator::Delete(DeleteOperator {
-                table_name,
+                table_id,
                 primary_keys,
             }),
             Childrens::Only(Box::new(input)),

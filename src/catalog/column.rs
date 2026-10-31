@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::errors::DatabaseError;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
@@ -37,12 +37,22 @@ pub struct ColumnCatalog {
     in_join: bool,
 }
 
+pub type SourceId = usize;
+
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ColumnRelation {
     None,
+    /// A column of a stored table.
     Table {
+        table_id: TableId,
         column_id: ColumnId,
-        table_name: TableName,
+    },
+    /// A column of a FROM item other than a stored table: an alias, a derived table, a CTE,
+    /// VALUES or a view. Every binding of an item gets its own `source_id`, and the arena keeps
+    /// its name.
+    Source {
+        source_id: SourceId,
+        column_id: ColumnId,
         is_temp: bool,
     },
 }
@@ -51,6 +61,27 @@ pub enum ColumnRelation {
 pub struct ColumnSummary {
     pub name: String,
     pub relation: ColumnRelation,
+}
+
+impl ColumnRelation {
+    /// Whether both belong to the same table or FROM item.
+    pub(crate) fn same_relation(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                ColumnRelation::Table { table_id, .. },
+                ColumnRelation::Table {
+                    table_id: other, ..
+                },
+            ) => table_id == other,
+            (
+                ColumnRelation::Source { source_id, .. },
+                ColumnRelation::Source {
+                    source_id: other, ..
+                },
+            ) => source_id == other,
+            _ => false,
+        }
+    }
 }
 
 impl ColumnRef {
@@ -112,7 +143,16 @@ impl ColumnCatalog {
     pub fn id(&self) -> Option<ColumnId> {
         match &self.summary.relation {
             ColumnRelation::None => None,
-            ColumnRelation::Table { column_id, .. } => Some(*column_id),
+            ColumnRelation::Table { column_id, .. } | ColumnRelation::Source { column_id, .. } => {
+                Some(*column_id)
+            }
+        }
+    }
+
+    pub(crate) fn table_id(&self) -> Option<TableId> {
+        match &self.summary.relation {
+            ColumnRelation::Table { table_id, .. } => Some(*table_id),
+            _ => None,
         }
     }
 
@@ -120,35 +160,37 @@ impl ColumnCatalog {
         &self.summary.name
     }
 
-    pub fn full_name(&self) -> String {
-        if let Some(table_name) = self.table_name() {
-            return format!("{}.{}", table_name, self.name());
-        }
-        self.name().to_string()
-    }
-
-    pub fn table_name(&self) -> Option<&TableName> {
+    pub fn full_name(&self, arena: &(impl MetaArena + ?Sized)) -> String {
+        let name = self.name();
         match &self.summary.relation {
-            ColumnRelation::None => None,
-            ColumnRelation::Table { table_name, .. } => Some(table_name),
+            ColumnRelation::None => name.to_string(),
+            ColumnRelation::Table { table_id, .. } => match arena.table_name(*table_id) {
+                Some(table_name) => format!("{table_name}.{name}"),
+                None => format!("#{table_id}.{name}"),
+            },
+            ColumnRelation::Source { source_id, .. } => format!("#{source_id}.{name}"),
         }
     }
 
     pub(crate) fn is_persistent_table_column(&self) -> bool {
-        matches!(
-            self.summary.relation,
-            ColumnRelation::Table { is_temp: false, .. }
-        )
+        matches!(self.summary.relation, ColumnRelation::Table { .. })
     }
 
     pub fn set_name(&mut self, name: String) {
         self.summary.name = name;
     }
 
-    pub fn set_ref_table(&mut self, table_name: TableName, column_id: ColumnId, is_temp: bool) {
+    pub fn set_table(&mut self, table_id: TableId, column_id: ColumnId) {
         self.summary.relation = ColumnRelation::Table {
+            table_id,
             column_id,
-            table_name,
+        };
+    }
+
+    pub fn set_source(&mut self, source_id: SourceId, column_id: ColumnId, is_temp: bool) {
+        self.summary.relation = ColumnRelation::Source {
+            source_id,
+            column_id,
             is_temp,
         };
     }

@@ -39,14 +39,7 @@ impl<'a> WriteExecutor<'a> for Update<'a> {
     type Input = (&'a UpdateOperator, &'a LogicalPlan);
 
     fn into_executor<B: ExecBuilder>(
-        (
-            UpdateOperator {
-                table_name: _,
-                table,
-                value_exprs,
-            },
-            input_plan,
-        ): Self::Input,
+        (UpdateOperator { table, value_exprs }, input_plan): Self::Input,
         arena: &mut B,
         plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {

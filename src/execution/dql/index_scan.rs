@@ -134,7 +134,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
         if arena.iter_mut(self.iter).is_empty() {
             let ranges = Self::ranges(self.info, self.lookup, arena, plan_arena)?;
             let TableScanOperator {
-                table_name,
+                table_id,
                 deserializers,
                 limit,
                 with_pk,
@@ -142,9 +142,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
             } = self.op;
             let state = arena.local_state(plan_arena);
             let iter = state.transaction().read_by_index(
-                state.table_cache,
                 state.plan_arena,
-                table_name.clone(),
+                *table_id,
                 *limit,
                 self.info.meta,
                 ranges,
@@ -187,10 +186,11 @@ mod tests {
     fn reset_rebinds_probe_after_partial_read_eof_and_missing_key() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         let mut tx = storage.transaction()?;
+        let mut names = crate::storage::NameMapping::default();
         let mut tables = TableCache::default();
         let cell = TableArenaCell::default();
         let mut meta = PlanArena::new(&cell);
-        build_table(&mut tables, &mut tx, &mut meta)?;
+        build_table(&mut names, &mut tables, &mut tx, &mut meta)?;
         let meta = PlanArena::new(&cell);
         let serializers = [
             LogicalType::Integer.serializable(),
@@ -215,9 +215,9 @@ mod tests {
                 false,
             )?;
         }
-        let table = tables.get("t1").unwrap();
+        let table = names.table(&tables, "t1").unwrap();
         let op = TableScanOperator {
-            table_name: "t1".into(),
+            table_id: 0,
             deserializers: TupleDeserializers::new(table, &meta, true),
             limit: (None, None),
             index_infos: vec![],

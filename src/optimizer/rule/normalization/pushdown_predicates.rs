@@ -602,7 +602,7 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
 mod tests {
 
     use crate::binder::test::build_t1_table;
-    use crate::catalog::{ColumnCatalog, ColumnDesc, TableName};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::{Range, RangeDetacher};
     use crate::expression::{BinaryOperator, ScalarExpression};
@@ -631,7 +631,6 @@ mod tests {
 
     fn build_test_column(
         arena: &mut PlanArena,
-        table_name: &TableName,
         id: crate::types::ColumnId,
         name: &str,
     ) -> Result<crate::catalog::ColumnRef, DatabaseError> {
@@ -640,7 +639,7 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        column.set_ref_table(table_name.clone(), id, false);
+        column.set_table(0, id);
         Ok(arena.alloc_column(column))
     }
 
@@ -681,10 +680,9 @@ mod tests {
 
         let table_state = build_t1_table()?;
         let mut arena = PlanArena::new(&table_state.table_arena);
-        let table: TableName = "classification".to_string().into();
-        let left_column = build_test_column(&mut arena, &table, 1, "left")?;
-        let right_column = build_test_column(&mut arena, &table, 2, "right")?;
-        let unknown_column = build_test_column(&mut arena, &table, 3, "unknown")?;
+        let left_column = build_test_column(&mut arena, 1, "left")?;
+        let right_column = build_test_column(&mut arena, 2, "right")?;
+        let unknown_column = build_test_column(&mut arena, 3, "unknown")?;
         let left = cmp_predicate(&mut arena, BinaryOperator::Eq, left_column, 0, 1);
         let right = cmp_predicate(&mut arena, BinaryOperator::Eq, right_column, 1, 1);
         let unknown = cmp_predicate(&mut arena, BinaryOperator::Eq, unknown_column, 2, 1);
@@ -785,13 +783,12 @@ mod tests {
     fn test_unique_composite_index_uses_tuple_ranges() -> Result<(), DatabaseError> {
         let table_state = build_t1_table()?;
         let mut arena = PlanArena::new(&table_state.table_arena);
-        let table_name: TableName = "mock_table".to_string().into();
-        let c1 = build_test_column(&mut arena, &table_name, 1, "c1")?;
-        let c2 = build_test_column(&mut arena, &table_name, 2, "c2")?;
+        let c1 = build_test_column(&mut arena, 1, "c1")?;
+        let c2 = build_test_column(&mut arena, 2, "c2")?;
         let meta = arena.alloc_index(IndexMeta {
             id: 0,
             column_ids: vec![1, 2],
-            table_name: table_name.clone(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]),
             name: "unique_c1_c2".to_string(),
@@ -829,7 +826,7 @@ mod tests {
         ] {
             let scan = LogicalPlan::new(
                 Operator::TableScan(TableScanOperator {
-                    table_name: table_name.clone(),
+                    table_id: 0,
                     deserializers: crate::storage::deserializers_for_test(vec![c1, c2]),
                     limit: (None, None),
                     index_infos: vec![IndexInfo {
@@ -876,17 +873,16 @@ mod tests {
 
     #[test]
     fn test_composite_range_consumes_prefix_equalities_continuously() -> Result<(), DatabaseError> {
-        let table_name: TableName = ::std::sync::Arc::from("mock_table");
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
-        let c1 = build_test_column(&mut arena, &table_name, 1, "c1")?;
-        let c2 = build_test_column(&mut arena, &table_name, 2, "c2")?;
-        let c3 = build_test_column(&mut arena, &table_name, 3, "c3")?;
-        let c4 = build_test_column(&mut arena, &table_name, 4, "c4")?;
+        let c1 = build_test_column(&mut arena, 1, "c1")?;
+        let c2 = build_test_column(&mut arena, 2, "c2")?;
+        let c3 = build_test_column(&mut arena, 3, "c3")?;
+        let c4 = build_test_column(&mut arena, 4, "c4")?;
         let index_meta = arena.alloc_index(IndexMeta {
             id: 0,
             column_ids: vec![1, 2, 3],
-            table_name: table_name.clone(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Tuple(vec![
                 LogicalType::Integer,
@@ -928,7 +924,7 @@ mod tests {
             ],))
         );
         let residual = detached.residual.expect("c4 predicate should remain");
-        let residual_detached = RangeDetacher::new(table_name.as_ref(), &4, &mut arena)
+        let residual_detached = RangeDetacher::new(0, &4, &mut arena)
             .detach(residual)?
             .expect("residual should be the c4 predicate");
         assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(4)));
@@ -940,16 +936,15 @@ mod tests {
     #[test]
     fn test_composite_range_stops_consuming_after_first_non_equality() -> Result<(), DatabaseError>
     {
-        let table_name: TableName = ::std::sync::Arc::from("mock_table");
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
-        let c1 = build_test_column(&mut arena, &table_name, 1, "c1")?;
-        let c2 = build_test_column(&mut arena, &table_name, 2, "c2")?;
-        let c3 = build_test_column(&mut arena, &table_name, 3, "c3")?;
+        let c1 = build_test_column(&mut arena, 1, "c1")?;
+        let c2 = build_test_column(&mut arena, 2, "c2")?;
+        let c3 = build_test_column(&mut arena, 3, "c3")?;
         let index_meta = arena.alloc_index(IndexMeta {
             id: 0,
             column_ids: vec![1, 2, 3],
-            table_name: table_name.clone(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Tuple(vec![
                 LogicalType::Integer,
@@ -991,7 +986,7 @@ mod tests {
             }
         );
         let residual = detached.residual.expect("c3 predicate should remain");
-        let residual_detached = RangeDetacher::new(table_name.as_ref(), &3, &mut arena)
+        let residual_detached = RangeDetacher::new(0, &3, &mut arena)
             .detach(residual)?
             .expect("residual should be the c3 predicate");
         assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(3)));
@@ -1002,7 +997,6 @@ mod tests {
 
     #[test]
     fn test_cover_mapping_matches_scan_order() -> Result<(), DatabaseError> {
-        let table_name: TableName = ::std::sync::Arc::from("mock_table");
         let table_arena = crate::planner::TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let c1_id = 1;
@@ -1014,7 +1008,7 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Integer, Some(0), false, None)?,
         );
-        c1.set_ref_table(table_name.clone(), c1_id, false);
+        c1.set_table(0, c1_id);
         let c1_ref = arena.alloc_column(c1);
 
         let mut c2 = ColumnCatalog::new(
@@ -1022,7 +1016,7 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        c2.set_ref_table(table_name.clone(), c2_id, false);
+        c2.set_table(0, c2_id);
         let c2_ref = arena.alloc_column(c2);
 
         let mut c3 = ColumnCatalog::new(
@@ -1030,14 +1024,14 @@ mod tests {
             false,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        c3.set_ref_table(table_name.clone(), c3_id, false);
+        c3.set_table(0, c3_id);
 
         let columns = vec![c1_ref, c2_ref];
 
         let index_meta_reordered = arena.alloc_index(IndexMeta {
             id: 0,
             column_ids: vec![c2_id, c3_id, c1_id],
-            table_name: table_name.clone(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Tuple(vec![
                 LogicalType::Integer,
@@ -1050,7 +1044,7 @@ mod tests {
         let index_meta_aligned = arena.alloc_index(IndexMeta {
             id: 1,
             column_ids: vec![c1_id, c2_id],
-            table_name: table_name.clone(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]),
             name: "idx_c1_c2".to_string(),
@@ -1059,7 +1053,7 @@ mod tests {
 
         let scan_plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name,
+                table_id: 0,
                 deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: vec![

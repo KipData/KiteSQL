@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::catalog::{ColumnCatalog, ColumnRef, TableId};
 use crate::errors::DatabaseError;
 use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
@@ -41,7 +41,7 @@ static EMPTY_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {
 });
 
 pub struct Describe {
-    table_name: TableName,
+    table_id: TableId,
     columns: Option<Vec<ColumnRef>>,
     cursor: usize,
 }
@@ -49,7 +49,7 @@ pub struct Describe {
 impl From<&DescribeOperator> for Describe {
     fn from(op: &DescribeOperator) -> Self {
         Describe {
-            table_name: op.table_name.clone(),
+            table_id: op.table_id,
             columns: None,
             cursor: 0,
         }
@@ -87,8 +87,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Describe {
     ) -> Result<(), DatabaseError> {
         if self.columns.is_none() {
             let table = arena
-                .transaction()
-                .table(arena.table_cache(), self.table_name.clone())?
+                .table_cache()
+                .get(&self.table_id)
                 .ok_or(DatabaseError::TableNotFound)?;
             self.columns = Some(table.columns().copied().collect());
         }

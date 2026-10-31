@@ -23,10 +23,9 @@ use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::{slice, vec};
 
-pub type TableName = Arc<str>;
+pub type TableName = String;
 /// Allocated once per table or view, in creation order; it prefixes the table's keys.
 pub type TableId = u64;
 
@@ -189,9 +188,8 @@ impl TableCatalog {
             .ok_or(DatabaseError::OverFlow)?;
 
         col.summary_mut().relation = ColumnRelation::Table {
+            table_id: self.id,
             column_id: col_id,
-            table_name: self.name.clone(),
-            is_temp: false,
         };
 
         self.column_idxs
@@ -242,7 +240,7 @@ impl TableCatalog {
         let index = IndexMeta {
             id: index_id,
             column_ids,
-            table_name: self.name.clone(),
+            table_id: self.id,
             pk_ty,
             value_ty,
             name,
@@ -418,13 +416,8 @@ mod tests {
         columns: Vec<ColumnCatalog>,
     ) -> (TableArenaCell, TableCatalog) {
         let table_arena = TableArenaCell::default();
-        let table_catalog = TableCatalog::new(
-            0,
-            name.to_string().into(),
-            columns,
-            table_arena.borrow_mut(),
-        )
-        .unwrap();
+        let table_catalog =
+            TableCatalog::new(0, name.to_string(), columns, table_arena.borrow_mut()).unwrap();
         (table_arena, table_catalog)
     }
 

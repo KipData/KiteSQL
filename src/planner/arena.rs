@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::catalog::view::View;
+use crate::catalog::{ColumnCatalog, ColumnRef, SourceId, TableCatalog, TableId, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::ScalarExpression;
@@ -22,6 +23,7 @@ use crate::planner::operator::visitor_mut::{
 };
 use crate::planner::operator::{Operator, PhysicalOption};
 use crate::planner::{LogicalPlan, ScalarQueryRef};
+use crate::storage::{NameMapping, TableCache, ViewCache};
 use crate::types::index::{IndexMeta, IndexMetaRef};
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
@@ -112,6 +114,10 @@ pub struct TableArena {
     columns: Vec<TableArenaColumn>,
     indexes: Vec<TableArenaIndex>,
     expressions: Vec<TableArenaExpression>,
+    source_count: usize,
+    pub(crate) names: NameMapping,
+    pub(crate) tables: TableCache,
+    pub(crate) views: ViewCache,
     scalar_query_count: usize,
     version: usize,
 }
@@ -152,6 +158,7 @@ pub struct PlanArena<'a> {
     columns: Vec<ColumnCatalog>,
     indexes: Vec<IndexMeta>,
     expressions: Vec<ArenaExpr>,
+    source_count: usize,
     plans: Vec<LogicalPlan>,
 }
 
@@ -290,6 +297,14 @@ pub trait MetaArena {
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef>;
 
     fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef>;
+
+    fn alloc_source(&mut self) -> SourceId;
+
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog>;
+
+    fn table_name(&self, table_id: TableId) -> Option<&str> {
+        self.table(table_id).map(|table| table.name().as_str())
+    }
 }
 
 impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
@@ -346,6 +361,12 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
     }
     fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
         (**self).find_index(index)
+    }
+    fn alloc_source(&mut self) -> SourceId {
+        (**self).alloc_source()
+    }
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        (**self).table(table_id)
     }
 }
 
@@ -478,6 +499,12 @@ impl<A: MetaArena> MetaArena for ExecMetaArena<A> {
     fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
         self.parent.find_index(index)
     }
+    fn alloc_source(&mut self) -> SourceId {
+        self.parent.alloc_source()
+    }
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        self.parent.table(table_id)
+    }
 }
 
 const DUMMY_COLUMN_NAMES: [&str; DUMMY_COLUMN_COUNT] = [
@@ -542,6 +569,10 @@ impl Default for TableArena {
             columns: Vec::new(),
             indexes: Vec::new(),
             expressions: Vec::new(),
+            source_count: 0,
+            names: NameMapping::default(),
+            tables: TableCache::default(),
+            views: ViewCache::default(),
             scalar_query_count: 0,
             version: 0,
         }
@@ -555,6 +586,14 @@ impl fmt::Debug for TableArenaCell {
 }
 
 impl TableArena {
+    pub(crate) fn insert_table(&mut self, table: TableCatalog) {
+        self.names.insert_table(&mut self.tables, table);
+    }
+
+    pub(crate) fn insert_view(&mut self, view_id: TableId, view: View) {
+        self.names.insert_view(&mut self.views, view_id, view);
+    }
+
     pub(crate) fn alloc_dummy(&self, name: &str) -> ColumnRef {
         DUMMY_COLUMN_NAMES
             .iter()
@@ -779,6 +818,15 @@ impl MetaArena for TableArena {
             .position(|candidate| candidate.live && candidate.meta == *index)
             .map(IndexMetaRef::new)
     }
+
+    fn alloc_source(&mut self) -> SourceId {
+        self.source_count += 1;
+        self.source_count - 1
+    }
+
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        self.tables.get(&table_id)
+    }
 }
 
 impl<'a> PlanArena<'a> {
@@ -796,6 +844,7 @@ impl<'a> PlanArena<'a> {
             columns: Vec::new(),
             indexes: Vec::new(),
             expressions: Vec::new(),
+            source_count: 0,
             plans: Vec::new(),
         }
     }
@@ -900,6 +949,7 @@ impl<'a> PlanArena<'a> {
             });
         }
         self.append_expressions_to_table_arena(table_arena);
+        table_arena.source_count += self.source_count;
         if !self.columns.is_empty() || !self.indexes.is_empty() || !self.expressions.is_empty() {
             table_arena.increment_version();
         }
@@ -955,7 +1005,7 @@ impl<'a> PlanArena<'a> {
     pub(crate) fn temp_table(&mut self) -> TableName {
         let table_name = format!("_temp_table_{}_", self.temp_table_id);
         self.temp_table_id += 1;
-        table_name.into()
+        table_name
     }
 
     pub(crate) fn alloc_plan(&mut self, plan: LogicalPlan) -> PlanRef {
@@ -1121,6 +1171,16 @@ impl MetaArena for PlanArena<'_> {
             .position(|candidate| candidate == index)
             .map(|offset| IndexMetaRef::new(table_indexes_len + offset))
     }
+
+    fn alloc_source(&mut self) -> SourceId {
+        self.assert_table_arena_unchanged();
+        self.source_count += 1;
+        self.table_arena.borrow().source_count + self.source_count - 1
+    }
+
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        self.table_arena.borrow().table(table_id)
+    }
 }
 
 /// Execution-local parameter values and temporary expressions over an immutable plan arena.
@@ -1281,6 +1341,12 @@ impl MetaArena for ParamArena<'_> {
     }
     fn alloc_index(&mut self, _: IndexMeta) -> IndexMetaRef {
         unreachable!("ParamArena cannot allocate catalog indexes")
+    }
+    fn alloc_source(&mut self) -> SourceId {
+        unreachable!("ParamArena cannot allocate sources")
+    }
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        self.plan_arena().table(table_id)
     }
 }
 
@@ -1467,7 +1533,11 @@ mod tests {
 
     fn table_column(name: &str, is_temp: bool) -> ColumnCatalog {
         let mut column = column(name);
-        column.set_ref_table("t".to_string().into(), if is_temp { 0 } else { 1 }, is_temp);
+        if is_temp {
+            column.set_source(0, 0, true);
+        } else {
+            column.set_table(0, 1);
+        }
         column
     }
 
@@ -1475,7 +1545,7 @@ mod tests {
         IndexMeta {
             id: 1,
             column_ids: vec![1],
-            table_name: "t".into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: name.to_string(),

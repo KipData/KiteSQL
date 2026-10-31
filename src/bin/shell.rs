@@ -199,7 +199,7 @@ StorageTransaction commands:
             (
                 schema
                     .iter()
-                    .map(|column| Cell::new(column.full_name()))
+                    .map(|column| Cell::new(schema.full_name(column)))
                     .collect::<Vec<_>>(),
                 schema.len(),
             )

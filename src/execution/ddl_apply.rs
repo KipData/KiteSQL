@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::catalog::view::View;
-use crate::catalog::{TableCatalog, TableName};
+use crate::catalog::{TableCatalog, TableId, TableName};
 use crate::optimizer::core::histogram::HistogramMeta;
 use crate::optimizer::core::statistics_meta::IndexStatistics;
 use crate::types::index::IndexId;
@@ -28,22 +28,23 @@ pub(crate) enum DDLApply {
         name: TableName,
     },
     UpsertView {
+        id: TableId,
         view: View,
     },
     DropView {
         name: TableName,
     },
     UpsertIndexStatistics {
-        table_name: TableName,
+        table_id: TableId,
         index_id: IndexId,
         meta: IndexStatistics,
     },
     RemoveIndexStatistics {
-        table_name: TableName,
+        table_id: TableId,
         index_id: IndexId,
     },
     UpsertColumnStatistics {
-        table_name: TableName,
+        table_id: TableId,
         column_id: ColumnId,
         meta: HistogramMeta,
     },
@@ -57,7 +58,7 @@ impl DDLApply {
         }
     }
 
-    pub(crate) fn upsert_view(view: View) -> Self {
-        Self::UpsertView { view }
+    pub(crate) fn upsert_view(id: TableId, view: View) -> Self {
+        Self::UpsertView { id, view }
     }
 }

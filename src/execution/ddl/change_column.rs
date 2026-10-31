@@ -53,27 +53,19 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
         let ChangeColumnOperator {
-            table_name,
+            table_id,
             old_column_name,
             new_column_name,
             data_type,
             default_change,
             not_null_change,
         } = self.op;
+        let table_id = *table_id;
 
-        let (
-            table_id,
-            old_schema,
-            pk_ty,
-            column_index,
-            old_column_type,
-            old_column_id,
-            affected_index_name,
-        ) = {
-            let table_catalog = arena
-                .transaction()
-                .table(table_cache, table_name.clone())?
-                .ok_or(DatabaseError::TableNotFound)?;
+        let table_catalog = table_cache
+            .get(&table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
+        let (old_schema, pk_ty, column_index, old_column_type, old_column_id, affected_index_name) = {
             let (column_index, old_column) = table_catalog
                 .columns()
                 .enumerate()
@@ -91,7 +83,6 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
                     .map(|index_meta| index_meta.name.clone())
             });
             (
-                table_catalog.id(),
                 table_catalog.columns().copied().collect_vec(),
                 table_catalog.primary_keys_type().clone(),
                 column_index,
@@ -180,7 +171,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             let table = transaction.change_column(
                 table_codec,
                 plan_arena,
-                table_name,
+                table_catalog.name(),
                 old_column_name,
                 new_column_name,
                 data_type,

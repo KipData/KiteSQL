@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
@@ -26,7 +26,7 @@ use crate::types::tuple_builder::TupleBuilder;
 use std::mem;
 
 pub struct Delete<'a> {
-    table_name: &'a TableName,
+    table_id: TableId,
     input: ExecNode<'a>,
     // Set once the statement ran; cleared when the executor is reset.
     done: bool,
@@ -36,13 +36,13 @@ impl<'a> WriteExecutor<'a> for Delete<'a> {
     type Input = (&'a DeleteOperator, &'a LogicalPlan);
 
     fn into_executor<B: ExecBuilder>(
-        (DeleteOperator { table_name, .. }, input_plan): Self::Input,
+        (DeleteOperator { table_id, .. }, input_plan): Self::Input,
         arena: &mut B,
         plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input_plan);
         ExecNode::Delete(Box::new(Delete {
-            table_name,
+            table_id: *table_id,
             input,
             done: false,
         }))
@@ -70,12 +70,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
         }
         let input = &mut self.input;
 
-        let (table_id, index_templates) = {
+        let table_id = self.table_id;
+        let index_templates = {
             let table = arena
-                .transaction()
-                .table(arena.table_cache(), self.table_name.clone())?
+                .table_cache()
+                .get(&table_id)
                 .ok_or(DatabaseError::TableNotFound)?;
-            let index_templates = table
+            table
                 .indexes()
                 .filter(|index_meta| {
                     !matches!(
@@ -93,8 +94,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
                             .collect::<Result<Vec<_>, _>>()?,
                     ))
                 })
-                .collect::<Result<Vec<_>, DatabaseError>>()?;
-            (table.id(), index_templates)
+                .collect::<Result<Vec<_>, DatabaseError>>()?
         };
         let mut deleted_count = 0;
 

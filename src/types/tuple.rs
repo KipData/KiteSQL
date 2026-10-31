@@ -63,6 +63,10 @@ impl<'a, 'p> SchemaView<'a, 'p> {
         self.schema.len()
     }
 
+    pub fn full_name(&self, column: &ColumnCatalog) -> String {
+        column.full_name(self.arena)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.schema.is_empty()
     }

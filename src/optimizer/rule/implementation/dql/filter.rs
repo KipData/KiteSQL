@@ -229,14 +229,14 @@ mod tests {
                 true,
                 ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
             );
-            column.set_ref_table("t".into(), id, false);
+            column.set_table(0, id);
             let column = arena.alloc_column(column);
             columns.push(column);
             keys.push(arena.alloc_expression(ScalarExpression::column_expr(column, id as usize)));
         }
         let mut plan = LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: "t".into(),
+                table_id: 0,
                 deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos: vec![],
@@ -261,7 +261,7 @@ mod tests {
             builder.append(&DataValue::Null);
         }
         let mut cache = StatisticsMetaCache::default();
-        cache.columns.insert(("t".into(), 0), builder.build());
+        cache.columns.insert((0, 0), builder.build());
         cache
     }
 

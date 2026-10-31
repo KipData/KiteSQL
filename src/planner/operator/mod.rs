@@ -524,12 +524,7 @@ impl Explain for ColumnRef {
         arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        let column = arena.column(*self);
-        if let Some(table_name) = column.table_name() {
-            write!(f, "{}.{}", table_name, column.name())
-        } else {
-            f.write_str(column.name())
-        }
+        f.write_str(&arena.column(*self).full_name(arena))
     }
 }
 
@@ -562,17 +557,11 @@ impl_display_explain!(
     ScalarSubqueryOperator,
     FunctionScanOperator,
     LimitOperator,
-    DescribeOperator,
-    InsertOperator,
-    DeleteOperator,
-    AddColumnOperator,
-    DropColumnOperator,
     CreateTableOperator,
     CreateViewOperator,
     DropTableOperator,
     DropViewOperator,
     DropIndexOperator,
-    TruncateOperator,
     #[cfg(feature = "copy")]
     CopyToFileOperator,
 );
@@ -1230,6 +1219,23 @@ mod tests {
         arena.alloc_column(column_catalog(name))
     }
 
+    /// A table arena whose catalog names table id 0 `users`.
+    fn users_table_arena() -> TableArenaCell {
+        let table_arena = TableArenaCell::default();
+        {
+            let catalog = table_arena.borrow_mut();
+            let users = crate::catalog::TableCatalog::new(
+                0,
+                "users".to_string(),
+                vec![column_catalog("id")],
+                catalog,
+            )
+            .unwrap();
+            catalog.insert_table(users);
+        }
+        table_arena
+    }
+
     fn index_info(meta: IndexMetaRef) -> IndexInfo {
         IndexInfo {
             meta,
@@ -1331,7 +1337,7 @@ mod tests {
         let meta = arena.alloc_index(IndexMeta {
             id: 1,
             column_ids: vec![1],
-            table_name: "users".into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "idx_users_id".to_string(),
@@ -1377,7 +1383,7 @@ mod tests {
         assert!(!values.all_referenced_columns(&arena, |column| *column == left)?);
 
         let delete = Operator::Delete(DeleteOperator {
-            table_name: "users".into(),
+            table_id: 0,
             primary_keys: vec![left],
         });
         assert!(delete.any_referenced_column(&arena, |column| *column == left)?);
@@ -1436,14 +1442,13 @@ mod tests {
         assert_eq!(referenced_columns(&project, &mut arena)?, vec![b, c]);
 
         let update = Operator::Update(UpdateOperator {
-            table_name: "users".into(),
             table: crate::catalog::table::DmlTable::default(),
             value_exprs: vec![(1, column_expr(a, 0, &mut arena))],
         });
         assert_eq!(referenced_columns(&update, &mut arena)?, vec![a]);
 
         let add_column = Operator::AddColumn(AddColumnOperator {
-            table_name: "users".into(),
+            table_id: 0,
             if_not_exists: false,
             column: ColumnCatalog::new(
                 "added".to_string(),
@@ -1459,7 +1464,7 @@ mod tests {
         assert!(referenced_columns(&add_column, &mut arena)?.is_empty());
 
         let change_column = Operator::ChangeColumn(ChangeColumnOperator {
-            table_name: "users".into(),
+            table_id: 0,
             old_column_name: "old".to_string(),
             new_column_name: "new".to_string(),
             data_type: LogicalType::Integer,
@@ -1485,7 +1490,7 @@ mod tests {
         assert!(referenced_columns(&create_table, &mut arena)?.is_empty());
 
         let table_scan = Operator::TableScan(TableScanOperator {
-            table_name: "users".into(),
+            table_id: 0,
             deserializers: crate::storage::deserializers_for_test(vec![a, d]),
             limit: (None, None),
             index_infos: Vec::new(),
@@ -1530,7 +1535,7 @@ mod tests {
         assert_eq!(referenced_columns(&set_membership, &mut arena)?, vec![c, d]);
 
         let delete = Operator::Delete(DeleteOperator {
-            table_name: "users".into(),
+            table_id: 0,
             primary_keys: vec![a],
         });
         assert_eq!(referenced_columns(&delete, &mut arena)?, vec![a]);
@@ -1543,7 +1548,7 @@ mod tests {
         let no_reference_operators = [
             Operator::ScalarSubquery(ScalarSubqueryOperator),
             Operator::Analyze(AnalyzeOperator {
-                table_name: "users".into(),
+                table_id: 0,
                 index_metas: vec![IndexMetaRef::new(1)],
                 histogram_buckets: Some(8),
                 hll_precision: None,
@@ -1640,7 +1645,7 @@ mod tests {
 
     #[test]
     fn ddl_operator_explain_formats_table_index_and_column_actions() {
-        let table_arena = TableArenaCell::default();
+        let table_arena = users_table_arena();
         let mut arena = PlanArena::new(&table_arena);
         let id = column("id", &mut arena);
         let name = column("name", &mut arena);
@@ -1662,7 +1667,7 @@ mod tests {
             ),
             (
                 Operator::CreateIndex(CreateIndexOperator {
-                    table_name: "users".into(),
+                    table_id: 0,
                     columns: vec![id, name],
                     index_name: "idx_users_name".to_string(),
                     if_not_exists: false,
@@ -1693,7 +1698,7 @@ mod tests {
             ),
             (
                 Operator::DropColumn(DropColumnOperator {
-                    table_name: "users".into(),
+                    table_id: 0,
                     column_name: "age".to_string(),
                     if_exists: true,
                 }),
@@ -1701,7 +1706,7 @@ mod tests {
             ),
             (
                 Operator::AddColumn(AddColumnOperator {
-                    table_name: "users".into(),
+                    table_id: 0,
                     if_not_exists: true,
                     column: column_catalog("age"),
                 }),
@@ -1709,7 +1714,7 @@ mod tests {
             ),
             (
                 Operator::ChangeColumn(ChangeColumnOperator {
-                    table_name: "users".into(),
+                    table_id: 0,
                     old_column_name: "age".to_string(),
                     new_column_name: "age_years".to_string(),
                     data_type: LogicalType::Integer,
@@ -1719,9 +1724,7 @@ mod tests {
                 "Change age -> users.age_years (Integer, Drop, Set)",
             ),
             (
-                Operator::Truncate(TruncateOperator {
-                    table_name: "users".into(),
-                }),
+                Operator::Truncate(TruncateOperator { table_id: 0 }),
                 "Truncate users",
             ),
         ];
@@ -1733,13 +1736,13 @@ mod tests {
 
     #[test]
     fn dml_values_describe_and_analyze_explain_formats_payloads() {
-        let table_arena = TableArenaCell::default();
+        let table_arena = users_table_arena();
         let mut arena = PlanArena::new(&table_arena);
         let id = column("id", &mut arena);
         let index = arena.alloc_index(IndexMeta {
             id: 1,
             column_ids: vec![1],
-            table_name: "users".into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "idx_users_id".to_string(),
@@ -1749,7 +1752,6 @@ mod tests {
         let cases = [
             (
                 Operator::Insert(InsertOperator {
-                    table_name: "users".into(),
                     table: crate::catalog::table::DmlTable::default(),
                     is_overwrite: true,
                 }),
@@ -1757,7 +1759,6 @@ mod tests {
             ),
             (
                 Operator::Update(UpdateOperator {
-                    table_name: "users".into(),
                     table: crate::catalog::table::DmlTable {
                         columns: vec![id],
                         ..Default::default()
@@ -1768,15 +1769,13 @@ mod tests {
             ),
             (
                 Operator::Delete(DeleteOperator {
-                    table_name: "users".into(),
+                    table_id: 0,
                     primary_keys: vec![id],
                 }),
                 "Delete users",
             ),
             (
-                Operator::Describe(DescribeOperator {
-                    table_name: "users".into(),
-                }),
+                Operator::Describe(DescribeOperator { table_id: 0 }),
                 "Describe users",
             ),
             (
@@ -1792,7 +1791,7 @@ mod tests {
             ),
             (
                 Operator::Analyze(AnalyzeOperator {
-                    table_name: "users".into(),
+                    table_id: 0,
                     index_metas: vec![index],
                     histogram_buckets: Some(128),
                     hll_precision: None,
@@ -1959,13 +1958,13 @@ mod tests {
         use crate::binder::copy::{ExtSource, FileFormat};
         use std::path::PathBuf;
 
-        let table_arena = TableArenaCell::default();
+        let table_arena = users_table_arena();
         let mut arena = PlanArena::new(&table_arena);
         let id = column("id", &mut arena);
         let name = column("name", &mut arena);
 
         let operator = Operator::CopyFromFile(CopyFromFileOperator {
-            table: "users".into(),
+            table_id: 0,
             source: ExtSource {
                 path: PathBuf::from("/tmp/users.csv"),
                 format: FileFormat::Csv {

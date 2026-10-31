@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::binder::Binder;
-use crate::catalog::{ColumnRef, TableName};
+use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::planner::operator::update::UpdateOperator;
 use crate::planner::operator::Operator;
@@ -24,14 +24,14 @@ use crate::types::LogicalType;
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_update(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         assignments: Vec<(ColumnRef, ExprRef)>,
         input: LogicalPlan,
         arena: &mut PlanArena<'_>,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table_catalog = self
             .context
-            .table(table_name.clone())?
+            .table(table_name)?
             .ok_or(DatabaseError::TableNotFound)?;
         let mut value_exprs = Vec::with_capacity(assignments.len());
         for (column, expr) in assignments {
@@ -66,11 +66,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
                 })
         })?;
         Ok(LogicalPlan::new(
-            Operator::Update(UpdateOperator {
-                table_name,
-                table,
-                value_exprs,
-            }),
+            Operator::Update(UpdateOperator { table, value_exprs }),
             Childrens::Only(Box::new(input)),
         ))
     }

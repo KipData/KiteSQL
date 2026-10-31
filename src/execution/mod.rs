@@ -630,7 +630,6 @@ impl<'t, T: StorageTransaction + 't> StorageIter<'t, T> {
 pub(crate) struct ExecArenaLocalState<'b, 'a, 't, T: StorageTransaction + 'a> {
     transaction: *mut T,
     pub(crate) table_codec: &'b mut TableCodec,
-    pub(crate) table_cache: &'a TableCache,
     pub(crate) result: &'b mut ExecResult,
     pub(crate) plan_arena: &'b (dyn MetaArena + 'a),
     pub(crate) iters: &'b mut [StorageIter<'t, T>],
@@ -729,10 +728,6 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
         self.arena.table_cache
     }
 
-    pub(crate) fn transaction(&self) -> &'t T {
-        unsafe { &*self.arena.transaction }
-    }
-
     pub(crate) fn iter_mut(&mut self, slot: IterSlot) -> &mut StorageIter<'t, T> {
         &mut self.arena.iters[slot]
     }
@@ -751,7 +746,6 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
         ExecArenaLocalState {
             transaction: self.arena.transaction,
             table_codec: &mut self.buffer.table_codec,
-            table_cache: self.arena.table_cache,
             result: &mut self.buffer.result,
             plan_arena,
             iters: &mut self.arena.iters,

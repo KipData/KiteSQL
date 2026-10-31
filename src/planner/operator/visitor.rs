@@ -693,7 +693,7 @@ pub(crate) mod tests {
             Operator::Project(ProjectOperator::new(vec![expr(9)])),
             Operator::ScalarSubquery(ScalarSubqueryOperator),
             Operator::TableScan(TableScanOperator {
-                table_name: "t1".into(),
+                table_id: 0,
                 deserializers: crate::storage::deserializers_for_test(vec![column_ref]),
                 limit: (None, None),
                 index_infos: vec![index_info(expr(10), expr(11))],
@@ -730,9 +730,7 @@ pub(crate) mod tests {
             Operator::ShowTable,
             Operator::ShowView,
             Operator::Explain,
-            Operator::Describe(DescribeOperator {
-                table_name: "t1".into(),
-            }),
+            Operator::Describe(DescribeOperator { table_id: 0 }),
             Operator::SetMembership(SetMembershipOperator {
                 kind: SetMembershipKind::Intersect,
                 left_schema_ref: vec![column_ref],
@@ -743,33 +741,31 @@ pub(crate) mod tests {
                 _right_schema_ref: vec![column_ref],
             }),
             Operator::Insert(InsertOperator {
-                table_name: "t1".into(),
                 table: crate::catalog::table::DmlTable::default(),
                 is_overwrite: false,
             }),
             Operator::Update(UpdateOperator {
-                table_name: "t1".into(),
                 table: crate::catalog::table::DmlTable::default(),
                 value_exprs: vec![(0, expr(15))],
             }),
             Operator::Delete(DeleteOperator {
-                table_name: "t1".into(),
+                table_id: 0,
                 primary_keys: vec![column_ref],
             }),
             Operator::Analyze(AnalyzeOperator {
-                table_name: "t1".into(),
+                table_id: 0,
                 index_metas: vec![IndexMetaRef::new(0)],
                 histogram_buckets: Some(1),
                 hll_precision: None,
                 statistics_relative_error: None,
             }),
             Operator::AddColumn(AddColumnOperator {
-                table_name: "t1".into(),
+                table_id: 0,
                 if_not_exists: false,
                 column: column.clone(),
             }),
             Operator::ChangeColumn(ChangeColumnOperator {
-                table_name: "t1".into(),
+                table_id: 0,
                 old_column_name: "value".to_string(),
                 new_column_name: "value".to_string(),
                 data_type: LogicalType::Integer,
@@ -777,7 +773,7 @@ pub(crate) mod tests {
                 not_null_change: NotNullChange::NoChange,
             }),
             Operator::DropColumn(DropColumnOperator {
-                table_name: "t1".into(),
+                table_id: 0,
                 column_name: "value".to_string(),
                 if_exists: false,
             }),
@@ -787,7 +783,7 @@ pub(crate) mod tests {
                 if_not_exists: false,
             }),
             Operator::CreateIndex(CreateIndexOperator {
-                table_name: "t1".into(),
+                table_id: 0,
                 columns: vec![column_ref],
                 index_name: "idx".to_string(),
                 if_not_exists: false,
@@ -814,9 +810,7 @@ pub(crate) mod tests {
                 index_name: "idx".to_string(),
                 if_exists: false,
             }),
-            Operator::Truncate(TruncateOperator {
-                table_name: "t1".into(),
-            }),
+            Operator::Truncate(TruncateOperator { table_id: 0 }),
         ];
         let operators = {
             let mut with_recursive_operators = operators;
@@ -841,7 +835,7 @@ pub(crate) mod tests {
                 },
             };
             with_copy_operators.push(Operator::CopyFromFile(CopyFromFileOperator {
-                table: "t1".into(),
+                table_id: 0,
                 source: source.clone(),
                 schema_ref: vec![column_ref],
             }));

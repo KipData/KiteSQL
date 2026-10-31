@@ -181,7 +181,7 @@ impl<S: Storage> Database<S> {
         &self,
     ) -> Result<OrmIter<DatabaseIter<'_, S>, DescribeColumn>, DatabaseError> {
         Ok(self
-            .bind(|ctx| ctx.binder.bind_describe(M::table_name().into()))?
+            .bind(|ctx| ctx.binder.bind_describe(M::table_name()))?
             .orm::<DescribeColumn>())
     }
 }
@@ -293,7 +293,7 @@ impl<'a, S: Storage> Transaction<'a, S> {
         DatabaseError,
     > {
         Ok(self
-            .bind(|ctx| ctx.binder.bind_describe(M::table_name().into()))?
+            .bind(|ctx| ctx.binder.bind_describe(M::table_name()))?
             .orm::<DescribeColumn>())
     }
 }

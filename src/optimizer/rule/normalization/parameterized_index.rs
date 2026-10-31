@@ -230,9 +230,9 @@ fn pick_parameterized_index_position(
 ) -> Option<usize> {
     let right_column = arena.column(*right_column);
     let column_id = right_column.id()?;
-    let table_name = right_column.table_name()?;
+    let table_id = right_column.table_id()?;
 
-    if &scan_op.table_name != table_name {
+    if scan_op.table_id != table_id {
         return None;
     }
 
@@ -242,7 +242,7 @@ fn pick_parameterized_index_position(
         .enumerate()
         .filter(|(_, index_info)| {
             let index_meta = arena.index(index_info.meta);
-            index_meta.table_name == *table_name
+            index_meta.table_id == table_id
                 && index_meta.column_ids.len() == 1
                 && index_meta.column_ids.first().copied() == Some(column_id)
         })
@@ -404,7 +404,7 @@ fn lookup_work(
     let meta = arena.index(index);
     let rows = match loader {
         Some(loader) => loader
-            .load(&scan.table_name, meta.id)?
+            .load(scan.table_id, meta.id)?
             .map(|statistics| statistics.histogram().values_len()),
         None => None,
     }
@@ -754,6 +754,11 @@ mod inner_join_tests {
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
 
+    fn table_id(name: &str) -> crate::catalog::TableId {
+        name.bytes()
+            .fold(0, |id, byte| id << 8 | crate::catalog::TableId::from(byte))
+    }
+
     fn scan(
         arena: &mut PlanArena<'_>,
         name: &str,
@@ -769,7 +774,7 @@ mod inner_join_tests {
                     true,
                     ColumnDesc::new(ty.clone(), None, false, None).unwrap(),
                 );
-                column.set_ref_table(name.into(), id as _, true);
+                column.set_table(table_id(name), id as _);
                 arena.alloc_column(column)
             })
             .collect();
@@ -780,7 +785,7 @@ mod inner_join_tests {
                 meta: arena.alloc_index(IndexMeta {
                     id: id as _,
                     column_ids: keys.iter().map(|id| *id as _).collect(),
-                    table_name: name.into(),
+                    table_id: table_id(name),
                     pk_ty: LogicalType::Integer,
                     value_ty: if keys.len() == 1 {
                         types[keys[0]].clone()
@@ -805,7 +810,7 @@ mod inner_join_tests {
             .collect();
         LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
-                table_name: name.into(),
+                table_id: table_id(name),
                 deserializers: crate::storage::deserializers_for_test(columns),
                 limit: (None, None),
                 index_infos,
@@ -1352,8 +1357,8 @@ mod inner_join_tests {
         let Operator::TableScan(inner) = &right.operator else {
             unreachable!()
         };
-        assert_eq!(outer.table_name.as_ref(), "right");
-        assert_eq!(inner.table_name.as_ref(), "left");
+        assert_eq!(outer.table_id, table_id("right"));
+        assert_eq!(inner.table_id, table_id("left"));
         Ok(())
     }
 

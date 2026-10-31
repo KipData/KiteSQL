@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{TableCatalog, TableName};
+use crate::catalog::{TableCatalog, TableId};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::Range;
 use crate::expression::ScalarExpression;
@@ -115,7 +115,7 @@ impl IndexOrderHint {
 pub struct IndexMeta {
     pub id: IndexId,
     pub column_ids: Vec<ColumnId>,
-    pub table_name: TableName,
+    pub table_id: TableId,
     pub pk_ty: LogicalType,
     pub value_ty: LogicalType,
     pub name: String,
@@ -211,7 +211,7 @@ mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableCatalog};
     use crate::planner::{PlanArena, TableArena, TableArenaCell};
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use std::fmt::Debug;
     use std::io::{Cursor, Seek, SeekFrom};
@@ -233,7 +233,7 @@ mod tests {
         IndexMeta {
             id: 1,
             column_ids: vec![10],
-            table_name: "t".into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "idx_t".to_string(),
@@ -250,12 +250,11 @@ mod tests {
         T: ReferenceSerialization + Debug + PartialEq,
     {
         let mut cursor = Cursor::new(Vec::new());
-        let mut reference_tables = ReferenceTables::new();
 
-        value.encode(&mut cursor, false, &mut reference_tables, encode_arena)?;
+        value.encode(&mut cursor, false, encode_arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        T::decode::<RocksTransaction, _, _>(&mut cursor, None, &reference_tables, decode_arena)
+        T::decode::<RocksTransaction, _, _>(&mut cursor, None, decode_arena)
     }
 
     #[test]
@@ -431,7 +430,7 @@ mod tests {
         let meta = IndexMeta {
             id: 1,
             column_ids: vec![id_column],
-            table_name: "t".into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "idx_id".to_string(),

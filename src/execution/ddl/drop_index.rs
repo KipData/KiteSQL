@@ -56,20 +56,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
 
         let dropped = {
             let (transaction, table_codec) = arena.transaction_codec_mut();
-            transaction.drop_index(
-                table_codec,
-                plan_arena,
-                table_name.clone(),
-                index_name,
-                *if_exists,
-            )?
+            transaction.drop_index(table_codec, plan_arena, table_name, index_name, *if_exists)?
         };
         if let Some((table, index_id)) = dropped {
+            let table_id = table.id();
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
-            arena.push_ddl_apply(DDLApply::RemoveIndexStatistics {
-                table_name: table_name.clone(),
-                index_id,
-            });
+            arena.push_ddl_apply(DDLApply::RemoveIndexStatistics { table_id, index_id });
         }
 
         arena.finish();

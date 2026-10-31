@@ -62,18 +62,15 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
         let state = arena.local_state(plan_arena);
         if state.iters[self.iter].is_empty() {
             let TableScanOperator {
-                table_name,
+                table_id,
                 deserializers,
                 limit,
                 ..
             } = self.op;
-            let iter = state.transaction().read(
-                state.table_codec,
-                state.table_cache,
-                deserializers,
-                table_name,
-                *limit,
-            )?;
+            let iter =
+                state
+                    .transaction()
+                    .read(state.table_codec, deserializers, *table_id, *limit)?;
             state.iters[self.iter] = StorageIter::Tuple(iter);
         }
         let iter = state.iters[self.iter].as_tuple();
@@ -104,10 +101,11 @@ mod tests {
     fn reset_keeps_seq_iterator_and_restores_offset_limit() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         let mut tx = storage.transaction()?;
+        let mut names = crate::storage::NameMapping::default();
         let mut tables = TableCache::default();
         let cell = TableArenaCell::default();
         let mut meta = PlanArena::new(&cell);
-        build_table(&mut tables, &mut tx, &mut meta)?;
+        build_table(&mut names, &mut tables, &mut tx, &mut meta)?;
         let meta = PlanArena::new(&cell);
         let serializers = [
             LogicalType::Integer.serializable(),
@@ -133,8 +131,12 @@ mod tests {
             )?;
         }
         let op = TableScanOperator {
-            table_name: "t1".into(),
-            deserializers: TupleDeserializers::new(tables.get("t1").unwrap(), &meta, true),
+            table_id: 0,
+            deserializers: TupleDeserializers::new(
+                names.table(&tables, "t1").unwrap(),
+                &meta,
+                true,
+            ),
             limit: (Some(1), Some(2)),
             index_infos: vec![],
             with_pk: true,
