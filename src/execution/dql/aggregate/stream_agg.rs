@@ -16,7 +16,9 @@ use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
     create_accumulators, update_accumulators, write_aggregate_output, Accumulator,
 };
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -63,7 +65,7 @@ impl<'a> ReadExecutor<'a> for StreamAggExecutor<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.group_keys = None;
@@ -73,7 +75,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {

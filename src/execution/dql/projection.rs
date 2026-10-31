@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::project::ProjectOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -42,7 +44,7 @@ impl<'a> ReadExecutor<'a> for Projection<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.input.reset(arena, plan_arena)
@@ -50,7 +52,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Projection<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if !self.input.next_tuple(arena, plan_arena)? {

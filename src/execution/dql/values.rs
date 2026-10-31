@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::ExprRef;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -52,7 +52,7 @@ impl<'a> ReadExecutor<'a> for Values<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Values<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows = self.op.rows.iter();
@@ -62,7 +62,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Values<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.remaining_rows == 0 {

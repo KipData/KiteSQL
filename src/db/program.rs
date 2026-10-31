@@ -411,7 +411,10 @@ mod tests {
             if !matches!(info.lookup, Some(IndexLookup::Static(_))) {
                 continue;
             }
-            let mut execution_arena = ExecArena::new(context, &transaction);
+            let mut exec_buffer = crate::execution::ExecBuffer::default();
+            let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
+            let mut execution_arena =
+                crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
             let ranges = IndexScan::ranges(
                 info,
                 info.lookup.as_ref().expect("lookup"),
@@ -698,7 +701,10 @@ mod tests {
         let context = &tables;
         let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
-        let mut execution_arena = ExecArena::new(context, &transaction);
+        let mut exec_buffer = crate::execution::ExecBuffer::default();
+        let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
+        let mut execution_arena =
+            crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let ranges = IndexScan::ranges(
             info,
             info.lookup.as_ref().expect("lookup"),

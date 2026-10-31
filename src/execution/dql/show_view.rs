@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecBuilder, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
+    ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
 };
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -41,7 +41,7 @@ impl<'a> ReadExecutor<'a> for ShowViews {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowViews {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         *arena.iter_mut(self.metas) = StorageIter::Empty;
@@ -50,7 +50,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowViews {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if arena.iter_mut(self.metas).is_empty() {

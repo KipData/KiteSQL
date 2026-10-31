@@ -474,6 +474,19 @@ impl TupleImpl {
 
     /// e.g.: bits(u8)..|data_0(len for utf8_1)|utf8_0|data_1|
     /// Tips: all len is u32
+    /// A rough bound of the bytes `serialize_to` writes: the null bitmap and the values.
+    pub(crate) fn serialized_len_hint(&self) -> usize {
+        Self::null_bits_len(self.len())
+            + self
+                .iter()
+                .map(DataValue::serialized_len_hint)
+                .sum::<usize>()
+    }
+
+    fn null_bits_len(values_len: usize) -> usize {
+        (values_len + BITS_MAX_INDEX) / BITS_MAX_INDEX
+    }
+
     pub fn serialize_to<I, S>(
         &self,
         serializers: I,
@@ -487,14 +500,9 @@ impl TupleImpl {
             bits | (1 << (7 - i))
         }
 
-        let values_len = self.len();
-        let bits_len = (values_len + BITS_MAX_INDEX) / BITS_MAX_INDEX;
-        let values_bytes_len = self
-            .iter()
-            .map(DataValue::serialized_len_hint)
-            .sum::<usize>();
+        let bits_len = Self::null_bits_len(self.len());
         bytes.clear();
-        bytes.reserve(bits_len + values_bytes_len);
+        bytes.reserve(self.serialized_len_hint());
         bytes.resize(bits_len, 0u8);
 
         for (i, (value, serializer)) in self.iter().zip(serializers).enumerate() {

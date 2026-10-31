@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::planner::ScalarQueryRef;
@@ -186,7 +188,7 @@ impl<'a> ReadExecutor<'a> for Sort<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows.clear();
@@ -195,7 +197,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
@@ -242,7 +244,7 @@ mod test {
     #[test]
     fn memory_sort_restores_scalar_values_for_each_output_row() -> Result<(), DatabaseError> {
         use super::Sort;
-        use crate::execution::{ExecArena, ReadExecutor};
+        use crate::execution::ReadExecutor;
         use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
         use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
         use crate::planner::operator::values::ValuesOperator;
@@ -299,7 +301,9 @@ mod test {
                 nulls_first: false,
             }],
         };
-        let mut arena = ExecArena::new(cache, &transaction);
+        let mut exec_buffer = crate::execution::ExecBuffer::default();
+        let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+        let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         // Select the memory executor explicitly even when the spill feature is enabled.
         let mut root = <Sort as ReadExecutor>::into_executor((&op, &plan), &mut arena, &metadata);
         let mut metadata = ExecMetaArena::new(metadata);

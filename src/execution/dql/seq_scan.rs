@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecBuilder, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
+    ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
 };
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -41,7 +41,7 @@ impl<'a> ReadExecutor<'a> for SeqScan<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let state = arena.local_state(plan_arena);
@@ -60,7 +60,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let state = arena.local_state(plan_arena);
@@ -143,7 +143,9 @@ mod tests {
             index_infos: vec![],
             with_pk: true,
         };
-        let mut arena = ExecArena::new(&tables, &tx);
+        let mut exec_buffer = crate::execution::ExecBuffer::default();
+        let mut exec_arena = crate::execution::ExecArena::new(&tables, &tx);
+        let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut meta = ExecMetaArena::new(meta);
         let mut scan = SeqScan {
             op: &op,
@@ -151,17 +153,20 @@ mod tests {
         };
         scan.next_tuple(&mut arena, &mut meta)?;
         assert_eq!(arena.result_tuple()[0], DataValue::Int32(2));
-        let iterator = &arena.iters[scan.iter] as *const _;
+        let iterator = &arena.arena.iters[scan.iter] as *const _;
         for _ in 0..3 {
             scan.reset(&mut arena, &mut meta)?;
             scan.reset(&mut arena, &mut meta)?;
             for id in [2, 3] {
                 scan.next_tuple(&mut arena, &mut meta)?;
                 assert_eq!(arena.result_tuple()[0], DataValue::Int32(id));
-                assert_eq!(&arena.iters[scan.iter] as *const _, iterator);
+                assert_eq!(&arena.arena.iters[scan.iter] as *const _, iterator);
             }
             scan.next_tuple(&mut arena, &mut meta)?;
-            assert_eq!(arena.result.status, Some(crate::execution::ExecStatus::End));
+            assert_eq!(
+                arena.buffer.result.status,
+                Some(crate::execution::ExecStatus::End)
+            );
         }
         Ok(())
     }

@@ -15,7 +15,9 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::compare_sort_keys;
 use crate::execution::spill::{SegmentOffset, SegmentReader, SortRow, SpillReader, SpillVec};
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -67,7 +69,7 @@ impl<'a> ReadExecutor<'a> for ExternalSort<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows = None;
@@ -76,7 +78,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {

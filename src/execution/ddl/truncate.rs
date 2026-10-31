@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -37,7 +37,7 @@ impl<'a> WriteExecutor<'a> for Truncate<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         Ok(())
@@ -45,7 +45,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let TruncateOperator { table_name } = self.op;

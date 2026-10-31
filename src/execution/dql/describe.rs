@@ -14,7 +14,7 @@
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -72,7 +72,7 @@ impl<'a> ReadExecutor<'a> for Describe {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Describe {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.columns = None;
@@ -82,7 +82,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Describe {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.columns.is_none() {

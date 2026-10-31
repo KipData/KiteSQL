@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::create_accumulators;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
@@ -47,7 +49,7 @@ impl<'a> ReadExecutor<'a> for SimpleAggExecutor<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.returned = false;
@@ -56,7 +58,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.returned {

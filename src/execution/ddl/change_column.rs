@@ -14,7 +14,7 @@
 
 use super::{rewrite_table_in_batches, visit_table_in_batches};
 use crate::errors::DatabaseError;
-use crate::execution::{DDLApply, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -40,7 +40,7 @@ impl<'a> WriteExecutor<'a> for ChangeColumn<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         Ok(())
@@ -48,7 +48,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();

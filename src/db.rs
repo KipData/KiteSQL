@@ -627,7 +627,7 @@ fn begin_execution<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
 ) -> Result<ExecArena<'p, 'a, T>, DatabaseError> {
     let stamp = statement_stamp(transaction, executor.plan())?;
     let mut arena = ExecArena::new(table_cache, transaction).with_iters(executor.iters());
-    arena.set_statement_stamp(stamp);
+    executor.buffer.set_statement_stamp(stamp);
     executor.start(&mut arena, plan_arena)?;
 
     Ok(arena)
@@ -1433,7 +1433,7 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
         match executor.next_tuple(&mut self.arena, plan_arena) {
             Ok(true) => {
                 let schema = SchemaView::new(&executor.schema, plan_arena);
-                Ok(Some(f(&schema, self.arena.result_mut())))
+                Ok(Some(f(&schema, executor.buffer.result_mut())))
             }
             Ok(false) => {
                 self.finish_statement_scope(ddl_apply)?;

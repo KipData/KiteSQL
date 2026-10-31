@@ -41,6 +41,8 @@ pub(crate) const BOUND_MAX_TAG: u8 = u8::MAX;
 pub(crate) const NULL_TAG: u8 = 1u8;
 pub(crate) const NOTNULL_TAG: u8 = 0u8;
 const TABLE_NAME_HASH_LEN: usize = 8;
+// A rough bound of the key prefix: the table hash, the codec tag and the bound tags.
+const KEY_PREFIX_LEN_HINT: usize = TABLE_NAME_HASH_LEN + 4;
 const KEY_TYPE_TAG_LEN: usize = 1;
 const KEY_BOUND_LEN: usize = 1;
 const TUPLE_KEY_PREFIX_LEN: usize = TABLE_NAME_HASH_LEN + KEY_TYPE_TAG_LEN + KEY_BOUND_LEN;
@@ -54,7 +56,10 @@ static EMPTY_REFERENCE_TABLES: LazyLock<ReferenceTables> = LazyLock::new(Referen
 
 pub type Bytes = Vec<u8>;
 pub type BumpBytes<'bump> = bumpalo::collections::Vec<'bump, u8>;
-type TupleValueWriter<'a> = &'a mut dyn FnMut(&mut Bytes) -> Result<(), DatabaseError>;
+type TupleValueWriter<'a> = (
+    usize,
+    &'a mut dyn FnMut(&mut Bytes) -> Result<(), DatabaseError>,
+);
 
 #[derive(Default)]
 pub struct TableCodec {
@@ -312,11 +317,13 @@ impl TableCodec {
         self.clear_buffers();
         let stamp = self.stamp;
         self.with_table_hash_buffers(table_name, |lower, table_hash, value, _| {
+            lower.reserve(KEY_PREFIX_LEN_HINT + tuple_id.memcomparable_len_hint());
             Self::write_key_prefix(lower, CodecType::Tuple, table_hash);
             lower.push(BOUND_MIN_TAG);
             tuple_id.memcomparable_encode(lower)?;
 
-            if let Some(write_value) = tuple_value {
+            if let Some((len_hint, write_value)) = tuple_value {
+                value.reserve(len_hint + size_of::<u64>());
                 write_value(value)?;
                 value.extend_from_slice(&stamp.to_le_bytes());
             }
@@ -440,6 +447,17 @@ impl TableCodec {
         self.clear_buffers();
         let stamp = self.stamp;
         self.with_table_hash_buffers(table_name, |lower, table_hash, value, _| {
+            let values_len = (0..index.values.len())
+                .map(|i| index.values.value_at(i).memcomparable_len_hint())
+                .sum::<usize>();
+            let tuple_id_len = tuple_id.map_or(0, DataValue::memcomparable_len_hint);
+            lower.reserve(
+                KEY_PREFIX_LEN_HINT
+                    + std::mem::size_of_val(&index.id)
+                    + 1
+                    + values_len
+                    + tuple_id_len,
+            );
             Self::write_key_prefix(lower, CodecType::Index, table_hash);
             lower.push(BOUND_MIN_TAG);
             lower.extend_from_slice(&index.id.to_le_bytes());
@@ -455,6 +473,7 @@ impl TableCodec {
             }
 
             if let Some(tuple_id) = tuple_id {
+                value.reserve(tuple_id.memcomparable_len_hint() + size_of::<u64>());
                 tuple_id.encode_reference_value(&mut *value)?;
                 value.extend_from_slice(&stamp.to_le_bytes());
             }
@@ -1242,7 +1261,7 @@ mod tests {
         let bytes = TableCodec::default().with_tuple(
             "t1",
             &DataValue::Int32(0),
-            Some(&mut write_value),
+            Some((expected.serialized_len_hint(), &mut write_value)),
             |_, value| Ok(value.to_vec()),
         )?;
         let deserializers = table_catalog

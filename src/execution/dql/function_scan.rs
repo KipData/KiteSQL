@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
 use crate::expression::function::table::TableFunction;
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -50,7 +50,7 @@ impl<'a> ReadExecutor<'a> for FunctionScan<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.iter = None;
@@ -59,7 +59,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.iter.is_none() {

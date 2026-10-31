@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, DDLApply, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor,
+    build_read, DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
@@ -53,7 +53,7 @@ impl<'a> WriteExecutor<'a> for CreateIndex<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.input.reset(arena, plan_arena)
@@ -61,7 +61,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let CreateIndexOperator {

@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    ExecArena, ExecBuilder, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
+    ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
 };
 use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
@@ -49,7 +49,7 @@ impl<'a> IndexScan<'a> {
     pub(crate) fn ranges<T: StorageTransaction + 'a>(
         info: &'a IndexInfo,
         lookup: &'a IndexLookup,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
     ) -> Result<IndexRanges<'a>, DatabaseError> {
         let mut range = match lookup {
@@ -102,7 +102,7 @@ impl<'a> ReadExecutor<'a> for IndexScan<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let slot = self.iter;
@@ -128,7 +128,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if arena.iter_mut(self.iter).is_empty() {
@@ -233,7 +233,9 @@ mod tests {
             sort_elimination_hint: None,
             stream_aggregate_hint: None,
         };
-        let mut arena = ExecArena::new(&tables, &tx);
+        let mut exec_buffer = crate::execution::ExecBuffer::default();
+        let mut exec_arena = crate::execution::ExecArena::new(&tables, &tx);
+        let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut meta = ExecMetaArena::new(meta);
         let slot = arena.alloc_iter();
         let mut scan = IndexScan::new(&op, &info, &IndexLookup::Probe, slot);
@@ -243,7 +245,7 @@ mod tests {
         });
         scan.next_tuple(&mut arena, &mut meta)?;
         assert_eq!(arena.result_tuple()[0], DataValue::Int32(1));
-        let iterator = &arena.iters[slot] as *const _;
+        let iterator = &arena.arena.iters[slot] as *const _;
         for (probe, expected) in [
             (RuntimeIndexProbe::Eq(DataValue::Int32(3)), vec![3]),
             (RuntimeIndexProbe::Eq(DataValue::Int32(99)), vec![]),
@@ -266,15 +268,15 @@ mod tests {
             arena.push_runtime_probe(probe);
             scan.reset(&mut arena, &mut meta)?;
             // An initialized scan is ready now, not at its next pull.
-            assert!(arena.runtime_probe_stack.is_empty());
+            assert!(arena.buffer.runtime_probe_stack.is_empty());
             for id in expected {
                 scan.next_tuple(&mut arena, &mut meta)?;
                 assert_eq!(arena.result_tuple()[0], DataValue::Int32(id));
-                assert_eq!(&arena.iters[slot] as *const _, iterator);
+                assert_eq!(&arena.arena.iters[slot] as *const _, iterator);
             }
             scan.next_tuple(&mut arena, &mut meta)?;
-            assert_eq!(arena.result.status, Some(ExecStatus::End));
-            assert!(arena.runtime_probe_stack.is_empty());
+            assert_eq!(arena.buffer.result.status, Some(ExecStatus::End));
+            assert!(arena.buffer.runtime_probe_stack.is_empty());
         }
         Ok(())
     }

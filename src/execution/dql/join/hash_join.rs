@@ -21,7 +21,9 @@ use crate::execution::dql::join::hash::{
     JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
 };
 use crate::execution::dql::sort::BumpVec;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -143,7 +145,7 @@ impl<'a> HashJoin<'a> {
 
     fn initialize_build<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if !matches!(self.state, HashJoinState::Build) {
@@ -253,7 +255,7 @@ impl<'a> ReadExecutor<'a> for HashJoin<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = HashJoinState::Build;
@@ -264,7 +266,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if let Some(err) = self.init_error.take() {

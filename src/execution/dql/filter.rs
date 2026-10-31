@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::filter::FilterOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -43,7 +45,7 @@ impl<'a> ReadExecutor<'a> for Filter<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Filter<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.input.reset(arena, plan_arena)
@@ -51,7 +53,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Filter<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {

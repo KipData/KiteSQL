@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::expression::window::WindowFunctionKind;
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::window::WindowOperator;
@@ -224,7 +226,7 @@ impl<'a> Window<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state.clear();
@@ -235,7 +237,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut output_ready = true;

@@ -128,6 +128,7 @@ pub struct Executor<'a> {
     root: ExecNode<'a>,
     iters: usize,
     pub(crate) schema: Schema,
+    pub(crate) buffer: ExecBuffer,
     // Set once an execution started; the next one resets the tree first.
     ran: bool,
     // Keeps the plan the tree borrows from alive, so it must stay declared after `root`.
@@ -144,6 +145,7 @@ impl<'a> Executor<'a> {
             root,
             iters: iters.0,
             schema,
+            buffer: ExecBuffer::default(),
             ran: false,
             keeper,
         }
@@ -168,7 +170,8 @@ impl<'a> Executor<'a> {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<bool, DatabaseError> {
-        self.root.next_tuple(arena, plan_arena)
+        let mut context = ExecContext::new(&mut self.buffer, arena);
+        self.root.next_tuple(&mut context, plan_arena)
     }
 
     pub(crate) fn start<T: StorageTransaction + 'a, A: MetaArena + 'a>(
@@ -176,8 +179,10 @@ impl<'a> Executor<'a> {
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
+        self.buffer.reset();
         if mem::replace(&mut self.ran, true) {
-            self.root.reset(arena, plan_arena)?;
+            let mut context = ExecContext::new(&mut self.buffer, arena);
+            self.root.reset(&mut context, plan_arena)?;
         }
         Ok(())
     }
@@ -239,13 +244,13 @@ pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
     // Restores the state the node had right after it was built, resetting its inputs too.
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError>;
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError>;
 }
@@ -253,7 +258,7 @@ pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
 impl<'a> ExecNode<'a> {
     pub(crate) fn reset<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         match self {
@@ -401,10 +406,10 @@ impl<'a> ExecNode<'a> {
 
     pub(crate) fn next_tuple<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<bool, DatabaseError> {
-        arena.result.status = None;
+        arena.buffer.result.status = None;
         match self {
             ExecNode::AddColumn(exec) => {
                 <AddColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
@@ -550,7 +555,7 @@ impl<'a> ExecNode<'a> {
                 <Window<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
             }
         }?;
-        match arena.result.status.unwrap_or(ExecStatus::End) {
+        match arena.buffer.result.status.unwrap_or(ExecStatus::End) {
             ExecStatus::Continue => Ok(true),
             ExecStatus::End => Ok(false),
         }
@@ -559,16 +564,25 @@ impl<'a> ExecNode<'a> {
 
 pub(crate) type IterSlot = usize;
 
-pub(crate) struct ExecArena<'a, 't, T: StorageTransaction + 'a> {
+#[derive(Default)]
+pub(crate) struct ExecBuffer {
     result: ExecResult,
     table_codec: TableCodec,
+    runtime_probe_stack: Vec<RuntimeIndexProbe>,
+}
+
+pub(crate) struct ExecArena<'a, 't, T: StorageTransaction + 'a> {
     table_cache: &'a TableCache,
     transaction: *mut T,
-    runtime_probe_stack: Vec<RuntimeIndexProbe>,
     ddl_apply: Vec<DDLApply>,
     recursive_input: Option<RecursiveInput>,
     iters: Vec<StorageIter<'t, T>>,
     _lifetimes: PhantomData<&'t &'a ()>,
+}
+
+pub(crate) struct ExecContext<'c, 'a, 't, T: StorageTransaction + 'a> {
+    buffer: &'c mut ExecBuffer,
+    arena: &'c mut ExecArena<'a, 't, T>,
 }
 
 pub(crate) enum StorageIter<'t, T: StorageTransaction + 't> {
@@ -659,9 +673,33 @@ impl<'b, 'a, 't, T: StorageTransaction + 'a> ExecArenaLocalState<'b, 'a, 't, T> 
     }
 }
 
-impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
+impl ExecBuffer {
     pub(crate) fn set_statement_stamp(&mut self, stamp: u64) {
         self.table_codec.set_stamp(stamp);
+    }
+
+    /// Drops what an unfinished execution may have left behind.
+    pub(crate) fn reset(&mut self) {
+        self.result.status = None;
+        self.runtime_probe_stack.clear();
+    }
+
+    #[inline]
+    pub(crate) fn result_mut(&mut self) -> &mut TupleImpl {
+        &mut self.result.tuple
+    }
+}
+
+impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
+    pub(crate) fn new(table_cache: &'a TableCache, transaction: &'t T) -> Self {
+        Self {
+            table_cache,
+            transaction: transaction as *const T as *mut T,
+            ddl_apply: Vec::new(),
+            recursive_input: None,
+            iters: Vec::new(),
+            _lifetimes: PhantomData,
+        }
     }
 
     pub(crate) fn with_iters(mut self, iters: usize) -> Self {
@@ -673,44 +711,37 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
         self.iters.fill_with(|| StorageIter::Empty);
     }
 
-    pub(crate) fn new(table_cache: &'a TableCache, transaction: &'t T) -> Self {
-        Self {
-            result: ExecResult::default(),
-            table_codec: TableCodec::default(),
-            table_cache,
-            transaction: transaction as *const T as *mut T,
-            runtime_probe_stack: Vec::new(),
-            ddl_apply: Vec::new(),
-            recursive_input: None,
-            iters: Vec::new(),
-            _lifetimes: PhantomData,
-        }
-    }
-}
-
-impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
-    pub(crate) fn push_ddl_apply(&mut self, apply: DDLApply) {
-        self.ddl_apply.push(apply);
-    }
-
     pub(crate) fn take_ddl_apply(&mut self) -> Vec<DDLApply> {
         std::mem::take(&mut self.ddl_apply)
     }
+}
+
+impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
+    pub(crate) fn new(buffer: &'c mut ExecBuffer, arena: &'c mut ExecArena<'a, 't, T>) -> Self {
+        Self { buffer, arena }
+    }
+
+    pub(crate) fn push_ddl_apply(&mut self, apply: DDLApply) {
+        self.arena.ddl_apply.push(apply);
+    }
 
     pub(crate) fn table_cache(&self) -> &'a TableCache {
-        self.table_cache
+        self.arena.table_cache
     }
 
     pub(crate) fn transaction(&self) -> &'t T {
-        unsafe { &*self.transaction }
+        unsafe { &*self.arena.transaction }
     }
 
     pub(crate) fn iter_mut(&mut self, slot: IterSlot) -> &mut StorageIter<'t, T> {
-        &mut self.iters[slot]
+        &mut self.arena.iters[slot]
     }
 
     pub(crate) fn transaction_codec_mut(&mut self) -> (&mut T, &mut TableCodec) {
-        (unsafe { &mut *self.transaction }, &mut self.table_codec)
+        (
+            unsafe { &mut *self.arena.transaction },
+            &mut self.buffer.table_codec,
+        )
     }
 
     pub(crate) fn local_state<'b>(
@@ -718,53 +749,54 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
         plan_arena: &'b (dyn MetaArena + 'a),
     ) -> ExecArenaLocalState<'b, 'a, 't, T> {
         ExecArenaLocalState {
-            transaction: self.transaction,
-            table_codec: &mut self.table_codec,
-            table_cache: self.table_cache,
-            result: &mut self.result,
+            transaction: self.arena.transaction,
+            table_codec: &mut self.buffer.table_codec,
+            table_cache: self.arena.table_cache,
+            result: &mut self.buffer.result,
             plan_arena,
-            iters: &mut self.iters,
-            ddl_apply: &mut self.ddl_apply,
+            iters: &mut self.arena.iters,
+            ddl_apply: &mut self.arena.ddl_apply,
         }
     }
 
     pub(crate) fn push_runtime_probe(&mut self, value: RuntimeIndexProbe) {
-        self.runtime_probe_stack.push(value);
+        self.buffer.runtime_probe_stack.push(value);
     }
 
     pub(crate) fn pop_runtime_probe(&mut self) -> RuntimeIndexProbe {
-        self.runtime_probe_stack
+        self.buffer
+            .runtime_probe_stack
             .pop()
             .expect("index probe join pushes a probe before resetting its input")
     }
 
     pub(crate) fn set_recursive_input(&mut self, input: RecursiveInput) {
-        debug_assert!(self.recursive_input.is_none());
-        self.recursive_input = Some(input);
+        debug_assert!(self.arena.recursive_input.is_none());
+        self.arena.recursive_input = Some(input);
     }
 
     pub(crate) fn iter_len(&self) -> usize {
-        self.iters.len()
+        self.arena.iters.len()
     }
 
     // Slots are allocated in build order, so a subtree built last owns the tail.
     pub(crate) fn truncate_iters(&mut self, len: usize) {
-        self.iters.truncate(len);
+        self.arena.iters.truncate(len);
     }
 
     #[inline]
     pub(crate) fn result_tuple(&self) -> &TupleImpl {
-        &self.result.tuple
+        &self.buffer.result.tuple
     }
 
     #[inline]
     pub(crate) fn result_mut(&mut self) -> &mut TupleImpl {
-        &mut self.result.tuple
+        self.buffer.result_mut()
     }
 
     #[inline]
     pub(crate) fn output_tuple_mut(&mut self) -> &mut Tuple {
-        self.result.output_mut()
+        self.buffer.result.output_mut()
     }
 
     #[inline]
@@ -774,16 +806,16 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
         right: TupleImpl,
         pk: Option<TupleId>,
     ) -> TupleImpl {
-        self.result.concat_pool.concat(left, right, pk)
+        self.buffer.result.concat_pool.concat(left, right, pk)
     }
 
     #[inline]
     pub(crate) fn release(&mut self, tuple: TupleImpl) {
-        self.result.concat_pool.release(tuple);
+        self.buffer.result.concat_pool.release(tuple);
     }
 
     pub(crate) fn take_tuple(&mut self) -> TupleImpl {
-        std::mem::take(&mut self.result.tuple)
+        std::mem::take(&mut self.buffer.result.tuple)
     }
 
     pub(crate) fn rewrite<E: RewriteExpression, TInput: Input + ?Sized>(
@@ -793,7 +825,7 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
         input: Option<&TInput>,
     ) -> Result<(), DatabaseError> {
         let base = {
-            let values = &mut self.result.tuple.rightmost_mut().values;
+            let values = &mut self.buffer.result.tuple.rightmost_mut().values;
             values.reserve(exprs.len());
             values.len()
         };
@@ -802,24 +834,30 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
                 let expression = expr.expression(arena);
                 match input {
                     Some(input) => expression.eval(arena, Some(input)),
-                    None => expression.eval(arena, Some(&self.result.tuple)),
+                    None => expression.eval(arena, Some(&self.buffer.result.tuple)),
                 }
                 .map(|value| value.into_owned())
             };
             match value {
-                Ok(value) => self.result.tuple.push(value),
+                Ok(value) => self.buffer.result.tuple.push(value),
                 Err(error) => {
-                    self.result.tuple.rightmost_mut().values.truncate(base);
+                    self.buffer
+                        .result
+                        .tuple
+                        .rightmost_mut()
+                        .values
+                        .truncate(base);
                     return Err(error);
                 }
             }
         }
 
-        let pk = self.result.tuple.take_pk();
+        let pk = self.buffer.result.tuple.take_pk();
         let tuple = self
+            .buffer
             .result
             .concat_pool
-            .retain_rightmost(&mut self.result.tuple);
+            .retain_rightmost(&mut self.buffer.result.tuple);
         tuple.values.rotate_left(base);
         tuple.values.truncate(exprs.len());
         tuple.pk = pk;
@@ -828,17 +866,17 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
 
     #[inline]
     pub(crate) fn resume(&mut self) {
-        self.result.status = Some(ExecStatus::Continue);
+        self.buffer.result.status = Some(ExecStatus::Continue);
     }
 
     #[inline]
     pub(crate) fn finish(&mut self) {
-        self.result.status = Some(ExecStatus::End);
+        self.buffer.result.status = Some(ExecStatus::End);
     }
 
     #[inline]
     pub(crate) fn produce(&mut self, tuple: TupleImpl) {
-        self.result.tuple = tuple;
+        self.buffer.result.tuple = tuple;
         self.resume();
     }
 }
@@ -866,14 +904,15 @@ impl ExecBuilder for IterCounter {
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecBuilder for ExecArena<'a, '_, T> {
+impl<'a, T: StorageTransaction + 'a> ExecBuilder for ExecContext<'_, 'a, '_, T> {
     fn alloc_iter(&mut self) -> IterSlot {
-        self.iters.push(StorageIter::Empty);
-        self.iters.len() - 1
+        self.arena.iters.push(StorageIter::Empty);
+        self.arena.iters.len() - 1
     }
 
     fn take_recursive_input(&mut self) -> RecursiveInput {
-        self.recursive_input
+        self.arena
+            .recursive_input
             .take()
             .expect("recursive input initialized")
     }
@@ -1071,19 +1110,18 @@ mod test_utils {
 
     pub(crate) struct TestExecutor<'a, T: StorageTransaction + 'a> {
         root: ExecNode<'a>,
+        buffer: ExecBuffer,
         arena: ExecArena<'a, 'a, T>,
         plan_arena: ExecMetaArena<PlanArena<'a>>,
     }
 
     impl<T: StorageTransaction> TestExecutor<'_, T> {
         pub(crate) fn next_tuple(&mut self) -> Result<Option<&mut TupleImpl>, DatabaseError> {
-            if !self
-                .root
-                .next_tuple(&mut self.arena, &mut self.plan_arena)?
-            {
+            let mut context = ExecContext::new(&mut self.buffer, &mut self.arena);
+            if !self.root.next_tuple(&mut context, &mut self.plan_arena)? {
                 return Ok(None);
             }
-            Ok(Some(self.arena.result_mut()))
+            Ok(Some(self.buffer.result_mut()))
         }
     }
 
@@ -1097,10 +1135,16 @@ mod test_utils {
         T: StorageTransaction + 'a,
         E: ReadExecutor<'a>,
     {
+        let mut buffer = ExecBuffer::default();
         let mut arena = ExecArena::new(cache, transaction);
-        let root = <E as ReadExecutor<'a>>::into_executor(input, &mut arena, &plan_arena);
+        let root = <E as ReadExecutor<'a>>::into_executor(
+            input,
+            &mut ExecContext::new(&mut buffer, &mut arena),
+            &plan_arena,
+        );
         TestExecutor {
             root,
+            buffer,
             arena,
             plan_arena: ExecMetaArena::new(plan_arena),
         }
@@ -1117,10 +1161,16 @@ mod test_utils {
         T: StorageTransaction + 'a,
         E: WriteExecutor<'a>,
     {
+        let mut buffer = ExecBuffer::default();
         let mut arena = ExecArena::new(cache, transaction);
-        let root = <E as WriteExecutor<'a>>::into_executor(input, &mut arena, &plan_arena);
+        let root = <E as WriteExecutor<'a>>::into_executor(
+            input,
+            &mut ExecContext::new(&mut buffer, &mut arena),
+            &plan_arena,
+        );
         TestExecutor {
             root,
+            buffer,
             arena,
             plan_arena: ExecMetaArena::new(plan_arena),
         }
@@ -1180,9 +1230,11 @@ mod test {
         let tables = TableCache::default();
         let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
-        let mut arena = ExecArena::new(&tables, &transaction);
+        let mut exec_buffer = ExecBuffer::default();
+        let mut exec_arena = ExecArena::new(&tables, &transaction);
+        let mut arena = ExecContext::new(&mut exec_buffer, &mut exec_arena);
         for base in [0, 10] {
-            arena.result.tuple = TupleImpl::concat(
+            arena.buffer.result.tuple = TupleImpl::concat(
                 ints([base, base + 1]).into(),
                 ints([base + 2, base + 3]).into(),
                 Some(DataValue::Int32(base)),

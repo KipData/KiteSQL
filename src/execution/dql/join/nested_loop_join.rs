@@ -19,7 +19,9 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
 use crate::planner::ExprRef;
 use crate::storage::StorageTransaction;
@@ -147,7 +149,7 @@ impl<'a> ReadExecutor<'a> for NestedLoopJoin<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = NestedLoopJoinState::PullLeft { right_bitmap: None };
@@ -157,7 +159,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> 
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut state = std::mem::replace(&mut self.state, NestedLoopJoinState::End);
@@ -553,7 +555,9 @@ mod test {
         let mut plan = cross(left.clone(), cross(left, right));
         plan.populate_output_schema_recursive(&mut plan_arena);
         let context = &table_cache;
-        let mut arena = ExecArena::new(context, &transaction);
+        let mut exec_buffer = crate::execution::ExecBuffer::default();
+        let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
+        let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut root = build_read(&mut arena, &plan_arena, &plan);
         let mut rows = 0;
         let mut plan_arena = ExecMetaArena::new(plan_arena);

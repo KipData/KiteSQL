@@ -19,7 +19,9 @@ use crate::planner::PlanArena;
 use crate::errors::DatabaseError;
 #[cfg(feature = "spill")]
 use crate::execution::spill::{SpillReader, SpillVec};
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::recursive_cte::RecursiveScanOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -233,7 +235,7 @@ impl<'a> RecursiveCte<'a> {
 
     fn start_recursive<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<bool, DatabaseError> {
         let Some(input) = mem::take(&mut self.working).into_input()? else {
@@ -263,7 +265,7 @@ impl<'a> ReadExecutor<'a> for RecursiveCte<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.working = RecursiveRows::default();
@@ -277,7 +279,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
@@ -338,7 +340,7 @@ impl<'a> ReadExecutor<'a> for RecursiveScan {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.input.reset()
@@ -346,7 +348,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         match self.input.next().transpose()? {

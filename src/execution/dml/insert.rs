@@ -15,7 +15,9 @@
 use crate::catalog::table::DmlTable;
 use crate::catalog::TableName;
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
+};
 use crate::planner::operator::insert::InsertOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -68,7 +70,7 @@ impl<'a> WriteExecutor<'a> for Insert<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.done = false;
@@ -77,7 +79,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if mem::replace(&mut self.done, true) {

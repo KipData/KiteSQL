@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
 use crate::planner::ExecMetaArena;
@@ -43,7 +45,7 @@ pub struct ScalarQueryInit<'a> {
 impl<'a> ScalarQueryInit<'a> {
     fn evaluate_init<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut value = DataValue::Null;
@@ -105,7 +107,7 @@ impl<'a> ReadExecutor<'a> for ScalarQueryInit<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = if self.reference.is_outer_value {
@@ -119,7 +121,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a>
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
@@ -229,7 +231,9 @@ mod tests {
             );
             first.populate_output_schema_recursive(&mut metadata);
             duplicate.populate_output_schema_recursive(&mut metadata);
-            let mut arena = ExecArena::new(cache, &transaction);
+            let mut exec_buffer = crate::execution::ExecBuffer::default();
+            let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+            let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
             let mut first_root = build_read(&mut arena, &metadata, &first);
             let mut duplicate_root = build_read(&mut arena, &metadata, &duplicate);
             let mut view = ExecMetaArena::new(metadata);

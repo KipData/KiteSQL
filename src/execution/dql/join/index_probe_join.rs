@@ -14,7 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::predicates_matched;
-use crate::execution::{build_read, ExecArena, ExecBuilder, ExecNode, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+};
 use crate::planner::operator::index_probe_join::IndexProbeJoinOperator;
 use crate::planner::{ExecMetaArena, LogicalPlan, MetaArena};
 use crate::storage::StorageTransaction;
@@ -47,7 +49,7 @@ impl<'a> ReadExecutor<'a> for IndexProbeJoin<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.left_input.reset(arena, plan_arena)
@@ -55,7 +57,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         while self.left_input.next_tuple(arena, plan_arena)? {
@@ -91,7 +93,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::execution::{execute_input, ExecArena};
+    use crate::execution::execute_input;
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
@@ -195,7 +197,9 @@ mod tests {
         let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let cache = &table_cache;
-        let mut arena = ExecArena::new(cache, &transaction);
+        let mut exec_buffer = crate::execution::ExecBuffer::default();
+        let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+        let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut root = <IndexProbeJoin as ReadExecutor>::into_executor(
             (&op, &left, &right),
             &mut arena,
@@ -217,7 +221,7 @@ mod tests {
         assert!(!root.next_tuple(&mut arena, &mut plan_arena)?);
         // The NULL key is skipped without probing.
         assert_eq!(
-            arena.runtime_probe_stack,
+            arena.buffer.runtime_probe_stack,
             [2, 99, 2].map(|key| RuntimeIndexProbe::Eq(DataValue::Int32(key)))
         );
         Ok(())

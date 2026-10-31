@@ -361,7 +361,7 @@ pub trait StorageTransaction: Sized {
         table_codec.with_tuple(
             table_name,
             tuple_id,
-            Some(&mut write_value),
+            Some((tuple.serialized_len_hint(), &mut write_value)),
             |key, value| {
                 if !is_overwrite && self.exists(key)? {
                     return Err(DatabaseError::DuplicatePrimaryKey);

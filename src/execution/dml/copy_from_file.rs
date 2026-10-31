@@ -14,7 +14,7 @@
 
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecBuilder, ExecNode, ExecutorNode, WriteExecutor};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -43,7 +43,7 @@ impl<'a> WriteExecutor<'a> for CopyFromFile<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, '_, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         Ok(())
@@ -51,7 +51,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, '_, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let op = self.op;
