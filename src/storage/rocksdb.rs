@@ -16,8 +16,6 @@ use crate::errors::DatabaseError;
 use crate::storage::{
     CheckpointableStorage, InnerIter, Storage, StorageTransaction, TransactionIsolationLevel,
 };
-#[cfg(feature = "unsafe_txdb_checkpoint")]
-use librocksdb_sys as ffi;
 use rocksdb::{
     checkpoint::Checkpoint,
     statistics::{StatsLevel, Ticker},
@@ -26,8 +24,6 @@ use rocksdb::{
     TransactionDB, TransactionOptions, WriteOptions,
 };
 use std::collections::Bound;
-#[cfg(feature = "unsafe_txdb_checkpoint")]
-use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::{self, ErrorKind};
@@ -38,8 +34,6 @@ use std::sync::Arc;
 const ROCKSDB_FIXED_PREFIX_LEN: usize = 9;
 const ROCKSDB_BLOOM_BITS_PER_KEY: f64 = 10.0;
 const ROCKSDB_MEMTABLE_PREFIX_BLOOM_RATIO: f64 = 0.10;
-#[cfg(feature = "unsafe_txdb_checkpoint")]
-const ROCKSDB_TRANSACTION_DB_INNER_OFFSET: usize = 0x30;
 
 /// A lightweight snapshot of key RocksDB runtime indicators for tuning and diagnostics.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -375,66 +369,6 @@ fn unsupported_transactiondb_checkpoint_error() -> DatabaseError {
     )
 }
 
-#[cfg(feature = "unsafe_txdb_checkpoint")]
-fn rocksdb_error_from_ptr(err: *mut c_char) -> DatabaseError {
-    unsafe {
-        let message = CStr::from_ptr(err).to_string_lossy().into_owned();
-        ffi::rocksdb_free(err.cast::<c_void>());
-        io::Error::other(message).into()
-    }
-}
-
-#[cfg(feature = "unsafe_txdb_checkpoint")]
-fn checkpoint_path_to_cstring(path: &Path) -> Result<CString, DatabaseError> {
-    CString::new(path.to_string_lossy().into_owned()).map_err(|_| {
-        io::Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "checkpoint path '{}' contains an interior NUL byte",
-                path.display()
-            ),
-        )
-        .into()
-    })
-}
-
-#[cfg(feature = "unsafe_txdb_checkpoint")]
-fn create_transactiondb_checkpoint(
-    db: &TransactionDB<rocksdb::MultiThreaded>,
-    path: &Path,
-) -> Result<(), DatabaseError> {
-    let path = checkpoint_path_to_cstring(path)?;
-    let mut err: *mut c_char = std::ptr::null_mut();
-
-    // `rocksdb` 0.23 does not expose a safe checkpoint API for `TransactionDB`.
-    // This fallback is intentionally gated behind the `unsafe_txdb_checkpoint`
-    // feature so callers must opt in explicitly.
-    let db_ptr = unsafe {
-        *(std::ptr::from_ref(db)
-            .cast::<u8>()
-            .add(ROCKSDB_TRANSACTION_DB_INNER_OFFSET)
-            .cast::<*mut ffi::rocksdb_transactiondb_t>())
-    };
-    let checkpoint =
-        unsafe { ffi::rocksdb_transactiondb_checkpoint_object_create(db_ptr, &mut err) };
-    if !err.is_null() {
-        return Err(rocksdb_error_from_ptr(err));
-    }
-    if checkpoint.is_null() {
-        return Err(io::Error::other("Could not create checkpoint object.").into());
-    }
-
-    unsafe {
-        ffi::rocksdb_checkpoint_create(checkpoint, path.as_ptr(), 0, &mut err);
-        ffi::rocksdb_checkpoint_object_destroy(checkpoint);
-    }
-    if !err.is_null() {
-        return Err(rocksdb_error_from_ptr(err));
-    }
-
-    Ok(())
-}
-
 impl Storage for OptimisticRocksStorage {
     type Metrics = RocksDbMetrics;
 
@@ -549,9 +483,11 @@ impl CheckpointableStorage for RocksStorage {
 
         #[cfg(feature = "unsafe_txdb_checkpoint")]
         {
-            if let Err(err) = create_transactiondb_checkpoint(self.inner.as_ref(), path) {
+            let checkpoint =
+                rocksdb::checkpoint::TransactionDBCheckpoint::new(self.inner.as_ref())?;
+            if let Err(err) = checkpoint.create_checkpoint(path) {
                 cleanup_failed_checkpoint_dir(path)?;
-                return Err(err);
+                return Err(err.into());
             }
 
             Ok(())

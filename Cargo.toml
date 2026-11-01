@@ -4,7 +4,6 @@
 name          = "kite_sql"
 version       = "0.6.1"
 edition       = "2021"
-build         = "build.rs"
 authors       = ["Kould <kould2333@gmail.com>", "Xwg <loloxwg@gmail.com>"]
 description   = "SQL as a Function for Rust"
 documentation = "https://docs.rs/kite_sql/latest/kite_sql/"
@@ -33,7 +32,7 @@ macros  = []
 orm     = ["macros"]
 parser  = ["dep:sqlparser"]
 rocksdb = ["dep:rocksdb"]
-unsafe_txdb_checkpoint = ["rocksdb", "dep:librocksdb-sys"]
+unsafe_txdb_checkpoint = ["rocksdb"]
 lmdb    = ["dep:lmdb", "dep:lmdb-sys"]
 pprof   = ["pprof/criterion", "pprof/flamegraph"]
 python  = ["parser", "dep:pyo3"]
@@ -79,10 +78,9 @@ sqlite                = { version = "0.34" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Optional dependencies for features
-librocksdb-sys = { version = "0.17.1", optional = true }
 lmdb = { version = "0.8.0", optional = true }
 lmdb-sys = { version = "0.8.0", optional = true }
-rocksdb = { version = "0.23", optional = true, default-features = false, features = ["bindgen-runtime"] }
+rocksdb = { version = "0.25", optional = true, default-features = false, features = ["bindgen-runtime"] }
 rustyline = { version = "14", default-features = false, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
