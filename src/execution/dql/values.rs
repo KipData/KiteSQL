@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::ExprRef;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -36,25 +36,23 @@ impl<'a> From<&'a ValuesOperator> for Values<'a> {
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Values<'a> {
+impl<'a> ReadExecutor<'a> for Values<'a> {
     type Input = &'a ValuesOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         input: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
         let executor = Values::from(input);
-        arena.push(ExecNode::Values(executor))
+        ExecNode::Values(Box::new(executor))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Values<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows = self.op.rows.iter();
@@ -64,7 +62,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Values<'a> {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.remaining_rows == 0 {

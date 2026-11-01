@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 
@@ -26,28 +26,24 @@ where
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.len()
-            .encode(writer, is_direct, reference_tables, arena)?;
+        self.len().encode(writer, is_direct, arena)?;
         for value in self.iter() {
-            value.encode(writer, is_direct, reference_tables, arena)?
+            value.encode(writer, is_direct, arena)?
         }
         Ok(())
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let len =
-            <usize as ReferenceSerialization>::decode(reader, drive, reference_tables, arena)?;
+        let len = <usize as ReferenceSerialization>::decode(reader, drive.as_deref_mut(), arena)?;
         let mut vec = Vec::with_capacity(len);
         for _ in 0..len {
-            vec.push(V::decode(reader, drive, reference_tables, arena)?);
+            vec.push(V::decode(reader, drive.as_deref_mut(), arena)?);
         }
         Ok(vec)
     }

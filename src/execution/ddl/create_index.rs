@@ -14,8 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode,
-    WriteExecutor,
+    build_read, DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::create_index::CreateIndexOperator;
@@ -30,22 +29,20 @@ use crate::types::ColumnId;
 pub struct CreateIndex<'a> {
     op: &'a CreateIndexOperator,
     input_schema: Schema,
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateIndex<'a> {
+impl<'a> WriteExecutor<'a> for CreateIndex<'a> {
     type Input = (&'a CreateIndexOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, input_plan): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
         let input_schema = input_plan.read_schema().clone();
-        let input = build_read(arena, plan_arena, input_plan, cache, transaction);
-        arena.push(ExecNode::CreateIndex(CreateIndex {
+        let input = build_read(arena, plan_arena, input_plan);
+        ExecNode::CreateIndex(Box::new(CreateIndex {
             op,
             input_schema,
             input,
@@ -54,25 +51,35 @@ impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateIndex<'a> {
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.input.reset(arena, plan_arena)
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let CreateIndexOperator {
-            table_name,
+            table_id,
             index_name,
             columns,
             if_not_exists,
             ty,
         } = self.op;
 
+        let table_catalog = arena
+            .table_cache()
+            .get(table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
         if *if_not_exists
-            && arena.table_cache().get(table_name).is_some_and(|table| {
-                table
-                    .indexes()
-                    .any(|index| plan_arena.index(*index).name == *index_name)
-            })
+            && table_catalog
+                .indexes()
+                .any(|index| plan_arena.index(*index).name == *index_name)
         {
             arena.finish();
             return Ok(());
@@ -95,16 +102,17 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             let (table, index_id) = transaction.add_index_meta(
                 table_codec,
                 plan_arena,
-                table_name,
+                table_catalog.name(),
                 index_name.clone(),
                 column_ids,
                 *ty,
             )?;
+            let table_id = table.id();
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
-            Ok(index_id)
+            Ok((table_id, index_id))
         };
-        let index_id = match index_id_result {
-            Ok(index_id) => index_id,
+        let (table_id, index_id) = match index_id_result {
+            Ok(ids) => ids,
             Err(DatabaseError::DuplicateIndex(index_name)) => {
                 if *if_not_exists {
                     arena.finish();
@@ -116,7 +124,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             Err(err) => return Err(err),
         };
 
-        while arena.next_tuple(self.input, plan_arena)? {
+        while self.input.next_tuple(arena, plan_arena)? {
             if arena.result_tuple().pk().is_none() {
                 continue;
             }
@@ -126,7 +134,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
                 let (tuple, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let tuple_pk = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
                 let index = Index::new(index_id, tuple, *ty);
-                transaction.add_index(table_codec, table_name.as_ref(), index, tuple_pk)?;
+                transaction.add_index(table_codec, table_id, index, tuple_pk)?;
             }
         }
 

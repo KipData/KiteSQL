@@ -75,7 +75,7 @@ fn table_column(expr: ExprRef, arena: &PlanArena<'_>) -> Option<(ColumnRef, usiz
         ScalarExpression::ColumnRef { column, position }
             if matches!(
                 arena.column(*column).summary().relation,
-                ColumnRelation::Table { .. }
+                ColumnRelation::Table { .. } | ColumnRelation::Source { .. }
             ) =>
         {
             Some((*column, *position))

@@ -506,7 +506,7 @@ impl std::fmt::Display for LogicalType {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
@@ -986,20 +986,14 @@ pub(crate) mod test {
     fn test_logic_type_serialization() -> Result<(), DatabaseError> {
         fn fn_assert(
             cursor: &mut Cursor<Vec<u8>>,
-            reference_tables: &mut ReferenceTables,
             logical_type: LogicalType,
         ) -> Result<(), DatabaseError> {
             let mut arena = crate::planner::TableArena::default();
-            logical_type.encode(cursor, false, reference_tables, &arena)?;
+            logical_type.encode(cursor, false, &arena)?;
 
             cursor.seek(SeekFrom::Start(0))?;
             assert_eq!(
-                LogicalType::decode::<RocksTransaction, _, _>(
-                    cursor,
-                    None,
-                    reference_tables,
-                    &mut arena,
-                )?,
+                LogicalType::decode::<RocksTransaction, _, _>(cursor, None, &mut arena,)?,
                 logical_type
             );
             cursor.seek(SeekFrom::Start(0))?;
@@ -1008,113 +1002,55 @@ pub(crate) mod test {
         }
 
         let mut cursor = Cursor::new(Vec::new());
-        let mut reference_tables = ReferenceTables::new();
 
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::SqlNull)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Boolean)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Tinyint)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::UTinyint)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Smallint)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::USmallint)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Integer)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::UInteger)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Bigint)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::UBigint)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Float)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Double)?;
+        fn_assert(&mut cursor, LogicalType::SqlNull)?;
+        fn_assert(&mut cursor, LogicalType::Boolean)?;
+        fn_assert(&mut cursor, LogicalType::Tinyint)?;
+        fn_assert(&mut cursor, LogicalType::UTinyint)?;
+        fn_assert(&mut cursor, LogicalType::Smallint)?;
+        fn_assert(&mut cursor, LogicalType::USmallint)?;
+        fn_assert(&mut cursor, LogicalType::Integer)?;
+        fn_assert(&mut cursor, LogicalType::UInteger)?;
+        fn_assert(&mut cursor, LogicalType::Bigint)?;
+        fn_assert(&mut cursor, LogicalType::UBigint)?;
+        fn_assert(&mut cursor, LogicalType::Float)?;
+        fn_assert(&mut cursor, LogicalType::Double)?;
         fn_assert(
             &mut cursor,
-            &mut reference_tables,
             LogicalType::Char(42, CharLengthUnits::Characters),
         )?;
+        fn_assert(&mut cursor, LogicalType::Char(42, CharLengthUnits::Octets))?;
         fn_assert(
             &mut cursor,
-            &mut reference_tables,
-            LogicalType::Char(42, CharLengthUnits::Octets),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
             LogicalType::Varchar(Some(42), CharLengthUnits::Characters),
         )?;
         fn_assert(
             &mut cursor,
-            &mut reference_tables,
             LogicalType::Varchar(None, CharLengthUnits::Characters),
         )?;
         fn_assert(
             &mut cursor,
-            &mut reference_tables,
             LogicalType::Varchar(Some(42), CharLengthUnits::Octets),
         )?;
         fn_assert(
             &mut cursor,
-            &mut reference_tables,
             LogicalType::Varchar(None, CharLengthUnits::Octets),
         )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Varbinary(Some(8)),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Varbinary(None),
-        )?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Date)?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::DateTime)?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Time(Some(3)),
-        )?;
-        fn_assert(&mut cursor, &mut reference_tables, LogicalType::Time(None))?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::TimeStamp(Some(3), true),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::TimeStamp(Some(3), false),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::TimeStamp(None, true),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::TimeStamp(None, false),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Decimal(Some(4), Some(2)),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Decimal(Some(4), None),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Decimal(None, Some(2)),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Decimal(None, None),
-        )?;
-        fn_assert(
-            &mut cursor,
-            &mut reference_tables,
-            LogicalType::Tuple(vec![LogicalType::Integer]),
-        )?;
+        fn_assert(&mut cursor, LogicalType::Varbinary(Some(8)))?;
+        fn_assert(&mut cursor, LogicalType::Varbinary(None))?;
+        fn_assert(&mut cursor, LogicalType::Date)?;
+        fn_assert(&mut cursor, LogicalType::DateTime)?;
+        fn_assert(&mut cursor, LogicalType::Time(Some(3)))?;
+        fn_assert(&mut cursor, LogicalType::Time(None))?;
+        fn_assert(&mut cursor, LogicalType::TimeStamp(Some(3), true))?;
+        fn_assert(&mut cursor, LogicalType::TimeStamp(Some(3), false))?;
+        fn_assert(&mut cursor, LogicalType::TimeStamp(None, true))?;
+        fn_assert(&mut cursor, LogicalType::TimeStamp(None, false))?;
+        fn_assert(&mut cursor, LogicalType::Decimal(Some(4), Some(2)))?;
+        fn_assert(&mut cursor, LogicalType::Decimal(Some(4), None))?;
+        fn_assert(&mut cursor, LogicalType::Decimal(None, Some(2)))?;
+        fn_assert(&mut cursor, LogicalType::Decimal(None, None))?;
+        fn_assert(&mut cursor, LogicalType::Tuple(vec![LogicalType::Integer]))?;
 
         Ok(())
     }

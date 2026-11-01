@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::binder::Binder;
-use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::planner::operator::describe::DescribeOperator;
 use crate::planner::operator::Operator;
@@ -22,12 +21,11 @@ use crate::storage::StorageTransaction;
 use crate::types::LogicalType;
 
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
-    pub(crate) fn bind_describe(
-        &mut self,
-        table_name: TableName,
-    ) -> Result<LogicalPlan, DatabaseError> {
+    pub(crate) fn bind_describe(&mut self, table_name: &str) -> Result<LogicalPlan, DatabaseError> {
         Ok(LogicalPlan::new(
-            Operator::Describe(DescribeOperator { table_name }),
+            Operator::Describe(DescribeOperator {
+                table_id: self.context.table_id(table_name)?,
+            }),
             Childrens::None,
         ))
     }

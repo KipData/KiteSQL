@@ -25,19 +25,24 @@ use sqlite::{Connection, State, Statement as SqliteStatement, Value};
 
 pub struct SqliteBackend {
     connection: Connection,
+    path: Option<(String, bool)>,
 }
 
 impl SqliteBackend {
     pub fn new(path: &str, sync: bool) -> Result<Self, TpccError> {
         let connection = Connection::open(path)?;
         configure_sqlite(&connection, sync)?;
-        Ok(Self { connection })
+        let path = Some((path.to_string(), sync));
+        Ok(Self { connection, path })
     }
 
     pub fn new_memory() -> Result<Self, TpccError> {
         let connection = Connection::open(":memory:")?;
         configure_sqlite(&connection, false)?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            path: None,
+        })
     }
 
     fn prepare_spec_groups(
@@ -87,8 +92,18 @@ impl BackendControl for SqliteBackend {
         self.prepare_spec_groups(specs)
     }
 
+    type Worker<'a>
+        = SqliteBackend
+    where
+        Self: 'a;
+
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
         self.start_transaction()
+    }
+
+    fn worker(&self) -> Result<Self::Worker<'_>, TpccError> {
+        let (path, sync) = self.path.as_ref().ok_or(TpccError::InvalidBackend)?;
+        SqliteBackend::new(path, *sync)
     }
 }
 

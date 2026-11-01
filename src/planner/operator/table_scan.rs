@@ -13,21 +13,20 @@
 // limitations under the License.
 
 use super::{Operator, SortOption};
-use crate::catalog::{ColumnRef, TableCatalog, TableName};
+use crate::catalog::{ColumnRef, TableCatalog, TableId};
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
-use crate::iter_ext::Itertools;
 use crate::planner::operator::sort::SortField;
 use crate::planner::MetaArena;
-use crate::planner::{fmt_explain_list, Childrens, Explain, LogicalPlan};
-use crate::storage::Bounds;
+use crate::planner::{fmt_explain_list, fmt_table, Childrens, Explain, LogicalPlan};
+use crate::storage::{Bounds, TupleDeserializers};
 use crate::types::index::IndexInfo;
 use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct TableScanOperator {
-    pub(crate) table_name: TableName,
-    pub(crate) columns: Vec<ColumnRef>,
+    pub(crate) table_id: TableId,
+    pub(crate) deserializers: TupleDeserializers,
     // Support push down limit.
     pub(crate) limit: Bounds,
 
@@ -38,21 +37,24 @@ pub struct TableScanOperator {
 }
 
 impl TableScanOperator {
+    pub(crate) fn columns(&self) -> impl Iterator<Item = ColumnRef> + '_ {
+        self.deserializers.read_columns()
+    }
+
     pub fn build(
-        table_name: TableName,
         table_catalog: &TableCatalog,
         with_pk: bool,
         arena: &mut (dyn MetaArena + '_),
     ) -> Result<LogicalPlan, DatabaseError> {
-        // Fill all Columns in TableCatalog by default
-        let columns = table_catalog.columns().copied().collect_vec();
+        // Read all columns of the table by default; column pruning narrows them.
+        let deserializers = TupleDeserializers::new(table_catalog, &*arena, with_pk);
         let mut index_infos = Vec::with_capacity(table_catalog.indexes.len());
 
         for index_ref in table_catalog.indexes.iter().copied() {
             let column_ids = arena.index(index_ref).column_ids.clone();
             let mut sort_fields = Vec::with_capacity(column_ids.len());
             for (position, col_id) in column_ids.iter().enumerate() {
-                let column_ref = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
+                let (_, column_ref) = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
                     DatabaseError::column_not_found(format!("index column id: {col_id} not found"))
                 })?;
                 sort_fields.push(SortField {
@@ -81,8 +83,8 @@ impl TableScanOperator {
         Ok(LogicalPlan::new(
             Operator::TableScan(TableScanOperator {
                 index_infos,
-                table_name,
-                columns,
+                table_id: table_catalog.id(),
+                deserializers,
                 limit: (None, None),
                 with_pk,
             }),
@@ -97,8 +99,10 @@ impl Explain for TableScanOperator {
         arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        write!(f, "TableScan {} -> [", self.table_name)?;
-        fmt_explain_list(&self.columns, ", ", arena, f)?;
+        f.write_str("TableScan ")?;
+        fmt_table(self.table_id, arena, f)?;
+        f.write_str(" -> [")?;
+        fmt_explain_list(self.columns(), ", ", arena, f)?;
         f.write_str("]")?;
         let (offset, limit) = self.limit;
         if let Some(limit) = limit {

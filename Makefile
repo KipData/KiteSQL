@@ -169,3 +169,4 @@ wasm-examples:
 native-examples:
 	$(CARGO) run --example hello_world
 	$(CARGO) run --example transaction
+	$(CARGO) run --example program

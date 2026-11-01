@@ -87,7 +87,7 @@ mod tests {
     use crate::expression::window::WindowFunctionKind;
     use crate::expression::ScalarExpression;
     use crate::planner::{ExprRef, PlanArena, TableArena, TableArenaCell};
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::LogicalType;
     use std::io::{Cursor, Seek, SeekFrom};
@@ -158,15 +158,13 @@ mod tests {
             vec![SortField::from(arena.alloc_expression(ScalarExpression::from(2))).desc()],
         );
         let mut cursor = Cursor::new(Vec::new());
-        let mut reference_tables = ReferenceTables::new();
-        source.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        source.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
             WindowOperator::decode::<RocksTransaction, _, _>(
                 &mut cursor,
                 None,
-                &reference_tables,
                 &mut TableArena::default(),
             )?,
             source

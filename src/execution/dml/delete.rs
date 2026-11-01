@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
 };
 use crate::planner::operator::delete::DeleteOperator;
 use crate::planner::LogicalPlan;
@@ -23,48 +23,58 @@ use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexType};
 use crate::types::tuple_builder::TupleBuilder;
+use std::mem;
 
 pub struct Delete<'a> {
-    table_name: &'a TableName,
-    input: Option<ExecId>,
+    table_id: TableId,
+    input: ExecNode<'a>,
+    // Set once the statement ran; cleared when the executor is reset.
+    done: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Delete<'a> {
+impl<'a> WriteExecutor<'a> for Delete<'a> {
     type Input = (&'a DeleteOperator, &'a LogicalPlan);
 
-    fn into_executor(
-        (DeleteOperator { table_name, .. }, input_plan): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = Some(build_read(
-            arena,
-            plan_arena,
-            input_plan,
-            cache,
-            transaction,
-        ));
-        arena.push(ExecNode::Delete(Delete { table_name, input }))
+    fn into_executor<B: ExecBuilder>(
+        (DeleteOperator { table_id, .. }, input_plan): Self::Input,
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input_plan);
+        ExecNode::Delete(Box::new(Delete {
+            table_id: *table_id,
+            input,
+            done: false,
+        }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
-    fn next_tuple<A: MetaArena + 'a>(
+    fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let Some(input) = self.input.take() else {
+        self.done = false;
+        self.input.reset(arena, plan_arena)
+    }
+
+    fn next_tuple<A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        if mem::replace(&mut self.done, true) {
             arena.finish();
             return Ok(());
-        };
+        }
+        let input = &mut self.input;
 
+        let table_id = self.table_id;
         let index_templates = {
             let table = arena
-                .transaction()
-                .table(arena.table_cache(), self.table_name.clone())?
+                .table_cache()
+                .get(&table_id)
                 .ok_or(DatabaseError::TableNotFound)?;
             table
                 .indexes()
@@ -88,7 +98,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
         };
         let mut deleted_count = 0;
 
-        while arena.next_tuple(input, plan_arena)? {
+        while input.next_tuple(arena, plan_arena)? {
             let tuple = arena.take_tuple();
             let Some(tuple_id) = tuple.pk() else {
                 continue;
@@ -98,12 +108,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let index = Index::new(*index_id, values, *index_ty);
-                transaction.del_index(table_codec, self.table_name, &index, tuple_id)?;
+                transaction.del_index(table_codec, table_id, &index, tuple_id)?;
             }
 
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.remove_tuple(table_codec, self.table_name, tuple_id)?;
+            transaction.remove_tuple(table_codec, table_id, tuple_id)?;
             deleted_count += 1;
         }
 

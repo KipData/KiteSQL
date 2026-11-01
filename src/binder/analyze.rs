@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::binder::{Binder, Source};
-use crate::catalog::TableName;
 use crate::errors::DatabaseError;
 use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
@@ -25,12 +24,12 @@ use crate::types::LogicalType;
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_analyze(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let table = self
             .context
-            .source_and_bind(table_name.clone(), None, None, true, arena)?
+            .source_and_bind(table_name, None, None, true, arena)?
             .and_then(|source| {
                 if let Source::Table(table) = source {
                     Some(table)
@@ -41,10 +40,10 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
             .ok_or(DatabaseError::TableNotFound)?;
         let index_metas = table.indexes.clone();
 
-        let scan_op = TableScanOperator::build(table_name.clone(), table, false, arena)?;
+        let scan_op = TableScanOperator::build(table, false, arena)?;
         Ok(LogicalPlan::new(
             Operator::Analyze(AnalyzeOperator {
-                table_name,
+                table_id: table.id(),
                 index_metas,
                 histogram_buckets: None,
                 hll_precision: None,

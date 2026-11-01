@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::create_view::CreateViewOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -24,30 +22,36 @@ pub struct CreateView<'a> {
     op: &'a CreateViewOperator,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CreateView<'a> {
+impl<'a> WriteExecutor<'a> for CreateView<'a> {
     type Input = &'a CreateViewOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         op: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::CreateView(CreateView { op }))
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        ExecNode::CreateView(Box::new(CreateView { op }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateView<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let CreateViewOperator { view, or_replace } = self.op;
         let (transaction, table_codec) = arena.transaction_codec_mut();
-        let view = transaction.create_view(table_codec, plan_arena, view.clone(), *or_replace)?;
-        arena.push_ddl_apply(DDLApply::upsert_view(view));
+        let view_id = transaction.create_view(table_codec, plan_arena, view, *or_replace)?;
+        arena.push_ddl_apply(DDLApply::upsert_view(view_id, view.clone()));
 
         arena.finish();
         Ok(())

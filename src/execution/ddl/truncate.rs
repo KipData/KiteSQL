@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::truncate::TruncateOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -24,30 +22,36 @@ pub struct Truncate<'a> {
     op: &'a TruncateOperator,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for Truncate<'a> {
+impl<'a> WriteExecutor<'a> for Truncate<'a> {
     type Input = &'a TruncateOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         op: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::Truncate(Truncate { op }))
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        ExecNode::Truncate(Box::new(Truncate { op }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let TruncateOperator { table_name } = self.op;
+        let TruncateOperator { table_id } = *self.op;
         let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec) = state.transaction_codec_mut();
-        transaction.drop_data(table_codec, table_name)?;
+        transaction.drop_data(table_codec, table_id)?;
 
         arena.finish();
         Ok(())

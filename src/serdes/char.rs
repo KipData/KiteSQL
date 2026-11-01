@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 
@@ -23,7 +23,6 @@ impl ReferenceSerialization for char {
         &self,
         writer: &mut W,
         _: bool,
-        _: &mut ReferenceTables,
         _: &A,
     ) -> Result<(), DatabaseError> {
         if self.len_utf8() > 2 {
@@ -40,8 +39,7 @@ impl ReferenceSerialization for char {
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        _: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        _: &ReferenceTables,
+        _: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         _: &mut A,
     ) -> Result<Self, DatabaseError> {
         let mut buf = [0u8; 2];

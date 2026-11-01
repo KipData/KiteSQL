@@ -76,6 +76,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
         let transaction = storage.transaction()?;
+        let names = crate::storage::NameMapping::default();
         let table_cache = crate::storage::TableCache::default();
         let view_cache = crate::storage::ViewCache::default();
         let scala_functions = Default::default();
@@ -84,6 +85,7 @@ mod tests {
         let sql = "create table t1 (id int primary key, name varchar(10) null)";
         let mut binder = Binder::new(
             BinderContext::new(
+                &names,
                 &table_cache,
                 &view_cache,
                 &transaction,
@@ -101,7 +103,7 @@ mod tests {
 
         match plan1.operator {
             Operator::CreateTable(op) => {
-                assert_eq!(op.table_name.as_ref(), "t1");
+                assert_eq!(op.table_name, "t1");
                 assert_eq!(op.columns[0].name(), "id");
                 assert!(!op.columns[0].nullable());
                 assert_eq!(

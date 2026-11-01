@@ -23,7 +23,7 @@ pub(crate) mod drop_table;
 pub(crate) mod drop_view;
 pub(crate) mod truncate;
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{InnerIter, StorageTransaction};
@@ -35,31 +35,25 @@ use std::collections::Bound;
 const REWRITE_BATCH_SIZE: usize = 1024;
 
 #[allow(clippy::too_many_arguments)]
-fn read_tuple_batch<T, D, I>(
+fn read_tuple_batch<T: StorageTransaction>(
     transaction: &T,
     table_codec: &mut TableCodec,
-    table_name: &TableName,
+    table_id: TableId,
     pk_ty: &LogicalType,
-    old_values_len: usize,
-    old_deserializers: &mut D,
+    old_deserializers: &[TupleValueSerializableImpl],
     start_after: Option<&TupleId>,
     batch: &mut Vec<TupleImpl>,
     batch_size: usize,
-) -> Result<usize, DatabaseError>
-where
-    T: StorageTransaction,
-    D: FnMut() -> I,
-    I: IntoIterator<Item = TupleValueSerializableImpl>,
-{
+) -> Result<usize, DatabaseError> {
     let lower = if let Some(last_pk) = start_after {
-        table_codec.with_tuple_unchecked(table_name.as_ref(), last_pk, None, |key, _| {
+        table_codec.with_tuple_unchecked(table_id, last_pk, None, |key, _, _| {
             Ok::<_, DatabaseError>(Bound::Excluded(key.to_vec()))
         })?
     } else {
         Bound::Unbounded
     };
 
-    table_codec.with_tuple_bound(table_name.as_ref(), |min, max| {
+    table_codec.with_tuple_bound(table_id, |min, max, pool| {
         let lower = match &lower {
             Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
             Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
@@ -78,7 +72,7 @@ where
             } else {
                 batch.push(TupleImpl::from(Tuple::new(
                     None,
-                    Vec::with_capacity(old_values_len),
+                    Vec::with_capacity(old_deserializers.len()),
                 )));
                 batch
                     .last_mut()
@@ -86,10 +80,11 @@ where
             };
             TableCodec::decode_tuple_into(
                 tuple.output_mut(),
-                old_deserializers(),
+                old_deserializers,
                 Some(tuple_id),
                 value,
-                old_values_len,
+                old_deserializers.len(),
+                pool,
             )?;
             len += 1;
         }
@@ -98,19 +93,16 @@ where
     })
 }
 
-pub(crate) fn visit_table_in_batches<T, D, I, F>(
+pub(crate) fn visit_table_in_batches<T, F>(
     transaction: &T,
     table_codec: &mut TableCodec,
-    table_name: &TableName,
+    table_id: TableId,
     pk_ty: &LogicalType,
-    old_values_len: usize,
-    mut old_deserializers: D,
+    old_deserializers: &[TupleValueSerializableImpl],
     mut visit: F,
 ) -> Result<(), DatabaseError>
 where
     T: StorageTransaction,
-    D: FnMut() -> I,
-    I: IntoIterator<Item = TupleValueSerializableImpl>,
     F: FnMut(&TupleImpl) -> Result<(), DatabaseError>,
 {
     let mut last_pk = None;
@@ -120,10 +112,9 @@ where
         let batch_len = read_tuple_batch(
             transaction,
             table_codec,
-            table_name,
+            table_id,
             pk_ty,
-            old_values_len,
-            &mut old_deserializers,
+            old_deserializers,
             last_pk.as_ref(),
             &mut batch,
             REWRITE_BATCH_SIZE,
@@ -148,23 +139,18 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn rewrite_table_in_batches<T, D, I, S, J, F, G>(
+pub(crate) fn rewrite_table_in_batches<T, F, G>(
     transaction: &mut T,
     table_codec: &mut TableCodec,
-    table_name: &TableName,
+    table_id: TableId,
     pk_ty: &LogicalType,
-    old_values_len: usize,
-    mut old_deserializers: D,
-    mut new_serializers: S,
+    old_deserializers: &[TupleValueSerializableImpl],
+    new_serializers: &[TupleValueSerializableImpl],
     mut rewrite: F,
     mut after_write: G,
 ) -> Result<(), DatabaseError>
 where
     T: StorageTransaction,
-    D: FnMut() -> I,
-    I: IntoIterator<Item = TupleValueSerializableImpl>,
-    S: FnMut() -> J,
-    J: IntoIterator<Item = TupleValueSerializableImpl>,
     F: FnMut(&mut TupleImpl) -> Result<(), DatabaseError>,
     G: FnMut(&mut T, &mut TableCodec, &TupleImpl) -> Result<(), DatabaseError>,
 {
@@ -175,10 +161,9 @@ where
         let batch_len = read_tuple_batch(
             transaction,
             table_codec,
-            table_name,
+            table_id,
             pk_ty,
-            old_values_len,
-            &mut old_deserializers,
+            old_deserializers,
             last_pk.as_ref(),
             &mut batch,
             REWRITE_BATCH_SIZE,
@@ -192,13 +177,7 @@ where
 
         for tuple in batch.iter_mut().take(batch_len) {
             rewrite(tuple)?;
-            transaction.append_tuple(
-                table_codec,
-                table_name.as_ref(),
-                tuple,
-                new_serializers(),
-                true,
-            )?;
+            transaction.append_tuple(table_codec, table_id, tuple, new_serializers, true)?;
             after_write(transaction, table_codec, tuple)?;
         }
 

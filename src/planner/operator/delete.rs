@@ -12,23 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnRef, TableName};
+use crate::catalog::{ColumnRef, TableId};
+use crate::planner::{fmt_table, Explain, MetaArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct DeleteOperator {
-    pub table_name: TableName,
+    pub table_id: TableId,
     // FIXME
     // for column pruning
     pub primary_keys: Vec<ColumnRef>,
 }
 
-impl fmt::Display for DeleteOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Delete {}", self.table_name)?;
-
-        Ok(())
+impl Explain for DeleteOperator {
+    fn fmt<A: MetaArena + ?Sized>(
+        &self,
+        arena: &A,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        f.write_str("Delete ")?;
+        fmt_table(self.table_id, arena, f)
     }
 }

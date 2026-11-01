@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
@@ -26,22 +26,20 @@ use crate::types::value::DataValue;
 
 pub struct StreamDistinctExecutor<'a> {
     groupby_exprs: &'a [ExprRef],
-    input: ExecId,
+    input: ExecNode<'a>,
     last_keys: Option<TupleImpl>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecutor<'a> {
+impl<'a> ReadExecutor<'a> for StreamDistinctExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::StreamDistinct(StreamDistinctExecutor {
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::StreamDistinct(Box::new(StreamDistinctExecutor {
             groupby_exprs: &op.groupby_exprs,
             input,
             last_keys: None,
@@ -52,20 +50,20 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for StreamDistinctExecu
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.last_keys = None;
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if !arena.next_tuple(self.input, plan_arena)? {
+            if !self.input.next_tuple(arena, plan_arena)? {
                 if let Some(last_keys) = self.last_keys.take() {
                     drop(std::mem::replace(arena.result_mut(), last_keys));
                     arena.resume();
@@ -107,30 +105,19 @@ mod tests {
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
     use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
+    use crate::storage::{Storage, TableCache};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use tempfile::TempDir;
 
     #[allow(clippy::type_complexity)]
-    fn build_test_storage() -> Result<
-        (
-            TableCache,
-            ViewCache,
-            StatisticsMetaCache,
-            TempDir,
-            RocksStorage,
-        ),
-        DatabaseError,
-    > {
-        let meta_cache = crate::storage::StatisticsMetaCache::default();
-        let view_cache = crate::storage::ViewCache::default();
+    fn build_test_storage() -> Result<(TableCache, TempDir, RocksStorage), DatabaseError> {
         let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
 
-        Ok((table_cache, view_cache, meta_cache, temp_dir, storage))
+        Ok((table_cache, temp_dir, storage))
     }
 
     fn optimize_exprs(
@@ -184,11 +171,11 @@ mod tests {
             unreachable!()
         };
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.iter().next().unwrap()),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;
@@ -242,11 +229,11 @@ mod tests {
             unreachable!()
         };
 
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.iter().next().unwrap()),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         ))?;

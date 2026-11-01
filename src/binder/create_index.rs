@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::binder::{Binder, Source};
-use crate::catalog::{ColumnRef, TableName};
+use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
@@ -26,17 +26,15 @@ use crate::types::LogicalType;
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_create_index_source(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         let source = self
             .context
-            .source_and_bind(table_name.clone(), None, None, false, arena)?
+            .source_and_bind(table_name, None, None, false, arena)?
             .ok_or(DatabaseError::SourceNotFound)?;
         match source {
-            Source::Table(table) => {
-                TableScanOperator::build(table_name.clone(), table, true, arena)
-            }
+            Source::Table(table) => TableScanOperator::build(table, true, arena),
             Source::View(view) => view.plan.clone_plan(arena),
             Source::Schema(_) => Err(DatabaseError::UnsupportedStmt(
                 "derived source cannot be rebound as a base relation".to_string(),
@@ -46,7 +44,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
     pub(crate) fn bind_create_index(
         &mut self,
-        table_name: TableName,
+        table_name: &str,
         index_name: String,
         columns: Vec<ColumnRef>,
         if_not_exists: bool,
@@ -63,7 +61,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
         Ok(LogicalPlan::new(
             Operator::CreateIndex(CreateIndexOperator {
-                table_name,
+                table_id: self.context.table_id(table_name)?,
                 columns,
                 index_name,
                 if_not_exists,

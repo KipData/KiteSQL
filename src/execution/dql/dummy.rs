@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::tuple::Tuple;
@@ -30,25 +30,23 @@ impl Default for Dummy {
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Dummy {
+impl<'a> ReadExecutor<'a> for Dummy {
     type Input = ();
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         _: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
         let executor = Dummy::default();
-        arena.push(ExecNode::Dummy(executor))
+        ExecNode::Dummy(Box::new(executor))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Dummy {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, T>,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.row = Some(Tuple::default());
@@ -57,7 +55,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Dummy {
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         _: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let Some(row) = self.row.take() else {

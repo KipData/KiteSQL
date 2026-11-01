@@ -149,14 +149,14 @@ let kite_sql = DataBaseBuilder::path("./data")
 ### MVCC Transaction
 - Pessimistic (Default)
 - Optimistic
-- Isolation levels: see [Transaction Isolation](transaction-isolation.md)
+- Isolation level: repeatable read; every statement in a transaction reads the snapshot taken when it began
 
 ### Checkpoint
 KiteSQL exposes checkpoint as a storage capability rather than a full backup workflow. A checkpoint only creates a consistent local snapshot directory; compressing, uploading, retaining, and pruning backups should stay in application code.
 
 Support matrix:
 - `build_optimistic()` supports `Database::checkpoint(...)` through RocksDB's safe checkpoint API.
-- `build_rocksdb()` requires Cargo feature `unsafe_txdb_checkpoint` because upstream `rocksdb` does not currently expose a safe `TransactionDB` checkpoint API.
+- `build_rocksdb()` requires Cargo feature `unsafe_txdb_checkpoint`, which uses RocksDB's `TransactionDB` checkpoint API.
 - `build_lmdb()` and `build_in_memory()` do not currently expose checkpoint support.
 
 Opt in for `TransactionDB` checkpoint support:

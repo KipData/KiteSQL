@@ -51,6 +51,14 @@ impl RtHist {
         p90
     }
 
+    pub fn merge(&mut self, other: &RtHist) {
+        for (total, other) in self.total.iter_mut().zip(&other.total) {
+            total
+                .add(other)
+                .expect("histograms share the same precision");
+        }
+    }
+
     pub fn hist_report(&self) {
         println!("\n<Latency Percentile RT in us (MaxRT)>");
         println!("| Transaction | p90 | Max |");

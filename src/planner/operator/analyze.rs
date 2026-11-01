@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::planner::MetaArena;
-use crate::planner::{fmt_explain_list, Explain};
+use crate::planner::{fmt_explain_list, fmt_table, Explain};
 use crate::types::index::IndexMetaRef;
 use kite_sql_serde_macros::ReferenceSerialization;
 use ordered_float::OrderedFloat;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct AnalyzeOperator {
-    pub table_name: TableName,
+    pub table_id: TableId,
     pub index_metas: Vec<IndexMetaRef>,
     pub histogram_buckets: Option<usize>,
     pub hll_precision: Option<u8>,
@@ -34,7 +34,9 @@ impl Explain for AnalyzeOperator {
         arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        write!(f, "Analyze {} -> [", self.table_name)?;
+        f.write_str("Analyze ")?;
+        fmt_table(self.table_id, arena, f)?;
+        f.write_str(" -> [")?;
         fmt_explain_list(&self.index_metas, ", ", arena, f)?;
         f.write_str("]")
     }

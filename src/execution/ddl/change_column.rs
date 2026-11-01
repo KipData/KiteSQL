@@ -14,9 +14,7 @@
 
 use super::{rewrite_table_in_batches, visit_table_in_batches};
 use crate::errors::DatabaseError;
-use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::change_column::{ChangeColumnOperator, NotNullChange};
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -27,41 +25,47 @@ pub struct ChangeColumn<'a> {
     op: &'a ChangeColumnOperator,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for ChangeColumn<'a> {
+impl<'a> WriteExecutor<'a> for ChangeColumn<'a> {
     type Input = &'a ChangeColumnOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         op: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::ChangeColumn(ChangeColumn { op }))
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        ExecNode::ChangeColumn(Box::new(ChangeColumn { op }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
         let ChangeColumnOperator {
-            table_name,
+            table_id,
             old_column_name,
             new_column_name,
             data_type,
             default_change,
             not_null_change,
         } = self.op;
+        let table_id = *table_id;
 
+        let table_catalog = table_cache
+            .get(&table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
         let (old_schema, pk_ty, column_index, old_column_type, old_column_id, affected_index_name) = {
-            let table_catalog = arena
-                .transaction()
-                .table(table_cache, table_name.clone())?
-                .ok_or(DatabaseError::TableNotFound)?;
             let (column_index, old_column) = table_catalog
                 .columns()
                 .enumerate()
@@ -101,32 +105,28 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             }
         }
 
+        let old_serializers = || {
+            old_schema
+                .iter()
+                .map(|column| plan_arena.column(*column).datatype().serializable())
+                .collect_vec()
+        };
         if needs_data_rewrite {
             let target_column_name = new_column_name.clone();
             let target_data_type = data_type.clone();
+            let old_serializers = old_serializers();
+            let mut new_serializers = old_serializers.clone();
+            new_serializers[column_index] = data_type.serializable();
+
             let mut state = arena.local_state(plan_arena);
-            let plan_arena = state.plan_arena;
             let (transaction, table_codec) = state.transaction_codec_mut();
             rewrite_table_in_batches(
                 transaction,
                 table_codec,
-                table_name,
+                table_id,
                 &pk_ty,
-                old_schema.len(),
-                || {
-                    old_schema
-                        .iter()
-                        .map(|column| plan_arena.column(*column).datatype().serializable())
-                },
-                || {
-                    old_schema.iter().enumerate().map(|(index, column)| {
-                        if index == column_index {
-                            data_type.serializable()
-                        } else {
-                            plan_arena.column(*column).datatype().serializable()
-                        }
-                    })
-                },
+                &old_serializers,
+                &new_serializers,
                 |tuple| {
                     let value = std::mem::replace(&mut tuple[column_index], DataValue::Null);
                     tuple[column_index] = value.cast(&target_data_type)?;
@@ -139,20 +139,15 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             )?;
         } else if needs_not_null_validation {
             let target_column_name = new_column_name.clone();
+            let old_serializers = old_serializers();
             let mut state = arena.local_state(plan_arena);
-            let plan_arena = state.plan_arena;
             let (transaction, table_codec) = state.transaction_codec_mut();
             visit_table_in_batches(
                 transaction,
                 table_codec,
-                table_name,
+                table_id,
                 &pk_ty,
-                old_schema.len(),
-                || {
-                    old_schema
-                        .iter()
-                        .map(|column| plan_arena.column(*column).datatype().serializable())
-                },
+                &old_serializers,
                 |tuple| {
                     if tuple[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));
@@ -167,7 +162,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             let table = transaction.change_column(
                 table_codec,
                 plan_arena,
-                table_name,
+                table_catalog.name(),
                 old_column_name,
                 new_column_name,
                 data_type,

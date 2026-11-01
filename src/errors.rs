@@ -78,7 +78,6 @@ pub enum DatabaseError {
     DefaultNotColumnRef,
     DefaultNotExist,
     DuplicateColumn(String),
-    DuplicateSourceHash(String),
     DuplicateIndex(String),
     DuplicateTableName(String),
     DuplicatePrimaryKey,
@@ -176,9 +175,6 @@ impl fmt::Display for DatabaseError {
             }
             Self::DefaultNotExist => f.write_str("default does not exist"),
             Self::DuplicateColumn(value) => write!(f, "column: `{value}` already exists"),
-            Self::DuplicateSourceHash(value) => {
-                write!(f, "table or view: `{value}` hash already exists")
-            }
             Self::DuplicateIndex(value) => write!(f, "index: `{value}` already exists"),
             Self::DuplicateTableName(value) => {
                 write!(f, "table name: `{value}` specified more than once")
@@ -668,10 +664,6 @@ mod tests {
             (
                 DatabaseError::DuplicateColumn("id".into()),
                 "column: `id` already exists",
-            ),
-            (
-                DatabaseError::DuplicateSourceHash("v".into()),
-                "table or view: `v` hash already exists",
             ),
             (
                 DatabaseError::DuplicateIndex("idx".into()),

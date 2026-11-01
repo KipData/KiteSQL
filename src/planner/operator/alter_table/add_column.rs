@@ -12,28 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, TableName};
+use crate::catalog::{ColumnCatalog, TableId};
+use crate::planner::{fmt_table, Explain, MetaArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct AddColumnOperator {
-    pub table_name: TableName,
+    pub table_id: TableId,
     pub if_not_exists: bool,
     pub column: ColumnCatalog,
 }
 
-impl fmt::Display for AddColumnOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Add {} -> {}, If Not Exists: {}",
-            self.column.name(),
-            self.table_name,
-            self.if_not_exists
-        )?;
-
-        Ok(())
+impl Explain for AddColumnOperator {
+    fn fmt<A: MetaArena + ?Sized>(
+        &self,
+        arena: &A,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        write!(f, "Add {} -> ", self.column.name())?;
+        fmt_table(self.table_id, arena, f)?;
+        write!(f, ", If Not Exists: {}", self.if_not_exists)
     }
 }

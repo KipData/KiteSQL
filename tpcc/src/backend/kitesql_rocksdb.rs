@@ -18,7 +18,7 @@ use super::{
 };
 use crate::TpccError;
 use kite_sql::binder::{command_type, CommandType};
-use kite_sql::db::{DataBaseBuilder, Database, Statement, Transaction, TransactionIter};
+use kite_sql::db::{DataBaseBuilder, Database, ProgramIter, Statement, Transaction};
 use kite_sql::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
 use kite_sql::storage::{Storage, StorageTransaction};
 use kite_sql::types::tuple::TupleImpl;
@@ -63,7 +63,7 @@ impl<S: Storage> KiteSqlRocksBackend<S> {
             let mut prepared = Vec::with_capacity(group.len());
             for spec in group {
                 prepared.push(KiteSqlPreparedStatement {
-                    plan: self.database.prepare_sql(spec.sql, &spec.parameters)?,
+                    program: self.database.program_sql(spec.sql, &spec.parameters)?,
                     spec: spec.clone(),
                 });
             }
@@ -79,7 +79,7 @@ impl<S: Storage> KiteSqlRocksBackend<S> {
     }
 }
 
-impl<S: Storage> BackendControl for KiteSqlRocksBackend<S> {
+impl<S: Storage + Sync> BackendControl for KiteSqlRocksBackend<S> {
     type PreparedStatement<'a>
         = KiteSqlPreparedStatement<'a>
     where
@@ -97,8 +97,17 @@ impl<S: Storage> BackendControl for KiteSqlRocksBackend<S> {
         self.prepare_spec_groups(specs)
     }
 
+    type Worker<'a>
+        = &'a Self
+    where
+        Self: 'a;
+
     fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
         self.start_transaction()
+    }
+
+    fn worker(&self) -> Result<Self::Worker<'_>, TpccError> {
+        Ok(self)
     }
 
     fn storage_metrics(&self) -> Option<String> {
@@ -169,9 +178,9 @@ impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
         &'b mut self,
         statement: &'b mut KiteSqlPreparedStatement<'a>,
         params: &[DbParam],
-    ) -> Result<KiteSqlTxnResult<'b, S::TransactionType<'a>>, TpccError> {
-        Ok(KiteSqlTxnResult::new(
-            self.inner.execute(&statement.plan, params)?,
+    ) -> Result<KiteSqlTxnResult<'b, 'a, S::TransactionType<'a>>, TpccError> {
+        Ok(KiteSqlTxnResult(
+            statement.program.execute(&mut self.inner, params)?,
         ))
     }
 }
@@ -234,13 +243,9 @@ impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
     }
 }
 
-pub struct KiteSqlTxnResult<'a, T: StorageTransaction + 'a>(TransactionIter<'a, T>);
+pub struct KiteSqlTxnResult<'b, 'a, T: StorageTransaction + 'a>(pub(crate) ProgramIter<'b, 'a, T>);
 
-impl<'a, T: StorageTransaction + 'a> KiteSqlTxnResult<'a, T> {
-    pub(crate) fn new(iter: TransactionIter<'a, T>) -> Self {
-        Self(iter)
-    }
-
+impl<'a, T: StorageTransaction + 'a> KiteSqlTxnResult<'_, 'a, T> {
     pub(crate) fn skip_next_tuple(&mut self) -> Result<bool, TpccError> {
         Ok(self
             .0

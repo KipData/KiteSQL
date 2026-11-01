@@ -56,7 +56,7 @@ impl ImplementationRule for SeqScanImplementation {
                         IndexType::PrimaryKey { .. }
                     )
                 })
-                .map(|index_info| loader.load(&scan_op.table_name, arena.index(index_info.meta).id))
+                .map(|index_info| loader.load(scan_op.table_id, arena.index(index_info.meta).id))
                 .transpose()?
                 .flatten()
                 .map(|index_statistics| index_statistics.histogram().values_len());
@@ -105,7 +105,7 @@ impl ImplementationRule for IndexScanImplementation {
                 // A PK/Unique equality range has an exact row count even without statistics.
                 let counted = loader
                     .collect_count(
-                        &scan_op.table_name,
+                        scan_op.table_id,
                         index_meta.id,
                         range,
                         &mut state.histogram_buf,

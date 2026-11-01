@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 use std::sync::Arc;
@@ -24,11 +24,9 @@ impl ReferenceSerialization for String {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.len()
-            .encode(writer, is_direct, reference_tables, arena)?;
+        self.len().encode(writer, is_direct, arena)?;
         writer.write_all(self.as_bytes())?;
 
         Ok(())
@@ -36,11 +34,10 @@ impl ReferenceSerialization for String {
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let len = usize::decode(reader, drive, reference_tables, arena)?;
+        let len = usize::decode(reader, drive, arena)?;
         let mut bytes = vec![0; len];
         reader.read_exact(&mut bytes)?;
 
@@ -53,11 +50,9 @@ impl ReferenceSerialization for Arc<str> {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.len()
-            .encode(writer, is_direct, reference_tables, arena)?;
+        self.len().encode(writer, is_direct, arena)?;
         writer.write_all(self.as_bytes())?;
 
         Ok(())
@@ -65,11 +60,10 @@ impl ReferenceSerialization for Arc<str> {
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let str = String::decode(reader, drive, reference_tables, arena)?;
+        let str = String::decode(reader, drive, arena)?;
         Ok(str.into())
     }
 }
@@ -78,7 +72,7 @@ impl ReferenceSerialization for Arc<str> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use std::io::{Cursor, Seek, SeekFrom};
 
@@ -86,19 +80,13 @@ pub(crate) mod test {
     fn test_serialization() -> Result<(), DatabaseError> {
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
-        let mut reference_tables = ReferenceTables::new();
         let mut arena = crate::planner::TableArena::default();
 
         let source = "hello".to_string();
-        ReferenceSerialization::encode(&source, &mut cursor, true, &mut reference_tables, &arena)?;
+        ReferenceSerialization::encode(&source, &mut cursor, true, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
         assert_eq!(
-            String::decode::<RocksTransaction, _, _>(
-                &mut cursor,
-                None,
-                &reference_tables,
-                &mut arena,
-            )?,
+            String::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena,)?,
             source
         );
 

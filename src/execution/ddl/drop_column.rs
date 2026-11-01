@@ -14,9 +14,7 @@
 
 use super::rewrite_table_in_batches;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::drop_column::DropColumnOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -26,38 +24,43 @@ pub struct DropColumn<'a> {
     op: &'a DropColumnOperator,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropColumn<'a> {
+impl<'a> WriteExecutor<'a> for DropColumn<'a> {
     type Input = &'a DropColumnOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         op: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::DropColumn(DropColumn { op }))
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        ExecNode::DropColumn(Box::new(DropColumn { op }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let table_cache = arena.table_cache();
         let DropColumnOperator {
-            table_name,
+            table_id,
             column_name,
             if_exists,
         } = self.op;
 
+        let table_catalog = table_cache
+            .get(table_id)
+            .ok_or(DatabaseError::TableNotFound)?;
         let (old_schema, pk_ty, column_info) = {
-            let table_catalog = arena
-                .transaction()
-                .table(table_cache, table_name.clone())?
-                .ok_or(DatabaseError::TableNotFound)?;
             let column_info = table_catalog
                 .columns()
                 .enumerate()
@@ -78,27 +81,22 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                 ));
             }
             {
+                let old_serializers = old_schema
+                    .iter()
+                    .map(|column| plan_arena.column(*column).datatype().serializable())
+                    .collect_vec();
+                let mut new_serializers = old_serializers.clone();
+                new_serializers.remove(column_index);
+
                 let mut state = arena.local_state(plan_arena);
-                let plan_arena = state.plan_arena;
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 rewrite_table_in_batches(
                     transaction,
                     table_codec,
-                    table_name,
+                    *table_id,
                     &pk_ty,
-                    old_schema.len(),
-                    || {
-                        old_schema
-                            .iter()
-                            .map(|column| plan_arena.column(*column).datatype().serializable())
-                    },
-                    || {
-                        old_schema
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, _)| *index != column_index)
-                            .map(|(_, column)| plan_arena.column(*column).datatype().serializable())
-                    },
+                    &old_serializers,
+                    &new_serializers,
                     |tuple| {
                         let _ = tuple.remove(column_index);
                         Ok(())
@@ -108,8 +106,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
             }
             {
                 let (transaction, table_codec) = arena.transaction_codec_mut();
-                let table =
-                    transaction.drop_column(table_codec, plan_arena, table_name, column_name)?;
+                let table = transaction.drop_column(
+                    table_codec,
+                    plan_arena,
+                    table_catalog.name(),
+                    column_name,
+                )?;
                 arena.push_ddl_apply(DDLApply::upsert_table(table, true));
             }
 

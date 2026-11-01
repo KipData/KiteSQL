@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::{ColumnCatalog, ColumnRef, TableName};
+use crate::catalog::view::View;
+use crate::catalog::{ColumnCatalog, ColumnRef, SourceId, TableCatalog, TableId, TableName};
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::ScalarExpression;
@@ -22,6 +23,7 @@ use crate::planner::operator::visitor_mut::{
 };
 use crate::planner::operator::{Operator, PhysicalOption};
 use crate::planner::{LogicalPlan, ScalarQueryRef};
+use crate::storage::{NameMapping, TableCache, ViewCache};
 use crate::types::index::{IndexMeta, IndexMetaRef};
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
@@ -112,6 +114,10 @@ pub struct TableArena {
     columns: Vec<TableArenaColumn>,
     indexes: Vec<TableArenaIndex>,
     expressions: Vec<TableArenaExpression>,
+    source_count: usize,
+    pub(crate) names: NameMapping,
+    pub(crate) tables: TableCache,
+    pub(crate) views: ViewCache,
     scalar_query_count: usize,
     version: usize,
 }
@@ -152,6 +158,7 @@ pub struct PlanArena<'a> {
     columns: Vec<ColumnCatalog>,
     indexes: Vec<IndexMeta>,
     expressions: Vec<ArenaExpr>,
+    source_count: usize,
     plans: Vec<LogicalPlan>,
 }
 
@@ -290,6 +297,14 @@ pub trait MetaArena {
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef>;
 
     fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef>;
+
+    fn alloc_source(&mut self) -> SourceId;
+
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog>;
+
+    fn table_name(&self, table_id: TableId) -> Option<&str> {
+        self.table(table_id).map(|table| table.name().as_str())
+    }
 }
 
 impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
@@ -347,6 +362,12 @@ impl<A: MetaArena + ?Sized> MetaArena for Box<A> {
     fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
         (**self).find_index(index)
     }
+    fn alloc_source(&mut self) -> SourceId {
+        (**self).alloc_source()
+    }
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        (**self).table(table_id)
+    }
 }
 
 /// Owns the metadata and scalar-query cache for one statement execution.
@@ -371,18 +392,23 @@ impl<A: MetaArena> ExecMetaArena<A> {
         }
     }
 
-    pub(crate) fn boxed<'a>(self) -> ExecMetaArena<Box<dyn MetaArena + 'a>>
-    where
-        A: 'a,
-    {
-        ExecMetaArena {
-            parent: Box::new(self.parent),
-            init_values: self.init_values,
-        }
-    }
-
     pub(crate) fn into_parent(self) -> A {
         self.parent
+    }
+
+    pub(crate) fn parent(&self) -> &A {
+        &self.parent
+    }
+
+    pub(crate) fn parent_mut(&mut self) -> &mut A {
+        &mut self.parent
+    }
+
+    /// Drops the scalar-query results of the previous execution.
+    pub(crate) fn reset(&mut self) {
+        self.init_values.clear();
+        self.init_values
+            .resize_with(self.parent.scalar_query_count(), || None);
     }
 
     pub(crate) fn set_init_value(&mut self, reference: ScalarQueryRef, value: DataValue) {
@@ -473,6 +499,12 @@ impl<A: MetaArena> MetaArena for ExecMetaArena<A> {
     fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
         self.parent.find_index(index)
     }
+    fn alloc_source(&mut self) -> SourceId {
+        self.parent.alloc_source()
+    }
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        self.parent.table(table_id)
+    }
 }
 
 const DUMMY_COLUMN_NAMES: [&str; DUMMY_COLUMN_COUNT] = [
@@ -537,6 +569,10 @@ impl Default for TableArena {
             columns: Vec::new(),
             indexes: Vec::new(),
             expressions: Vec::new(),
+            source_count: 0,
+            names: NameMapping::default(),
+            tables: TableCache::default(),
+            views: ViewCache::default(),
             scalar_query_count: 0,
             version: 0,
         }
@@ -550,6 +586,14 @@ impl fmt::Debug for TableArenaCell {
 }
 
 impl TableArena {
+    pub(crate) fn insert_table(&mut self, table: TableCatalog) {
+        self.names.insert_table(&mut self.tables, table);
+    }
+
+    pub(crate) fn insert_view(&mut self, view_id: TableId, view: View) {
+        self.names.insert_view(&mut self.views, view_id, view);
+    }
+
     pub(crate) fn alloc_dummy(&self, name: &str) -> ColumnRef {
         DUMMY_COLUMN_NAMES
             .iter()
@@ -774,6 +818,15 @@ impl MetaArena for TableArena {
             .position(|candidate| candidate.live && candidate.meta == *index)
             .map(IndexMetaRef::new)
     }
+
+    fn alloc_source(&mut self) -> SourceId {
+        self.source_count += 1;
+        self.source_count - 1
+    }
+
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        self.tables.get(&table_id)
+    }
 }
 
 impl<'a> PlanArena<'a> {
@@ -791,6 +844,7 @@ impl<'a> PlanArena<'a> {
             columns: Vec::new(),
             indexes: Vec::new(),
             expressions: Vec::new(),
+            source_count: 0,
             plans: Vec::new(),
         }
     }
@@ -895,6 +949,7 @@ impl<'a> PlanArena<'a> {
             });
         }
         self.append_expressions_to_table_arena(table_arena);
+        table_arena.source_count += self.source_count;
         if !self.columns.is_empty() || !self.indexes.is_empty() || !self.expressions.is_empty() {
             table_arena.increment_version();
         }
@@ -950,7 +1005,7 @@ impl<'a> PlanArena<'a> {
     pub(crate) fn temp_table(&mut self) -> TableName {
         let table_name = format!("_temp_table_{}_", self.temp_table_id);
         self.temp_table_id += 1;
-        table_name.into()
+        table_name
     }
 
     pub(crate) fn alloc_plan(&mut self, plan: LogicalPlan) -> PlanRef {
@@ -1116,11 +1171,22 @@ impl MetaArena for PlanArena<'_> {
             .position(|candidate| candidate == index)
             .map(|offset| IndexMetaRef::new(table_indexes_len + offset))
     }
+
+    fn alloc_source(&mut self) -> SourceId {
+        self.assert_table_arena_unchanged();
+        self.source_count += 1;
+        self.table_arena.borrow().source_count + self.source_count - 1
+    }
+
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        self.table_arena.borrow().table(table_id)
+    }
 }
 
 /// Execution-local parameter values and temporary expressions over an immutable plan arena.
 pub(crate) struct ParamArena<'a> {
-    parent: &'a PlanArena<'a>,
+    parent: PlanArena<'a>,
+    parameter_expressions: Vec<ExprRef>,
     expressions: Vec<(Option<usize>, ArenaExpr)>,
     parameter_count: usize,
     parent_end: usize,
@@ -1128,13 +1194,23 @@ pub(crate) struct ParamArena<'a> {
 }
 
 impl<'a> ParamArena<'a> {
-    pub(crate) fn new(
-        parent: &'a PlanArena<'a>,
-        parameter_expressions: &[ExprRef],
-        params: &[(usize, DataValue)],
-    ) -> Result<Self, DatabaseError> {
-        let mut expressions = Vec::with_capacity(parameter_expressions.len());
-        for (slot, &expr_ref) in parameter_expressions.iter().enumerate() {
+    pub(crate) fn new(parent: PlanArena<'a>, parameter_expressions: Vec<ExprRef>) -> Self {
+        Self {
+            parameter_count: parameter_expressions.len(),
+            parent_end: parent.expression_end(),
+            scalar_query_count: parent.scalar_query_count,
+            expressions: Vec::with_capacity(parameter_expressions.len()),
+            parameter_expressions,
+            parent,
+        }
+    }
+
+    pub(crate) fn bind(&mut self, params: &[(usize, DataValue)]) -> Result<(), DatabaseError> {
+        let parent = &self.parent;
+        // Keep the parameter slots of the previous execution and overwrite their values.
+        self.expressions.truncate(self.parameter_count);
+        self.scalar_query_count = parent.scalar_query_count;
+        for (slot, &expr_ref) in self.parameter_expressions.iter().enumerate() {
             debug_assert_eq!(parent.arena_expression(expr_ref).param, Some(slot));
             let ScalarExpression::Constant(value @ DataValue::Parameter { id, .. }) =
                 parent.expression(expr_ref)
@@ -1151,21 +1227,33 @@ impl<'a> ParamArena<'a> {
                 },
                 &|_| None,
             )?;
-            expressions.push((Some(id), ArenaExpr::new(ScalarExpression::Constant(value))));
+            // reuse
+            match self.expressions.get_mut(slot) {
+                Some((
+                    _,
+                    ArenaExpr {
+                        expression: ScalarExpression::Constant(bound),
+                        param: None,
+                    },
+                )) => *bound = value,
+                // An execution rewrote the slot; rebuild it.
+                Some((_, expr)) => *expr = ArenaExpr::new(ScalarExpression::Constant(value)),
+                None => self
+                    .expressions
+                    .push((Some(id), ArenaExpr::new(ScalarExpression::Constant(value)))),
+            }
         }
-        Ok(Self {
-            parent,
-            expressions,
-            parameter_count: parameter_expressions.len(),
-            parent_end: parent.expression_end(),
-            scalar_query_count: parent.scalar_query_count,
-        })
+        Ok(())
+    }
+
+    pub(crate) fn plan_arena(&self) -> &PlanArena<'a> {
+        &self.parent
     }
 }
 
 impl MetaArena for ParamArena<'_> {
     fn arena_id(&self) -> usize {
-        self.parent.arena_id() + 1
+        self.plan_arena().arena_id() + 1
     }
     fn alloc_scalar_query_ref(&mut self, is_outer_value: bool) -> ScalarQueryRef {
         let reference = ScalarQueryRef {
@@ -1188,7 +1276,7 @@ impl MetaArena for ParamArena<'_> {
     where
         Self: 'a,
     {
-        self.parent.table_arena_cell()
+        self.plan_arena().table_arena_cell()
     }
     fn has_bound_params(&self) -> bool {
         true
@@ -1207,20 +1295,20 @@ impl MetaArena for ParamArena<'_> {
         None
     }
     fn column(&self, column: ColumnRef) -> &ColumnCatalog {
-        self.parent.column(column)
+        self.plan_arena().column(column)
     }
     fn index(&self, index: IndexMetaRef) -> &IndexMeta {
-        self.parent.index(index)
+        self.plan_arena().index(index)
     }
     fn find_column(&self, column: &ColumnCatalog) -> Option<ColumnRef> {
-        self.parent.find_column(column)
+        self.plan_arena().find_column(column)
     }
     fn find_index(&self, index: &IndexMeta) -> Option<IndexMetaRef> {
-        self.parent.find_index(index)
+        self.plan_arena().find_index(index)
     }
     fn expression(&self, expr: ExprRef) -> &ScalarExpression {
         if expr.pos() < self.parent_end {
-            let parent = self.parent.arena_expression(expr);
+            let parent = self.plan_arena().arena_expression(expr);
             return match parent.param {
                 Some(slot) => &self.expressions[slot].1.expression,
                 None => &parent.expression,
@@ -1254,6 +1342,12 @@ impl MetaArena for ParamArena<'_> {
     fn alloc_index(&mut self, _: IndexMeta) -> IndexMetaRef {
         unreachable!("ParamArena cannot allocate catalog indexes")
     }
+    fn alloc_source(&mut self) -> SourceId {
+        unreachable!("ParamArena cannot allocate sources")
+    }
+    fn table(&self, table_id: TableId) -> Option<&TableCatalog> {
+        self.plan_arena().table(table_id)
+    }
 }
 
 // GRCOV_EXCL_START
@@ -1265,6 +1359,16 @@ mod tests {
     use crate::types::index::{IndexMeta, IndexType};
     use crate::types::LogicalType;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn new_bound<'a>(
+        parent: &PlanArena<'a>,
+        parameter_expressions: &[ExprRef],
+        params: &[(usize, DataValue)],
+    ) -> Result<ParamArena<'a>, DatabaseError> {
+        let mut arena = ParamArena::new(parent.clone(), parameter_expressions.to_vec());
+        arena.bind(params)?;
+        Ok(arena)
+    }
 
     #[test]
     fn sorting_moves_only_outer_results() {
@@ -1360,7 +1464,6 @@ mod tests {
         let allocated = view.alloc_scalar_query_ref(true);
         view.reserve_scalar_query_ref(allocated);
         view.set_init_value(allocated, DataValue::Null);
-        let view = view.boxed();
         assert_eq!(view.init_value(allocated), Some(&DataValue::Null));
         assert_eq!(view.arena_id(), 1);
         Ok(())
@@ -1389,7 +1492,7 @@ mod tests {
             }
         );
         assert_ne!(catalog, local);
-        let mut params = ParamArena::new(&plan, &[], &[])?;
+        let mut params = new_bound(&plan, &[], &[])?;
         assert_eq!(params.arena_id(), 2);
         let param_local = params.alloc_scalar_query_ref(false);
         params.reserve_scalar_query_ref(param_local);
@@ -1413,9 +1516,8 @@ mod tests {
         view.set_init_value(local, DataValue::Int32(33));
         assert_eq!(view.init_value(catalog), Some(&DataValue::Int32(11)));
         assert_eq!(view.init_value(local), Some(&DataValue::Int32(33)));
-        let mut boxed = view.boxed();
-        let reference = boxed.alloc_scalar_query_ref(true);
-        boxed.reserve_scalar_query_ref(reference);
+        let reference = view.alloc_scalar_query_ref(true);
+        view.reserve_scalar_query_ref(reference);
         assert_eq!(reference.arena_id, 2);
         assert_eq!(reference.pos, param_local.pos + 1);
         Ok(())
@@ -1431,7 +1533,11 @@ mod tests {
 
     fn table_column(name: &str, is_temp: bool) -> ColumnCatalog {
         let mut column = column(name);
-        column.set_ref_table("t".to_string().into(), if is_temp { 0 } else { 1 }, is_temp);
+        if is_temp {
+            column.set_source(0, 0, true);
+        } else {
+            column.set_table(0, 1);
+        }
         column
     }
 
@@ -1439,7 +1545,7 @@ mod tests {
         IndexMeta {
             id: 1,
             column_ids: vec![1],
-            table_name: "t".into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: name.to_string(),
@@ -1460,8 +1566,7 @@ mod tests {
         let parameter_expressions = parent.parameter_expressions();
         assert_eq!(parent.arena_expression(id).param, Some(0));
         {
-            let bound =
-                ParamArena::new(&parent, &parameter_expressions, &[(1, DataValue::Int32(7))])?;
+            let bound = new_bound(&parent, &parameter_expressions, &[(1, DataValue::Int32(7))])?;
             assert_eq!(
                 bound.expression(id),
                 &ScalarExpression::Constant(DataValue::Int32(7))
@@ -1470,8 +1575,11 @@ mod tests {
         *parent.expression_mut(id) = ScalarExpression::Constant(DataValue::Int32(2));
         assert_eq!(parent.arena_expression(id).param, None);
         let parameter_expressions = parent.parameter_expressions();
-        let bound = ParamArena::new(&parent, &parameter_expressions, &[])?;
-        assert!(std::ptr::eq(bound.expression(id), parent.expression(id)));
+        let bound = new_bound(&parent, &parameter_expressions, &[])?;
+        assert!(std::ptr::eq(
+            bound.expression(id),
+            bound.plan_arena().expression(id)
+        ));
         Ok(())
     }
 
@@ -1512,7 +1620,7 @@ mod tests {
         assert_eq!(parent.arena_expression(middle).param, None);
         assert_eq!(parent.arena_expression(second).param, Some(1));
 
-        let mut bound = ParamArena::new(
+        let mut bound = new_bound(
             &parent,
             &parameters,
             &[(1, DataValue::Int32(3)), (2, DataValue::Int32(8))],
@@ -1527,7 +1635,7 @@ mod tests {
         );
         assert!(std::ptr::eq(
             bound.expression(middle),
-            parent.expression(middle)
+            bound.plan_arena().expression(middle)
         ));
         let temporary = bound.alloc_expression(ScalarExpression::Constant(DataValue::Int32(42)));
         assert_eq!(temporary.pos(), parent.expression_end());
@@ -1566,12 +1674,11 @@ mod tests {
         let parent_column = parent.alloc_column(column("parent"));
         let parent_index = parent.alloc_index(index_meta("parent"));
         let parameter_expressions = parent.parameter_expressions();
-        let mut first =
-            ParamArena::new(&parent, &parameter_expressions, &[(1, DataValue::Int32(3))])?;
-        let second = ParamArena::new(&parent, &parameter_expressions, &[(1, DataValue::Int32(8))])?;
+        let mut first = new_bound(&parent, &parameter_expressions, &[(1, DataValue::Int32(3))])?;
+        let second = new_bound(&parent, &parameter_expressions, &[(1, DataValue::Int32(8))])?;
         assert!(std::ptr::eq(
             first.expression(constant),
-            parent.expression(constant)
+            first.plan_arena().expression(constant)
         ));
         assert_eq!(
             first.expression(parameter),
@@ -1612,11 +1719,11 @@ mod tests {
         );
         assert!(std::ptr::eq(
             first.column(parent_column),
-            parent.column(parent_column)
+            first.plan_arena().column(parent_column)
         ));
         assert!(std::ptr::eq(
             first.index(parent_index),
-            parent.index(parent_index)
+            first.plan_arena().index(parent_index)
         ));
         assert_eq!(first.find_column(&column("parent")), Some(parent_column));
         assert_eq!(first.find_index(&index_meta("parent")), Some(parent_index));

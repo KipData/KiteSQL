@@ -891,6 +891,11 @@ mod tests {
         };
         let flag = column("flag", LogicalType::Boolean, 0)?;
         let number = column("number", LogicalType::Bigint, 1)?;
+        let alias = arena.alloc_column(ColumnCatalog::new(
+            "alias".into(),
+            true,
+            ColumnDesc::new(LogicalType::Boolean, None, false, None)?,
+        ));
         let zero = arena.alloc_expression(DataValue::Int64(0).into());
         let mut alloc = |expr| arena.alloc_expression(expr);
         let cast = |expr, ty| ScalarExpression::TypeCast {
@@ -921,7 +926,7 @@ mod tests {
             (
                 alloc(ScalarExpression::Alias {
                     expr: flag,
-                    alias: AliasType::Expr(number),
+                    alias: AliasType::Column(alias),
                 }),
                 true,
             ),

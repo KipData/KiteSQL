@@ -16,7 +16,8 @@
 //!
 //! Unlike the main harness, every file gets its own database, values are rendered the way the
 //! SQLite reference runner does (by the column type declared in the query), queries that exceed
-//! the parser recursion limit are skipped, and failures are counted instead of aborting the run.
+//! the parser recursion limit and records in [`NON_STANDARD`] are skipped, and failures are
+//! counted instead of aborting the run.
 
 use clap::Parser;
 use kite_sql::db::{DataBaseBuilder, Database};
@@ -32,6 +33,21 @@ use tempfile::TempDir;
 
 const STACK_SIZE: usize = 64 * 1024 * 1024;
 const MAX_ERROR_LINES: usize = 30;
+
+/// Records that test SQLite behavior standard SQL rejects, with the records that check its
+/// effect: `(file, first line, last line, reason)`.
+const NON_STANDARD: &[(&str, u32, u32, &str)] = &[(
+    "evidence/slt_lang_update.slt",
+    90,
+    106,
+    "a column assigned more than once in UPDATE",
+)];
+
+fn is_non_standard(path: &Path, line: u32) -> bool {
+    NON_STANDARD
+        .iter()
+        .any(|&(file, first, last, _)| path.ends_with(file) && (first..=last).contains(&line))
+}
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -184,6 +200,14 @@ fn run_file(
 
     let mut summary = Summary::default();
     for record in records {
+        let line = match &record {
+            Record::Statement { loc, .. } | Record::Query { loc, .. } => Some(loc.line()),
+            _ => None,
+        };
+        if line.is_some_and(|line| is_non_standard(path, line)) {
+            summary.skipped += 1;
+            continue;
+        }
         let is_statement = match &record {
             Record::Statement { loc, .. } => {
                 if trace {

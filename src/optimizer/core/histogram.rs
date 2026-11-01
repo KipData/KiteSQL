@@ -799,7 +799,7 @@ mod tests {
         IndexMeta {
             id: 0,
             column_ids: vec![1],
-            table_name: "t1".to_string().into(),
+            table_id: 0,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
             name: "pk_c1".to_string(),

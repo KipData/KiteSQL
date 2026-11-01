@@ -1,13 +1,14 @@
 use super::*;
 
 impl<S: Storage> Database<S> {
-    /// Prepares an ORM-built plan once for repeated execution with positional parameters.
-    /// Use `e.param(id)` inside expression closures, then pass values to `execute`.
-    pub fn prepare<F>(
+    /// Prepares an ORM-built plan once into a program for repeated execution with
+    /// positional parameters. Use `e.param(id)` inside expression closures, then pass
+    /// values to `Program::execute`.
+    pub fn program<F>(
         &self,
         params: &[(usize, LogicalType)],
         build: F,
-    ) -> Result<crate::db::PreparedPlan<'_>, DatabaseError>
+    ) -> Result<crate::db::Program<'_>, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -180,18 +181,18 @@ impl<S: Storage> Database<S> {
         &self,
     ) -> Result<OrmIter<DatabaseIter<'_, S>, DescribeColumn>, DatabaseError> {
         Ok(self
-            .bind(|ctx| ctx.binder.bind_describe(M::table_name().into()))?
+            .bind(|ctx| ctx.binder.bind_describe(M::table_name()))?
             .orm::<DescribeColumn>())
     }
 }
 
 impl<'a, S: Storage> Transaction<'a, S> {
-    /// Prepares an ORM-built plan for repeated execution inside this transaction.
-    pub fn prepare<F>(
+    /// Prepares an ORM-built plan into a program, against this transaction's view.
+    pub fn program<F>(
         &self,
         params: &[(usize, LogicalType)],
         build: F,
-    ) -> Result<crate::db::PreparedPlan<'a>, DatabaseError>
+    ) -> Result<crate::db::Program<'a>, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -215,7 +216,7 @@ impl<'a, S: Storage> Transaction<'a, S> {
     pub fn bind<F>(
         &mut self,
         build: F,
-    ) -> Result<TransactionIter<'_, S::TransactionType<'a>>, DatabaseError>
+    ) -> Result<TransactionIter<'_, '_, S::TransactionType<'a>>, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -256,15 +257,17 @@ impl<'a, S: Storage> Transaction<'a, S> {
     /// Fetches all rows for a model inside the current transaction.
     pub fn fetch<M: Model>(
         &mut self,
-    ) -> Result<OrmIter<TransactionIter<'_, S::TransactionType<'a>>, M>, DatabaseError> {
+    ) -> Result<OrmIter<TransactionIter<'_, '_, S::TransactionType<'a>>, M>, DatabaseError> {
         orm_list::<_, M>(self)
     }
 
     /// Lists all table names inside the current transaction.
     pub fn show_tables(
         &mut self,
-    ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
-    {
+    ) -> Result<
+        ProjectValueIter<TransactionIter<'_, '_, S::TransactionType<'a>>, String>,
+        DatabaseError,
+    > {
         Ok(ProjectValueIter::new(
             self.bind(|ctx| ctx.binder.bind_show_tables())?,
         ))
@@ -273,8 +276,10 @@ impl<'a, S: Storage> Transaction<'a, S> {
     /// Lists all view names inside the current transaction.
     pub fn show_views(
         &mut self,
-    ) -> Result<ProjectValueIter<TransactionIter<'_, S::TransactionType<'a>>, String>, DatabaseError>
-    {
+    ) -> Result<
+        ProjectValueIter<TransactionIter<'_, '_, S::TransactionType<'a>>, String>,
+        DatabaseError,
+    > {
         Ok(ProjectValueIter::new(
             self.bind(|ctx| ctx.binder.bind_show_views())?,
         ))
@@ -283,10 +288,12 @@ impl<'a, S: Storage> Transaction<'a, S> {
     /// Describes the schema of the model table inside the current transaction.
     pub fn describe<M: Model>(
         &mut self,
-    ) -> Result<OrmIter<TransactionIter<'_, S::TransactionType<'a>>, DescribeColumn>, DatabaseError>
-    {
+    ) -> Result<
+        OrmIter<TransactionIter<'_, '_, S::TransactionType<'a>>, DescribeColumn>,
+        DatabaseError,
+    > {
         Ok(self
-            .bind(|ctx| ctx.binder.bind_describe(M::table_name().into()))?
+            .bind(|ctx| ctx.binder.bind_describe(M::table_name()))?
             .orm::<DescribeColumn>())
     }
 }

@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::create_accumulators;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
@@ -25,22 +25,20 @@ use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 pub struct SimpleAggExecutor<'a> {
     agg_calls: &'a [ExprRef],
-    input: ExecId,
+    input: ExecNode<'a>,
     returned: bool,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor<'a> {
+impl<'a> ReadExecutor<'a> for SimpleAggExecutor<'a> {
     type Input = (&'a AggregateOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (AggregateOperator { agg_calls, .. }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
-        arena.push(ExecNode::SimpleAgg(SimpleAggExecutor {
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
+        ExecNode::SimpleAgg(Box::new(SimpleAggExecutor {
             agg_calls,
             input,
             returned: false,
@@ -51,16 +49,16 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for SimpleAggExecutor<'
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.returned = false;
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.returned {
@@ -70,7 +68,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'
 
         let mut accs = create_accumulators(self.agg_calls, plan_arena)?;
 
-        while arena.next_tuple(self.input, plan_arena)? {
+        while self.input.next_tuple(arena, plan_arena)? {
             let tuple = arena.result_tuple();
             for (acc, expr) in accs.iter_mut().zip(self.agg_calls.iter()) {
                 let ScalarExpression::AggCall { args, .. } = plan_arena.expression(*expr) else {

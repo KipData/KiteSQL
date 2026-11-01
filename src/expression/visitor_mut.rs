@@ -34,19 +34,6 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for ExprCloner {
         *expr = arena.alloc_expression(arena.expression(*expr).clone());
         walk_mut_expr(self, expr, arena)
     }
-
-    // A deep clone must not share the alias target with the original.
-    fn visit_alias(
-        &mut self,
-        expr: &mut ExprRef,
-        alias: &mut AliasType,
-        arena: &mut A,
-    ) -> Result<(), DatabaseError> {
-        if let AliasType::Expr(alias_expr) = alias {
-            self.visit(alias_expr, arena)?;
-        }
-        self.visit(expr, arena)
-    }
 }
 
 pub(crate) struct PositionShift {

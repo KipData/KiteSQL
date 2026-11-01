@@ -705,7 +705,7 @@ mod test {
     use super::*;
     use crate::errors::DatabaseError;
     use crate::expression::BinaryOperator;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::evaluator::BinaryEvaluatorRef;
     use crate::types::value::DataValue;
@@ -840,19 +840,13 @@ mod test {
     fn test_binary_evaluator_serialization() -> Result<(), DatabaseError> {
         let evaluator = create(LogicalType::Boolean, BinaryOperator::NotEq)?;
         let mut cursor = Cursor::new(Vec::new());
-        let mut reference_tables = ReferenceTables::new();
         let mut arena = crate::planner::TableArena::default();
 
-        evaluator.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        evaluator.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            BinaryEvaluatorRef::decode::<RocksTransaction, _, _>(
-                &mut cursor,
-                None,
-                &reference_tables,
-                &mut arena,
-            )?,
+            BinaryEvaluatorRef::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena,)?,
             evaluator
         );
 

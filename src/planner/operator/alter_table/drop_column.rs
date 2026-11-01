@@ -12,26 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
+use crate::planner::{fmt_table, Explain, MetaArena};
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::fmt;
-use std::fmt::Formatter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct DropColumnOperator {
-    pub table_name: TableName,
+    pub table_id: TableId,
     pub column_name: String,
     pub if_exists: bool,
 }
 
-impl fmt::Display for DropColumnOperator {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(
-            f,
-            "Drop {} -> {}, If Exists: {}",
-            self.column_name, self.table_name, self.if_exists
-        )?;
-
-        Ok(())
+impl Explain for DropColumnOperator {
+    fn fmt<A: MetaArena + ?Sized>(
+        &self,
+        arena: &A,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        write!(f, "Drop {} -> ", self.column_name)?;
+        fmt_table(self.table_id, arena, f)?;
+        write!(f, ", If Exists: {}", self.if_exists)
     }
 }

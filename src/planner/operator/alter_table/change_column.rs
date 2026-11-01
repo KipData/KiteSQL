@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::catalog::TableName;
+use crate::catalog::TableId;
 use crate::planner::MetaArena;
-use crate::planner::{Explain, ExprRef};
+use crate::planner::{fmt_table, Explain, ExprRef};
 use crate::types::LogicalType;
 use kite_sql_serde_macros::ReferenceSerialization;
 
@@ -34,7 +34,7 @@ pub enum NotNullChange {
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct ChangeColumnOperator {
-    pub table_name: TableName,
+    pub table_id: TableId,
     pub old_column_name: String,
     pub new_column_name: String,
     pub data_type: LogicalType,
@@ -48,11 +48,9 @@ impl Explain for ChangeColumnOperator {
         arena: &A,
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
-        write!(
-            f,
-            "Change {} -> {}.{} ({}, ",
-            self.old_column_name, self.table_name, self.new_column_name, self.data_type
-        )?;
+        write!(f, "Change {} -> ", self.old_column_name)?;
+        fmt_table(self.table_id, arena, f)?;
+        write!(f, ".{} ({}, ", self.new_column_name, self.data_type)?;
         match &self.default_change {
             DefaultChange::NoChange => f.write_str("NoChange")?,
             DefaultChange::Set(expr) => write!(f, "Set({})", expr.explain(arena))?,

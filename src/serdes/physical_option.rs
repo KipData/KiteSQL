@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::planner::operator::{PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization, ReferenceTables};
+use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
 use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 
@@ -24,7 +24,6 @@ impl ReferenceSerialization for RowCountOption {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
         match self {
@@ -32,7 +31,7 @@ impl ReferenceSerialization for RowCountOption {
             Self::Unknown => writer.write_all(&[1])?,
             Self::Estimated { rows, .. } => {
                 writer.write_all(&[2])?;
-                rows.encode(writer, is_direct, reference_tables, arena)?;
+                rows.encode(writer, is_direct, arena)?;
             }
         }
         Ok(())
@@ -40,8 +39,7 @@ impl ReferenceSerialization for RowCountOption {
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        context: Option<&mut ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
         let mut tag = [0];
@@ -50,7 +48,7 @@ impl ReferenceSerialization for RowCountOption {
             0 => Self::Follow,
             1 => Self::Unknown,
             2 => Self::Estimated {
-                rows: usize::decode(reader, context, reference_tables, arena)?,
+                rows: usize::decode(reader, context, arena)?,
                 ndv: None,
             },
             _ => return Err(DatabaseError::InvalidValue("invalid row count tag".into())),
@@ -63,27 +61,22 @@ impl ReferenceSerialization for PhysicalOption {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
-        self.plan
-            .encode(writer, is_direct, reference_tables, arena)?;
-        self.sort_option
-            .encode(writer, is_direct, reference_tables, arena)?;
-        self.row_count
-            .encode(writer, is_direct, reference_tables, arena)
+        self.plan.encode(writer, is_direct, arena)?;
+        self.sort_option.encode(writer, is_direct, arena)?;
+        self.row_count.encode(writer, is_direct, arena)
     }
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        context: Option<&ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut context: Option<&mut ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
         Ok(Self {
-            plan: PlanImpl::decode(reader, context, reference_tables, arena)?,
-            sort_option: SortOption::decode(reader, context, reference_tables, arena)?,
-            row_count: RowCountOption::decode(reader, context, reference_tables, arena)?,
+            plan: PlanImpl::decode(reader, context.as_deref_mut(), arena)?,
+            sort_option: SortOption::decode(reader, context.as_deref_mut(), arena)?,
+            row_count: RowCountOption::decode(reader, context, arena)?,
             lookup_work: None,
             join_decided: false,
         })
@@ -134,13 +127,11 @@ mod tests {
         ] {
             for is_direct in [false, true] {
                 let mut encoded = Vec::new();
-                let mut references = ReferenceTables::new();
-                option.encode(&mut encoded, is_direct, &mut references, &arena)?;
+                option.encode(&mut encoded, is_direct, &arena)?;
                 let mut reader = encoded.as_slice();
                 let decoded = PhysicalOption::decode::<TestTransaction<'_>, _, _>(
                     &mut reader,
                     None,
-                    &references,
                     &mut arena,
                 )?;
                 assert_eq!(decoded, option);
@@ -177,28 +168,17 @@ mod tests {
         for is_direct in [false, true] {
             // The wire layout is exactly three ordered fields.
             let mut expected = Vec::new();
-            let mut reference_tables = ReferenceTables::new();
-            option
-                .plan
-                .encode(&mut expected, is_direct, &mut reference_tables, &arena)?;
+            option.plan.encode(&mut expected, is_direct, &arena)?;
             option
                 .sort_option
-                .encode(&mut expected, is_direct, &mut reference_tables, &arena)?;
-            option
-                .row_count
-                .encode(&mut expected, is_direct, &mut reference_tables, &arena)?;
+                .encode(&mut expected, is_direct, &arena)?;
+            option.row_count.encode(&mut expected, is_direct, &arena)?;
             let mut encoded = Vec::new();
-            let mut references = ReferenceTables::new();
-            option.encode(&mut encoded, is_direct, &mut references, &arena)?;
+            option.encode(&mut encoded, is_direct, &arena)?;
             assert_eq!(encoded, expected);
-            assert_eq!(references, reference_tables);
             let mut reader = encoded.as_slice();
-            let decoded = PhysicalOption::decode::<TestTransaction<'_>, _, _>(
-                &mut reader,
-                None,
-                &references,
-                &mut arena,
-            )?;
+            let decoded =
+                PhysicalOption::decode::<TestTransaction<'_>, _, _>(&mut reader, None, &mut arena)?;
             assert_eq!(decoded.plan, PlanImpl::Sort);
             assert_eq!(
                 decoded.row_count,

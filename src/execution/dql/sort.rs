@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
@@ -158,27 +158,25 @@ pub struct Sort<'a> {
     rows: NullableVec<'static, (usize, SortTuple)>,
     _arena: Box<Bump>,
     sort_fields: &'a [SortField],
-    input: ExecId,
+    input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
+impl<'a> ReadExecutor<'a> for Sort<'a> {
     type Input = (&'a SortOperator, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (SortOperator { sort_fields }, input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let input = build_read(arena, plan_arena, input, cache, transaction);
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let input = build_read(arena, plan_arena, input);
         let sort_arena = Box::<Bump>::default();
         let rows = unsafe {
             transmute::<NullableVec<'_, (usize, SortTuple)>, NullableVec<'static, (usize, SortTuple)>>(
                 NullableVec::new(&sort_arena),
             )
         };
-        arena.push(ExecNode::Sort(Sort {
+        ExecNode::Sort(Box::new(Sort {
             rows,
             _arena: sort_arena,
             sort_fields,
@@ -190,16 +188,16 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for Sort<'a> {
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows.clear();
-        arena.reset(self.input, plan_arena)
+        self.input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
@@ -208,7 +206,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
                 arena.produce(row.tuple);
                 return Ok(());
             }
-            while arena.next_tuple(self.input, plan_arena)? {
+            while self.input.next_tuple(arena, plan_arena)? {
                 let offset = self.rows.len();
                 self.rows.put((
                     offset,
@@ -246,7 +244,7 @@ mod test {
     #[test]
     fn memory_sort_restores_scalar_values_for_each_output_row() -> Result<(), DatabaseError> {
         use super::Sort;
-        use crate::execution::{empty_context, ExecArena, ReadExecutor};
+        use crate::execution::ReadExecutor;
         use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
         use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
         use crate::planner::operator::values::ValuesOperator;
@@ -255,14 +253,12 @@ mod test {
             Childrens, ExecMetaArena, LogicalPlan, MetaArena, PlanArena, TableArenaCell,
         };
         use crate::storage::memory::MemoryStorage;
-        use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
+        use crate::storage::{Storage, TableCache};
 
         let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let tables = TableCache::default();
-        let views = ViewCache::default();
-        let stats = StatisticsMetaCache::default();
-        let cache = empty_context(&tables, &views, &stats);
+        let cache = &tables;
         let catalog = TableArenaCell::default();
         let mut metadata = PlanArena::new(&catalog);
         let column = metadata.alloc_column(ColumnCatalog::new(
@@ -305,24 +301,17 @@ mod test {
                 nulls_first: false,
             }],
         };
-        let mut arena = ExecArena::with_capacity(0);
-        arena.init_context(cache, &transaction);
+        let mut exec_buffer = crate::execution::ExecBuffer::default();
+        let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+        let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         // Select the memory executor explicitly even when the spill feature is enabled.
-        let root = <Sort as ReadExecutor<_>>::into_executor(
-            (&op, &plan),
-            &mut arena,
-            &mut metadata,
-            cache,
-            &transaction,
-        );
+        let mut root = <Sort as ReadExecutor>::into_executor((&op, &plan), &mut arena, &metadata);
         let mut metadata = ExecMetaArena::new(metadata);
-        let nodes = arena.nodes.items.len();
-        assert!(arena.next_tuple(root, &mut metadata)?);
+        assert!(root.next_tuple(&mut arena, &mut metadata)?);
         assert_eq!(*arena.result_tuple(), vec![DataValue::Int32(1)]);
-        arena.reset(root, &mut metadata)?;
-        assert_eq!(arena.nodes.items.len(), nodes);
+        root.reset(&mut arena, &mut metadata)?;
         for expected in [1, 2, 3] {
-            assert!(arena.next_tuple(root, &mut metadata)?);
+            assert!(root.next_tuple(&mut arena, &mut metadata)?);
             assert_eq!(*arena.result_tuple(), vec![DataValue::Int32(expected)]);
             assert_eq!(
                 metadata.init_value(result),
@@ -336,18 +325,17 @@ mod test {
                 &DataValue::Int32(expected)
             );
         }
-        assert!(!arena.next_tuple(root, &mut metadata)?);
-        arena.reset(root, &mut metadata)?;
+        assert!(!root.next_tuple(&mut arena, &mut metadata)?);
+        root.reset(&mut arena, &mut metadata)?;
         for expected in [1, 2, 3] {
-            assert!(arena.next_tuple(root, &mut metadata)?);
+            assert!(root.next_tuple(&mut arena, &mut metadata)?);
             assert_eq!(*arena.result_tuple(), vec![DataValue::Int32(expected)]);
             assert_eq!(
                 metadata.init_value(result),
                 Some(&DataValue::Int32(expected))
             );
         }
-        assert!(!arena.next_tuple(root, &mut metadata)?);
-        assert_eq!(arena.nodes.items.len(), nodes);
+        assert!(!root.next_tuple(&mut arena, &mut metadata)?);
         Ok(())
     }
 

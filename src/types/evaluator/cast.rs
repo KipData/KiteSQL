@@ -1220,7 +1220,7 @@ impl CastEvaluatorRef {
 mod test {
     use super::*;
     use crate::errors::DatabaseError;
-    use crate::serdes::{ReferenceSerialization, ReferenceTables};
+    use crate::serdes::ReferenceSerialization;
     use crate::storage::rocksdb::RocksTransaction;
     use crate::types::evaluator::CastEvaluatorRef;
     use crate::types::value::{DataValue, Utf8Type};
@@ -1371,19 +1371,13 @@ mod test {
     fn test_cast_evaluator_serialization() -> Result<(), DatabaseError> {
         let evaluator = create(LogicalType::Integer, LogicalType::Bigint)?;
         let mut cursor = Cursor::new(Vec::new());
-        let mut reference_tables = ReferenceTables::new();
         let mut arena = crate::planner::TableArena::default();
 
-        evaluator.encode(&mut cursor, false, &mut reference_tables, &arena)?;
+        evaluator.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            CastEvaluatorRef::decode::<RocksTransaction, _, _>(
-                &mut cursor,
-                None,
-                &reference_tables,
-                &mut arena
-            )?,
+            CastEvaluatorRef::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena)?,
             evaluator
         );
 

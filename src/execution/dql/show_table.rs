@@ -13,57 +13,55 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor};
+use crate::execution::{
+    ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
+};
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{StorageTransaction, TableIter};
+use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 
-pub struct ShowTables<'a, T: StorageTransaction + 'a> {
-    pub(crate) metas: Option<TableIter<'a, T>>,
+pub struct ShowTables {
+    metas: IterSlot,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for ShowTables<'a, T> {
+impl<'a> ReadExecutor<'a> for ShowTables {
     type Input = ();
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         _: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _: &mut (dyn MetaArena + '_),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::ShowTables(ShowTables { metas: None }))
+        arena: &mut B,
+        _: &(dyn MetaArena + '_),
+    ) -> ExecNode<'a> {
+        let metas = arena.alloc_iter();
+        ExecNode::ShowTables(Box::new(ShowTables { metas }))
     }
 }
 
-impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowTables<'a, T> {
+impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowTables {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        _arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        self.metas = None;
+        *arena.iter_mut(self.metas) = StorageIter::Empty;
         Ok(())
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        if self.metas.is_none() {
+        if arena.iter_mut(self.metas).is_empty() {
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec();
-            self.metas = Some(transaction.tables(table_codec)?);
+            let metas = transaction.tables(table_codec)?;
+            state.iters[self.metas] = StorageIter::Table(metas);
         }
 
-        let Some(table) = self
-            .metas
-            .as_mut()
-            .expect("show tables iterator initialized")
-            .try_next(plan_arena)?
-        else {
+        let metas = arena.iter_mut(self.metas).as_table();
+        let Some(table) = metas.try_next(plan_arena)? else {
             arena.finish();
             return Ok(());
         };

@@ -68,29 +68,33 @@ assert_eq!(adults[0].name, "Alice");
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-For repeated queries, `prepare` builds and optimizes the ORM plan once. Declare
-positional parameter types up front, use `e.param(id)` in the builder, and supply
-values on each execution. The result iterator supports the usual typed ORM decoding:
+For repeated queries, `program` builds and optimizes the ORM plan once, together
+with its executors. Declare positional parameter types up front, use `e.param(id)` in
+the builder, and supply values on each execution inside a transaction. The result
+iterator supports the usual typed ORM decoding:
 
 ```rust,ignore
 use kite_sql::types::LogicalType;
 use kite_sql::types::value::DataValue;
 
-let plan = database.prepare(&[(1, LogicalType::Integer)], |ctx| {
+let mut program = database.program(&[(1, LogicalType::Integer)], |ctx| {
     ctx.from::<User>()?
         .filter(|e| e.column(User::id())?.eq(e.param(1)?))?
         .finish()
 })?;
-let users = database.execute(&plan, [(1, DataValue::Int32(1))])?
+let mut tx = database.new_transaction(false)?;
+let users = program
+    .execute(&mut tx, [(1, DataValue::Int32(1))])?
     .orm::<User>()
     .collect::<Result<Vec<_>, _>>()?;
+tx.commit()?;
 # let _ = users;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-`Transaction::prepare` and `Transaction::execute` provide the same
-workflow within an explicit transaction. The plan must be executed against the
-database that created it; DDL and ANALYZE cannot be prepared.
+`Transaction::program` builds the program against an explicit transaction. A program
+runs one execution at a time, in any transaction of the database that created it;
+DDL and ANALYZE cannot be prepared.
 
 Inside expression closures, `e.column(User::id())?` resolves through the core
 binder and returns a bound expression. Expression methods such as `eq`, `gte`,

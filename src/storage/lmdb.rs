@@ -451,9 +451,7 @@ mod tests {
         kite_sql
             .ddl("create table t1 (a int primary key, b int)")
             .unwrap();
-        kite_sql
-            .load(CatalogKind::Table("t1".to_string().into()))
-            .unwrap();
+        kite_sql.load(CatalogKind::Table("t1".to_string())).unwrap();
         kite_sql
             .run("insert into t1 values (1, 10), (2, 20), (3, 30)")
             .unwrap()
@@ -528,11 +526,12 @@ mod tests {
             .unwrap()
             .done()
             .unwrap();
-        let select = db.prepare_sql("select count(*) from t", &[]).unwrap();
-        let insert = db.prepare_sql("insert into t values (3)", &[]).unwrap();
-        assert!(select.read_only && !insert.read_only);
+        let mut select = db.program_sql("select count(*) from t", &[]).unwrap();
+        let mut insert = db.program_sql("insert into t values (3)", &[]).unwrap();
+        assert!(select.read_only() && !insert.read_only());
         let mut first = db.run("select a from t").unwrap();
-        let mut second = db.execute(&select, []).unwrap();
+        let mut snapshot = db.new_transaction(true).unwrap();
+        let mut second = select.execute(&mut snapshot, []).unwrap();
         let count = second.next_tuple(|_, t| t[0].to_string()).unwrap();
         assert_eq!(count.as_deref(), Some("1"));
         assert!(first.next_tuple(|_, _| ()).unwrap().is_some());
@@ -540,8 +539,9 @@ mod tests {
         let mut reader = db.new_transaction(true).unwrap();
         assert!(reader.run("select a from t").unwrap().done().is_ok());
         assert!(reader.run("insert into t values (4)").is_err());
-        assert!(reader.execute(&insert, []).is_err());
+        assert!(insert.execute(&mut reader, []).is_err());
         drop((first, second, reader));
+        drop(snapshot);
         writer.commit().unwrap();
     }
 
@@ -572,7 +572,7 @@ mod tests {
             .ddl("create table t_metrics (a int primary key, b int)")
             .unwrap();
         kite_sql
-            .load(CatalogKind::Table("t_metrics".to_string().into()))
+            .load(CatalogKind::Table("t_metrics".to_string()))
             .unwrap();
         kite_sql
             .run("insert into t_metrics values (1, 10), (2, 20), (3, 30)")

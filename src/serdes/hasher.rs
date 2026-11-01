@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
 use crate::serdes::stable_hash::StableHasher;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 
 impl ReferenceSerialization for StableHasher {
@@ -23,22 +23,20 @@ impl ReferenceSerialization for StableHasher {
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
         let (key0, key1) = self.keys();
-        key0.encode(writer, is_direct, reference_tables, arena)?;
-        key1.encode(writer, is_direct, reference_tables, arena)
+        key0.encode(writer, is_direct, arena)?;
+        key1.encode(writer, is_direct, arena)
     }
 
     fn decode<T: StorageTransaction, R: std::io::Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
-        let key0 = u64::decode(reader, drive, reference_tables, arena)?;
-        let key1 = u64::decode(reader, drive, reference_tables, arena)?;
+        let key0 = u64::decode(reader, drive.as_deref_mut(), arena)?;
+        let key1 = u64::decode(reader, drive, arena)?;
 
         Ok(StableHasher::new_with_keys(key0, key1))
     }

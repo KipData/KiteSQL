@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 use std::ops::Bound;
@@ -27,19 +27,18 @@ where
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &A,
     ) -> Result<(), DatabaseError> {
         match self {
             Bound::Included(v) => {
                 writer.write_all(&[0])?;
 
-                v.encode(writer, is_direct, reference_tables, arena)?;
+                v.encode(writer, is_direct, arena)?;
             }
             Bound::Excluded(v) => {
                 writer.write_all(&[1])?;
 
-                v.encode(writer, is_direct, reference_tables, arena)?;
+                v.encode(writer, is_direct, arena)?;
             }
             Bound::Unbounded => {
                 writer.write_all(&[2])?;
@@ -51,16 +50,15 @@ where
 
     fn decode<T: StorageTransaction, R: Read, A: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut A,
     ) -> Result<Self, DatabaseError> {
         let mut type_bytes = [0u8; 1];
         reader.read_exact(&mut type_bytes)?;
 
         Ok(match type_bytes[0] {
-            0 => Bound::Included(V::decode(reader, drive, reference_tables, arena)?),
-            1 => Bound::Excluded(V::decode(reader, drive, reference_tables, arena)?),
+            0 => Bound::Included(V::decode(reader, drive.as_deref_mut(), arena)?),
+            1 => Bound::Excluded(V::decode(reader, drive, arena)?),
             2 => Bound::Unbounded,
             _ => unreachable!(),
         })

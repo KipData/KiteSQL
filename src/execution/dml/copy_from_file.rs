@@ -14,9 +14,7 @@
 
 use crate::binder::copy::FileFormat;
 use crate::errors::DatabaseError;
-use crate::execution::{
-    ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
 use crate::planner::operator::copy_from_file::CopyFromFileOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
@@ -30,24 +28,30 @@ pub struct CopyFromFile<'a> {
     op: &'a CopyFromFileOperator,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for CopyFromFile<'a> {
+impl<'a> WriteExecutor<'a> for CopyFromFile<'a> {
     type Input = &'a CopyFromFileOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         op: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::CopyFromFile(CopyFromFile { op }))
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        ExecNode::CopyFromFile(Box::new(CopyFromFile { op }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let op = self.op;
@@ -60,12 +64,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
             .iter()
             .map(|ty| ty.serializable())
             .collect_vec();
-        let table_cache = arena.context().table_cache();
-        let transaction = arena.transaction();
-        let table = transaction
-            .table(table_cache, op.table.clone())?
+        let table = arena
+            .table_cache()
+            .get(&op.table_id)
             .ok_or(DatabaseError::TableNotFound)?;
-        let table_name = table.name().to_string();
 
         let file = File::open(&op.source.path)?;
         let mut buf_reader = BufReader::new(file);
@@ -98,7 +100,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
             tuple_builder.build_with_row(chunk.output_mut(), record.iter().take(column_count))?;
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.append_tuple(table_codec, &table_name, &chunk, &serializers, false)?;
+            transaction.append_tuple(table_codec, table.id(), &chunk, &serializers, false)?;
         }
 
         arena.finish();
@@ -130,7 +132,7 @@ mod tests {
         let tmp_dir = TempDir::new()?;
         let mut db = DataBaseBuilder::path(tmp_dir.path()).build_rocksdb()?;
         db.ddl("create table test_copy (a int primary key, b float, c varchar(10))")?;
-        db.load(CatalogKind::Table("test_copy".to_string().into()))?;
+        db.load(CatalogKind::Table("test_copy".to_string()))?;
 
         fn test_column(
             name: &str,
@@ -142,7 +144,7 @@ mod tests {
                 false,
                 ColumnDesc::new(ty, primary_key, false, None)?,
             );
-            column.set_ref_table("t1".to_string().into(), 1, false);
+            column.set_table(0, 1);
             Ok(column)
         }
 
@@ -158,7 +160,7 @@ mod tests {
         ];
 
         let op = CopyFromFileOperator {
-            table: "test_copy".to_string().into(),
+            table_id: 0,
             source: ExtSource {
                 path: file.path().into(),
                 format: FileFormat::Csv {
@@ -174,11 +176,7 @@ mod tests {
         let transaction = db.storage.transaction()?;
         let mut executor = crate::execution::execute_input_mut::<_, CopyFromFile>(
             &op,
-            crate::execution::test_utils::empty_context(
-                db.state.table_cache(),
-                db.state.view_cache(),
-                db.state.meta_cache(),
-            ),
+            db.state.table_cache(),
             plan_arena,
             &transaction,
         );

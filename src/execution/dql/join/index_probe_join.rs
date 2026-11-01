@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::predicates_matched;
 use crate::execution::{
-    build_read, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, ReadExecutor,
+    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::index_probe_join::IndexProbeJoinOperator;
 use crate::planner::{ExecMetaArena, LogicalPlan, MetaArena};
@@ -24,23 +24,21 @@ use crate::types::index::RuntimeIndexProbe;
 
 pub struct IndexProbeJoin<'a> {
     op: &'a IndexProbeJoinOperator,
-    left_input: ExecId,
-    right_input: ExecId,
+    left_input: ExecNode<'a>,
+    right_input: ExecNode<'a>,
 }
 
-impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexProbeJoin<'a> {
+impl<'a> ReadExecutor<'a> for IndexProbeJoin<'a> {
     type Input = (&'a IndexProbeJoinOperator, &'a LogicalPlan, &'a LogicalPlan);
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         (op, left_input, right_input): Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        plan_arena: &mut (dyn MetaArena + 'a),
-        cache: ExecutionContext<'_>,
-        transaction: &T,
-    ) -> ExecId {
-        let left_input = build_read(arena, plan_arena, left_input, cache, transaction);
-        let right_input = build_read(arena, plan_arena, right_input, cache, transaction);
-        arena.push(ExecNode::IndexProbeJoin(Self {
+        arena: &mut B,
+        plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        let left_input = build_read(arena, plan_arena, left_input);
+        let right_input = build_read(arena, plan_arena, right_input);
+        ExecNode::IndexProbeJoin(Box::new(Self {
             op,
             left_input,
             right_input,
@@ -51,18 +49,18 @@ impl<'a, T: StorageTransaction + 'a> ReadExecutor<'a, T> for IndexProbeJoin<'a> 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> {
     fn reset<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        arena.reset(self.left_input, plan_arena)
+        self.left_input.reset(arena, plan_arena)
     }
 
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        while arena.next_tuple(self.left_input, plan_arena)? {
+        while self.left_input.next_tuple(arena, plan_arena)? {
             let mut left = arena.take_tuple();
             let key = plan_arena
                 .expression(self.op.probe)
@@ -73,8 +71,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
                 continue;
             }
             arena.push_runtime_probe(RuntimeIndexProbe::Eq(key));
-            arena.reset(self.right_input, plan_arena)?;
-            if arena.next_tuple(self.right_input, plan_arena)?
+            self.right_input.reset(arena, plan_arena)?;
+            if self.right_input.next_tuple(arena, plan_arena)?
                 && predicates_matched(&self.op.predicates, &left, arena.result_tuple(), plan_arena)?
             {
                 let mut right = arena.take_tuple();
@@ -95,14 +93,14 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::execution::{execute_input, ExecArena};
+    use crate::execution::execute_input;
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, PlanArena, TableArenaCell};
     use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::{StatisticsMetaCache, Storage, TableCache, ViewCache};
+    use crate::storage::{Storage, TableCache};
     use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
     use crate::types::{CharLengthUnits, LogicalType};
@@ -153,25 +151,10 @@ mod tests {
         }))
     }
 
-    fn build_test_storage() -> Result<
-        (
-            TableCache,
-            ViewCache,
-            StatisticsMetaCache,
-            TempDir,
-            RocksStorage,
-        ),
-        DatabaseError,
-    > {
+    fn build_test_storage() -> Result<(TableCache, TempDir, RocksStorage), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = RocksStorage::new(temp_dir.path())?;
-        Ok((
-            TableCache::default(),
-            ViewCache::default(),
-            StatisticsMetaCache::default(),
-            temp_dir,
-            storage,
-        ))
+        Ok((TableCache::default(), temp_dir, storage))
     }
 
     // Values ignores runtime probes, so it stands in for the unique lookup and the pushed
@@ -211,24 +194,20 @@ mod tests {
             plan_arena.alloc_expression(ScalarExpression::column_expr(right_schema[1], 3));
         let probe = plan_arena.alloc_expression(ScalarExpression::column_expr(left_column, 0));
         let op = IndexProbeJoinOperator::new(probe, vec![equality, residual]);
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
-        let cache = crate::execution::empty_context(&table_cache, &view_cache, &meta_cache);
-        let mut arena = ExecArena::with_capacity(0);
-        arena.init_context(cache, &transaction);
-        let root = <IndexProbeJoin as ReadExecutor<_>>::into_executor(
+        let cache = &table_cache;
+        let mut exec_buffer = crate::execution::ExecBuffer::default();
+        let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+        let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
+        let mut root = <IndexProbeJoin as ReadExecutor>::into_executor(
             (&op, &left, &right),
             &mut arena,
-            &mut plan_arena,
-            cache,
-            &transaction,
+            &plan_arena,
         );
-        let address = arena.nodes.items.as_ptr();
-        let count = arena.nodes.items.len();
-        assert_eq!(count, 3);
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         for payload in ["first", "again"] {
-            assert!(arena.next_tuple(root, &mut plan_arena)?);
+            assert!(root.next_tuple(&mut arena, &mut plan_arena)?);
             assert_eq!(
                 arena.take_tuple(),
                 vec![
@@ -238,13 +217,11 @@ mod tests {
                     DataValue::Boolean(true)
                 ]
             );
-            assert_eq!(arena.nodes.items.as_ptr(), address);
-            assert_eq!(arena.nodes.items.len(), count);
         }
-        assert!(!arena.next_tuple(root, &mut plan_arena)?);
+        assert!(!root.next_tuple(&mut arena, &mut plan_arena)?);
         // The NULL key is skipped without probing.
         assert_eq!(
-            arena.runtime_probe_stack,
+            arena.buffer.runtime_probe_stack,
             [2, 99, 2].map(|key| RuntimeIndexProbe::Eq(DataValue::Int32(key)))
         );
         Ok(())
@@ -269,11 +246,11 @@ mod tests {
         let predicate = plan_arena.alloc_expression(ScalarExpression::column_expr(right_column, 1));
         let probe = plan_arena.alloc_expression(ScalarExpression::column_expr(left_column, 0));
         let op = IndexProbeJoinOperator::new(probe, vec![predicate]);
-        let (table_cache, view_cache, meta_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let mut executor = execute_input::<_, IndexProbeJoin>(
             (&op, &left, &right),
-            crate::execution::empty_context(&table_cache, &view_cache, &meta_cache),
+            &table_cache,
             plan_arena,
             &transaction,
         );

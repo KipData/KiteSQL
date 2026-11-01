@@ -122,3 +122,31 @@ select id from t_update_pk order by id
 
 statement ok
 drop table t_update_pk
+
+# Every SET expression reads the row as it was before the update.
+statement ok
+create table t_update_old_row(id int primary key, a int, b int, c int)
+
+statement ok
+insert into t_update_old_row values (1, 10, 20, 0), (2, 30, 40, 0)
+
+statement ok
+update t_update_old_row set a = b, b = a
+
+query III
+select id, a, b from t_update_old_row order by id
+----
+1 20 10
+2 40 30
+
+statement ok
+update t_update_old_row set a = a + 1, c = a * 2 where id = 1
+
+query IIII
+select id, a, b, c from t_update_old_row order by id
+----
+1 21 10 40
+2 40 30 0
+
+statement ok
+drop table t_update_old_row

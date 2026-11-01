@@ -29,7 +29,7 @@ pub struct View {
 impl View {
     pub(crate) fn visit_column_refs<A, F>(
         &self,
-        arena: &mut A,
+        arena: &A,
         f: &mut F,
     ) -> Result<(), crate::errors::DatabaseError>
     where

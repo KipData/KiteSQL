@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::planner::MetaArena;
-use crate::serdes::{ReferenceSerialization, ReferenceTables};
+use crate::serdes::ReferenceSerialization;
 use crate::storage::StorageTransaction;
 use std::io::{Read, Write};
 
@@ -27,24 +27,22 @@ where
         &self,
         writer: &mut W,
         is_direct: bool,
-        reference_tables: &mut ReferenceTables,
         arena: &AR,
     ) -> Result<(), DatabaseError> {
         let (v1, v2) = self;
-        v1.encode(writer, is_direct, reference_tables, arena)?;
-        v2.encode(writer, is_direct, reference_tables, arena)?;
+        v1.encode(writer, is_direct, arena)?;
+        v2.encode(writer, is_direct, arena)?;
 
         Ok(())
     }
 
     fn decode<T: StorageTransaction, R: Read, AR: MetaArena + ?Sized>(
         reader: &mut R,
-        drive: Option<&crate::serdes::ReferenceDecodeContext<'_, T>>,
-        reference_tables: &ReferenceTables,
+        mut drive: Option<&mut crate::serdes::ReferenceDecodeContext<'_, T>>,
         arena: &mut AR,
     ) -> Result<Self, DatabaseError> {
-        let v1 = A::decode(reader, drive, reference_tables, arena)?;
-        let v2 = B::decode(reader, drive, reference_tables, arena)?;
+        let v1 = A::decode(reader, drive.as_deref_mut(), arena)?;
+        let v2 = B::decode(reader, drive, arena)?;
 
         Ok((v1, v2))
     }

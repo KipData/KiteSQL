@@ -69,7 +69,7 @@ impl ScalarExpression {
                 };
                 Ok(tuple.column(*position))
             }
-            // `AliasType::Expr` only carries the output identity.
+            // `AliasType::Column` only carries the output identity.
             ScalarExpression::Alias { expr, .. } => {
                 let Some(tuple) = tuple else {
                     return Ok(Cow::Owned(DataValue::Null));

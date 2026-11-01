@@ -13,9 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::{
-    DDLApply, ExecArena, ExecId, ExecNode, ExecutionContext, ExecutorNode, WriteExecutor,
-};
+use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::drop_index::DropIndexOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
@@ -24,24 +22,30 @@ pub struct DropIndex<'a> {
     op: &'a DropIndexOperator,
 }
 
-impl<'a, T: StorageTransaction + 'a> WriteExecutor<'a, T> for DropIndex<'a> {
+impl<'a> WriteExecutor<'a> for DropIndex<'a> {
     type Input = &'a DropIndexOperator;
 
-    fn into_executor(
+    fn into_executor<B: ExecBuilder>(
         op: Self::Input,
-        arena: &mut ExecArena<'a, T>,
-        _plan_arena: &mut (dyn MetaArena + 'a),
-        _: ExecutionContext<'_>,
-        _: &T,
-    ) -> ExecId {
-        arena.push(ExecNode::DropIndex(DropIndex { op }))
+        _arena: &mut B,
+        _plan_arena: &(dyn MetaArena + 'a),
+    ) -> ExecNode<'a> {
+        ExecNode::DropIndex(Box::new(DropIndex { op }))
     }
 }
 
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
+    fn reset<A: MetaArena + 'a>(
+        &mut self,
+        _arena: &mut ExecContext<'_, 'a, '_, T>,
+        _plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+
     fn next_tuple<A: MetaArena + 'a>(
         &mut self,
-        arena: &mut ExecArena<'a, T>,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let DropIndexOperator {
@@ -52,20 +56,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
 
         let dropped = {
             let (transaction, table_codec) = arena.transaction_codec_mut();
-            transaction.drop_index(
-                table_codec,
-                plan_arena,
-                table_name.clone(),
-                index_name,
-                *if_exists,
-            )?
+            transaction.drop_index(table_codec, plan_arena, table_name, index_name, *if_exists)?
         };
         if let Some((table, index_id)) = dropped {
+            let table_id = table.id();
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
-            arena.push_ddl_apply(DDLApply::RemoveIndexStatistics {
-                table_name: table_name.clone(),
-                index_id,
-            });
+            arena.push_ddl_apply(DDLApply::RemoveIndexStatistics { table_id, index_id });
         }
 
         arena.finish();
