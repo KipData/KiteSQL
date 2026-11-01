@@ -80,6 +80,7 @@ use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanArena, PlanKeeper}
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{IndexIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter};
 use crate::types::index::RuntimeIndexProbe;
+use crate::types::serialize::BytesPool;
 use crate::types::tuple::{ConcatPool, Input, Schema, Tuple, TupleId, TupleImpl};
 use crate::types::value::DataValue;
 use std::borrow::Cow;
@@ -785,6 +786,19 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
     #[inline]
     pub(crate) fn result_tuple(&self) -> &TupleImpl {
         &self.buffer.result.tuple
+    }
+
+    #[inline]
+    pub(crate) fn bytes_pool(&mut self) -> &mut BytesPool {
+        self.buffer.table_codec.bytes_pool()
+    }
+
+    #[inline]
+    pub(crate) fn result_tuple_and_pool(&mut self) -> (&TupleImpl, &mut BytesPool) {
+        (
+            &self.buffer.result.tuple,
+            self.buffer.table_codec.bytes_pool(),
+        )
     }
 
     #[inline]

@@ -114,19 +114,26 @@ pub(crate) fn update_accumulators<T: TupleLike + ?Sized>(
     arena: &(dyn MetaArena + '_),
 ) -> Result<(), DatabaseError> {
     for (acc, expr) in accs.iter_mut().zip(agg_calls.iter()) {
-        let ScalarExpression::AggCall { args, .. } = arena.expression(*expr) else {
-            unreachable!()
-        };
-        if args.len() > 1 {
-            return Err(DatabaseError::UnsupportedStmt(
-                "currently aggregate functions only support a single Column as a parameter"
-                    .to_string(),
-            ));
-        }
-        let value = arena.expression(args[0]).eval(arena, Some(tuple))?;
+        let value = aggregate_arg(*expr, tuple, arena)?;
         acc.update_value(&value)?;
     }
     Ok(())
+}
+
+pub(crate) fn aggregate_arg<'a, T: TupleLike + ?Sized>(
+    agg_call: ExprRef,
+    tuple: &'a T,
+    arena: &'a (dyn MetaArena + '_),
+) -> Result<Cow<'a, DataValue>, DatabaseError> {
+    let ScalarExpression::AggCall { args, .. } = arena.expression(agg_call) else {
+        unreachable!()
+    };
+    if args.len() > 1 {
+        return Err(DatabaseError::UnsupportedStmt(
+            "currently aggregate functions only support a single Column as a parameter".to_string(),
+        ));
+    }
+    arena.expression(args[0]).eval(arena, Some(tuple))
 }
 
 pub(crate) fn write_aggregate_output(

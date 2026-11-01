@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
-    prepare_accumulators, update_accumulators, write_aggregate_output, Accumulator,
+    aggregate_arg, prepare_accumulators, update_accumulators, write_aggregate_output, Accumulator,
 };
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -25,6 +25,7 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
+use std::borrow::Cow;
 use std::mem;
 
 // The optimizer selects this executor only when equal group keys are contiguous in the input.
@@ -35,7 +36,8 @@ pub struct StreamAggExecutor<'a> {
     group_keys: Vec<DataValue>,
     in_group: bool,
     accs: Vec<Box<dyn Accumulator>>,
-    next_accs: Vec<Box<dyn Accumulator>>,
+    carried: bool,
+    carried_args: Vec<DataValue>,
     input: ExecNode<'a>,
 }
 
@@ -61,7 +63,8 @@ impl<'a> ReadExecutor<'a> for StreamAggExecutor<'a> {
             group_keys: Vec::new(),
             in_group: false,
             accs: Vec::new(),
-            next_accs: Vec::new(),
+            carried: false,
+            carried_args: Vec::new(),
             input,
         }))
     }
@@ -75,6 +78,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
     ) -> Result<(), DatabaseError> {
         self.group_keys.clear();
         self.in_group = false;
+        self.carried = false;
+        self.carried_args.clear();
         self.input.reset(arena, plan_arena)
     }
 
@@ -84,6 +89,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let len = self.groupby_exprs.len();
+        if mem::take(&mut self.carried) {
+            prepare_accumulators(&mut self.accs, self.agg_calls, plan_arena)?;
+            for (acc, arg) in self.accs.iter_mut().zip(&self.carried_args) {
+                acc.update_value(arg)?;
+            }
+            arena.bytes_pool().recycle(&mut self.carried_args);
+        }
         loop {
             if !self.input.next_tuple(arena, plan_arena)? {
                 if !mem::take(&mut self.in_group) {
@@ -117,13 +129,19 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
                 self.group_keys.truncate(len);
                 update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
             } else {
-                prepare_accumulators(&mut self.next_accs, self.agg_calls, plan_arena)?;
-                update_accumulators(&mut self.next_accs, self.agg_calls, tuple, plan_arena)?;
-                mem::swap(&mut self.accs, &mut self.next_accs);
+                let (tuple, pool) = arena.result_tuple_and_pool();
+                for expr in self.agg_calls {
+                    let arg = match aggregate_arg(*expr, tuple, plan_arena)? {
+                        Cow::Owned(arg) => arg,
+                        Cow::Borrowed(arg) => pool.clone_value(arg),
+                    };
+                    self.carried_args.push(arg);
+                }
+                self.carried = true;
                 // Draining the closed group's keys moves the row's keys to the front.
                 write_aggregate_output(
                     arena.output_tuple_mut(),
-                    &mut self.next_accs,
+                    &mut self.accs,
                     self.group_keys.drain(..len),
                 )?;
                 arena.resume();
