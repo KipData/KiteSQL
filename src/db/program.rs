@@ -48,19 +48,16 @@ impl<'p> Program<'p> {
                 "cannot write in a read-only transaction".into(),
             ));
         }
-        transaction.inner.begin_statement_scope()?;
-        let inner = std::ptr::from_mut(&mut transaction.inner);
-        let arena = begin_execution(
+        let arena = start_execution_inner(
             transaction.state.table_cache(),
-            unsafe { &mut *inner },
+            &mut transaction.inner,
             &mut self.executor,
             &mut self.arena,
         )?;
         Ok(ProgramIter {
             guard: TransactionGuard {
                 arena,
-                transaction: inner,
-                statement_scope_active: true,
+                active: true,
             },
             program: self,
         })

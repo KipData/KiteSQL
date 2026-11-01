@@ -285,7 +285,6 @@ impl<S: Storage> Database<S> {
         while let Some(statement) = statements.next() {
             let (plan_arena, executor) = match (|| {
                 let tx = unsafe { &mut *transaction };
-                tx.begin_statement_scope()?;
                 let (plan, arena) = self
                     .state
                     .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))?;
@@ -300,16 +299,12 @@ impl<S: Storage> Database<S> {
             };
 
             if statements.peek().is_some() {
-                if let Err(err) = TransactionIter::new(plan_arena, executor, transaction).done() {
+                if let Err(err) = TransactionIter::new(plan_arena, executor).done() {
                     unsafe { drop(Box::from_raw(transaction)) };
                     return Err(err.with_sql_context(sql));
                 }
             } else {
-                let inner = Box::into_raw(Box::new(TransactionIter::new(
-                    plan_arena,
-                    executor,
-                    transaction,
-                )));
+                let inner = Box::into_raw(Box::new(TransactionIter::new(plan_arena, executor)));
                 return Ok(DatabaseIter { transaction, inner });
             }
         }
@@ -1149,39 +1144,33 @@ where
         let mut input_plan = self.binder.bind_query(query, self.arena)?;
         let input_len = input_plan.output_schema(self.arena).len();
 
-        let targets = {
-            let source = self
-                .binder
-                .context
-                .source(&table_name)?
-                .ok_or(DatabaseError::TableNotFound)?;
-
-            if idents.is_empty() {
-                let table_schema = source.schema();
-                if input_len > table_schema.len() {
-                    return Err(DatabaseError::ValuesLenMismatch(
-                        table_schema.len(),
-                        input_len,
-                    ));
-                }
-                table_schema[..input_len].to_vec()
-            } else {
-                if input_len != idents.len() {
-                    return Err(DatabaseError::ValuesLenMismatch(idents.len(), input_len));
-                }
-                let mut targets = Vec::with_capacity(idents.len());
-                for ident in idents {
-                    let column_name = lower_ident(ident);
-                    let column = source.column(&column_name, self.arena).ok_or_else(|| {
-                        attach_span_if_absent(
-                            DatabaseError::column_not_found(column_name),
-                            ident.span,
-                        )
-                    })?;
-                    targets.push(column);
-                }
-                targets
+        let source = self
+            .binder
+            .context
+            .source(&table_name)?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let targets = if idents.is_empty() {
+            let table_schema = source.schema();
+            if input_len > table_schema.len() {
+                return Err(DatabaseError::ValuesLenMismatch(
+                    table_schema.len(),
+                    input_len,
+                ));
             }
+            Cow::Borrowed(&table_schema[..input_len])
+        } else {
+            if input_len != idents.len() {
+                return Err(DatabaseError::ValuesLenMismatch(idents.len(), input_len));
+            }
+            let mut targets = Vec::with_capacity(idents.len());
+            for ident in idents {
+                let column_name = lower_ident(ident);
+                let column = source.column(&column_name, self.arena).ok_or_else(|| {
+                    attach_span_if_absent(DatabaseError::column_not_found(column_name), ident.span)
+                })?;
+                targets.push(column);
+            }
+            Cow::Owned(targets)
         };
 
         self.binder
@@ -3578,12 +3567,12 @@ mod tests {
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let transaction = tables.storage.transaction()?;
-        let catalog = tables.table_arena.borrow();
+        let arena = tables.table_arena.borrow();
         let mut binder = Binder::new(
             BinderContext::new(
-                &catalog.names,
-                &catalog.tables,
-                &catalog.views,
+                &arena.names,
+                &arena.tables,
+                &arena.views,
                 &transaction,
                 &scala_functions,
                 &table_functions,
@@ -3591,9 +3580,9 @@ mod tests {
             &[],
             None,
         );
-        let mut arena = PlanArena::new(&tables.table_arena);
+        let mut plan_arena = PlanArena::new(&tables.table_arena);
         assert_unsupported(
-            binder.bind(&stmt, &mut arena).unwrap_err(),
+            binder.bind(&stmt, &mut plan_arena).unwrap_err(),
             "only dropping a single column",
         );
 

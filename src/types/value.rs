@@ -1269,11 +1269,26 @@ impl DataValue {
 
     pub(crate) fn memcomparable_len_hint(&self) -> usize {
         1 + match self {
+            // Unbound values fail to encode, so they write nothing past the tag.
+            DataValue::Parameter { .. } | DataValue::InitValue { .. } | DataValue::Null => 0,
+            DataValue::Boolean(_) | DataValue::Int8(_) | DataValue::UInt8(_) => 1,
+            DataValue::Int16(_) | DataValue::UInt16(_) => 2,
+            DataValue::Int32(_)
+            | DataValue::UInt32(_)
+            | DataValue::Float32(_)
+            | DataValue::Date32(_)
+            | DataValue::Time32(..) => 4,
+            DataValue::Int64(_)
+            | DataValue::UInt64(_)
+            | DataValue::Float64(_)
+            | DataValue::Date64(_)
+            | DataValue::Time64(..) => 8,
+            // At most two exponent bytes and 15 base-100 significand bytes.
+            #[cfg(feature = "decimal")]
+            DataValue::Decimal(_) => 17,
             DataValue::Utf8 { value, .. } => Self::encoded_string_len(value.len()),
             DataValue::Binary { value, .. } => Self::encoded_string_len(value.len()),
             DataValue::Tuple(values) => values.iter().map(Self::memcomparable_len_hint).sum(),
-            // Fixed-width values and decimals.
-            _ => 16,
         }
     }
 
@@ -2076,6 +2091,59 @@ mod test {
     use rust_decimal::Decimal;
     use std::cmp::Ordering;
     use std::io::Cursor;
+
+    #[test]
+    fn memcomparable_len_hint_matches_encoding() -> Result<(), DatabaseError> {
+        let utf8 = |value: &str| DataValue::Utf8 {
+            value: value.to_string(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        };
+        let exact = [
+            DataValue::Null,
+            DataValue::Boolean(true),
+            DataValue::Int8(-1),
+            DataValue::UInt8(1),
+            DataValue::Int16(-1),
+            DataValue::UInt16(1),
+            DataValue::Int32(-1),
+            DataValue::UInt32(1),
+            DataValue::Float32(OrderedFloat(-1.5)),
+            DataValue::Date32(1),
+            DataValue::Time32(1, 0),
+            DataValue::Int64(-1),
+            DataValue::UInt64(1),
+            DataValue::Float64(OrderedFloat(1.5)),
+            DataValue::Date64(1),
+            DataValue::Time64(1, 0, false),
+            utf8(""),
+            utf8("kite_sql"),
+            DataValue::Binary {
+                value: vec![1; 9],
+                len: None,
+            },
+            DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Null, utf8("a")]),
+        ];
+        for value in exact {
+            let mut bytes = Vec::new();
+            value.memcomparable_encode(&mut bytes)?;
+            assert_eq!(value.memcomparable_len_hint(), bytes.len(), "{value:?}");
+        }
+        #[cfg(feature = "decimal")]
+        for decimal in [
+            Decimal::ZERO,
+            Decimal::MAX,
+            Decimal::MIN,
+            Decimal::new(1, 28),
+            Decimal::new(-123_456_789, 20),
+        ] {
+            let value = DataValue::Decimal(decimal);
+            let mut bytes = Vec::new();
+            value.memcomparable_encode(&mut bytes)?;
+            assert!(bytes.len() <= value.memcomparable_len_hint(), "{value:?}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn borrowed_tuple_matches_owned_tuple_without_materialization() {

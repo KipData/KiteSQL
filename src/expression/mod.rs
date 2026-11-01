@@ -56,7 +56,8 @@ pub enum TrimWhereField {
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub enum AliasType {
     Name(String),
-    Expr(ExprRef),
+    /// The output column the alias stands for; only its identity matters.
+    Column(ColumnRef),
 }
 
 /// ScalarExpression represnet all scalar expression in SQL.
@@ -572,12 +573,11 @@ impl Explain for ExprRef {
             ScalarExpression::ColumnRef { column, .. } => Explain::fmt(column, arena, f),
             ScalarExpression::Alias { alias, expr } => match alias {
                 AliasType::Name(alias) => f.write_str(alias),
-                AliasType::Expr(alias_expr) => write!(
-                    f,
-                    "({}) as ({})",
-                    expr.explain(arena),
-                    alias_expr.explain(arena)
-                ),
+                AliasType::Column(column) => {
+                    write!(f, "({}) as (", expr.explain(arena))?;
+                    Explain::fmt(column, arena, f)?;
+                    f.write_str(")")
+                }
             },
             ScalarExpression::TypeCast { expr, ty, .. } => {
                 write!(f, "cast ({} as {ty})", expr.explain(arena))
@@ -990,9 +990,9 @@ impl ExprRef {
         match arena.expression(self) {
             ScalarExpression::ColumnRef { column, .. } => *column,
             ScalarExpression::Alias {
-                alias: AliasType::Expr(expr),
+                alias: AliasType::Column(column),
                 ..
-            } => expr.output_column_ref(arena),
+            } => *column,
             _ => {
                 let output_name = self.output_name(arena);
                 let return_type = self.return_type(arena).into_owned();
@@ -1233,7 +1233,7 @@ mod test {
             &mut cursor,
             ScalarExpression::Alias {
                 expr: empty,
-                alias: AliasType::Expr(empty),
+                alias: AliasType::Column(c3_column),
             },
             Some(&mut context),
             &mut plan_arena,

@@ -99,26 +99,22 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
         };
         arena.push_ddl_apply(apply);
 
+        // The old row layout is a prefix of the new one.
+        let mut serializers = old_schema
+            .iter()
+            .map(|column| plan_arena.column(*column).datatype().serializable())
+            .collect_vec();
+        serializers.push(column.datatype().serializable());
+
         let mut state = arena.local_state(plan_arena);
-        let plan_arena = state.plan_arena;
         let (transaction, table_codec) = state.transaction_codec_mut();
         rewrite_table_in_batches(
             transaction,
             table_codec,
             *table_id,
             &pk_ty,
-            old_schema.len(),
-            || {
-                old_schema
-                    .iter()
-                    .map(|column| plan_arena.column(*column).datatype().serializable())
-            },
-            || {
-                old_schema
-                    .iter()
-                    .map(|column| plan_arena.column(*column).datatype().serializable())
-                    .chain(::std::iter::once(column.datatype().serializable()))
-            },
+            &serializers[..old_schema.len()],
+            &serializers,
             |tuple| {
                 if let Some(value) = &default_value {
                     tuple.push(value.clone());

@@ -27,15 +27,28 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
-    pub(crate) fn dml_table(
+    fn insert_table(
         &self,
         table_name: &str,
+        targets: &[ColumnRef],
         arena: &mut PlanArena<'_>,
-    ) -> Result<DmlTable, DatabaseError> {
-        self.context
+    ) -> Result<(DmlTable, Vec<Option<usize>>), DatabaseError> {
+        let catalog = self
+            .context
             .table(table_name)?
-            .ok_or(DatabaseError::TableNotFound)?
-            .dml_table(arena, |_| true)
+            .ok_or(DatabaseError::TableNotFound)?;
+        let table = catalog.dml_table(arena, |_| true)?;
+        let mut sources = vec![None; table.columns.len()];
+        for (position, target) in targets.iter().enumerate() {
+            let column = arena
+                .column(*target)
+                .id()
+                .and_then(|id| catalog.get_column_by_id(&id));
+            if let Some((index, _)) = column {
+                sources[index] = Some(position);
+            }
+        }
+        Ok((table, sources))
     }
 
     pub(crate) fn bind_insert_values(
@@ -47,12 +60,12 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
         is_overwrite: bool,
         arena: &mut PlanArena<'_>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table = self.dml_table(table_name, arena)?;
+        let (table, sources) = self.insert_table(table_name, &targets, arena)?;
         let mut values = Vec::with_capacity(row_count * table.columns.len());
         for row in rows.chunks(targets.len()) {
-            for &column in table.columns.iter() {
-                values.push(match Self::insert_target(&targets, column, arena) {
-                    Some(position) => row[position],
+            for (&column, source) in table.columns.iter().zip(&sources) {
+                values.push(match source {
+                    Some(position) => row[*position],
                     None => Self::insert_default(column, arena)?,
                 });
             }
@@ -76,11 +89,11 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
         is_overwrite: bool,
         arena: &mut PlanArena<'_>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table = self.dml_table(table_name, arena)?;
+        let (table, sources) = self.insert_table(table_name, targets, arena)?;
         // Project the input to all columns in table order, filling in defaults.
         let mut projection = Vec::with_capacity(table.columns.len());
-        for &column in table.columns.iter() {
-            projection.push(match Self::insert_target(targets, column, arena) {
+        for (&column, source) in table.columns.iter().zip(&sources) {
+            projection.push(match *source {
                 Some(position) => {
                     let input = input_plan.output_schema(arena)[position];
                     arena.alloc_expression(ScalarExpression::column_expr(input, position))
@@ -97,17 +110,6 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
             }),
             Childrens::Only(Box::new(input_plan)),
         ))
-    }
-
-    fn insert_target(
-        targets: &[ColumnRef],
-        column: ColumnRef,
-        arena: &PlanArena<'_>,
-    ) -> Option<usize> {
-        let column_id = arena.column(column).id();
-        targets
-            .iter()
-            .rposition(|target| arena.column(*target).id() == column_id)
     }
 
     fn insert_default(

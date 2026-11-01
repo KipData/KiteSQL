@@ -76,10 +76,14 @@ impl NameMapping {
         self.names.get(name)
     }
 
-    pub(crate) fn table<'a>(&self, tables: &'a TableCache, name: &str) -> Option<&'a TableCatalog> {
+    pub(crate) fn table_id(&self, name: &str) -> Option<TableId> {
         self.get(name)
             .filter(|meta| !meta.is_view)
-            .and_then(|meta| tables.get(&meta.id))
+            .map(|meta| meta.id)
+    }
+
+    pub(crate) fn table<'a>(&self, tables: &'a TableCache, name: &str) -> Option<&'a TableCatalog> {
+        self.table_id(name).and_then(|id| tables.get(&id))
     }
 
     pub(crate) fn view<'a>(&self, views: &'a ViewCache, name: &str) -> Option<&'a View> {
@@ -219,14 +223,6 @@ pub trait StorageTransaction: Sized {
 
     fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
         Ok(0)
-    }
-
-    fn begin_statement_scope(&mut self) -> Result<(), DatabaseError> {
-        Ok(())
-    }
-
-    fn end_statement_scope(&mut self) -> Result<(), DatabaseError> {
-        Ok(())
     }
 
     /// The bounds is applied to the whole data batches, not per batch.

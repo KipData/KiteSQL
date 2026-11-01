@@ -219,12 +219,8 @@ impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'_, A> {
                 }
                 ScalarExpression::Alias {
                     expr,
-                    alias: AliasType::Expr(alias),
-                } if matches!(arena.expression(*alias), ScalarExpression::ColumnRef { column: target, .. }
-                        if arena.same_column(*target, column)) =>
-                {
-                    *expr
-                }
+                    alias: AliasType::Column(target),
+                } if arena.same_column(*target, column) => *expr,
                 ScalarExpression::ColumnRef { column: target, .. }
                     if arena.same_column(*target, column) =>
                 {

@@ -90,7 +90,7 @@ impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_,
         (
             ScalarExpression::Alias {
                 expr,
-                alias: AliasType::Expr(alias_ref),
+                alias: AliasType::Column(alias_column),
             },
             alias_ref,
         )

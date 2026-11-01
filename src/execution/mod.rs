@@ -865,15 +865,12 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
     }
 }
 
-/// What building an executor tree needs: storage iterator slots, plus the rows a
-/// recursive step reads, which only exist while a recursive CTE runs.
 pub(crate) trait ExecBuilder {
     fn alloc_iter(&mut self) -> IterSlot;
 
     fn take_recursive_input(&mut self) -> RecursiveInput;
 }
 
-/// Counts the iterator slots of a tree built ahead of any transaction.
 #[derive(Default)]
 struct IterCounter(usize);
 

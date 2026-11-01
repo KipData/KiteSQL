@@ -22,11 +22,7 @@ use crate::types::LogicalType;
 
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     pub(crate) fn bind_truncate(&mut self, table_name: &str) -> Result<LogicalPlan, DatabaseError> {
-        let table_id = self
-            .context
-            .table(table_name)?
-            .ok_or(DatabaseError::TableNotFound)?
-            .id();
+        let table_id = self.context.table_id(table_name)?;
         Ok(LogicalPlan::new(
             Operator::Truncate(TruncateOperator { table_id }),
             Childrens::None,

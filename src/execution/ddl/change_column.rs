@@ -105,32 +105,28 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             }
         }
 
+        let old_serializers = || {
+            old_schema
+                .iter()
+                .map(|column| plan_arena.column(*column).datatype().serializable())
+                .collect_vec()
+        };
         if needs_data_rewrite {
             let target_column_name = new_column_name.clone();
             let target_data_type = data_type.clone();
+            let old_serializers = old_serializers();
+            let mut new_serializers = old_serializers.clone();
+            new_serializers[column_index] = data_type.serializable();
+
             let mut state = arena.local_state(plan_arena);
-            let plan_arena = state.plan_arena;
             let (transaction, table_codec) = state.transaction_codec_mut();
             rewrite_table_in_batches(
                 transaction,
                 table_codec,
                 table_id,
                 &pk_ty,
-                old_schema.len(),
-                || {
-                    old_schema
-                        .iter()
-                        .map(|column| plan_arena.column(*column).datatype().serializable())
-                },
-                || {
-                    old_schema.iter().enumerate().map(|(index, column)| {
-                        if index == column_index {
-                            data_type.serializable()
-                        } else {
-                            plan_arena.column(*column).datatype().serializable()
-                        }
-                    })
-                },
+                &old_serializers,
+                &new_serializers,
                 |tuple| {
                     let value = std::mem::replace(&mut tuple[column_index], DataValue::Null);
                     tuple[column_index] = value.cast(&target_data_type)?;
@@ -143,20 +139,15 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             )?;
         } else if needs_not_null_validation {
             let target_column_name = new_column_name.clone();
+            let old_serializers = old_serializers();
             let mut state = arena.local_state(plan_arena);
-            let plan_arena = state.plan_arena;
             let (transaction, table_codec) = state.transaction_codec_mut();
             visit_table_in_batches(
                 transaction,
                 table_codec,
                 table_id,
                 &pk_ty,
-                old_schema.len(),
-                || {
-                    old_schema
-                        .iter()
-                        .map(|column| plan_arena.column(*column).datatype().serializable())
-                },
+                &old_serializers,
                 |tuple| {
                     if tuple[column_index].is_null() {
                         return Err(DatabaseError::not_null_column(target_column_name.clone()));

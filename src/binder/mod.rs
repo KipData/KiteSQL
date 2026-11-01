@@ -475,8 +475,8 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
     }
 
     pub(crate) fn table_id(&self, table_name: &str) -> Result<TableId, DatabaseError> {
-        self.table(table_name)?
-            .map(TableCatalog::id)
+        self.names
+            .table_id(table_name)
             .ok_or(DatabaseError::TableNotFound)
     }
 
@@ -831,12 +831,12 @@ pub mod test {
             let scala_functions = Default::default();
             let table_functions = Default::default();
             let transaction = self.storage.transaction()?;
-            let catalog = self.table_arena.borrow();
+            let arena = self.table_arena.borrow();
             let mut binder = Binder::new(
                 BinderContext::new(
-                    &catalog.names,
-                    &catalog.tables,
-                    &catalog.views,
+                    &arena.names,
+                    &arena.tables,
+                    &arena.views,
                     &transaction,
                     &scala_functions,
                     &table_functions,
@@ -860,8 +860,8 @@ pub mod test {
         let table_arena = TableArenaCell::default();
         let storage = build_test_catalog(temp_dir.path(), &table_arena)?;
         let table = {
-            let catalog = table_arena.borrow();
-            catalog.names.table(&catalog.tables, "t1").unwrap().clone()
+            let arena = table_arena.borrow();
+            arena.names.table(&arena.tables, "t1").unwrap().clone()
         };
 
         Ok(TableState {
@@ -935,15 +935,15 @@ pub mod test {
         use crate::expression::ScalarExpression;
 
         let state = build_t1_table()?;
-        let catalog = state.table_arena.borrow();
-        let arena = PlanArena::new(&state.table_arena);
+        let arena = state.table_arena.borrow();
+        let plan_arena = PlanArena::new(&state.table_arena);
         let transaction = state.storage.transaction()?;
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let mut context = BinderContext::new(
-            &catalog.names,
-            &catalog.tables,
-            &catalog.views,
+            &arena.names,
+            &arena.tables,
+            &arena.views,
             &transaction,
             &scala_functions,
             &table_functions,
@@ -957,25 +957,37 @@ pub mod test {
             Some("c1".into()),
             None,
             Source::Schema(vec![c1, c1]),
-            &arena,
+            &plan_arena,
         );
         assert!(matches!(
-            context.resolve_column("c1", None, &arena)?,
+            context.resolve_column("c1", None, &plan_arena)?,
             Some(ScalarExpression::ColumnRef { column, position: 0 }) if column == c1
         ));
-        context.add_bound_source("b".into(), None, None, Source::Schema(vec![c2]), &arena);
+        context.add_bound_source(
+            "b".into(),
+            None,
+            None,
+            Source::Schema(vec![c2]),
+            &plan_arena,
+        );
         assert!(matches!(
-            context.resolve_column("c2", Some("b"), &arena)?,
+            context.resolve_column("c2", Some("b"), &plan_arena)?,
             Some(ScalarExpression::ColumnRef { column, position: 2 }) if column == c2
         ));
         // Re-registering a binding preserves its original columns and positions.
-        context.add_bound_source("b".into(), None, None, Source::Schema(vec![c1]), &arena);
+        context.add_bound_source(
+            "b".into(),
+            None,
+            None,
+            Source::Schema(vec![c1]),
+            &plan_arena,
+        );
         assert!(matches!(
-            context.resolve_column("c2", Some("b"), &arena)?,
+            context.resolve_column("c2", Some("b"), &plan_arena)?,
             Some(ScalarExpression::ColumnRef { column, position: 2 }) if column == c2
         ));
         assert!(matches!(
-            context.resolve_column("c1", Some("c1"), &arena)?,
+            context.resolve_column("c1", Some("c1"), &plan_arena)?,
             Some(ScalarExpression::ColumnRef { position: 0, .. })
         ));
         context.add_bound_source(
@@ -983,27 +995,39 @@ pub mod test {
             Some("c1".into()),
             None,
             Source::Schema(vec![c2]),
-            &arena,
+            &plan_arena,
         );
-        assert_eq!(context.name_binding("b", None, &arena).unwrap().position, 2);
+        assert_eq!(
+            context
+                .name_binding("b", None, &plan_arena)
+                .unwrap()
+                .position,
+            2
+        );
         assert!(matches!(
-            context.resolve_column("c1", None, &arena)?,
+            context.resolve_column("c1", None, &plan_arena)?,
             Some(ScalarExpression::ColumnRef { column, position: 0 }) if column == c1
         ));
         assert!(matches!(
-            context.resolve_column("c1", Some("a"), &arena),
+            context.resolve_column("c1", Some("a"), &plan_arena),
             Err(DatabaseError::InvalidTable { .. })
         ));
         let mut fork = context.fork();
-        fork.add_bound_source("c".into(), None, None, Source::Schema(vec![c1]), &arena);
+        fork.add_bound_source(
+            "c".into(),
+            None,
+            None,
+            Source::Schema(vec![c1]),
+            &plan_arena,
+        );
         assert!(matches!(
-            fork.resolve_column("c1", None, &arena),
+            fork.resolve_column("c1", None, &plan_arena),
             Err(DatabaseError::AmbiguousColumn(_))
         ));
-        assert!(context.resolve_column("c1", None, &arena)?.is_some());
+        assert!(context.resolve_column("c1", None, &plan_arena)?.is_some());
         assert!(context
             .fork_empty()
-            .resolve_column("c1", None, &arena)?
+            .resolve_column("c1", None, &plan_arena)?
             .is_none());
         Ok(())
     }

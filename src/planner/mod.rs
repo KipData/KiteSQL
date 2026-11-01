@@ -812,7 +812,7 @@ mod tests {
     fn logical_plan_collects_tables_explains_and_hashes_without_schema_cache() {
         let table_arena = TableArenaCell::default();
         {
-            let catalog = table_arena.borrow_mut();
+            let arena = table_arena.borrow_mut();
             let users = TableCatalog::new(
                 table_id("users"),
                 "users".to_string(),
@@ -821,10 +821,10 @@ mod tests {
                     true,
                     ColumnDesc::new(LogicalType::Integer, None, false, None).unwrap(),
                 )],
-                catalog,
+                arena,
             )
             .unwrap();
-            catalog.names.insert_table(&mut catalog.tables, users);
+            arena.names.insert_table(&mut arena.tables, users);
         }
         let mut arena = PlanArena::new(&table_arena);
         let id = column("id", LogicalType::Integer, &mut arena);

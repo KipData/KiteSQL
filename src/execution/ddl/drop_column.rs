@@ -81,27 +81,22 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                 ));
             }
             {
+                let old_serializers = old_schema
+                    .iter()
+                    .map(|column| plan_arena.column(*column).datatype().serializable())
+                    .collect_vec();
+                let mut new_serializers = old_serializers.clone();
+                new_serializers.remove(column_index);
+
                 let mut state = arena.local_state(plan_arena);
-                let plan_arena = state.plan_arena;
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 rewrite_table_in_batches(
                     transaction,
                     table_codec,
                     *table_id,
                     &pk_ty,
-                    old_schema.len(),
-                    || {
-                        old_schema
-                            .iter()
-                            .map(|column| plan_arena.column(*column).datatype().serializable())
-                    },
-                    || {
-                        old_schema
-                            .iter()
-                            .enumerate()
-                            .filter(|(index, _)| *index != column_index)
-                            .map(|(_, column)| plan_arena.column(*column).datatype().serializable())
-                    },
+                    &old_serializers,
+                    &new_serializers,
                     |tuple| {
                         let _ = tuple.remove(column_index);
                         Ok(())

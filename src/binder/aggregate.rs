@@ -506,10 +506,10 @@ mod tests {
             alias: AliasType::Name("g".to_string()),
         });
 
-        let identity = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
+        let identity = test_column(&mut arena, "identity", LogicalType::Integer);
         let mut target = arena.alloc_expression(ScalarExpression::Alias {
             expr: group_expr,
-            alias: AliasType::Expr(identity),
+            alias: AliasType::Column(identity),
         });
 
         {
@@ -529,13 +529,13 @@ mod tests {
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let transaction = tables.storage.transaction()?;
-        let catalog = tables.table_arena.borrow();
+        let arena = tables.table_arena.borrow();
         let args: [(usize, LogicalType); 0] = [];
         let mut binder = Binder::new(
             BinderContext::new(
-                &catalog.names,
-                &catalog.tables,
-                &catalog.views,
+                &arena.names,
+                &arena.tables,
+                &arena.views,
                 &transaction,
                 &scala_functions,
                 &table_functions,
@@ -544,36 +544,38 @@ mod tests {
             None,
         );
         let table_arena = crate::planner::TableArenaCell::default();
-        let mut arena = PlanArena::new(&table_arena);
-        let group_column = test_column(&mut arena, "c1", LogicalType::Integer);
-        let missing_column = test_column(&mut arena, "c2", LogicalType::Integer);
-        let group_expr = arena.alloc_expression(ScalarExpression::column_expr(group_column, 0));
-        let missing_expr = arena.alloc_expression(ScalarExpression::column_expr(missing_column, 1));
+        let mut plan_arena = PlanArena::new(&table_arena);
+        let group_column = test_column(&mut plan_arena, "c1", LogicalType::Integer);
+        let missing_column = test_column(&mut plan_arena, "c2", LogicalType::Integer);
+        let group_expr =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(group_column, 0));
+        let missing_expr =
+            plan_arena.alloc_expression(ScalarExpression::column_expr(missing_column, 1));
         binder.context.group_by_exprs.push(group_expr);
 
-        binder.validate_having_orderby(group_expr, &arena)?;
-        let group_alias = arena.alloc_expression(ScalarExpression::Alias {
+        binder.validate_having_orderby(group_expr, &plan_arena)?;
+        let group_alias = plan_arena.alloc_expression(ScalarExpression::Alias {
             expr: group_expr,
             alias: AliasType::Name("group_alias".to_string()),
         });
-        binder.validate_having_orderby(group_alias, &arena)?;
+        binder.validate_having_orderby(group_alias, &plan_arena)?;
 
         assert!(matches!(
-            binder.validate_having_orderby(missing_expr, &arena),
+            binder.validate_having_orderby(missing_expr, &plan_arena),
             Err(DatabaseError::AggMiss(_))
         ));
 
-        let registered_agg = test_count(&mut arena, missing_expr);
+        let registered_agg = test_count(&mut plan_arena, missing_expr);
         binder.context.agg_calls.push(registered_agg);
-        binder.validate_having_orderby(registered_agg, &arena)?;
-        let constant = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
-        let unregistered_agg = test_count(&mut arena, constant);
+        binder.validate_having_orderby(registered_agg, &plan_arena)?;
+        let constant = plan_arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
+        let unregistered_agg = test_count(&mut plan_arena, constant);
         assert!(matches!(
-            binder.validate_having_orderby(unregistered_agg, &arena),
+            binder.validate_having_orderby(unregistered_agg, &plan_arena),
             Err(DatabaseError::AggMiss(_))
         ));
 
-        let invalid_binary = arena.alloc_expression(ScalarExpression::Binary {
+        let invalid_binary = plan_arena.alloc_expression(ScalarExpression::Binary {
             op: BinaryOperator::Eq,
             left_expr: group_expr,
             right_expr: missing_expr,
@@ -581,7 +583,7 @@ mod tests {
             ty: LogicalType::Boolean,
         });
         assert!(matches!(
-            binder.validate_having_orderby(invalid_binary, &arena),
+            binder.validate_having_orderby(invalid_binary, &plan_arena),
             Err(DatabaseError::AggMiss(_))
         ));
 

@@ -197,10 +197,10 @@ mod tests {
             alias: AliasType::Name("v".to_string()),
         });
 
-        let identity = arena.alloc_expression(ScalarExpression::Constant(1_i32.into()));
+        let identity = test_column(&mut arena, "identity", LogicalType::Integer);
         let mut target = arena.alloc_expression(ScalarExpression::Alias {
             expr,
-            alias: AliasType::Expr(identity),
+            alias: AliasType::Column(identity),
         });
 
         {

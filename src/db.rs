@@ -609,12 +609,12 @@ fn start_execution<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
     plan_arena: A,
 ) -> Result<Execution<'a, 'p, A, T>, DatabaseError> {
     let mut plan_arena = ExecMetaArena::new(plan_arena);
-    let arena = begin_execution(table_cache, transaction, &mut executor, &mut plan_arena)?;
+    let arena = start_execution_inner(table_cache, transaction, &mut executor, &mut plan_arena)?;
 
     Ok((plan_arena, (executor, arena)))
 }
 
-fn begin_execution<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
+fn start_execution_inner<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
     table_cache: &'p TableCache,
     transaction: &'a mut T,
     executor: &mut Executor<'p>,
@@ -797,7 +797,6 @@ impl<S: Storage> State<S> {
             &mut PlanArena<'a>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        transaction.begin_statement_scope()?;
         let State {
             scala_functions,
             table_functions,
@@ -809,14 +808,14 @@ impl<S: Storage> State<S> {
             statistics_relative_error,
             ..
         } = self;
-        let catalog = table_arena.borrow();
-        let table_cache = &catalog.tables;
+        let arena = table_arena.borrow();
+        let table_cache = &arena.tables;
         let mut plan_arena = PlanArena::new(table_arena);
         let mut binder = Binder::new(
             BinderContext::new(
-                &catalog.names,
+                &arena.names,
                 table_cache,
-                &catalog.views,
+                &arena.views,
                 transaction,
                 scala_functions,
                 table_functions,
@@ -875,9 +874,9 @@ impl DDLApply {
                 catalog_changed = true;
             }
             DDLApply::DropTable { name } => {
-                let catalog = state.table_arena.borrow_mut();
-                if let Some(meta) = catalog.names.remove(&name) {
-                    catalog.tables.remove(&meta.id);
+                let arena = state.table_arena.borrow_mut();
+                if let Some(meta) = arena.names.remove(&name) {
+                    arena.tables.remove(&meta.id);
                     state.meta_cache.remove_table(meta.id);
                 }
                 catalog_changed = true;
@@ -888,9 +887,9 @@ impl DDLApply {
                 catalog_changed = true;
             }
             DDLApply::DropView { name } => {
-                let catalog = state.table_arena.borrow_mut();
-                if let Some(meta) = catalog.names.remove(&name) {
-                    catalog.views.remove(&meta.id);
+                let arena = state.table_arena.borrow_mut();
+                if let Some(meta) = arena.names.remove(&name) {
+                    arena.views.remove(&meta.id);
                 }
                 catalog_changed = true;
             }
@@ -964,7 +963,7 @@ impl<S: Storage> Database<S> {
                 }
             };
         let (result, mut plan_arena, apply) = match (|| {
-            let mut iter = TransactionIter::new(plan_arena, executor, transaction);
+            let mut iter = TransactionIter::new(plan_arena, executor);
             let result = consume(&mut iter)?;
             let (arena, apply) = iter.done_with_ddl_apply()?;
             Ok::<_, DatabaseError>((result, arena, apply))
@@ -1142,7 +1141,6 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
         ));
         let result = (|| {
             let transaction = unsafe { &mut *transaction };
-            transaction.begin_statement_scope()?;
             let (executor, arena) = build(&self.state, transaction)?;
             self.state.execute(transaction, executor, arena)
         })();
@@ -1153,7 +1151,7 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
                 return Err(error);
             }
         };
-        let inner = Box::into_raw(Box::new(TransactionIter::new(arena, executor, transaction)));
+        let inner = Box::into_raw(Box::new(TransactionIter::new(arena, executor)));
         Ok(DatabaseIter { transaction, inner })
     }
 
@@ -1166,10 +1164,9 @@ impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
             &mut PlanArena<'_>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        let mut transaction = self
+        let transaction = self
             .storage
             .transaction_with_isolation(self.transaction_isolation, true)?;
-        transaction.begin_statement_scope()?;
         let (plan, mut arena) = self.state.build_plan(params, &transaction, build)?;
         Ok(plan.explain(&mut arena, 0))
     }
@@ -1353,18 +1350,14 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut Transaction<'txn, S> {
             &Self::Transaction,
         ) -> Result<(Executor<'a>, PlanArena<'a>), DatabaseError>,
     {
-        self.inner.begin_statement_scope()?;
         let (executor, arena) = build(self.state, &self.inner)?;
         if self.read_only && !executor.plan().operator.command_type().is_read_only() {
             return Err(DatabaseError::UnsupportedStmt(
                 "cannot write in a read-only transaction".into(),
             ));
         }
-        let transaction = std::ptr::from_mut(&mut self.inner);
-        let (arena, executor) =
-            self.state
-                .execute(unsafe { &mut *transaction }, executor, arena)?;
-        Ok(TransactionIter::new(arena, executor, transaction))
+        let (arena, executor) = self.state.execute(&mut self.inner, executor, arena)?;
+        Ok(TransactionIter::new(arena, executor))
     }
 
     #[cfg(feature = "orm")]
@@ -1376,7 +1369,6 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut Transaction<'txn, S> {
             &mut PlanArena<'_>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        self.inner.begin_statement_scope()?;
         let (plan, mut arena) = self.state.build_plan(params, &self.inner, build)?;
         Ok(plan.explain(&mut arena, 0))
     }
@@ -1384,29 +1376,23 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut Transaction<'txn, S> {
 
 struct TransactionGuard<'a, 'p, T: StorageTransaction + 'p> {
     arena: ExecArena<'p, 'a, T>,
-    transaction: *mut T,
-    statement_scope_active: bool,
+    active: bool,
 }
 
 impl<T: StorageTransaction> TransactionGuard<'_, '_, T> {
     #[inline]
-    fn finish_statement_scope(
-        &mut self,
-        ddl_apply: &mut Vec<DDLApply>,
-    ) -> Result<(), DatabaseError> {
-        if !self.statement_scope_active {
-            return Ok(());
+    fn finish(&mut self, ddl_apply: &mut Vec<DDLApply>) {
+        if !self.active {
+            return;
         }
-
+        self.active = false;
         self.arena.release_iters();
         ddl_apply.extend(self.arena.take_ddl_apply());
-        self.statement_scope_active = false;
-        unsafe { (*self.transaction).end_statement_scope() }
     }
 }
 
 impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
-    /// Pulls the next row of `executor`, ending the statement scope once the rows run out
+    /// Pulls the next row of `executor`, finishing the execution once the rows run out
     /// or the execution fails.
     #[inline]
     fn next_tuple<A: MetaArena + 'p, R>(
@@ -1416,7 +1402,7 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
         ddl_apply: &mut Vec<DDLApply>,
         f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
     ) -> Result<Option<R>, DatabaseError> {
-        if !self.statement_scope_active {
+        if !self.active {
             return Ok(None);
         }
         match executor.next_tuple(&mut self.arena, plan_arena) {
@@ -1425,11 +1411,11 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
                 Ok(Some(f(&schema, executor.buffer.result_mut())))
             }
             Ok(false) => {
-                self.finish_statement_scope(ddl_apply)?;
+                self.finish(ddl_apply);
                 Ok(None)
             }
             Err(err) => {
-                self.finish_statement_scope(ddl_apply)?;
+                self.finish(ddl_apply);
                 Err(err)
             }
         }
@@ -1438,7 +1424,7 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
 
 impl<T: StorageTransaction> Drop for TransactionGuard<'_, '_, T> {
     fn drop(&mut self) {
-        let _ = self.finish_statement_scope(&mut Vec::new());
+        self.finish(&mut Vec::new());
     }
 }
 
@@ -1458,13 +1444,11 @@ impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TransactionIter<'a, 
     pub(crate) fn new(
         plan_arena: ExecMetaArena<A>,
         (executor, arena): (Executor<'p>, ExecArena<'p, 'a, T>),
-        transaction: *mut T,
     ) -> Self {
         Self {
             guard: TransactionGuard {
                 arena,
-                transaction,
-                statement_scope_active: true,
+                active: true,
             },
             executor,
             plan_arena,

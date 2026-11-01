@@ -29,11 +29,8 @@ use std::mem;
 
 pub struct Insert<'a> {
     table: &'a DmlTable,
-    // Its rows hold all columns of the table, in table order.
     input: ExecNode<'a>,
-    // Reused by every row of every execution.
     tuple: TupleImpl,
-    // Set once the statement ran; cleared when the executor is reset.
     done: bool,
     is_overwrite: bool,
 }

@@ -739,8 +739,8 @@ impl Operator {
                 alias: &AliasType,
                 arena: &A,
             ) -> Result<(), DatabaseError> {
-                if let AliasType::Expr(alias_expr) = alias {
-                    self.visit(*alias_expr, arena)?;
+                if let AliasType::Column(column) = alias {
+                    self.visit_column_ref(column, 0)?;
                 }
                 self.visit(expr, arena)
             }
@@ -1223,15 +1223,15 @@ mod tests {
     fn users_table_arena() -> TableArenaCell {
         let table_arena = TableArenaCell::default();
         {
-            let catalog = table_arena.borrow_mut();
+            let arena = table_arena.borrow_mut();
             let users = crate::catalog::TableCatalog::new(
                 0,
                 "users".to_string(),
                 vec![column_catalog("id")],
-                catalog,
+                arena,
             )
             .unwrap();
-            catalog.insert_table(users);
+            arena.insert_table(users);
         }
         table_arena
     }

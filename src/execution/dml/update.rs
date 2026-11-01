@@ -31,7 +31,6 @@ pub struct Update<'a> {
     table: &'a DmlTable,
     value_exprs: &'a [(usize, ExprRef)],
     input: ExecNode<'a>,
-    // Set once the statement ran; cleared when the executor is reset.
     done: bool,
 }
 

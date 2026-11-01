@@ -28,11 +28,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
         primary_keys: Vec<ColumnRef>,
         input: LogicalPlan,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let table_id = self
-            .context
-            .table(table_name)?
-            .ok_or(DatabaseError::TableNotFound)?
-            .id();
+        let table_id = self.context.table_id(table_name)?;
         Ok(LogicalPlan::new(
             Operator::Delete(DeleteOperator {
                 table_id,

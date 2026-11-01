@@ -1152,8 +1152,8 @@ where
         mutation_source: bool,
     ) -> Result<BindPlanFrom<'scope, 'bind, 'parent, 'arena, T, A, M>, DatabaseError> {
         if mutation_source {
-            if let Some(table) = self.binder.context.table(&source.table_name)? {
-                self.binder.with_pk(table.id());
+            if let Ok(table_id) = self.binder.context.table_id(&source.table_name) {
+                self.binder.with_pk(table_id);
             }
         }
         let plan = bind_orm_source(self.binder, source, None, self.arena);
@@ -2391,8 +2391,8 @@ where
         let table_name = M::table_name();
         let source_name = self.model_relation_name()?;
         self.binder.context.allow_default = true;
-        if let Some(table) = self.binder.context.table(table_name)? {
-            self.binder.with_pk(table.id());
+        if let Ok(table_id) = self.binder.context.table_id(table_name) {
+            self.binder.with_pk(table_id);
         }
         let mut scope = UpdateBindScope {
             binder: self.binder,
@@ -2636,34 +2636,31 @@ where
 {
     let input_len = input_plan.output_schema(arena).len();
 
-    let targets = {
-        let source = binder
-            .context
-            .source(table_name)?
-            .ok_or(DatabaseError::TableNotFound)?;
-
-        if columns.is_empty() {
-            let table_schema = source.schema();
-            if input_len > table_schema.len() {
-                return Err(DatabaseError::ValuesLenMismatch(
-                    table_schema.len(),
-                    input_len,
-                ));
-            }
-            table_schema[..input_len].to_vec()
-        } else {
-            if input_len != columns.len() {
-                return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
-            }
-            let mut targets = Vec::with_capacity(columns.len());
-            for column_name in columns {
-                let column = source
-                    .column(&column_name, arena)
-                    .ok_or_else(|| DatabaseError::column_not_found(column_name.clone()))?;
-                targets.push(column);
-            }
-            targets
+    let source = binder
+        .context
+        .source(table_name)?
+        .ok_or(DatabaseError::TableNotFound)?;
+    let targets = if columns.is_empty() {
+        let table_schema = source.schema();
+        if input_len > table_schema.len() {
+            return Err(DatabaseError::ValuesLenMismatch(
+                table_schema.len(),
+                input_len,
+            ));
         }
+        Cow::Borrowed(&table_schema[..input_len])
+    } else {
+        if input_len != columns.len() {
+            return Err(DatabaseError::ValuesLenMismatch(columns.len(), input_len));
+        }
+        let mut targets = Vec::with_capacity(columns.len());
+        for column_name in columns {
+            let column = source
+                .column(&column_name, arena)
+                .ok_or_else(|| DatabaseError::column_not_found(column_name.clone()))?;
+            targets.push(column);
+        }
+        Cow::Owned(targets)
     };
 
     binder.bind_insert_query(table_name, input_plan, &targets, overwrite, arena)

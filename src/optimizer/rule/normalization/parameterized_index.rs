@@ -994,10 +994,9 @@ mod inner_join_tests {
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         ));
-        let alias_column = arena.alloc_expression(ScalarExpression::column_expr(output, 0));
         let alias = arena.alloc_expression(ScalarExpression::Alias {
             expr: source,
-            alias: AliasType::Expr(alias_column),
+            alias: AliasType::Column(output),
         });
         let project = |input| {
             LogicalPlan::new(
@@ -1045,7 +1044,7 @@ mod inner_join_tests {
         });
         let computed = arena.alloc_expression(ScalarExpression::Alias {
             expr: computed,
-            alias: AliasType::Expr(alias_column),
+            alias: AliasType::Column(output),
         });
         let mut projected = LogicalPlan::new(
             Operator::Project(ProjectOperator::new(vec![computed])),

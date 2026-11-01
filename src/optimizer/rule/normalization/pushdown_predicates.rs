@@ -696,7 +696,7 @@ mod tests {
         let constant = arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(true)));
         let alias = arena.alloc_expression(ScalarExpression::Alias {
             expr: right,
-            alias: AliasType::Expr(left),
+            alias: AliasType::Column(left_column),
         });
         for right_columns in [vec![right_column], vec![left_column, right_column]] {
             let mut children = Childrens::Twins {

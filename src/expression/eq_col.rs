@@ -781,15 +781,15 @@ mod tests {
             &mut arena,
             ScalarExpression::Alias {
                 expr: different_child,
-                alias: AliasType::Expr(lhs_child),
+                alias: AliasType::Column(lhs_column),
             },
             ScalarExpression::Alias {
                 expr: different_child,
-                alias: AliasType::Expr(rhs_child),
+                alias: AliasType::Column(rhs_column),
             },
             ScalarExpression::Alias {
                 expr: lhs_child,
-                alias: AliasType::Expr(different_child),
+                alias: AliasType::Column(different_column),
             },
         );
         assert_case(

@@ -870,16 +870,12 @@ impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder
                 matches!(
                     arena.expression(*expr),
                     ScalarExpression::Alias {
-                        alias: AliasType::Expr(alias_expr),
+                        alias: AliasType::Column(column),
                         ..
                     } if matches!(
-                        alias_expr.unpack_alias_ref(arena),
-                        ScalarExpression::ColumnRef { column, .. }
-                            if matches!(
-                                &arena.column(*column).summary().relation,
-                                crate::catalog::ColumnRelation::Source { is_temp, .. }
-                                    if *is_temp == temp
-                            )
+                        &arena.column(*column).summary().relation,
+                        crate::catalog::ColumnRelation::Source { is_temp, .. }
+                            if *is_temp == temp
                     )
                 )
             })
@@ -1170,11 +1166,9 @@ impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder
             };
 
             let expr = arena.alloc_expression(ScalarExpression::column_expr(column, position));
-            let alias_expr =
-                arena.alloc_expression(ScalarExpression::column_expr(alias_column, position));
             let alias_column_expr = arena.alloc_expression(ScalarExpression::Alias {
                 expr,
-                alias: AliasType::Expr(alias_expr),
+                alias: AliasType::Column(alias_column),
             });
             self.context
                 .add_alias(Some(table_alias.to_string()), alias, alias_column_expr);
@@ -1199,11 +1193,9 @@ impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder
             let source_column = arena.alloc_column(source_column);
 
             let expr = arena.alloc_expression(ScalarExpression::column_expr(column, position));
-            let alias_expr =
-                arena.alloc_expression(ScalarExpression::column_expr(source_column, position));
             source_exprs.push(arena.alloc_expression(ScalarExpression::Alias {
                 expr,
-                alias: AliasType::Expr(alias_expr),
+                alias: AliasType::Column(source_column),
             }));
         }
 

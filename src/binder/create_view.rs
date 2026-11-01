@@ -55,10 +55,9 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
                 let output_column = arena.alloc_column(column);
 
                 let expr = arena.alloc_expression(ScalarExpression::column_expr(mapping_column, i));
-                let alias = arena.alloc_expression(ScalarExpression::column_expr(output_column, i));
                 exprs.push(arena.alloc_expression(ScalarExpression::Alias {
                     expr,
-                    alias: AliasType::Expr(alias),
+                    alias: AliasType::Column(output_column),
                 }));
             }
             exprs
