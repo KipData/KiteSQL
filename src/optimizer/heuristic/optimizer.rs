@@ -914,9 +914,9 @@ mod tests {
         assert_eq!(
             index_info.lookup,
             Some(IndexLookup::Static(Range::SortedRanges(vec![
-                Range::Eq(DataValue::Int32(2)),
+                Range::Eq(DataValue::Int32(2).into()),
                 Range::Scope {
-                    min: Bound::Excluded(DataValue::Int32(40)),
+                    min: Bound::Excluded(DataValue::Int32(40).into()),
                     max: Bound::Unbounded,
                 }
             ])))

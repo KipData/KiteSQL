@@ -195,7 +195,7 @@ mod test {
                 range,
                 Range::Scope {
                     min: Bound::Unbounded,
-                    max: Bound::Excluded(DataValue::Int32(-2)),
+                    max: Bound::Excluded(DataValue::Int32(-2).into()),
                 }
             );
         } else {
@@ -362,7 +362,7 @@ mod test {
         let mut arena = PlanArena::new(&table_state.table_arena);
         let expected = Some(Range::Scope {
             min: Bound::Unbounded,
-            max: Bound::Included(DataValue::Int32(10)),
+            max: Bound::Included(DataValue::Int32(10).into()),
         });
 
         for sql in [
@@ -546,20 +546,20 @@ mod test {
             range_1_c1,
             Range::Scope {
                 min: Bound::Unbounded,
-                max: Bound::Excluded(DataValue::Int32(-2))
+                max: Bound::Excluded(DataValue::Int32(-2).into())
             }
         );
         assert_eq!(
             range_1_c2,
             Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(2)),
+                min: Bound::Excluded(DataValue::Int32(2).into()),
                 max: Bound::Unbounded
             }
         );
         assert_eq!(
             range_2_c1,
             Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(2)),
+                min: Bound::Excluded(DataValue::Int32(2).into()),
                 max: Bound::Unbounded
             }
         );
@@ -567,27 +567,27 @@ mod test {
             range_2_c2,
             Range::Scope {
                 min: Bound::Unbounded,
-                max: Bound::Excluded(DataValue::Int32(-2))
+                max: Bound::Excluded(DataValue::Int32(-2).into())
             }
         );
         assert_eq!(
             range_3_c1,
             Range::Scope {
                 min: Bound::Unbounded,
-                max: Bound::Excluded(DataValue::Int32(-1))
+                max: Bound::Excluded(DataValue::Int32(-1).into())
             }
         );
         assert_eq!(
             range_3_c2,
             Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(0)),
+                min: Bound::Excluded(DataValue::Int32(0).into()),
                 max: Bound::Unbounded
             }
         );
         assert_eq!(
             range_4_c1,
             Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(0)),
+                min: Bound::Excluded(DataValue::Int32(0).into()),
                 max: Bound::Unbounded
             }
         );
@@ -595,7 +595,7 @@ mod test {
             range_4_c2,
             Range::Scope {
                 min: Bound::Unbounded,
-                max: Bound::Excluded(DataValue::Int32(-1))
+                max: Bound::Excluded(DataValue::Int32(-1).into())
             }
         );
 
@@ -644,7 +644,7 @@ mod test {
 
         assert_eq!(
             plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
-            Some(Range::Eq(DataValue::Null))
+            Some(Range::Eq(DataValue::Null.into()))
         );
 
         Ok(())
@@ -661,7 +661,7 @@ mod test {
             plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
             Some(Range::Scope {
                 min: Bound::Unbounded,
-                max: Bound::Excluded(DataValue::Null),
+                max: Bound::Excluded(DataValue::Null.into()),
             })
         );
 
@@ -736,9 +736,9 @@ mod test {
         assert_eq!(
             plan_filter(&plan_1, table_state.column_id_by_name("c1"), &mut arena)?,
             Some(Range::SortedRanges(vec![
-                Range::Eq(DataValue::Int32(1)),
-                Range::Eq(DataValue::Int32(2)),
-                Range::Eq(DataValue::Int32(3)),
+                Range::Eq(DataValue::Int32(1).into()),
+                Range::Eq(DataValue::Int32(2).into()),
+                Range::Eq(DataValue::Int32(3).into()),
             ]))
         );
 

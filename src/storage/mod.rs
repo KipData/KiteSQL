@@ -23,7 +23,7 @@ use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableId, TableMeta, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
 use crate::errors::DatabaseError;
-use crate::expression::range_detacher::Range;
+use crate::expression::range_detacher::{Range, RangeValue};
 use crate::expression::TypeCast;
 use crate::iter_ext::Itertools;
 use crate::optimizer::core::cm_sketch::{
@@ -1327,7 +1327,7 @@ fn index_values(value: &DataValue) -> &[DataValue] {
 #[inline]
 fn encode_bound<'a>(
     table_codec: &mut TableCodec,
-    bound: &Bound<DataValue>,
+    bound: &Bound<RangeValue>,
     is_upper: bool,
     buffer: &'a mut Bytes,
     params: &IndexImplParams<'_, impl StorageTransaction>,
@@ -1335,11 +1335,11 @@ fn encode_bound<'a>(
 ) -> Result<Bound<&'a [u8]>, DatabaseError> {
     match bound {
         Bound::Included(val) => {
-            inner.bound_key(table_codec, params, val, is_upper, buffer)?;
+            inner.bound_key(table_codec, params, val.value()?, is_upper, buffer)?;
             Ok(Bound::Included(buffer.as_slice()))
         }
         Bound::Excluded(val) => {
-            inner.bound_key(table_codec, params, val, !is_upper, buffer)?;
+            inner.bound_key(table_codec, params, val.value()?, !is_upper, buffer)?;
             Ok(Bound::Excluded(buffer.as_slice()))
         }
         Bound::Unbounded => Ok(Bound::Unbounded),
@@ -2200,7 +2200,9 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
 
     pub(crate) fn reset_probe(&mut self, probe: RuntimeIndexProbe, bounds: Bounds) {
         match (&mut self.ranges.source, probe) {
-            (RangeSource::Owned(Range::Eq(value)), RuntimeIndexProbe::Eq(probe)) => *value = probe,
+            (RangeSource::Owned(Range::Eq(value)), RuntimeIndexProbe::Eq(probe)) => {
+                *value = RangeValue::Value(probe)
+            }
             (source, probe) => *source = RangeSource::Owned(probe.into()),
         }
         self.rewind(bounds);
@@ -2280,7 +2282,7 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
                             match self.inner.eq_to_res(
                                 table_codec,
                                 tuple,
-                                val,
+                                val.value()?,
                                 &self.params,
                                 &mut self.encode_min_buffer,
                                 &mut self.encode_max_buffer,

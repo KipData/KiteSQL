@@ -631,64 +631,6 @@ impl Hash for DataValue {
     }
 }
 impl DataValue {
-    /// Estimate bound selectivity using the complete index key type.
-    pub(crate) fn bound_selectivity(
-        min: std::ops::Bound<&Self>,
-        max: std::ops::Bound<&Self>,
-        key_type: &LogicalType,
-        distinct: f64,
-    ) -> f64 {
-        use std::ops::Bound;
-
-        match (min, max, key_type) {
-            (
-                Bound::Included(Self::Tuple(lower)) | Bound::Excluded(Self::Tuple(lower)),
-                Bound::Included(Self::Tuple(upper)) | Bound::Excluded(Self::Tuple(upper)),
-                LogicalType::Tuple(fields),
-            ) if !fields.is_empty() => {
-                if lower == upper
-                    && lower.len() == fields.len()
-                    && upper.len() == fields.len()
-                    && (matches!(min, Bound::Excluded(_)) || matches!(max, Bound::Excluded(_)))
-                {
-                    return 0.0;
-                }
-                // Approximate field NDV from full-key NDV; no per-field statistics.
-                let distinct = distinct.powf(1.0 / fields.len() as f64);
-                let mut divisor = 1.0;
-                for (i, field) in fields.iter().enumerate() {
-                    let (min, max, is_range) = match (lower.get(i), upper.get(i)) {
-                        (Some(lower), Some(upper)) => (
-                            Bound::Included(lower),
-                            Bound::Included(upper),
-                            lower != upper,
-                        ),
-                        (Some(lower), None) => (Bound::Included(lower), Bound::Unbounded, true),
-                        (None, Some(upper)) => (Bound::Unbounded, Bound::Included(upper), true),
-                        (None, None) => return 1.0 / divisor,
-                    };
-                    let selectivity = Self::bound_selectivity(min, max, field, distinct);
-                    if selectivity == 0.0 {
-                        return 0.0;
-                    }
-                    divisor /= selectivity;
-                    // Only the equal prefix and first differing field constrain
-                    // a lexicographic range. Missing fields delimit the prefix.
-                    if is_range {
-                        return 1.0 / divisor;
-                    }
-                }
-                1.0 / divisor
-            }
-            (Bound::Included(lower), Bound::Included(upper), _) if lower == upper => 1.0 / distinct,
-            (Bound::Unbounded, Bound::Unbounded, _) => 1.0,
-            // SQLite 3.45.3 whereRangeScanEst fallback: 1/4 for one bound,
-            // 1/64 for two. These are heuristics, not bucket estimates.
-            (Bound::Unbounded, _, _) | (_, Bound::Unbounded, _) => 1.0 / 4.0,
-            _ => 1.0 / 64.0,
-        }
-    }
-
     pub(crate) fn parameter_id(placeholder: &str) -> Option<usize> {
         let digits = placeholder.strip_prefix('$')?;
         if digits.is_empty() || digits.starts_with('0') {
@@ -712,7 +654,7 @@ impl DataValue {
                     return Err(DatabaseError::parameter_not_found(format!("${id}")));
                 };
                 *self = input.clone().cast(ty)?;
-                Ok(false)
+                Ok(self.is_null())
             }
             DataValue::InitValue { id, ty } => {
                 let Some(input) = init_values(*id) else {

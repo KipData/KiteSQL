@@ -27,7 +27,6 @@ use crate::planner::operator::{Operator, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef};
 use crate::types::serialize::TupleValueSerializableImpl;
-use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::ops::Bound;
 use std::{mem, slice};
@@ -471,12 +470,10 @@ impl PushPredicateIntoScan {
             if range.only_eq() && apply_column_count != column_count {
                 fn eq_to_scope(range: Range) -> Range {
                     match range {
-                        Range::Eq(DataValue::Tuple(values)) => {
-                            let min = Bound::Included(DataValue::Tuple(values.clone()));
-                            let max = Bound::Included(DataValue::Tuple(values));
-
-                            Range::Scope { min, max }
-                        }
+                        Range::Eq(value) if value.is_tuple() => Range::Scope {
+                            min: Bound::Included(value.clone()),
+                            max: Bound::Included(value),
+                        },
                         Range::SortedRanges(mut ranges) => {
                             for range in ranges.iter_mut() {
                                 let tmp = mem::replace(range, Range::Dummy);
@@ -770,7 +767,7 @@ mod tests {
             assert_eq!(
                 op.index_infos[0].lookup,
                 Some(IndexLookup::Static(Range::Scope {
-                    min: Bound::Excluded(DataValue::Int32(1)),
+                    min: Bound::Excluded(DataValue::Int32(1).into()),
                     max: Bound::Unbounded,
                 }))
             );
@@ -802,7 +799,7 @@ mod tests {
             (
                 first_range,
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)]).into()),
                     max: Bound::Unbounded,
                 },
                 0,
@@ -810,17 +807,14 @@ mod tests {
             (
                 first_eq,
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
-                    max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)]).into()),
+                    max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)]).into()),
                 },
                 1,
             ),
             (
                 full_eq,
-                Range::Eq(DataValue::Tuple(vec![
-                    DataValue::Int32(2),
-                    DataValue::Int32(3),
-                ])),
+                Range::Eq(DataValue::Tuple(vec![DataValue::Int32(2), DataValue::Int32(3)]).into()),
                 2,
             ),
         ] {
@@ -917,17 +911,23 @@ mod tests {
         assert_eq!(ignore_prefix_len, 3);
         assert_eq!(
             detached.range,
-            Range::Eq(DataValue::Tuple(vec![
-                DataValue::Int32(1),
-                DataValue::Int32(2),
-                DataValue::Int32(3),
-            ],))
+            Range::Eq(
+                DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(2),
+                    DataValue::Int32(3),
+                ],)
+                .into()
+            )
         );
         let residual = detached.residual.expect("c4 predicate should remain");
         let residual_detached = RangeDetacher::new(0, &4, &mut arena)
             .detach(residual)?
             .expect("residual should be the c4 predicate");
-        assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(4)));
+        assert_eq!(
+            residual_detached.range,
+            Range::Eq(DataValue::Int32(4).into())
+        );
         assert_eq!(residual_detached.residual, None);
 
         Ok(())
@@ -978,18 +978,20 @@ mod tests {
         assert_eq!(
             detached.range,
             Range::Scope {
-                min: Bound::Excluded(DataValue::Tuple(vec![
-                    DataValue::Int32(1),
-                    DataValue::Int32(2)
-                ],)),
-                max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)])),
+                min: Bound::Excluded(
+                    DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(2)],).into()
+                ),
+                max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)]).into()),
             }
         );
         let residual = detached.residual.expect("c3 predicate should remain");
         let residual_detached = RangeDetacher::new(0, &3, &mut arena)
             .detach(residual)?
             .expect("residual should be the c3 predicate");
-        assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(3)));
+        assert_eq!(
+            residual_detached.range,
+            Range::Eq(DataValue::Int32(3).into())
+        );
         assert_eq!(residual_detached.residual, None);
 
         Ok(())

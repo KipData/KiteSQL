@@ -227,7 +227,7 @@ mod tests {
             loader.collect_count(
                 index.table_id,
                 index.id,
-                &Range::Eq(DataValue::Int32(7)),
+                &Range::Eq(DataValue::Int32(7).into()),
                 &mut Vec::new()
             )?,
             Some((1, histogram.distinct_values_len()))

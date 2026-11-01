@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::range_detacher::Range;
+use crate::expression::range_detacher::{Range, RangeValue, RangeValueRef};
 use crate::expression::BinaryOperator;
 use crate::optimizer::core::cm_sketch::CountMinSketch;
 use crate::optimizer::core::hll::HyperLogLog;
@@ -287,7 +287,7 @@ impl BoundComparator {
 fn is_under(
     comparator: &BoundComparator,
     value: &DataValue,
-    target: &Bound<DataValue>,
+    target: Bound<&DataValue>,
     is_min: bool,
 ) -> Result<bool, DatabaseError> {
     let _is_under = |value: &DataValue, target: &DataValue, is_min: bool| {
@@ -308,7 +308,7 @@ fn is_under(
 fn is_above(
     comparator: &BoundComparator,
     value: &DataValue,
-    target: &Bound<DataValue>,
+    target: Bound<&DataValue>,
     is_min: bool,
 ) -> Result<bool, DatabaseError> {
     let _is_above = |value: &DataValue, target: &DataValue, is_min: bool| {
@@ -449,14 +449,14 @@ impl Histogram {
         let distinct = self.distinct_values_len().max(1) as f64;
         match range {
             Range::Dummy => 0.0,
-            Range::Eq(value) => DataValue::bound_selectivity(
+            Range::Eq(value) => bound_selectivity(
                 Bound::Included(value),
                 Bound::Included(value),
                 &key_type,
                 distinct,
             ),
             Range::Scope { min, max } => {
-                DataValue::bound_selectivity(min.as_ref(), max.as_ref(), &key_type, distinct)
+                bound_selectivity(min.as_ref(), max.as_ref(), &key_type, distinct)
             }
             Range::SortedRanges(ranges) => ranges
                 .iter()
@@ -476,7 +476,7 @@ impl Histogram {
         if self.buckets.is_empty() || ranges.is_empty() {
             return Ok(0);
         }
-        if ranges.iter().any(Range::has_parameter) {
+        if ranges.iter().any(|range| range.has_parameter()) {
             let selectivity = ranges
                 .iter()
                 .map(|range| self.estimate_range_selectivity(range))
@@ -530,6 +530,8 @@ impl Histogram {
 
         match &ranges[*binary_i] {
             Range::Scope { min, max } => {
+                // Ranges with parameters are estimated instead, so these bounds hold values.
+                let (min, max) = (RangeValue::bound(min)?, RangeValue::bound(max)?);
                 let bucket = &self.buckets[*bucket_i];
                 let mut bucket_count = bucket.count as usize;
                 if *bucket_i == 0 && scope_lower_includes_null(min) {
@@ -538,7 +540,7 @@ impl Histogram {
 
                 let mut temp_count = 0;
 
-                let is_eq = |value: &DataValue, target: &Bound<DataValue>| match target {
+                let is_eq = |value: &DataValue, target: Bound<&DataValue>| match target {
                     Bound::Included(target) => target.eq(value),
                     _ => false,
                 };
@@ -630,7 +632,7 @@ impl Histogram {
                 *count += if value.is_null() {
                     self.meta.null_count
                 } else {
-                    self.top_n_count_or_fallback(value, sketch, top_n)
+                    self.top_n_count_or_fallback(value.value()?, sketch, top_n)
                 };
                 *binary_i += 1
             }
@@ -723,7 +725,76 @@ fn key_types_match(left: &LogicalType, right: &LogicalType) -> bool {
     }
 }
 
-fn scope_lower_includes_null(min: &Bound<DataValue>) -> bool {
+/// Estimates a range from its shape and the NDV. The bounds are only compared with each
+/// other, so values known only at execution need no stand-in.
+fn bound_selectivity(
+    min: Bound<&RangeValue>,
+    max: Bound<&RangeValue>,
+    key_type: &LogicalType,
+    distinct: f64,
+) -> f64 {
+    match (min, max, key_type) {
+        (
+            Bound::Included(lower) | Bound::Excluded(lower),
+            Bound::Included(upper) | Bound::Excluded(upper),
+            LogicalType::Tuple(fields),
+        ) if !fields.is_empty() && lower.is_tuple() && upper.is_tuple() => {
+            // Approximate field NDV from full-key NDV; no per-field statistics.
+            let distinct = distinct.powf(1.0 / fields.len() as f64);
+            let (mut lower, mut upper) = (lower.fields(), upper.fields());
+            let mut divisor = 1.0;
+            for _ in fields {
+                let (min, max, is_range) = match (lower.next(), upper.next()) {
+                    (Some(lower), Some(upper)) => {
+                        let is_range = lower != upper;
+                        (Bound::Included(lower), Bound::Included(upper), is_range)
+                    }
+                    (Some(lower), None) => (Bound::Included(lower), Bound::Unbounded, true),
+                    (None, Some(upper)) => (Bound::Unbounded, Bound::Included(upper), true),
+                    (None, None) => return 1.0 / divisor,
+                };
+                let selectivity = RangeValueRef::bound_selectivity(min, max, distinct);
+                if selectivity == 0.0 {
+                    return 0.0;
+                }
+                divisor /= selectivity;
+                // Only the equal prefix and first differing field constrain
+                // a lexicographic range. Missing fields delimit the prefix.
+                if is_range {
+                    return 1.0 / divisor;
+                }
+            }
+            // The whole key is equal, so an excluded bound matches nothing.
+            if (matches!(min, Bound::Excluded(_)) || matches!(max, Bound::Excluded(_)))
+                && lower.next().is_none()
+                && upper.next().is_none()
+            {
+                return 0.0;
+            }
+            1.0 / divisor
+        }
+        (min, max, _) => RangeValueRef::bound_selectivity(
+            min.map(RangeValue::to_ref),
+            max.map(RangeValue::to_ref),
+            distinct,
+        ),
+    }
+}
+
+impl RangeValueRef<'_> {
+    fn bound_selectivity(min: Bound<Self>, max: Bound<Self>, distinct: f64) -> f64 {
+        match (min, max) {
+            (Bound::Included(lower), Bound::Included(upper)) if lower == upper => 1.0 / distinct,
+            (Bound::Unbounded, Bound::Unbounded) => 1.0,
+            // SQLite 3.45.3 whereRangeScanEst fallback: 1/4 for one bound,
+            // 1/64 for two. These are heuristics, not bucket estimates.
+            (Bound::Unbounded, _) | (_, Bound::Unbounded) => 1.0 / 4.0,
+            _ => 1.0 / 64.0,
+        }
+    }
+}
+
+fn scope_lower_includes_null(min: Bound<&DataValue>) -> bool {
     match min {
         Bound::Unbounded => true,
         Bound::Included(value) => value.is_null(),
@@ -753,7 +824,8 @@ impl HistogramMeta {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crate::errors::DatabaseError;
-    use crate::expression::range_detacher::Range;
+    use crate::expression::range_detacher::{ComputedValue, Range, RangeValue};
+    use crate::expression::BinaryOperator;
     use crate::optimizer::core::cm_sketch::CountMinSketch;
     use crate::optimizer::core::histogram::{
         Bucket, HistogramBuilder, HistogramMetaBuilder, DEFAULT_HLL_PRECISION,
@@ -1028,8 +1100,8 @@ mod tests {
         };
         let prefix = vec![parameter(1), parameter(2)];
         let scope = |lower, upper| Range::Scope {
-            min: Bound::Excluded(DataValue::Tuple(lower)),
-            max: Bound::Excluded(DataValue::Tuple(upper)),
+            min: Bound::Excluded(DataValue::Tuple(lower).into()),
+            max: Bound::Excluded(DataValue::Tuple(upper).into()),
         };
         assert_eq!(
             histogram.collect_count(
@@ -1049,6 +1121,29 @@ mod tests {
                 &mut Vec::new()
             )?,
             10
+        );
+        // Computed last fields that differ are a range after the equal prefix, not a point.
+        let computed = |op| {
+            RangeValue::Computed(Box::new(ComputedValue {
+                prefix: Some(prefix.clone()),
+                op,
+                left: parameter(3),
+                right: DataValue::Int32(20),
+                eval_ty: LogicalType::Integer,
+                ty: LogicalType::Integer,
+            }))
+        };
+        assert_eq!(
+            histogram.collect_count(
+                &[Range::Scope {
+                    min: Bound::Excluded(computed(BinaryOperator::Minus)),
+                    max: Bound::Excluded(computed(BinaryOperator::Plus)),
+                }],
+                &sketch,
+                &top_n,
+                &mut Vec::new()
+            )?,
+            2
         );
         let mut lower = prefix.clone();
         lower.push(parameter(3));
@@ -1075,7 +1170,7 @@ mod tests {
         let full = DataValue::Tuple(vec![parameter(1), parameter(2), parameter(3), parameter(4)]);
         assert_eq!(
             histogram.collect_count(
-                &[Range::Eq(full.clone())],
+                &[Range::Eq(full.clone().into())],
                 &sketch,
                 &top_n,
                 &mut Vec::new()
@@ -1085,8 +1180,8 @@ mod tests {
         assert_eq!(
             histogram.collect_count(
                 &[Range::Scope {
-                    min: Bound::Excluded(full.clone()),
-                    max: Bound::Included(full),
+                    min: Bound::Excluded(full.clone().into()),
+                    max: Bound::Included(full.into()),
                 }],
                 &sketch,
                 &top_n,
@@ -1323,28 +1418,60 @@ mod tests {
             id,
             ty: crate::types::LogicalType::Integer,
         };
+        let computed = |op, id| {
+            RangeValue::Computed(Box::new(ComputedValue {
+                prefix: None,
+                op,
+                left: parameter(id),
+                right: DataValue::Int32(20),
+                eval_ty: LogicalType::Integer,
+                ty: LogicalType::Integer,
+            }))
+        };
         for (range, expected) in [
             (
-                Range::Eq(parameter(1)),
+                Range::Eq(parameter(1).into()),
                 1_000usize.div_ceil(histogram.distinct_values_len()),
             ),
             (
                 Range::Scope {
-                    min: Bound::Included(parameter(1)),
+                    min: Bound::Included(parameter(1).into()),
                     max: Bound::Unbounded,
                 },
                 250,
             ),
             (
                 Range::Scope {
-                    min: Bound::Included(parameter(1)),
-                    max: Bound::Excluded(parameter(2)),
+                    min: Bound::Included(parameter(1).into()),
+                    max: Bound::Excluded(parameter(2).into()),
                 },
                 16,
             ),
             (
-                Range::SortedRanges(vec![Range::Eq(parameter(1)), Range::Eq(parameter(2))]),
+                Range::SortedRanges(vec![
+                    Range::Eq(parameter(1).into()),
+                    Range::Eq(parameter(2).into()),
+                ]),
                 2 * 1_000usize.div_ceil(histogram.distinct_values_len()),
+            ),
+            // Bounds computed differently are two unknowns, not one point.
+            (
+                Range::Scope {
+                    min: Bound::Included(computed(BinaryOperator::Minus, 1)),
+                    max: Bound::Included(computed(BinaryOperator::Plus, 2)),
+                },
+                16,
+            ),
+            (
+                Range::Scope {
+                    min: Bound::Included(computed(BinaryOperator::Minus, 1)),
+                    max: Bound::Included(computed(BinaryOperator::Minus, 1)),
+                },
+                1_000usize.div_ceil(histogram.distinct_values_len()),
+            ),
+            (
+                Range::Eq(computed(BinaryOperator::Minus, 1)),
+                1_000usize.div_ceil(histogram.distinct_values_len()),
             ),
         ] {
             assert_eq!(
@@ -1388,10 +1515,10 @@ mod tests {
 
         let count_1 = histogram.collect_count(
             &[
-                Range::Eq(DataValue::Int32(2)),
+                Range::Eq(DataValue::Int32(2).into()),
                 Range::Scope {
-                    min: Bound::Included(DataValue::Int32(4)),
-                    max: Bound::Excluded(DataValue::Int32(12)),
+                    min: Bound::Included(DataValue::Int32(4).into()),
+                    max: Bound::Excluded(DataValue::Int32(12).into()),
                 },
             ],
             &sketch,
@@ -1403,7 +1530,7 @@ mod tests {
 
         let count_2 = histogram.collect_count(
             &[Range::Scope {
-                min: Bound::Included(DataValue::Int32(4)),
+                min: Bound::Included(DataValue::Int32(4).into()),
                 max: Bound::Unbounded,
             }],
             &sketch,
@@ -1415,7 +1542,7 @@ mod tests {
 
         let count_3 = histogram.collect_count(
             &[Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(7)),
+                min: Bound::Excluded(DataValue::Int32(7).into()),
                 max: Bound::Unbounded,
             }],
             &sketch,
@@ -1428,7 +1555,7 @@ mod tests {
         let count_4 = histogram.collect_count(
             &[Range::Scope {
                 min: Bound::Unbounded,
-                max: Bound::Included(DataValue::Int32(11)),
+                max: Bound::Included(DataValue::Int32(11).into()),
             }],
             &sketch,
             &top_n,
@@ -1440,7 +1567,7 @@ mod tests {
         let count_5 = histogram.collect_count(
             &[Range::Scope {
                 min: Bound::Unbounded,
-                max: Bound::Excluded(DataValue::Int32(8)),
+                max: Bound::Excluded(DataValue::Int32(8).into()),
             }],
             &sketch,
             &top_n,
@@ -1451,7 +1578,7 @@ mod tests {
 
         let count_6 = histogram.collect_count(
             &[Range::Scope {
-                min: Bound::Included(DataValue::Int32(2)),
+                min: Bound::Included(DataValue::Int32(2).into()),
                 max: Bound::Unbounded,
             }],
             &sketch,
@@ -1463,7 +1590,7 @@ mod tests {
 
         let count_7 = histogram.collect_count(
             &[Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(1)),
+                min: Bound::Excluded(DataValue::Int32(1).into()),
                 max: Bound::Unbounded,
             }],
             &sketch,
@@ -1476,7 +1603,7 @@ mod tests {
         let count_8 = histogram.collect_count(
             &[Range::Scope {
                 min: Bound::Unbounded,
-                max: Bound::Included(DataValue::Int32(12)),
+                max: Bound::Included(DataValue::Int32(12).into()),
             }],
             &sketch,
             &top_n,
@@ -1488,7 +1615,7 @@ mod tests {
         let count_9 = histogram.collect_count(
             &[Range::Scope {
                 min: Bound::Unbounded,
-                max: Bound::Excluded(DataValue::Int32(13)),
+                max: Bound::Excluded(DataValue::Int32(13).into()),
             }],
             &sketch,
             &top_n,
@@ -1499,8 +1626,8 @@ mod tests {
 
         let count_10 = histogram.collect_count(
             &[Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(0)),
-                max: Bound::Excluded(DataValue::Int32(3)),
+                min: Bound::Excluded(DataValue::Int32(0).into()),
+                max: Bound::Excluded(DataValue::Int32(3).into()),
             }],
             &sketch,
             &top_n,
@@ -1511,8 +1638,8 @@ mod tests {
 
         let count_11 = histogram.collect_count(
             &[Range::Scope {
-                min: Bound::Included(DataValue::Int32(1)),
-                max: Bound::Included(DataValue::Int32(2)),
+                min: Bound::Included(DataValue::Int32(1).into()),
+                max: Bound::Included(DataValue::Int32(2).into()),
             }],
             &sketch,
             &top_n,
@@ -1567,7 +1694,7 @@ mod tests {
 
         assert_eq!(
             histogram.collect_count(
-                &[Range::Eq(DataValue::Int32(1))],
+                &[Range::Eq(DataValue::Int32(1).into())],
                 &sketch,
                 &top_n,
                 &mut Vec::new()
@@ -1598,7 +1725,7 @@ mod tests {
 
         assert_eq!(
             histogram.collect_count(
-                &[Range::Eq(DataValue::Int32(1))],
+                &[Range::Eq(DataValue::Int32(1).into())],
                 &sketch,
                 &top_n,
                 &mut Vec::new()
@@ -1631,7 +1758,7 @@ mod tests {
 
         assert_eq!(
             histogram.collect_count(
-                &[Range::Eq(DataValue::Int32(7))],
+                &[Range::Eq(DataValue::Int32(7).into())],
                 &sketch,
                 &top_n,
                 &mut Vec::new()
@@ -1667,7 +1794,7 @@ mod tests {
 
         assert_eq!(
             histogram.collect_count(
-                &[Range::Eq(DataValue::Int32(7))],
+                &[Range::Eq(DataValue::Int32(7).into())],
                 &sketch,
                 &top_n,
                 &mut Vec::new()
@@ -1706,7 +1833,7 @@ mod tests {
 
         assert_eq!(
             histogram.collect_count(
-                &[Range::Eq(DataValue::Int32(7))],
+                &[Range::Eq(DataValue::Int32(7).into())],
                 &sketch,
                 &top_n,
                 &mut Vec::new()
@@ -1734,8 +1861,8 @@ mod tests {
 
         let (histogram, mut sketch, top_n) = builder.build(5)?;
         let ranges = [Range::Scope {
-            min: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(0)])),
-            max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(8)])),
+            min: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(0)]).into()),
+            max: Bound::Excluded(DataValue::Tuple(vec![DataValue::Int32(8)]).into()),
         }];
         let clean_count = histogram.collect_count(&ranges, &sketch, &top_n, &mut Vec::new())?;
 
