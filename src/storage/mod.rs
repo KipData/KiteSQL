@@ -1317,14 +1317,6 @@ fn encode_bound_key(buffer: &mut Bytes, key: &[u8], is_upper: bool) {
 }
 
 #[inline]
-fn index_values(value: &DataValue) -> &[DataValue] {
-    match value {
-        DataValue::Tuple(values) => values,
-        value => std::slice::from_ref(value),
-    }
-}
-
-#[inline]
 fn encode_bound<'a>(
     table_codec: &mut TableCodec,
     bound: &Bound<RangeValue>,
@@ -1412,6 +1404,9 @@ impl TupleMapping {
         let mut target_len = 0;
 
         for index_idx in scan_to_index {
+            if index_idx >= index_to_scan.len() {
+                index_to_scan.resize(index_idx + 1, usize::MAX);
+            }
             index_to_scan[index_idx] = target_len;
             target_len += 1;
         }
@@ -1701,11 +1696,7 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
         _: &mut Bytes,
         _: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        let index = Index::new(
-            params.index_meta().id,
-            index_values(value),
-            IndexType::Unique,
-        );
+        let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Unique);
         let Some(bytes) = table_codec.with_index(params.table_id, &index, None, |key, _| {
             params.tx.get_borrowed(key)
         })?
@@ -1728,11 +1719,7 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(
-            params.index_meta().id,
-            index_values(value),
-            IndexType::Unique,
-        );
+        let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Unique);
 
         table_codec.with_index(params.table_id, &index, None, |key, _| {
             if index.values.len() < params.index_meta().column_ids.len() {
@@ -1787,11 +1774,7 @@ impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(
-            params.index_meta().id,
-            index_values(value),
-            IndexType::Normal,
-        );
+        let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Normal);
         table_codec.with_index(params.table_id, &index, None, |key, _| {
             encode_bound_key(out, key, is_upper);
             Ok(())
@@ -1841,7 +1824,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
     ) -> Result<(), DatabaseError> {
         let index = Index::new(
             params.index_meta().id,
-            index_values(value),
+            value.as_slice(),
             IndexType::Composite,
         );
         table_codec.with_index(params.table_id, &index, None, |key, _| {
@@ -1860,22 +1843,25 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
         value: &[u8],
         params: &IndexImplParams<T>,
     ) -> Result<(), DatabaseError> {
+        let ty = params.value_ty();
         match &params.cover_mapping {
-            Some(mapping) => {
-                TableCodec::decode_index_key_into(tuple, key, params.value_ty(), &mapping.as_ref())?
-            }
-            None => {
-                TableCodec::decode_index_key_into(tuple, key, params.value_ty(), &OrderedMapping)?
-            }
+            Some(mapping) => TableCodec::decode_index_into(
+                tuple,
+                key,
+                value,
+                ty,
+                &mapping.as_ref(),
+                params.with_pk,
+            ),
+            None => TableCodec::decode_index_into(
+                tuple,
+                key,
+                value,
+                ty,
+                &OrderedMapping,
+                params.with_pk,
+            ),
         }
-
-        let tuple_id = if params.with_pk {
-            Some(TableCodec::decode_index(value)?)
-        } else {
-            None
-        };
-        tuple.pk = tuple_id;
-        Ok(())
     }
 
     fn eq_to_res<'a>(
@@ -1908,7 +1894,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
     ) -> Result<(), DatabaseError> {
         let index = Index::new(
             params.index_meta().id,
-            index_values(value),
+            value.as_slice(),
             params.index_meta().ty,
         );
         table_codec.with_index(params.table_id, &index, None, |key, _| {

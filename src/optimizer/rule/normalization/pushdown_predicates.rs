@@ -24,8 +24,8 @@ use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::extract_join_keys;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
-use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
-use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef};
+use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
+use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexMetaRef};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::LogicalType;
 use std::ops::Bound;
@@ -376,7 +376,8 @@ impl NormalizationRule for PushPredicateIntoScan {
 }
 
 /// Index-only read layout when `index` holds every scanned column: deserializers for the
-/// index columns, plus a scan-to-index slot mapping when their orders differ.
+/// index columns, plus a scan-to-index slot mapping when their orders differ. Slots after the
+/// index columns are primary key fields, which the entry's value holds.
 pub(crate) fn index_covering(
     columns: impl Iterator<Item = ColumnRef>,
     index: IndexMetaRef,
@@ -394,17 +395,13 @@ pub(crate) fn index_covering(
     let mut needs_mapping = false;
 
     for (scan_idx, column) in columns.enumerate() {
-        let column = arena.column(column);
         // Not covered once any scanned column is missing from the index.
-        let idx = column.id().and_then(|id| {
-            index_meta
-                .column_ids
-                .iter()
-                .position(|column_id| *column_id == id)
-        })?;
-        deserializers[idx] = column.datatype().serializable();
+        let idx = covering_idx(column, index_meta, arena)?;
+        if let Some(deserializer) = deserializers.get_mut(idx) {
+            *deserializer = arena.column(column).datatype().serializable();
+        }
         mapping_slots.push(idx);
-        needs_mapping |= scan_idx != idx;
+        needs_mapping |= scan_idx != idx || idx >= index_meta.column_ids.len();
     }
 
     Some((deserializers, needs_mapping.then_some(mapping_slots)))
@@ -416,12 +413,23 @@ pub(crate) fn is_index_covers(
     arena: &PlanArena,
 ) -> bool {
     let index_meta = arena.index(index);
-    columns.all(|column| {
-        arena
-            .column(column)
-            .id()
-            .is_some_and(|id| index_meta.column_ids.contains(&id))
-    })
+    columns.all(|column| covering_idx(column, index_meta, arena).is_some())
+}
+
+fn covering_idx(column: ColumnRef, index_meta: &IndexMeta, arena: &PlanArena) -> Option<usize> {
+    let id = arena.column(column).id()?;
+    if let Some(idx) = index_meta
+        .column_ids
+        .iter()
+        .position(|column_id| *column_id == id)
+    {
+        return Some(idx);
+    }
+    let primary_keys = arena.table(index_meta.table_id)?.primary_keys();
+    let idx = primary_keys
+        .iter()
+        .position(|(_, pk)| arena.column(*pk).id() == Some(id))?;
+    Some(index_meta.column_ids.len() + idx)
 }
 
 impl PushPredicateIntoScan {

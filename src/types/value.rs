@@ -33,7 +33,7 @@ use std::hash::Hash;
 use std::io::Read;
 #[cfg(feature = "decimal")]
 use std::mem;
-use std::{cmp, fmt};
+use std::{cmp, fmt, slice};
 
 trait ReadByteExt: Read {
     fn read_u8(&mut self) -> std::io::Result<u8> {
@@ -252,6 +252,10 @@ pub trait IndexKeyMapping {
     fn target_len(&self, fields_len: usize) -> usize;
 
     fn scan_index(&self, index_pos: usize) -> Option<usize>;
+
+    fn has_pk_fields(&self, _fields_len: usize) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -306,6 +310,11 @@ impl IndexKeyMapping for TupleMappingRef<'_> {
     #[inline]
     fn scan_index(&self, index_pos: usize) -> Option<usize> {
         TupleMappingRef::scan_index(self, index_pos)
+    }
+
+    #[inline]
+    fn has_pk_fields(&self, fields_len: usize) -> bool {
+        self.index_to_scan.len() > fields_len
     }
 }
 
@@ -861,6 +870,27 @@ impl DataValue {
     #[inline]
     pub fn is_null(&self) -> bool {
         matches!(self, DataValue::Null)
+    }
+
+    #[inline]
+    pub(crate) fn is_tuple(&self) -> bool {
+        matches!(self, DataValue::Tuple(_))
+    }
+
+    #[inline]
+    pub(crate) fn as_slice(&self) -> &[DataValue] {
+        match self {
+            DataValue::Tuple(values) => values,
+            value => slice::from_ref(value),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [DataValue] {
+        match self {
+            DataValue::Tuple(values) => values,
+            value => slice::from_mut(value),
+        }
     }
 
     #[inline]

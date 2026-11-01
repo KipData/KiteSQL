@@ -128,12 +128,12 @@ Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter (t1.c
 query T
 explain select * from t1 where c1 = 7 and c2 < 9;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter (t1.c2 < 9), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By u_c1_index => 7 => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By p_index => [(7), (7, 9)) Covered => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last, t1.c2 Asc Nulls Last) ignore_prefix_len: 1)]
 
 query T
 explain select * from t1 where (c1 = 7 or c1 = 10) and c2 < 9;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter (t1.c2 < 9), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By u_c1_index => 7, 10 => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By p_index => [(7), (7, 9)), [(10), (10, 9)) Covered => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last, t1.c2 Asc Nulls Last) ignore_prefix_len: 1)]
 
 query T
 explain select * from t1 where c1 is null and c2 is null;
@@ -143,7 +143,7 @@ Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter t1.c2
 query T
 explain select * from t1 where c1 > 0 and c1 < 8;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By u_c1_index => (0, 8) => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By p_index => ((0), (8)) Covered => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last, t1.c2 Asc Nulls Last) ignore_prefix_len: 0)]
 
 query T
 explain select * from t1 where c2 > 0 and c2 < 9;
@@ -182,7 +182,7 @@ Projection [t1.c1] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.c1] [I
 query T
 explain select c1, id from t1 where c1 < 10;
 ----
-Projection [t1.c1, t1.id] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1] [IndexScan By u_c1_index => (-inf, 10) => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.c1, t1.id] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1] [IndexScan By u_c1_index => (-inf, 10) Covered => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
 
 statement ok
 drop index t1.u_c1_index;
@@ -245,3 +245,35 @@ Projection [t_cover.c2, t_cover.c3] [Project => (Sort Option: Follow)] Filter (t
 
 statement ok
 drop table t_cover;
+
+statement ok
+create table t_pk_cover(a int, b int, c int, d int, primary key (a, b));
+
+statement ok
+insert into t_pk_cover values (1, 10, 100, 0), (2, 20, 100, 0), (3, 30, 300, 0), (4, 40, 400, 0), (5, 50, 500, 0), (6, 60, 600, 0), (7, 70, 700, 0), (8, 80, 800, 0), (9, 90, 900, 0), (10, 100, 1000, 0), (11, 110, 1100, 0), (12, 120, 1200, 0);
+
+statement ok
+create index idx_pk_cover on t_pk_cover (c);
+
+statement ok
+analyze table t_pk_cover;
+
+# Primary key fields are read from the index entry, in any scan order.
+query T
+explain select b, c, a from t_pk_cover where c = 100;
+----
+Projection [t_pk_cover.b, t_pk_cover.c, t_pk_cover.a] [Project => (Sort Option: Follow)] TableScan t_pk_cover -> [t_pk_cover.a, t_pk_cover.b, t_pk_cover.c] [IndexScan By idx_pk_cover => 100 Covered => (Sort Option: OrderBy: (t_pk_cover.c Asc Nulls Last) ignore_prefix_len: 0)]
+
+query III rowsort
+select b, c, a from t_pk_cover where c = 100;
+----
+10 100 1
+20 100 2
+
+query I
+select count(b) from t_pk_cover where c = 100;
+----
+2
+
+statement ok
+drop table t_pk_cover;
