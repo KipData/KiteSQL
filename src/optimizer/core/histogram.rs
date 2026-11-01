@@ -41,7 +41,8 @@ pub(crate) const DEFAULT_HLL_PRECISION: u8 = 14;
 pub struct HistogramMetaBuilder {
     null_count: usize,
     values_len: usize,
-    hll: HyperLogLog<DataValue>,
+    // One per key prefix; the last counts the whole key.
+    hlls: Vec<HyperLogLog<DataValue>>,
 }
 
 pub struct HistogramBuilder {
@@ -62,7 +63,7 @@ struct BoundComparator {
 
 #[derive(Debug, Clone, PartialEq, ReferenceSerialization)]
 pub struct HistogramMeta {
-    number_of_distinct_value: usize,
+    number_of_distinct_values: Vec<usize>,
     null_count: usize,
     values_len: usize,
     buckets_len: usize,
@@ -111,7 +112,7 @@ impl HistogramMetaBuilder {
         Ok(Self {
             null_count: 0,
             values_len: 0,
-            hll: HyperLogLog::with_precision(hll_precision)?,
+            hlls: vec![HyperLogLog::with_precision(hll_precision)?],
         })
     }
 
@@ -121,18 +122,24 @@ impl HistogramMetaBuilder {
             false
         } else {
             self.values_len += 1;
-            self.hll.add(value);
+            let fields = value.as_slice();
+            for (len, hll) in (1..=fields.len()).zip(&mut self.hlls) {
+                hll.add(&fields[..len]);
+            }
             true
         }
     }
 
     pub fn build(self) -> HistogramMeta {
-        HistogramMeta {
-            number_of_distinct_value: if self.values_len == 0 {
+        let distinct = |hll: &HyperLogLog<DataValue>| {
+            if self.values_len == 0 {
                 0
             } else {
-                self.hll.estimate().clamp(1, self.values_len)
-            },
+                hll.estimate().clamp(1, self.values_len)
+            }
+        };
+        HistogramMeta {
+            number_of_distinct_values: self.hlls.iter().map(distinct).collect(),
             null_count: self.null_count,
             values_len: self.values_len,
             buckets_len: 0,
@@ -147,9 +154,15 @@ impl HistogramBuilder {
         relative_error: f64,
         hll_precision: u8,
     ) -> Result<Self, DatabaseError> {
+        let mut meta = HistogramMetaBuilder::new(hll_precision)?;
+        if let LogicalType::Tuple(fields) = &index_meta.value_ty {
+            for _ in 1..fields.len() {
+                meta.hlls.push(HyperLogLog::with_precision(hll_precision)?);
+            }
+        }
         Ok(Self {
             index_id: index_meta.id,
-            meta: HistogramMetaBuilder::new(hll_precision)?,
+            meta,
             // TODO: derive the KLL rank error from the histogram bucket count
             // (e.g. 1 / (2 * buckets)) instead of sharing `relative_error` with the
             // Count-Min sketch; 100 buckets only need ~0.5% rank error, not 0.1%.
@@ -388,7 +401,7 @@ impl Histogram {
     }
 
     pub fn distinct_values_len(&self) -> usize {
-        self.meta.number_of_distinct_value
+        self.meta.distinct_values_len()
     }
 
     pub fn buckets_len(&self) -> usize {
@@ -396,7 +409,7 @@ impl Histogram {
     }
 
     fn average_count(&self) -> usize {
-        let distinct_values = self.meta.number_of_distinct_value;
+        let distinct_values = self.distinct_values_len();
         if distinct_values == 0 || self.meta.values_len == 0 {
             return 0;
         }
@@ -454,10 +467,15 @@ impl Histogram {
                 Bound::Included(value),
                 &key_type,
                 distinct,
+                &self.meta.number_of_distinct_values,
             ),
-            Range::Scope { min, max } => {
-                bound_selectivity(min.as_ref(), max.as_ref(), &key_type, distinct)
-            }
+            Range::Scope { min, max } => bound_selectivity(
+                min.as_ref(),
+                max.as_ref(),
+                &key_type,
+                distinct,
+                &self.meta.number_of_distinct_values,
+            ),
             Range::SortedRanges(ranges) => ranges
                 .iter()
                 .map(|range| self.estimate_range_selectivity(range))
@@ -526,7 +544,7 @@ impl Histogram {
         comparator: &BoundComparator,
         buf: &mut Vec<u8>,
     ) -> Result<bool, DatabaseError> {
-        let distinct_1 = OrderedFloat(1.0 / self.meta.number_of_distinct_value as f64);
+        let distinct_1 = OrderedFloat(1.0 / self.distinct_values_len() as f64);
 
         match &ranges[*binary_i] {
             Range::Scope { min, max } => {
@@ -732,6 +750,7 @@ fn bound_selectivity(
     max: Bound<&RangeValue>,
     key_type: &LogicalType,
     distinct: f64,
+    prefix_distinct: &[usize],
 ) -> f64 {
     match (min, max, key_type) {
         (
@@ -739,11 +758,16 @@ fn bound_selectivity(
             Bound::Included(upper) | Bound::Excluded(upper),
             LogicalType::Tuple(fields),
         ) if !fields.is_empty() && lower.is_tuple() && upper.is_tuple() => {
-            // Approximate field NDV from full-key NDV; no per-field statistics.
-            let distinct = distinct.powf(1.0 / fields.len() as f64);
+            // NDV of the first `len` fields, spread evenly over them when not analyzed.
+            let prefix_ndv = |len: usize| match len.checked_sub(1) {
+                Some(i) if prefix_distinct.len() == fields.len() => {
+                    prefix_distinct[i].max(1) as f64
+                }
+                _ => distinct.powf(len as f64 / fields.len() as f64),
+            };
             let (mut lower, mut upper) = (lower.fields(), upper.fields());
             let mut divisor = 1.0;
-            for _ in fields {
+            for len in 0..fields.len() {
                 let (min, max, is_range) = match (lower.next(), upper.next()) {
                     (Some(lower), Some(upper)) => {
                         let is_range = lower != upper;
@@ -753,7 +777,9 @@ fn bound_selectivity(
                     (None, Some(upper)) => (Bound::Unbounded, Bound::Included(upper), true),
                     (None, None) => return 1.0 / divisor,
                 };
-                let selectivity = RangeValueRef::bound_selectivity(min, max, distinct);
+                // Equal prefixes multiply to `1 / prefix_ndv(len + 1)`.
+                let field_distinct = (prefix_ndv(len + 1) / prefix_ndv(len)).max(1.0);
+                let selectivity = RangeValueRef::bound_selectivity(min, max, field_distinct);
                 if selectivity == 0.0 {
                     return 0.0;
                 }
@@ -812,7 +838,7 @@ impl HistogramMeta {
     }
 
     pub fn distinct_values_len(&self) -> usize {
-        self.number_of_distinct_value
+        self.number_of_distinct_values.last().copied().unwrap_or(0)
     }
 
     pub fn buckets_len(&self) -> usize {
@@ -876,6 +902,14 @@ mod tests {
             value_ty: LogicalType::Integer,
             name: "pk_c1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
+        }
+    }
+
+    fn tuple_index_meta(len: usize) -> IndexMeta {
+        IndexMeta {
+            value_ty: LogicalType::Tuple(vec![LogicalType::Integer; len]),
+            ty: IndexType::PrimaryKey { is_multiple: true },
+            ..index_meta()
         }
     }
 
@@ -1081,9 +1115,64 @@ mod tests {
     }
 
     #[test]
+    fn parameterized_tuple_ranges_use_prefix_distinct_values() -> Result<(), DatabaseError> {
+        let mut builder = HistogramBuilder::new(
+            &tuple_index_meta(4),
+            DEFAULT_STATISTICS_RELATIVE_ERROR,
+            DEFAULT_HLL_PRECISION,
+        )?;
+        // Shaped like TPC-C order_line: (w, d, o, number) with 10 lines per order.
+        for d in 0..10 {
+            for o in 0..300 {
+                for number in 0..10 {
+                    builder.append(DataValue::Tuple(vec![
+                        DataValue::Int32(1),
+                        DataValue::Int32(d),
+                        DataValue::Int32(o),
+                        DataValue::Int32(number),
+                    ]))?;
+                }
+            }
+        }
+        let (histogram, sketch, top_n) = builder.build(10)?;
+        let distinct = &histogram.meta().number_of_distinct_values;
+        let near = |actual: usize, expected: usize| actual.abs_diff(expected) * 50 <= expected;
+        assert_eq!(distinct.len(), 4);
+        assert_eq!(distinct[..2], [1, 10]);
+        assert!(near(distinct[2], 3_000), "{distinct:?}");
+        assert!(near(distinct[3], 30_000), "{distinct:?}");
+
+        let parameter = |id| DataValue::Parameter {
+            id,
+            ty: LogicalType::Integer,
+        };
+        let prefix = DataValue::Tuple(vec![parameter(1), parameter(2), parameter(3)]);
+        let count = |range| histogram.collect_count(&[range], &sketch, &top_n, &mut Vec::new());
+        // An even spread over the four fields would estimate 30_000^(1/4) ~ 13 rows.
+        let rows = count(Range::Scope {
+            min: Bound::Included(prefix.clone().into()),
+            max: Bound::Included(prefix.into()),
+        })?;
+        assert!((9..=11).contains(&rows), "{rows}");
+        // The equal prefix then the range on `number`: 10 rows / 64, at least one.
+        let rows = count(Range::Scope {
+            min: Bound::Included(
+                DataValue::Tuple(vec![parameter(1), parameter(2), parameter(3), parameter(4)])
+                    .into(),
+            ),
+            max: Bound::Included(
+                DataValue::Tuple(vec![parameter(1), parameter(2), parameter(3), parameter(5)])
+                    .into(),
+            ),
+        })?;
+        assert_eq!(rows, 1);
+        Ok(())
+    }
+
+    #[test]
     fn parameterized_tuple_ranges_accumulate_prefix_selectivity() -> Result<(), DatabaseError> {
         let mut builder = HistogramBuilder::new(
-            &index_meta(),
+            &tuple_index_meta(4),
             DEFAULT_STATISTICS_RELATIVE_ERROR,
             DEFAULT_HLL_PRECISION,
         )?;
@@ -1091,9 +1180,9 @@ mod tests {
             builder.append(DataValue::Tuple(vec![DataValue::Int32(value); 4]))?;
         }
         let (mut histogram, sketch, top_n) = builder.build(10)?;
-        // Fixed metadata isolates the heuristic from HLL estimation error.
+        // Fixed metadata without prefix NDVs isolates the even-spread fallback.
         histogram.meta.values_len = 10_000;
-        histogram.meta.number_of_distinct_value = 10_000;
+        histogram.meta.number_of_distinct_values = vec![10_000];
         let parameter = |id| DataValue::Parameter {
             id,
             ty: crate::types::LogicalType::Integer,
@@ -1847,7 +1936,7 @@ mod tests {
     #[test]
     fn test_collect_count_ignores_tuple_prefix_endpoint_count() -> Result<(), DatabaseError> {
         let mut builder = HistogramBuilder::new(
-            &index_meta(),
+            &tuple_index_meta(2),
             DEFAULT_STATISTICS_RELATIVE_ERROR,
             DEFAULT_HLL_PRECISION,
         )?;
