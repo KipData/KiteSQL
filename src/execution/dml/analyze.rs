@@ -277,11 +277,11 @@ mod test {
     }
 
     fn test_hll_precision_is_configurable() -> Result<(), DatabaseError> {
-        let rows = 1000;
+        let (rows, distinct) = (1000, 500);
         let ndv_with = |precision: u8| -> Result<usize, DatabaseError> {
             let mut builder = HistogramMetaBuilder::new(precision)?;
             for i in 0..rows {
-                builder.append(&DataValue::Int32(i));
+                builder.append(&DataValue::Int32(i % distinct));
             }
             Ok(builder.build().distinct_values_len())
         };
@@ -289,13 +289,16 @@ mod test {
         // Precision 4 has 16 registers, so its estimate must differ from the default sketch.
         assert_ne!(coarse, default);
 
-        let values = (0..rows).map(|i| format!("({i})")).join(", ");
+        let values = (0..rows)
+            .map(|i| format!("({i}, {})", i % distinct))
+            .join(", ");
         for (builder, expected) in [
             (DataBaseBuilder::path("."), default),
             (DataBaseBuilder::path(".").hll_precision(4), coarse),
         ] {
             let mut kite_sql = builder.build_in_memory()?;
-            kite_sql.ddl("create table t1 (a int primary key)")?;
+            kite_sql.ddl("create table t1 (id int primary key, a int)")?;
+            kite_sql.ddl("create index idx_a on t1 (a)")?;
             kite_sql
                 .run(format!("insert into t1 values {values}"))?
                 .done()?;
@@ -318,7 +321,7 @@ mod test {
             let loader = StatisticMetaLoader::new(kite_sql.state.meta_cache());
             let column = loader.load_column(table_id, a_id).unwrap();
             assert_eq!(column.distinct_values_len(), expected);
-            let index = loader.load(table_id, 0)?.unwrap();
+            let index = loader.load(table_id, 1)?.unwrap();
             assert_eq!(index.histogram().distinct_values_len(), expected);
         }
         Ok(())
