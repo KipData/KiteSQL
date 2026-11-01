@@ -635,7 +635,7 @@ pub(crate) mod tests {
             },
             lookup: None,
             residual_predicate: Some(residual_predicate),
-            covered_deserializers: None,
+            covered: false,
             cover_mapping: None,
             sort_elimination_hint: None,
             stream_aggregate_hint: None,

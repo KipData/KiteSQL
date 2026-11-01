@@ -349,7 +349,7 @@ mod tests {
                 lookup: Some(lookup),
                 residual_predicate: has_residual.then_some(predicate),
                 sort_option: sort.clone(),
-                covered_deserializers: None,
+                covered: false,
                 cover_mapping: None,
                 sort_elimination_hint: None,
                 stream_aggregate_hint: None,

@@ -149,7 +149,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
                 ranges,
                 *with_pk,
                 deserializers,
-                self.info.covered_deserializers.is_some(),
+                self.info.covered,
                 self.info.cover_mapping.as_deref(),
             )?;
             state.iters[self.iter] = StorageIter::Index(Box::new(iter));
@@ -228,7 +228,7 @@ mod tests {
             sort_option: SortOption::None,
             lookup: None,
             residual_predicate: None,
-            covered_deserializers: None,
+            covered: false,
             cover_mapping: None,
             sort_elimination_hint: None,
             stream_aggregate_hint: None,

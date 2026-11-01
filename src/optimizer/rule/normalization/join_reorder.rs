@@ -789,7 +789,7 @@ mod tests {
             sort_option: SortOption::None,
             lookup: None,
             residual_predicate: None,
-            covered_deserializers: None,
+            covered: false,
             cover_mapping: None,
             sort_elimination_hint: None,
             stream_aggregate_hint: None,

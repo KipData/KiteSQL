@@ -26,10 +26,9 @@ use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
 use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexMetaRef};
-use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::LogicalType;
+use std::mem;
 use std::ops::Bound;
-use std::{mem, slice};
 
 const EMPTY_SCHEMA: [crate::catalog::ColumnRef; 0] = [];
 type ClassifiedJoinFilters = (Option<ExprRef>, Option<ExprRef>, Option<ExprRef>, usize);
@@ -333,7 +332,7 @@ impl NormalizationRule for PushPredicateIntoScan {
             meta,
             lookup,
             residual_predicate,
-            covered_deserializers,
+            covered,
             cover_mapping,
             sort_option,
             sort_elimination_hint: _,
@@ -365,9 +364,9 @@ impl NormalizationRule for PushPredicateIntoScan {
             *lookup = Some(IndexLookup::Static(detached.range));
             *residual_predicate = detached.residual;
             let columns = scan_op.deserializers.read_columns();
-            (*covered_deserializers, *cover_mapping) = match index_covering(columns, *meta, arena) {
-                Some((deserializers, mapping)) => (Some(deserializers), mapping),
-                None => (None, None),
+            (*covered, *cover_mapping) = match index_covering(columns, *meta, arena) {
+                Some(mapping) => (true, mapping),
+                None => (false, None),
             };
         }
 
@@ -375,36 +374,26 @@ impl NormalizationRule for PushPredicateIntoScan {
     }
 }
 
-/// Index-only read layout when `index` holds every scanned column: deserializers for the
-/// index columns, plus a scan-to-index slot mapping when their orders differ. Slots after the
-/// index columns are primary key fields, which the entry's value holds.
+/// Index-only read layout when `index` holds every scanned column: a scan-to-index slot
+/// mapping when their orders differ. Slots after the index columns are primary key fields,
+/// which the entry's value holds.
 pub(crate) fn index_covering(
     columns: impl Iterator<Item = ColumnRef>,
     index: IndexMetaRef,
     arena: &PlanArena,
-) -> Option<(Vec<TupleValueSerializableImpl>, Option<Vec<usize>>)> {
+) -> Option<Option<Vec<usize>>> {
     let index_meta = arena.index(index);
-    let index_column_types = match &index_meta.value_ty {
-        LogicalType::Tuple(tys) => tys,
-        ty => slice::from_ref(ty),
-    };
-    let mut deserializers = (0..index_meta.column_ids.len())
-        .map(|idx| index_column_types[idx].skip_serializable())
-        .collect::<Vec<_>>();
     let mut mapping_slots = Vec::with_capacity(index_meta.column_ids.len());
     let mut needs_mapping = false;
 
     for (scan_idx, column) in columns.enumerate() {
         // Not covered once any scanned column is missing from the index.
         let idx = covering_idx(column, index_meta, arena)?;
-        if let Some(deserializer) = deserializers.get_mut(idx) {
-            *deserializer = arena.column(column).datatype().serializable();
-        }
         mapping_slots.push(idx);
         needs_mapping |= scan_idx != idx || idx >= index_meta.column_ids.len();
     }
 
-    Some((deserializers, needs_mapping.then_some(mapping_slots)))
+    Some(needs_mapping.then_some(mapping_slots))
 }
 
 pub(crate) fn is_index_covers(
@@ -839,7 +828,7 @@ mod tests {
                         },
                         lookup: None,
                         residual_predicate: None,
-                        covered_deserializers: None,
+                        covered: false,
                         cover_mapping: None,
                         sort_elimination_hint: None,
                         stream_aggregate_hint: None,
@@ -1075,7 +1064,7 @@ mod tests {
                         },
                         lookup: None,
                         residual_predicate: None,
-                        covered_deserializers: None,
+                        covered: false,
                         cover_mapping: None,
                         sort_elimination_hint: None,
                         stream_aggregate_hint: None,
@@ -1088,7 +1077,7 @@ mod tests {
                         },
                         lookup: None,
                         residual_predicate: None,
-                        covered_deserializers: None,
+                        covered: false,
                         cover_mapping: None,
                         sort_elimination_hint: None,
                         stream_aggregate_hint: None,
@@ -1129,32 +1118,13 @@ mod tests {
 
             // verify the first index (reordered scan columns) still uses mapping
             let reordered_index = &index_infos[0];
-            let deserializers = reordered_index
-                .covered_deserializers
-                .as_ref()
-                .expect("expected covering deserializers");
-            assert_eq!(deserializers.len(), 3);
-            assert_eq!(
-                deserializers[0],
-                arena.column(c2_ref).datatype().serializable(),
-                "first serializer should align with c2"
-            );
-            assert_eq!(
-                deserializers[1],
-                c3.datatype().skip_serializable(),
-                "non-projected index column should be skipped"
-            );
-            assert_eq!(
-                deserializers[2],
-                arena.column(c1_ref).datatype().serializable(),
-                "last serializer should align with c1"
-            );
+            assert!(reordered_index.covered);
             let mapping = reordered_index.cover_mapping.as_deref();
             assert_eq!(mapping, Some(&[2, 0][..]));
 
             // verify the second index matches scan order exactly so mapping is omitted
             let ordered_index = &index_infos[1];
-            assert!(ordered_index.covered_deserializers.is_some());
+            assert!(ordered_index.covered);
             assert!(
                 ordered_index.cover_mapping.is_none(),
                 "mapping should be None when index/scan order already match"

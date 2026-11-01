@@ -20,7 +20,6 @@ use crate::planner::operator::SortOption;
 use crate::planner::Explain;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
@@ -89,7 +88,8 @@ pub struct IndexInfo {
     pub(crate) sort_option: SortOption,
     pub(crate) lookup: Option<IndexLookup>,
     pub(crate) residual_predicate: Option<ExprRef>,
-    pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
+    // The index holds every scanned column, so no row is looked up.
+    pub(crate) covered: bool,
     pub(crate) cover_mapping: Option<Vec<usize>>,
     pub(crate) sort_elimination_hint: Option<IndexOrderHint>,
     pub(crate) stream_aggregate_hint: Option<IndexOrderHint>,
@@ -189,7 +189,7 @@ impl Explain for IndexInfo {
         if self.is_reverse() {
             f.write_str(" Reverse")?;
         }
-        if self.covered_deserializers.is_some() {
+        if self.covered {
             f.write_str(" Covered")?;
         }
         Ok(())
@@ -225,7 +225,7 @@ mod tests {
             sort_option: SortOption::None,
             lookup,
             residual_predicate: None,
-            covered_deserializers: None,
+            covered: false,
             cover_mapping: None,
             sort_elimination_hint: None,
             stream_aggregate_hint: None,
@@ -292,7 +292,7 @@ mod tests {
             DataValue::Int32(1).into(),
         ))));
         info.meta = index_ref;
-        info.covered_deserializers = Some(vec![LogicalType::Integer.serializable()]);
+        info.covered = true;
         assert_eq!(info.explain(&arena).to_string(), "idx_t => 1 Covered");
 
         let value = DataValue::Int32(1);
@@ -397,7 +397,7 @@ mod tests {
             sort_option: SortOption::None,
             lookup: Some(IndexLookup::Probe),
             residual_predicate: None,
-            covered_deserializers: Some(vec![LogicalType::Integer.serializable()]),
+            covered: true,
             cover_mapping: Some(vec![0]),
             sort_elimination_hint: Some(IndexOrderHint::new(1)),
             stream_aggregate_hint: Some(IndexOrderHint::new(1)),
