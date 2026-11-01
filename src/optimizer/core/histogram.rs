@@ -765,7 +765,7 @@ fn bound_selectivity(
                 }
                 _ => distinct.powf(len as f64 / fields.len() as f64),
             };
-            let (mut lower, mut upper) = (lower.fields(), upper.fields());
+            let (mut lower, mut upper) = (lower.iter(), upper.iter());
             let mut divisor = 1.0;
             for len in 0..fields.len() {
                 let (min, max, is_range) = match (lower.next(), upper.next()) {

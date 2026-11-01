@@ -99,7 +99,7 @@ impl RangeValue {
         }
     }
 
-    pub(crate) fn fields(&self) -> impl Iterator<Item = RangeValueRef<'_>> + '_ {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = RangeValueRef<'_>> + '_ {
         let (values, computed) = match self {
             RangeValue::Value(value) => (value.as_slice(), None),
             RangeValue::Computed(computed) => (
