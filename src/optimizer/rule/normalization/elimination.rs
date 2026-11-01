@@ -1671,10 +1671,13 @@ mod tests {
         let c2 = make_sort_field(&mut arena, "c2");
         for lookup in [
             None,
-            Some(IndexLookup::Static(Range::Eq(DataValue::Parameter {
-                id: 1,
-                ty: LogicalType::Integer,
-            }))),
+            Some(IndexLookup::Static(Range::Eq(
+                DataValue::Parameter {
+                    id: 1,
+                    ty: LogicalType::Integer,
+                }
+                .into(),
+            ))),
         ] {
             let mut plan = build_plan(
                 &mut arena,

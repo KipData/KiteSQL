@@ -1207,7 +1207,7 @@ mod inner_join_tests {
         let mut meta = arena.index(info.meta).clone();
         meta.ty = IndexType::PrimaryKey { is_multiple: true };
         info.meta = arena.alloc_index(meta);
-        info.lookup = Some(IndexLookup::Static(Range::Eq(DataValue::Int32(7))));
+        info.lookup = Some(IndexLookup::Static(Range::Eq(DataValue::Int32(7).into())));
         info.residual_predicate = Some(residual);
         let index = info.meta;
         right.physical_option = Some(PhysicalOption::new(

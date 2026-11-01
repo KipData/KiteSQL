@@ -161,16 +161,14 @@ mod tests {
     #[test]
     fn test_generic_range_serialization() -> Result<(), DatabaseError> {
         let range = Range::SortedRanges(vec![
-            Range::Eq(DataValue::Int32(7)),
+            Range::Eq(DataValue::Int32(7).into()),
             Range::Scope {
-                min: Bound::Included(DataValue::Int32(8)),
-                max: Bound::Excluded(DataValue::Int32(12)),
+                min: Bound::Included(DataValue::Int32(8).into()),
+                max: Bound::Excluded(DataValue::Int32(12).into()),
             },
             Range::SortedRanges(vec![Range::Dummy]),
         ]);
         assert_eq!(round_trip(range.clone())?, range);
-        let generic = Range::SortedRanges(vec![Range::Eq("prefix".to_string())]);
-        assert_eq!(round_trip(generic.clone())?, generic);
         Ok(())
     }
 

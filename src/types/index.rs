@@ -14,7 +14,7 @@
 
 use crate::catalog::{TableCatalog, TableId};
 use crate::errors::DatabaseError;
-use crate::expression::range_detacher::Range;
+use crate::expression::range_detacher::{Range, RangeValue};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::SortOption;
 use crate::planner::Explain;
@@ -68,8 +68,11 @@ pub enum RuntimeIndexProbe {
 impl From<RuntimeIndexProbe> for Range {
     fn from(probe: RuntimeIndexProbe) -> Self {
         match probe {
-            RuntimeIndexProbe::Eq(value) => Range::Eq(value),
-            RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max },
+            RuntimeIndexProbe::Eq(value) => Range::Eq(value.into()),
+            RuntimeIndexProbe::Scope { min, max } => Range::Scope {
+                min: min.map(RangeValue::Value),
+                max: max.map(RangeValue::Value),
+            },
         }
     }
 }
@@ -285,7 +288,9 @@ mod tests {
         probe.meta = index_ref;
         assert_eq!(probe.explain(&arena).to_string(), "idx_t => Probe ?");
 
-        let mut info = index_info(Some(IndexLookup::Static(Range::Eq(DataValue::Int32(1)))));
+        let mut info = index_info(Some(IndexLookup::Static(Range::Eq(
+            DataValue::Int32(1).into(),
+        ))));
         info.meta = index_ref;
         info.covered_deserializers = Some(vec![LogicalType::Integer.serializable()]);
         assert_eq!(info.explain(&arena).to_string(), "idx_t => 1 Covered");
@@ -319,7 +324,7 @@ mod tests {
         assert!(probes.contains(&RuntimeIndexProbe::Eq(DataValue::Int32(1))));
 
         let mut lookups = HashSet::new();
-        lookups.insert(IndexLookup::Static(Range::Eq(DataValue::Int32(1))));
+        lookups.insert(IndexLookup::Static(Range::Eq(DataValue::Int32(1).into())));
         lookups.insert(IndexLookup::Probe);
         assert!(lookups.contains(&IndexLookup::Probe));
 
@@ -368,7 +373,7 @@ mod tests {
         }
 
         for lookup in [
-            IndexLookup::Static(Range::Eq(DataValue::Int32(1))),
+            IndexLookup::Static(Range::Eq(DataValue::Int32(1).into())),
             IndexLookup::Probe,
         ] {
             assert_eq!(

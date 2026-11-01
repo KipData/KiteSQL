@@ -1072,10 +1072,10 @@ mod test {
             DataValue::Int32(4),
         ];
         let ranges = [
-            Range::Eq(DataValue::Int32(0)),
+            Range::Eq(DataValue::Int32(0).into()),
             Range::Scope {
-                min: Bound::Included(DataValue::Int32(2)),
-                max: Bound::Included(DataValue::Int32(4)),
+                min: Bound::Included(DataValue::Int32(2).into()),
+                max: Bound::Included(DataValue::Int32(4).into()),
             },
         ];
         let deserializers = crate::storage::TupleDeserializers::new(&table, &plan_arena, false);
@@ -1145,10 +1145,10 @@ mod test {
                         .id(),
                     (Some(0), Some(1)),
                     table.indexes[0],
-                    &[Range::Scope {
-                        min: Bound::Excluded(DataValue::Int32(0)),
+                    Range::Scope {
+                        min: Bound::Excluded(DataValue::Int32(0).into()),
                         max: Bound::Unbounded,
-                    }][..],
+                    },
                     true,
                     &deserializers,
                     false,
@@ -1185,10 +1185,10 @@ mod test {
                         .id(),
                     (Some(0), Some(1)),
                     table.indexes[0],
-                    &[Range::Scope {
-                        min: Bound::Excluded(DataValue::Int32(3)),
+                    Range::Scope {
+                        min: Bound::Excluded(DataValue::Int32(3).into()),
                         max: Bound::Unbounded,
-                    }][..],
+                    },
                     true,
                     &deserializers,
                     false,
@@ -1233,8 +1233,8 @@ mod test {
             .ok_or(DatabaseError::InvalidIndex)?;
 
         let c1_ranges = [Range::Scope {
-            min: Bound::Excluded(DataValue::Int32(0)),
-            max: Bound::Excluded(DataValue::Int32(10)),
+            min: Bound::Excluded(DataValue::Int32(0).into()),
+            max: Bound::Excluded(DataValue::Int32(10).into()),
         }];
         let deserializers = crate::storage::project_deserializers_for_test(
             kite_sql.state.names(),
@@ -1412,7 +1412,7 @@ mod test {
 
         let target_pk = DataValue::Int32(3);
         let covered_value = DataValue::Int32(4);
-        let covered_ranges = [Range::Eq(covered_value.clone())];
+        let covered_ranges = [Range::Eq(covered_value.clone().into())];
         let mut table_codec = TableCodec::default();
         transaction.remove_tuple(&mut table_codec, 0, &target_pk)?;
 

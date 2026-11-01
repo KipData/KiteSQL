@@ -438,7 +438,7 @@ mod test {
         let expected_frequency = loader.collect_count(
             table_id,
             1,
-            &Range::Eq(DataValue::Int32(7)),
+            &Range::Eq(DataValue::Int32(7).into()),
             &mut Vec::new(),
         )?;
 
@@ -457,7 +457,7 @@ mod test {
             loader.collect_count(
                 table_id,
                 1,
-                &Range::Eq(DataValue::Int32(7)),
+                &Range::Eq(DataValue::Int32(7).into()),
                 &mut Vec::new()
             )?,
             expected_frequency
@@ -586,7 +586,7 @@ mod test {
                 .collect_count(
                     table_id,
                     1,
-                    &Range::Eq(DataValue::Int32(7)),
+                    &Range::Eq(DataValue::Int32(7).into()),
                     &mut Vec::new()
                 )?
                 .map(|(rows, _)| rows),
@@ -613,7 +613,7 @@ mod test {
                 .collect_count(
                     table_id,
                     1,
-                    &Range::Eq(DataValue::Int32(7)),
+                    &Range::Eq(DataValue::Int32(7).into()),
                     &mut Vec::new()
                 )?
                 .map(|(rows, _)| rows),
