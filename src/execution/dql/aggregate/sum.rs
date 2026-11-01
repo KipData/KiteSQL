@@ -14,12 +14,13 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::Accumulator;
+use crate::execution::hash::FxHashSet;
 use crate::expression::BinaryOperator;
 use crate::types::evaluator::{binary_create, BinaryEvaluatorRef};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::mem;
 
 /// Text in a numeric aggregate is read as its longest numeric prefix (0 without one), as SQLite does.
 pub(crate) fn text_as_number(value: &DataValue) -> Cow<'_, DataValue> {
@@ -98,20 +99,24 @@ impl Accumulator for SumAccumulator {
         &self.result
     }
 
-    fn result_owned(self: Box<Self>) -> DataValue {
-        self.result
+    fn take_result(&mut self) -> DataValue {
+        mem::replace(&mut self.result, DataValue::Null)
+    }
+
+    fn reset(&mut self) {
+        self.result = DataValue::Null;
     }
 }
 
 pub struct DistinctSumAccumulator {
-    distinct_values: HashSet<DataValue>,
+    distinct_values: FxHashSet<DataValue>,
     inner: SumAccumulator,
 }
 
 impl DistinctSumAccumulator {
     pub fn new(ty: &LogicalType) -> Result<Self, DatabaseError> {
         Ok(Self {
-            distinct_values: HashSet::default(),
+            distinct_values: FxHashSet::default(),
             inner: SumAccumulator::new(Cow::Borrowed(ty))?,
         })
     }
@@ -131,8 +136,13 @@ impl Accumulator for DistinctSumAccumulator {
         self.inner.result()
     }
 
-    fn result_owned(self: Box<Self>) -> DataValue {
-        self.inner.result
+    fn take_result(&mut self) -> DataValue {
+        self.inner.take_result()
+    }
+
+    fn reset(&mut self) {
+        self.distinct_values.clear();
+        self.inner.reset();
     }
 }
 
@@ -164,7 +174,7 @@ mod tests {
             accumulator.update_value(&value)?;
         }
         assert_eq!(accumulator.result(), &DataValue::Int32(5));
-        assert_eq!(Box::new(accumulator).result_owned(), DataValue::Int32(5));
+        assert_eq!(accumulator.take_result(), DataValue::Int32(5));
         Ok(())
     }
 
@@ -175,7 +185,7 @@ mod tests {
             accumulator.update_value(&value)?;
         }
         assert_eq!(accumulator.result(), &DataValue::Int32(5));
-        assert_eq!(Box::new(accumulator).result_owned(), DataValue::Int32(5));
+        assert_eq!(accumulator.take_result(), DataValue::Int32(5));
         Ok(())
     }
 }

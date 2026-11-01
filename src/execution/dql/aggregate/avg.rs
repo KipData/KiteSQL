@@ -15,15 +15,16 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::sum::{text_as_number, SumAccumulator};
 use crate::execution::dql::aggregate::Accumulator;
+use crate::execution::hash::FxHashSet;
 use crate::expression::BinaryOperator;
 use crate::types::evaluator::binary_create;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::mem;
 
 pub struct AvgAccumulator {
-    distinct_values: Option<HashSet<DataValue>>,
+    distinct_values: Option<FxHashSet<DataValue>>,
     inner: Option<SumAccumulator>,
     count: usize,
     result: DataValue,
@@ -32,7 +33,7 @@ pub struct AvgAccumulator {
 impl AvgAccumulator {
     pub fn new(distinct: bool) -> Self {
         Self {
-            distinct_values: distinct.then(HashSet::new),
+            distinct_values: distinct.then(FxHashSet::default),
             inner: None,
             count: 0,
             result: DataValue::Null,
@@ -85,8 +86,17 @@ impl Accumulator for AvgAccumulator {
         &self.result
     }
 
-    fn result_owned(self: Box<Self>) -> DataValue {
-        self.result
+    fn take_result(&mut self) -> DataValue {
+        mem::replace(&mut self.result, DataValue::Null)
+    }
+
+    fn reset(&mut self) {
+        if let Some(values) = &mut self.distinct_values {
+            values.clear();
+        }
+        self.inner = None;
+        self.count = 0;
+        self.result = DataValue::Null;
     }
 }
 
@@ -109,7 +119,7 @@ mod tests {
         assert_ne!(first, second);
         accumulator.evaluate()?;
         assert_eq!(&second, accumulator.result());
-        assert_eq!(Box::new(accumulator).result_owned(), second);
+        assert_eq!(accumulator.take_result(), second);
         Ok(())
     }
 
@@ -133,10 +143,7 @@ mod tests {
 
         accumulator.update_value(&DataValue::Int32(3))?;
         accumulator.evaluate()?;
-        assert_eq!(
-            Box::new(accumulator).result_owned(),
-            DataValue::Float64(1.5.into())
-        );
+        assert_eq!(accumulator.take_result(), DataValue::Float64(1.5.into()));
         Ok(())
     }
 
@@ -145,16 +152,13 @@ mod tests {
         let mut empty = AvgAccumulator::new(false);
         empty.evaluate()?;
         assert_eq!(empty.result(), &DataValue::Null);
-        assert_eq!(Box::new(empty).result_owned(), DataValue::Null);
+        assert_eq!(empty.take_result(), DataValue::Null);
 
         let mut accumulator = AvgAccumulator::new(false);
         accumulator.update_value(&DataValue::UInt32(2))?;
         accumulator.update_value(&DataValue::UInt32(4))?;
         accumulator.evaluate()?;
-        assert_eq!(
-            Box::new(accumulator).result_owned(),
-            DataValue::Float64(3.0.into())
-        );
+        assert_eq!(accumulator.take_result(), DataValue::Float64(3.0.into()));
         Ok(())
     }
 }

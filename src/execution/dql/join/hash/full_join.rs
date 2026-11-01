@@ -14,9 +14,8 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::{
-    filter, join_rows, JoinProbeState, LeftDropState, LeftDropTuples, ProbeState,
+    filter, join_rows, BuildRow, JoinProbeState, LeftDropState, ProbeState,
 };
-use crate::execution::dql::join::hash_join::BuildState;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::bitset::BitSet;
@@ -33,39 +32,13 @@ impl JoinProbeState for FullJoinState {
     fn probe_next(
         &mut self,
         probe_state: &mut ProbeState,
-        build_state: Option<&mut BuildState>,
+        build: &[BuildRow],
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<TupleImpl>, DatabaseError> {
-        if probe_state.is_keys_has_null {
-            if probe_state.emitted_unmatched {
-                probe_state.finished = true;
-                return Ok(None);
-            }
-            probe_state.emitted_unmatched = true;
-            probe_state.finished = true;
-            probe_state
-                .probe_tuple
-                .prepend(std::iter::repeat_n(DataValue::Null, self.left_schema_len));
-            return Ok(Some(std::mem::take(&mut probe_state.probe_tuple)));
-        }
-
-        let Some(build_state) = build_state else {
-            if probe_state.emitted_unmatched {
-                probe_state.finished = true;
-                return Ok(None);
-            }
-            probe_state.emitted_unmatched = true;
-            probe_state.finished = true;
-            probe_state
-                .probe_tuple
-                .prepend(std::iter::repeat_n(DataValue::Null, self.left_schema_len));
-            return Ok(Some(std::mem::take(&mut probe_state.probe_tuple)));
-        };
-
-        while probe_state.index < build_state.tuples.len() {
-            let (i, build_tuple) = &build_state.tuples[probe_state.index];
-            probe_state.index += 1;
+        while let Some(i) = probe_state.next_row {
+            probe_state.next_row = build[i].next;
+            let build_tuple = &build[i].tuple;
 
             if let Some(filter_expr) = filter_expr {
                 let full_values = SplitTupleRef::new(build_tuple, &probe_state.probe_tuple);
@@ -73,7 +46,7 @@ impl JoinProbeState for FullJoinState {
                     continue;
                 }
             }
-            self.bits.insert(*i);
+            self.bits.insert(i);
             probe_state.produced = true;
             return Ok(Some(join_rows(
                 build_tuple,
@@ -101,25 +74,14 @@ impl JoinProbeState for FullJoinState {
     ) -> Result<Option<TupleImpl>, DatabaseError> {
         let full_schema_len = self.right_schema_len + self.left_schema_len;
 
-        loop {
-            if let Some(LeftDropTuples { tuples }) = left_drop_state.current.as_mut() {
-                for (i, mut left_tuple) in tuples.by_ref() {
-                    if self.bits.contains(i) {
-                        continue;
-                    }
-                    left_tuple.resize(full_schema_len, DataValue::Null);
-                    return Ok(Some(left_tuple));
-                }
-                left_drop_state.current = None;
+        for (i, row) in left_drop_state.rows.by_ref() {
+            if self.bits.contains(i) {
+                continue;
             }
-
-            let Some((_, state)) = left_drop_state.states.next() else {
-                return Ok(None);
-            };
-
-            left_drop_state.current = Some(LeftDropTuples {
-                tuples: state.tuples.into_iter(),
-            });
+            let mut left_tuple = row.tuple;
+            left_tuple.resize(full_schema_len, DataValue::Null);
+            return Ok(Some(left_tuple));
         }
+        Ok(None)
     }
 }

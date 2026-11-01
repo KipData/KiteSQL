@@ -32,7 +32,6 @@ use crate::execution::dql::aggregate::sum::{DistinctSumAccumulator, SumAccumulat
 use crate::execution::dql::aggregate::total::TotalAccumulator;
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
-use crate::iter_ext::Itertools;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::tuple::{Tuple, TupleLike};
@@ -53,7 +52,9 @@ pub trait Accumulator {
 
     fn result(&self) -> &DataValue;
 
-    fn result_owned(self: Box<Self>) -> DataValue;
+    fn take_result(&mut self) -> DataValue;
+
+    fn reset(&mut self);
 }
 
 pub(crate) fn create_accumulator(
@@ -75,22 +76,35 @@ pub(crate) fn create_accumulator(
 }
 
 #[inline]
-pub(crate) fn create_accumulators(
+pub(crate) fn push_accumulators(
+    accs: &mut Vec<Box<dyn Accumulator>>,
     exprs: &[ExprRef],
     arena: &(dyn MetaArena + '_),
-) -> Result<Vec<Box<dyn Accumulator>>, DatabaseError> {
-    exprs
-        .iter()
-        .map(|expr| {
-            let ScalarExpression::AggCall {
-                kind, ty, distinct, ..
-            } = arena.expression(*expr)
-            else {
-                unreachable!("create_accumulators called with non-aggregate expression {expr}")
-            };
-            create_accumulator(*kind, ty, *distinct)
-        })
-        .try_collect()
+) -> Result<(), DatabaseError> {
+    for expr in exprs {
+        let ScalarExpression::AggCall {
+            kind, ty, distinct, ..
+        } = arena.expression(*expr)
+        else {
+            unreachable!("push_accumulators called with non-aggregate expression {expr}")
+        };
+        accs.push(create_accumulator(*kind, ty, *distinct)?);
+    }
+    Ok(())
+}
+
+pub(crate) fn prepare_accumulators(
+    accs: &mut Vec<Box<dyn Accumulator>>,
+    exprs: &[ExprRef],
+    arena: &(dyn MetaArena + '_),
+) -> Result<(), DatabaseError> {
+    if accs.is_empty() {
+        return push_accumulators(accs, exprs, arena);
+    }
+    for acc in accs {
+        acc.reset();
+    }
+    Ok(())
 }
 
 pub(crate) fn update_accumulators<T: TupleLike + ?Sized>(
@@ -117,15 +131,16 @@ pub(crate) fn update_accumulators<T: TupleLike + ?Sized>(
 
 pub(crate) fn write_aggregate_output(
     output: &mut Tuple,
-    accs: Vec<Box<dyn Accumulator>>,
-    group_keys: Vec<DataValue>,
+    accs: &mut [Box<dyn Accumulator>],
+    group_keys: impl IntoIterator<Item = DataValue>,
 ) -> Result<(), DatabaseError> {
+    let group_keys = group_keys.into_iter();
     output.pk = None;
     output.values.clear();
-    output.values.reserve(accs.len() + group_keys.len());
-    for mut acc in accs {
+    output.values.reserve(accs.len() + group_keys.size_hint().0);
+    for acc in accs {
         acc.evaluate()?;
-        output.values.push(acc.result_owned());
+        output.values.push(acc.take_result());
     }
     output.values.extend(group_keys);
     Ok(())

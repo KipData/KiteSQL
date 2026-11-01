@@ -22,37 +22,36 @@ use crate::execution::dql::join::hash::full_join::FullJoinState;
 use crate::execution::dql::join::hash::inner_join::InnerJoinState;
 use crate::execution::dql::join::hash::left_join::LeftJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
-use crate::execution::dql::join::hash_join::BuildState;
-use crate::execution::dql::sort::BumpVec;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::tuple::{Tuple, TupleImpl, TupleLike};
 use crate::types::value::DataValue;
-use std::collections::hash_map::IntoIter as HashMapIntoIter;
+use std::iter::Enumerate;
+use std::vec::IntoIter;
+
+/// A build row. Build rows are kept in input order, and their index is the row number.
+pub(crate) struct BuildRow {
+    pub(crate) tuple: TupleImpl,
+    pub(crate) next: Option<usize>,
+}
 
 pub(crate) struct ProbeState {
-    pub(crate) is_keys_has_null: bool,
     pub(crate) probe_tuple: TupleImpl,
-    pub(crate) index: usize,
+    pub(crate) next_row: Option<usize>,
     pub(crate) produced: bool,
     pub(crate) finished: bool,
     pub(crate) emitted_unmatched: bool,
 }
 
 pub(crate) struct LeftDropState {
-    pub(crate) states: HashMapIntoIter<BumpVec<'static, DataValue>, BuildState>,
-    pub(crate) current: Option<LeftDropTuples>,
-}
-
-pub(crate) struct LeftDropTuples {
-    pub(crate) tuples: std::vec::IntoIter<(usize, TupleImpl)>,
+    pub(crate) rows: Enumerate<IntoIter<BuildRow>>,
 }
 
 pub(crate) trait JoinProbeState {
     fn probe_next(
         &mut self,
         probe_state: &mut ProbeState,
-        build_state: Option<&mut BuildState>,
+        build: &[BuildRow],
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<TupleImpl>, DatabaseError>;
@@ -78,22 +77,22 @@ impl JoinProbeState for JoinProbeStateImpl {
     fn probe_next(
         &mut self,
         probe_state: &mut ProbeState,
-        build_state: Option<&mut BuildState>,
+        build: &[BuildRow],
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<TupleImpl>, DatabaseError> {
         match self {
             JoinProbeStateImpl::Inner(state) => {
-                state.probe_next(probe_state, build_state, filter_expr, plan_arena)
+                state.probe_next(probe_state, build, filter_expr, plan_arena)
             }
             JoinProbeStateImpl::Left(state) => {
-                state.probe_next(probe_state, build_state, filter_expr, plan_arena)
+                state.probe_next(probe_state, build, filter_expr, plan_arena)
             }
             JoinProbeStateImpl::Right(state) => {
-                state.probe_next(probe_state, build_state, filter_expr, plan_arena)
+                state.probe_next(probe_state, build, filter_expr, plan_arena)
             }
             JoinProbeStateImpl::Full(state) => {
-                state.probe_next(probe_state, build_state, filter_expr, plan_arena)
+                state.probe_next(probe_state, build, filter_expr, plan_arena)
             }
         }
     }

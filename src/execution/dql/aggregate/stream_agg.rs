@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
-    create_accumulators, update_accumulators, write_aggregate_output, Accumulator,
+    prepare_accumulators, update_accumulators, write_aggregate_output, Accumulator,
 };
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -31,8 +31,11 @@ use std::mem;
 pub struct StreamAggExecutor<'a> {
     agg_calls: &'a [ExprRef],
     groupby_exprs: &'a [ExprRef],
-    group_keys: Option<Vec<DataValue>>,
+    // The keys of the open group, followed by the keys of the row being read.
+    group_keys: Vec<DataValue>,
+    in_group: bool,
     accs: Vec<Box<dyn Accumulator>>,
+    next_accs: Vec<Box<dyn Accumulator>>,
     input: ExecNode<'a>,
 }
 
@@ -55,8 +58,10 @@ impl<'a> ReadExecutor<'a> for StreamAggExecutor<'a> {
         ExecNode::StreamAgg(Box::new(StreamAggExecutor {
             agg_calls,
             groupby_exprs,
-            group_keys: None,
+            group_keys: Vec::new(),
+            in_group: false,
             accs: Vec::new(),
+            next_accs: Vec::new(),
             input,
         }))
     }
@@ -68,8 +73,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        self.group_keys = None;
-        self.accs.clear();
+        self.group_keys.clear();
+        self.in_group = false;
         self.input.reset(arena, plan_arena)
     }
 
@@ -78,25 +83,25 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
+        let len = self.groupby_exprs.len();
         loop {
             if !self.input.next_tuple(arena, plan_arena)? {
-                let Some(group_keys) = self.group_keys.take() else {
+                if !mem::take(&mut self.in_group) {
                     arena.finish();
                     return Ok(());
-                };
+                }
                 write_aggregate_output(
                     arena.output_tuple_mut(),
-                    mem::take(&mut self.accs),
-                    group_keys,
+                    &mut self.accs,
+                    self.group_keys.drain(..),
                 )?;
                 arena.resume();
                 return Ok(());
             }
 
             let tuple = arena.result_tuple();
-            let mut group_keys = Vec::with_capacity(self.groupby_exprs.len());
             for expr in self.groupby_exprs {
-                group_keys.push(
+                self.group_keys.push(
                     plan_arena
                         .expression(*expr)
                         .eval(plan_arena, Some(tuple))?
@@ -104,24 +109,25 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
                 );
             }
 
-            match &mut self.group_keys {
-                None => {
-                    self.accs = create_accumulators(self.agg_calls, plan_arena)?;
-                    update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
-                    self.group_keys = Some(group_keys);
-                }
-                Some(current_keys) if current_keys == &group_keys => {
-                    update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
-                }
-                Some(current_keys) => {
-                    let mut next_accs = create_accumulators(self.agg_calls, plan_arena)?;
-                    update_accumulators(&mut next_accs, self.agg_calls, tuple, plan_arena)?;
-                    mem::swap(current_keys, &mut group_keys);
-                    let current_accs = mem::replace(&mut self.accs, next_accs);
-                    write_aggregate_output(arena.output_tuple_mut(), current_accs, group_keys)?;
-                    arena.resume();
-                    return Ok(());
-                }
+            if !self.in_group {
+                self.in_group = true;
+                prepare_accumulators(&mut self.accs, self.agg_calls, plan_arena)?;
+                update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
+            } else if self.group_keys[..len] == self.group_keys[len..] {
+                self.group_keys.truncate(len);
+                update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
+            } else {
+                prepare_accumulators(&mut self.next_accs, self.agg_calls, plan_arena)?;
+                update_accumulators(&mut self.next_accs, self.agg_calls, tuple, plan_arena)?;
+                mem::swap(&mut self.accs, &mut self.next_accs);
+                // Draining the closed group's keys moves the row's keys to the front.
+                write_aggregate_output(
+                    arena.output_tuple_mut(),
+                    &mut self.next_accs,
+                    self.group_keys.drain(..len),
+                )?;
+                arena.resume();
+                return Ok(());
             }
         }
     }
