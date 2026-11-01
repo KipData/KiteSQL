@@ -101,8 +101,7 @@ impl RangeValue {
 
     pub(crate) fn fields(&self) -> impl Iterator<Item = RangeValueRef<'_>> + '_ {
         let (values, computed) = match self {
-            RangeValue::Value(DataValue::Tuple(values)) => (values.as_slice(), None),
-            RangeValue::Value(value) => (std::slice::from_ref(value), None),
+            RangeValue::Value(value) => (value.as_slice(), None),
             RangeValue::Computed(computed) => (
                 computed.prefix.as_deref().unwrap_or_default(),
                 Some(computed.as_ref()),
@@ -127,7 +126,7 @@ impl RangeValue {
 
     pub(crate) fn is_tuple(&self) -> bool {
         match self {
-            RangeValue::Value(value) => matches!(value, DataValue::Tuple(_)),
+            RangeValue::Value(value) => value.is_tuple(),
             RangeValue::Computed(computed) => computed.prefix.is_some(),
         }
     }

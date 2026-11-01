@@ -657,7 +657,7 @@ fn encoded_fraction(
     end.memcomparable_encode(buf)?;
     let upper_end = buf.len();
     value.memcomparable_encode(buf)?;
-    if is_upper && matches!(value, DataValue::Tuple(_)) {
+    if is_upper && value.is_tuple() {
         buf.push(crate::storage::table_codec::BOUND_MAX_TAG);
     }
     let lower = &buf[..lower_end];
