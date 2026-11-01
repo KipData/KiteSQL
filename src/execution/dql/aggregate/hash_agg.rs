@@ -14,8 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
-    create_accumulators, update_accumulators, write_aggregate_output, Accumulator,
+    push_accumulators, update_accumulators, write_aggregate_output, Accumulator,
 };
+use crate::execution::hash::FxBuildHasher;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
@@ -25,15 +26,22 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
-use std::collections::hash_map::IntoIter as HashMapIntoIter;
-use std::collections::HashMap;
+use hashbrown::hash_table::IntoIter as HashTableIntoIter;
+use hashbrown::HashTable;
+use std::hash::BuildHasher;
+use std::mem;
 
-type HashAggOutput = HashMapIntoIter<Vec<DataValue>, Vec<Box<dyn Accumulator>>>;
+/// Group indexes, which locate each group's keys and accumulators.
+type HashAggOutput = HashTableIntoIter<usize>;
 
 pub struct HashAggExecutor<'a> {
     agg_calls: &'a [ExprRef],
     groupby_exprs: &'a [ExprRef],
     input: ExecNode<'a>,
+    // Every group's keys and accumulators back to back, in the order the groups appear:
+    // `groupby_exprs.len()` keys and `agg_calls.len()` accumulators per group.
+    keys: Vec<DataValue>,
+    accs: Vec<Box<dyn Accumulator>>,
     output: Option<HashAggOutput>,
 }
 
@@ -57,6 +65,8 @@ impl<'a> ReadExecutor<'a> for HashAggExecutor<'a> {
             agg_calls,
             groupby_exprs,
             input,
+            keys: Vec::new(),
+            accs: Vec::new(),
             output: None,
         }))
     }
@@ -68,6 +78,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
+        self.keys.clear();
+        self.accs.clear();
         self.output = None;
         self.input.reset(arena, plan_arena)
     }
@@ -77,16 +89,19 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
+        let len = self.groupby_exprs.len();
+        let acc_len = self.agg_calls.len();
         if self.output.is_none() {
-            let mut group_hash_accs: HashMap<Vec<DataValue>, Vec<Box<dyn Accumulator>>> =
-                HashMap::new();
-            let mut group_keys = Vec::with_capacity(self.groupby_exprs.len());
+            let hasher = FxBuildHasher::default();
+            let mut groups: HashTable<usize> = HashTable::new();
+            let mut group_count = 0;
 
             while self.input.next_tuple(arena, plan_arena)? {
                 let tuple = arena.result_tuple();
-                group_keys.clear();
+                // Evaluate the key in place, and drop it again if its group exists.
+                let start = self.keys.len();
                 for expr in self.groupby_exprs {
-                    group_keys.push(
+                    self.keys.push(
                         plan_arena
                             .expression(*expr)
                             .eval(plan_arena, Some(tuple))?
@@ -94,24 +109,50 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
                     );
                 }
 
-                if let Some(accs) = group_hash_accs.get_mut(group_keys.as_slice()) {
-                    update_accumulators(accs, self.agg_calls, tuple, plan_arena)?;
-                } else {
-                    let mut accs = create_accumulators(self.agg_calls, plan_arena)?;
-                    update_accumulators(&mut accs, self.agg_calls, tuple, plan_arena)?;
-                    group_hash_accs.insert(std::mem::take(&mut group_keys), accs);
-                }
+                let keys = &self.keys;
+                let hash = hasher.hash_one(&keys[start..]);
+                let group = groups
+                    .find(hash, |&group| keys[group * len..][..len] == keys[start..])
+                    .copied();
+                let group = match group {
+                    Some(group) => {
+                        self.keys.truncate(start);
+                        group
+                    }
+                    None => {
+                        let group = group_count;
+                        group_count += 1;
+                        groups.insert_unique(hash, group, |&group| {
+                            hasher.hash_one(&keys[group * len..][..len])
+                        });
+                        push_accumulators(&mut self.accs, self.agg_calls, plan_arena)?;
+                        group
+                    }
+                };
+                update_accumulators(
+                    &mut self.accs[group * acc_len..][..acc_len],
+                    self.agg_calls,
+                    tuple,
+                    plan_arena,
+                )?;
             }
 
-            self.output = Some(group_hash_accs.into_iter());
+            self.output = Some(groups.into_iter());
         }
 
-        let Some((group_keys, accs)) = self.output.as_mut().and_then(Iterator::next) else {
+        let Some(group) = self.output.as_mut().and_then(Iterator::next) else {
             arena.finish();
             return Ok(());
         };
+        let group_keys = self.keys[group * len..][..len]
+            .iter_mut()
+            .map(|value| mem::replace(value, DataValue::Null));
 
-        write_aggregate_output(arena.output_tuple_mut(), accs, group_keys)?;
+        write_aggregate_output(
+            arena.output_tuple_mut(),
+            &mut self.accs[group * acc_len..][..acc_len],
+            group_keys,
+        )?;
         arena.resume();
         Ok(())
     }

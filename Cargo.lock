@@ -1131,6 +1131,7 @@ dependencies = [
  "comfy-table",
  "criterion",
  "csv",
+ "hashbrown 0.15.4",
  "indicatif",
  "js-sys",
  "kite_sql_serde_macros",

@@ -13,11 +13,12 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::aggregate::create_accumulators;
+use crate::execution::dql::aggregate::{
+    prepare_accumulators, update_accumulators, write_aggregate_output, Accumulator,
+};
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
-use crate::expression::ScalarExpression;
 use crate::planner::operator::aggregate::AggregateOperator;
 use crate::planner::ExprRef;
 use crate::planner::LogicalPlan;
@@ -26,6 +27,7 @@ use crate::storage::StorageTransaction;
 pub struct SimpleAggExecutor<'a> {
     agg_calls: &'a [ExprRef],
     input: ExecNode<'a>,
+    accs: Vec<Box<dyn Accumulator>>,
     returned: bool,
 }
 
@@ -41,6 +43,7 @@ impl<'a> ReadExecutor<'a> for SimpleAggExecutor<'a> {
         ExecNode::SimpleAgg(Box::new(SimpleAggExecutor {
             agg_calls,
             input,
+            accs: Vec::new(),
             returned: false,
         }))
     }
@@ -66,36 +69,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'
             return Ok(());
         }
 
-        let mut accs = create_accumulators(self.agg_calls, plan_arena)?;
-
+        prepare_accumulators(&mut self.accs, self.agg_calls, plan_arena)?;
         while self.input.next_tuple(arena, plan_arena)? {
             let tuple = arena.result_tuple();
-            for (acc, expr) in accs.iter_mut().zip(self.agg_calls.iter()) {
-                let ScalarExpression::AggCall { args, .. } = plan_arena.expression(*expr) else {
-                    unreachable!()
-                };
-                if args.len() > 1 {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "currently aggregate functions only support a single Column as a parameter"
-                            .to_string(),
-                    ));
-                }
-
-                let value = plan_arena
-                    .expression(args[0])
-                    .eval(plan_arena, Some(tuple))?;
-                acc.update_value(&value)?;
-            }
+            update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
         }
 
-        let output = arena.output_tuple_mut();
-        output.pk = None;
-        output.values.clear();
-        output.values.reserve(accs.len());
-        for mut acc in accs {
-            acc.evaluate()?;
-            output.values.push(acc.result_owned());
-        }
+        write_aggregate_output(arena.output_tuple_mut(), &mut self.accs, [])?;
         self.returned = true;
         arena.resume();
         Ok(())

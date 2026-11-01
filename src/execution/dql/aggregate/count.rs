@@ -14,8 +14,9 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::Accumulator;
+use crate::execution::hash::FxHashSet;
 use crate::types::value::DataValue;
-use std::collections::HashSet;
+use std::mem;
 
 pub struct CountAccumulator {
     result: DataValue,
@@ -45,20 +46,24 @@ impl Accumulator for CountAccumulator {
         &self.result
     }
 
-    fn result_owned(self: Box<Self>) -> DataValue {
-        self.result
+    fn take_result(&mut self) -> DataValue {
+        mem::replace(&mut self.result, DataValue::Null)
+    }
+
+    fn reset(&mut self) {
+        self.result = DataValue::Int32(0);
     }
 }
 
 pub struct DistinctCountAccumulator {
-    distinct_values: HashSet<DataValue>,
+    distinct_values: FxHashSet<DataValue>,
     result: DataValue,
 }
 
 impl DistinctCountAccumulator {
     pub fn new() -> Self {
         Self {
-            distinct_values: HashSet::default(),
+            distinct_values: FxHashSet::default(),
             result: DataValue::Int32(0),
         }
     }
@@ -78,8 +83,13 @@ impl Accumulator for DistinctCountAccumulator {
         &self.result
     }
 
-    fn result_owned(self: Box<Self>) -> DataValue {
-        self.result
+    fn take_result(&mut self) -> DataValue {
+        mem::replace(&mut self.result, DataValue::Null)
+    }
+
+    fn reset(&mut self) {
+        self.distinct_values.clear();
+        self.result = DataValue::Int32(0);
     }
 }
 
@@ -95,7 +105,7 @@ mod tests {
             accumulator.update_value(&value)?;
         }
         assert_eq!(accumulator.result(), &DataValue::Int32(2));
-        assert_eq!(Box::new(accumulator).result_owned(), DataValue::Int32(2));
+        assert_eq!(accumulator.take_result(), DataValue::Int32(2));
         Ok(())
     }
 
@@ -106,7 +116,7 @@ mod tests {
             accumulator.update_value(&value)?;
         }
         assert_eq!(accumulator.result(), &DataValue::Int32(2));
-        assert_eq!(Box::new(accumulator).result_owned(), DataValue::Int32(2));
+        assert_eq!(accumulator.take_result(), DataValue::Int32(2));
         Ok(())
     }
 }

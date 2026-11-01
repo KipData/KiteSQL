@@ -18,6 +18,7 @@ use crate::expression::BinaryOperator;
 use crate::types::evaluator::binary_create;
 use crate::types::value::DataValue;
 use std::borrow::Cow;
+use std::mem;
 
 pub struct MinMaxAccumulator {
     result: DataValue,
@@ -64,8 +65,12 @@ impl Accumulator for MinMaxAccumulator {
         &self.result
     }
 
-    fn result_owned(self: Box<Self>) -> DataValue {
-        self.result
+    fn take_result(&mut self) -> DataValue {
+        mem::replace(&mut self.result, DataValue::Null)
+    }
+
+    fn reset(&mut self) {
+        self.result = DataValue::Null;
     }
 }
 
@@ -82,10 +87,7 @@ mod tests {
                 accumulator.update_value(&value)?;
             }
             assert_eq!(accumulator.result(), &DataValue::Int32(expected));
-            assert_eq!(
-                Box::new(accumulator).result_owned(),
-                DataValue::Int32(expected)
-            );
+            assert_eq!(accumulator.take_result(), DataValue::Int32(expected));
         }
         Ok(())
     }

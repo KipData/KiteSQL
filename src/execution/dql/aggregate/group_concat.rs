@@ -14,21 +14,22 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::Accumulator;
+use crate::execution::hash::FxHashSet;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
-use std::collections::HashSet;
 use std::fmt::Write;
+use std::mem;
 
 /// SQLite `group_concat()`: non-NULL values in input order joined with `,`; NULL when there are none.
 pub struct GroupConcatAccumulator {
-    distinct_values: Option<HashSet<DataValue>>,
+    distinct_values: Option<FxHashSet<DataValue>>,
     result: DataValue,
 }
 
 impl GroupConcatAccumulator {
     pub fn new(distinct: bool) -> Self {
         Self {
-            distinct_values: distinct.then(HashSet::new),
+            distinct_values: distinct.then(FxHashSet::default),
             result: DataValue::Null,
         }
     }
@@ -68,7 +69,14 @@ impl Accumulator for GroupConcatAccumulator {
         &self.result
     }
 
-    fn result_owned(self: Box<Self>) -> DataValue {
-        self.result
+    fn take_result(&mut self) -> DataValue {
+        mem::replace(&mut self.result, DataValue::Null)
+    }
+
+    fn reset(&mut self) {
+        if let Some(values) = &mut self.distinct_values {
+            values.clear();
+        }
+        self.result = DataValue::Null;
     }
 }

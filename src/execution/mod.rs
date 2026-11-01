@@ -16,6 +16,7 @@ pub(crate) mod ddl;
 mod ddl_apply;
 pub(crate) mod dml;
 pub(crate) mod dql;
+pub(crate) mod hash;
 pub(crate) mod runs;
 #[cfg(feature = "spill")]
 pub(crate) mod spill;

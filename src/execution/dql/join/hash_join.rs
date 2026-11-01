@@ -18,9 +18,9 @@ use crate::execution::dql::join::hash::inner_join::InnerJoinState;
 use crate::execution::dql::join::hash::left_join::LeftJoinState;
 use crate::execution::dql::join::hash::right_join::RightJoinState;
 use crate::execution::dql::join::hash::{
-    JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
+    BuildRow, JoinProbeState, JoinProbeStateImpl, LeftDropState, ProbeState,
 };
-use crate::execution::dql::sort::BumpVec;
+use crate::execution::hash::FxBuildHasher;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
@@ -32,9 +32,8 @@ use crate::storage::StorageTransaction;
 use crate::types::bitset::BitSet;
 use crate::types::tuple::TupleImpl;
 use crate::types::value::DataValue;
-use bumpalo::Bump;
-use std::collections::HashMap;
-use std::mem::transmute;
+use hashbrown::HashTable;
+use std::hash::BuildHasher;
 
 pub struct HashJoin<'a> {
     state: HashJoinState,
@@ -46,16 +45,42 @@ pub struct HashJoin<'a> {
     right_schema_len: usize,
     left_input: ExecNode<'a>,
     right_input: ExecNode<'a>,
-    bump: Box<Bump>,
     init_error: Option<DatabaseError>,
+}
+
+/// A distinct build key and the chain of its rows in `BuildTable::rows`.
+struct BuildKey {
+    // Where the key starts in `BuildTable::keys`.
+    offset: usize,
+    first_row: usize,
+    last_row: usize,
+}
+
+/// The build side: each distinct key once in `keys`, `on_left_keys.len()` values per key.
+struct BuildTable {
+    hasher: FxBuildHasher,
+    table: HashTable<BuildKey>,
+    keys: Vec<DataValue>,
+    rows: Vec<BuildRow>,
+}
+
+impl BuildTable {
+    fn first_row(&self, key: &[DataValue]) -> Option<usize> {
+        let keys = &self.keys;
+        self.table
+            .find(self.hasher.hash_one(key), |build_key| {
+                &keys[build_key.offset..][..key.len()] == key
+            })
+            .map(|build_key| build_key.first_row)
+    }
 }
 
 enum HashJoinState {
     Build,
     Probe {
-        build_map: HashMap<BumpVec<'static, DataValue>, BuildState>,
+        build_table: Box<BuildTable>,
         join_impl: JoinProbeStateImpl,
-        probe_buf: BumpVec<'static, DataValue>,
+        probe_buf: Vec<DataValue>,
         probe_state: Option<ProbeState>,
     },
     LeftDrop {
@@ -101,39 +126,20 @@ impl<'a> HashJoin<'a> {
             right_schema_len,
             left_input,
             right_input,
-            bump: Box::<Bump>::default(),
             init_error,
         }
     }
 }
 
 impl<'a> HashJoin<'a> {
-    #[allow(clippy::mutable_key_type)]
-    fn own_bump_vec(buf: BumpVec<'_, DataValue>) -> BumpVec<'static, DataValue> {
-        unsafe { transmute::<BumpVec<'_, DataValue>, BumpVec<'static, DataValue>>(buf) }
-    }
-
-    #[allow(clippy::mutable_key_type)]
-    fn own_build_map(
-        build_map: HashMap<BumpVec<'_, DataValue>, BuildState>,
-    ) -> HashMap<BumpVec<'static, DataValue>, BuildState> {
-        unsafe {
-            transmute::<
-                HashMap<BumpVec<'_, DataValue>, BuildState>,
-                HashMap<BumpVec<'static, DataValue>, BuildState>,
-            >(build_map)
-        }
-    }
-
     fn eval_keys(
         on_keys: &[ExprRef],
         tuple: &TupleImpl,
-        build_buf: &mut BumpVec<'_, DataValue>,
+        buf: &mut Vec<DataValue>,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
-        build_buf.clear();
         for expr in on_keys {
-            build_buf.push(
+            buf.push(
                 plan_arena
                     .expression(*expr)
                     .eval(plan_arena, Some(tuple))?
@@ -155,31 +161,40 @@ impl<'a> HashJoin<'a> {
         // build phase:
         // 1.construct hashtable, one hash key may contains multiple rows indices.
         // 2.merged all left tuples.
-        // TODO: std `RandomState` (SipHash) costs ~10% of an LMDB PK-sized hash join; a faster
-        // non-DoS-resistant hasher would do for build keys.
-        #[allow(clippy::mutable_key_type)]
-        let mut build_map = HashMap::new();
-        let mut build_buf = BumpVec::with_capacity_in(self.on_left_keys.len(), &self.bump);
-        let mut build_count = 0usize;
+        let hasher = FxBuildHasher::default();
+        let mut table: HashTable<BuildKey> = HashTable::new();
+        let mut keys = Vec::new();
+        let mut rows: Vec<BuildRow> = Vec::new();
+        let len = self.on_left_keys.len();
 
         while self.left_input.next_tuple(arena, plan_arena)? {
             let tuple = arena.take_tuple();
-            Self::eval_keys(&self.on_left_keys, &tuple, &mut build_buf, plan_arena)?;
+            let row = rows.len();
+            // Evaluate the key in place, and drop it again if the key is already there.
+            let start = keys.len();
+            Self::eval_keys(&self.on_left_keys, &tuple, &mut keys, plan_arena)?;
+            let hash = hasher.hash_one(&keys[start..]);
+            let found = table.find_mut(hash, |build_key| {
+                keys[build_key.offset..][..len] == keys[start..]
+            });
 
-            match build_map.get_mut(&build_buf) {
-                None => {
-                    let key = std::mem::replace(&mut build_buf, BumpVec::new_in(&self.bump));
-                    build_map.insert(
-                        Self::own_bump_vec(key),
-                        BuildState {
-                            tuples: vec![(build_count, tuple)],
-                        },
-                    );
-                }
-                Some(BuildState { tuples, .. }) => tuples.push((build_count, tuple)),
+            if let Some(build_key) = found {
+                rows[build_key.last_row].next = Some(row);
+                build_key.last_row = row;
+                keys.truncate(start);
+            } else {
+                let build_key = BuildKey {
+                    offset: start,
+                    first_row: row,
+                    last_row: row,
+                };
+                table.insert_unique(hash, build_key, |build_key| {
+                    hasher.hash_one(&keys[build_key.offset..][..len])
+                });
             }
-            build_count += 1;
+            rows.push(BuildRow { tuple, next: None });
         }
+        let build_count = rows.len();
 
         self.state = HashJoinState::Probe {
             join_impl: Self::create_join_impl(
@@ -188,11 +203,13 @@ impl<'a> HashJoin<'a> {
                 self.right_schema_len,
                 build_count,
             ),
-            probe_buf: Self::own_bump_vec(BumpVec::with_capacity_in(
-                self.on_right_keys.len(),
-                &self.bump,
-            )),
-            build_map: Self::own_build_map(build_map),
+            probe_buf: Vec::with_capacity(self.on_right_keys.len()),
+            build_table: Box::new(BuildTable {
+                hasher,
+                table,
+                keys,
+                rows,
+            }),
             probe_state: None,
         };
         Ok(())
@@ -220,13 +237,6 @@ impl<'a> HashJoin<'a> {
             JoinType::Cross => unreachable!(),
         }
     }
-}
-
-// TODO: dropping the build map (one heap `Vec` and owned `Tuple`s per key) costs ~13.5% of an
-// LMDB PK-sized hash join plus allocator consolidation; allocate build rows in `bump` instead.
-#[derive(Default, Debug)]
-pub(crate) struct BuildState {
-    pub(crate) tuples: Vec<(usize, TupleImpl)>,
 }
 
 impl<'a> ReadExecutor<'a> for HashJoin<'a> {
@@ -259,7 +269,6 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = HashJoinState::Build;
-        self.bump.reset();
         self.left_input.reset(arena, plan_arena)?;
         self.right_input.reset(arena, plan_arena)
     }
@@ -280,7 +289,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
             match state {
                 HashJoinState::Build => unreachable!("hash join must be initialized before probe"),
                 HashJoinState::Probe {
-                    mut build_map,
+                    build_table,
                     mut join_impl,
                     mut probe_buf,
                     mut probe_state,
@@ -291,16 +300,22 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
                                 break true;
                             }
                             let tuple = arena.take_tuple();
+                            probe_buf.clear();
                             Self::eval_keys(
                                 &self.on_right_keys,
                                 &tuple,
                                 &mut probe_buf,
                                 plan_arena,
                             )?;
+                            // A null key matches nothing.
+                            let next_row = if probe_buf.iter().any(DataValue::is_null) {
+                                None
+                            } else {
+                                build_table.first_row(&probe_buf)
+                            };
                             probe_state = Some(ProbeState {
-                                is_keys_has_null: probe_buf.iter().any(DataValue::is_null),
                                 probe_tuple: tuple,
-                                index: 0,
+                                next_row,
                                 produced: false,
                                 finished: false,
                                 emitted_unmatched: false,
@@ -310,15 +325,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
                         let Some(probe) = probe_state.as_mut() else {
                             continue;
                         };
-                        let build_state = if probe.is_keys_has_null {
-                            None
-                        } else {
-                            build_map.get_mut(&probe_buf)
-                        };
 
                         if let Some(tuple) = join_impl.probe_next(
                             probe,
-                            build_state,
+                            &build_table.rows,
                             self.filter.as_ref(),
                             plan_arena,
                         )? {
@@ -326,7 +336,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
                                 probe_state = None;
                             }
                             self.state = HashJoinState::Probe {
-                                build_map,
+                                build_table,
                                 join_impl,
                                 probe_buf,
                                 probe_state,
@@ -344,8 +354,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
                     state = HashJoinState::LeftDrop {
                         join_impl,
                         left_drop: LeftDropState {
-                            states: build_map.into_iter(),
-                            current: None,
+                            rows: build_table.rows.into_iter().enumerate(),
                         },
                     };
                 }
