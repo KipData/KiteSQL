@@ -1212,21 +1212,18 @@ impl<'a> ParamArena<'a> {
         self.scalar_query_count = parent.scalar_query_count;
         for (slot, &expr_ref) in self.parameter_expressions.iter().enumerate() {
             debug_assert_eq!(parent.arena_expression(expr_ref).param, Some(slot));
-            let ScalarExpression::Constant(value @ DataValue::Parameter { id, .. }) =
+            let ScalarExpression::Constant(DataValue::Parameter { id, ty }) =
                 parent.expression(expr_ref)
             else {
                 unreachable!("parameter expression must be a single parameter constant");
             };
             let id = *id;
-            let mut value = value.clone();
-            value.bind_parameters(
-                &|id| {
-                    params
-                        .iter()
-                        .find_map(|(candidate, value)| (*candidate == id).then_some(value))
-                },
-                &|_| None,
-            )?;
+            let value = params
+                .iter()
+                .find_map(|(candidate, value)| (*candidate == id).then_some(value))
+                .ok_or_else(|| DatabaseError::parameter_not_found(format!("${id}")))?
+                .clone()
+                .cast(ty)?;
             // reuse
             match self.expressions.get_mut(slot) {
                 Some((

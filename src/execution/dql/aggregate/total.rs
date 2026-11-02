@@ -15,20 +15,21 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::sum::text_as_number;
 use crate::execution::dql::aggregate::Accumulator;
+use crate::execution::hash::FxHashSet;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
-use std::collections::HashSet;
+use std::mem;
 
 /// SQLite `total()`: always a double, and 0.0 rather than NULL when nothing is summed.
 pub struct TotalAccumulator {
-    distinct_values: Option<HashSet<DataValue>>,
+    distinct_values: Option<FxHashSet<DataValue>>,
     result: DataValue,
 }
 
 impl TotalAccumulator {
     pub fn new(distinct: bool) -> Self {
         Self {
-            distinct_values: distinct.then(HashSet::new),
+            distinct_values: distinct.then(FxHashSet::default),
             result: DataValue::Float64(0.0.into()),
         }
     }
@@ -61,7 +62,14 @@ impl Accumulator for TotalAccumulator {
         &self.result
     }
 
-    fn result_owned(self: Box<Self>) -> DataValue {
-        self.result
+    fn take_result(&mut self) -> DataValue {
+        mem::replace(&mut self.result, DataValue::Null)
+    }
+
+    fn reset(&mut self) {
+        if let Some(values) = &mut self.distinct_values {
+            values.clear();
+        }
+        self.result = DataValue::Float64(0.0.into());
     }
 }

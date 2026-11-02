@@ -368,10 +368,10 @@ mod wasm_tests {
                 .id(),
             (Some(0), None),
             pk_index,
-            &[Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(0)),
-                max: Bound::Included(DataValue::Int32(2)),
-            }][..],
+            Range::Scope {
+                min: Bound::Excluded(DataValue::Int32(0).into()),
+                max: Bound::Included(DataValue::Int32(2).into()),
+            },
             true,
             &deserializers,
             false,
@@ -557,10 +557,10 @@ mod native_tests {
                 .id(),
             (Some(0), None),
             pk_index,
-            &[Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(0)),
-                max: Bound::Included(DataValue::Int32(2)),
-            }][..],
+            Range::Scope {
+                min: Bound::Excluded(DataValue::Int32(0).into()),
+                max: Bound::Included(DataValue::Int32(2).into()),
+            },
             true,
             &deserializers,
             false,

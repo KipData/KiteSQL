@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::execution::hash::FxBuildHasher;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
@@ -21,13 +22,22 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::tuple::TupleImpl;
-use std::collections::HashMap;
+use crate::types::value::DataValue;
+use hashbrown::HashTable;
+use std::hash::{BuildHasher, Hash, Hasher};
+
+struct RightRow {
+    offset: usize,
+    count: usize,
+}
 
 pub struct SetMembership<'a> {
     kind: SetMembershipKind,
     left_input: ExecNode<'a>,
     right_input: ExecNode<'a>,
-    right_counts: HashMap<TupleImpl, usize>,
+    hasher: FxBuildHasher,
+    right_rows: Vec<DataValue>,
+    right_counts: HashTable<RightRow>,
     built: bool,
 }
 
@@ -45,7 +55,9 @@ impl<'a> ReadExecutor<'a> for SetMembership<'a> {
             kind,
             left_input,
             right_input,
-            right_counts: HashMap::new(),
+            hasher: FxBuildHasher::default(),
+            right_rows: Vec::new(),
+            right_counts: HashTable::new(),
             built: false,
         }))
     }
@@ -58,6 +70,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership<'a> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.built = false;
+        self.right_rows.clear();
         self.right_counts.clear();
         self.left_input.reset(arena, plan_arena)?;
         self.right_input.reset(arena, plan_arena)
@@ -70,11 +83,20 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership<'a> {
     ) -> Result<(), DatabaseError> {
         if !self.built {
             while self.right_input.next_tuple(arena, plan_arena)? {
-                if let Some(count) = self.right_counts.get_mut(arena.result_tuple()) {
-                    *count += 1;
-                } else {
-                    self.right_counts.insert(arena.take_tuple(), 1);
+                let tuple = arena.result_tuple();
+                let width = tuple.len();
+                let hash = hash_row(&self.hasher, tuple.iter());
+                if let Some(row) = self.find_mut(hash, tuple) {
+                    row.count += 1;
+                    continue;
                 }
+                let offset = self.right_rows.len();
+                self.right_rows.extend(tuple.iter().cloned());
+                let (hasher, rows) = (&self.hasher, &self.right_rows);
+                self.right_counts
+                    .insert_unique(hash, RightRow { offset, count: 1 }, |row| {
+                        hash_row(hasher, &rows[row.offset..][..width])
+                    });
             }
             self.built = true;
         }
@@ -99,15 +121,30 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership<'a> {
     }
 }
 
-impl SetMembership<'_> {
-    fn consume_right_match(&mut self, tuple: &TupleImpl) -> bool {
-        if let Some(count) = self.right_counts.get_mut(tuple) {
-            if *count > 0 {
-                *count -= 1;
-                return true;
-            }
-        }
+fn hash_row<'v>(hasher: &FxBuildHasher, values: impl IntoIterator<Item = &'v DataValue>) -> u64 {
+    let mut state = hasher.build_hasher();
+    for value in values {
+        value.hash(&mut state);
+    }
+    state.finish()
+}
 
-        false
+impl SetMembership<'_> {
+    fn find_mut(&mut self, hash: u64, tuple: &TupleImpl) -> Option<&mut RightRow> {
+        let rows = &self.right_rows;
+        self.right_counts.find_mut(hash, |row| {
+            rows[row.offset..][..tuple.len()].iter().eq(tuple.iter())
+        })
+    }
+
+    fn consume_right_match(&mut self, tuple: &TupleImpl) -> bool {
+        let hash = hash_row(&self.hasher, tuple.iter());
+        match self.find_mut(hash, tuple) {
+            Some(row) if row.count > 0 => {
+                row.count -= 1;
+                true
+            }
+            _ => false,
+        }
     }
 }

@@ -14,13 +14,12 @@
 
 use crate::catalog::{TableCatalog, TableId};
 use crate::errors::DatabaseError;
-use crate::expression::range_detacher::Range;
+use crate::expression::range_detacher::{Range, RangeValue};
 use crate::expression::ScalarExpression;
 use crate::planner::operator::SortOption;
 use crate::planner::Explain;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
-use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
@@ -68,8 +67,11 @@ pub enum RuntimeIndexProbe {
 impl From<RuntimeIndexProbe> for Range {
     fn from(probe: RuntimeIndexProbe) -> Self {
         match probe {
-            RuntimeIndexProbe::Eq(value) => Range::Eq(value),
-            RuntimeIndexProbe::Scope { min, max } => Range::Scope { min, max },
+            RuntimeIndexProbe::Eq(value) => Range::Eq(value.into()),
+            RuntimeIndexProbe::Scope { min, max } => Range::Scope {
+                min: min.map(RangeValue::Value),
+                max: max.map(RangeValue::Value),
+            },
         }
     }
 }
@@ -86,7 +88,8 @@ pub struct IndexInfo {
     pub(crate) sort_option: SortOption,
     pub(crate) lookup: Option<IndexLookup>,
     pub(crate) residual_predicate: Option<ExprRef>,
-    pub(crate) covered_deserializers: Option<Vec<TupleValueSerializableImpl>>,
+    // The index holds every scanned column, so no row is looked up.
+    pub(crate) covered: bool,
     pub(crate) cover_mapping: Option<Vec<usize>>,
     pub(crate) sort_elimination_hint: Option<IndexOrderHint>,
     pub(crate) stream_aggregate_hint: Option<IndexOrderHint>,
@@ -186,7 +189,7 @@ impl Explain for IndexInfo {
         if self.is_reverse() {
             f.write_str(" Reverse")?;
         }
-        if self.covered_deserializers.is_some() {
+        if self.covered {
             f.write_str(" Covered")?;
         }
         Ok(())
@@ -222,7 +225,7 @@ mod tests {
             sort_option: SortOption::None,
             lookup,
             residual_predicate: None,
-            covered_deserializers: None,
+            covered: false,
             cover_mapping: None,
             sort_elimination_hint: None,
             stream_aggregate_hint: None,
@@ -285,9 +288,11 @@ mod tests {
         probe.meta = index_ref;
         assert_eq!(probe.explain(&arena).to_string(), "idx_t => Probe ?");
 
-        let mut info = index_info(Some(IndexLookup::Static(Range::Eq(DataValue::Int32(1)))));
+        let mut info = index_info(Some(IndexLookup::Static(Range::Eq(
+            DataValue::Int32(1).into(),
+        ))));
         info.meta = index_ref;
-        info.covered_deserializers = Some(vec![LogicalType::Integer.serializable()]);
+        info.covered = true;
         assert_eq!(info.explain(&arena).to_string(), "idx_t => 1 Covered");
 
         let value = DataValue::Int32(1);
@@ -319,7 +324,7 @@ mod tests {
         assert!(probes.contains(&RuntimeIndexProbe::Eq(DataValue::Int32(1))));
 
         let mut lookups = HashSet::new();
-        lookups.insert(IndexLookup::Static(Range::Eq(DataValue::Int32(1))));
+        lookups.insert(IndexLookup::Static(Range::Eq(DataValue::Int32(1).into())));
         lookups.insert(IndexLookup::Probe);
         assert!(lookups.contains(&IndexLookup::Probe));
 
@@ -368,7 +373,7 @@ mod tests {
         }
 
         for lookup in [
-            IndexLookup::Static(Range::Eq(DataValue::Int32(1))),
+            IndexLookup::Static(Range::Eq(DataValue::Int32(1).into())),
             IndexLookup::Probe,
         ] {
             assert_eq!(
@@ -392,7 +397,7 @@ mod tests {
             sort_option: SortOption::None,
             lookup: Some(IndexLookup::Probe),
             residual_predicate: None,
-            covered_deserializers: Some(vec![LogicalType::Integer.serializable()]),
+            covered: true,
             cover_mapping: Some(vec![0]),
             sort_elimination_hint: Some(IndexOrderHint::new(1)),
             stream_aggregate_hint: Some(IndexOrderHint::new(1)),

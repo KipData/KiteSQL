@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::expression::range_detacher::Range;
+use crate::expression::range_detacher::{Range, RangeValue};
 use crate::planner::MetaArena;
 use crate::serdes::stable_hash::{StableHasher, CM_SKETCH_HASH_KEYS};
 use crate::serdes::ReferenceSerialization;
@@ -208,7 +208,7 @@ impl CountMinSketch<DataValue> {
 
         for range in ranges {
             count += match range {
-                Range::Eq(value) => self.estimate(value),
+                Range::Eq(RangeValue::Value(value)) => self.estimate(value),
                 _ => 0,
             }
         }
@@ -454,7 +454,7 @@ mod tests {
         }
         assert_eq!(
             cms.collect_count(&[
-                Range::Eq(DataValue::Int32(300)),
+                Range::Eq(DataValue::Int32(300).into()),
                 Range::Scope {
                     min: Bound::Unbounded,
                     max: Bound::Unbounded,

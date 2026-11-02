@@ -429,10 +429,10 @@ fn use_probe_index(plan: &mut LogicalPlan, position: usize, arena: &PlanArena<'_
             let info = &mut scan.index_infos[position];
             info.lookup = Some(IndexLookup::Probe);
             info.residual_predicate = None;
-            (info.covered_deserializers, info.cover_mapping) =
+            (info.covered, info.cover_mapping) =
                 match index_covering(scan.deserializers.read_columns(), info.meta, arena) {
-                    Some((deserializers, mapping)) => (Some(deserializers), mapping),
-                    None => (None, None),
+                    Some(mapping) => (true, mapping),
+                    None => (false, None),
                 };
             plan.physical_option = Some(PhysicalOption::new(
                 PlanImpl::IndexScan(Box::new(info.clone())),
@@ -802,7 +802,7 @@ mod inner_join_tests {
                 lookup: None,
                 residual_predicate: None,
                 sort_option: SortOption::None,
-                covered_deserializers: None,
+                covered: false,
                 cover_mapping: None,
                 sort_elimination_hint: None,
                 stream_aggregate_hint: None,
@@ -1207,7 +1207,7 @@ mod inner_join_tests {
         let mut meta = arena.index(info.meta).clone();
         meta.ty = IndexType::PrimaryKey { is_multiple: true };
         info.meta = arena.alloc_index(meta);
-        info.lookup = Some(IndexLookup::Static(Range::Eq(DataValue::Int32(7))));
+        info.lookup = Some(IndexLookup::Static(Range::Eq(DataValue::Int32(7).into())));
         info.residual_predicate = Some(residual);
         let index = info.meta;
         right.physical_option = Some(PhysicalOption::new(

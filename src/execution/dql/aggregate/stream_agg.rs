@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
-    create_accumulators, update_accumulators, write_aggregate_output, Accumulator,
+    aggregate_arg, prepare_accumulators, update_accumulators, write_aggregate_output, Accumulator,
 };
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -25,14 +25,19 @@ use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
+use std::borrow::Cow;
 use std::mem;
 
 // The optimizer selects this executor only when equal group keys are contiguous in the input.
 pub struct StreamAggExecutor<'a> {
     agg_calls: &'a [ExprRef],
     groupby_exprs: &'a [ExprRef],
-    group_keys: Option<Vec<DataValue>>,
+    // The keys of the open group, followed by the keys of the row being read.
+    group_keys: Vec<DataValue>,
+    in_group: bool,
     accs: Vec<Box<dyn Accumulator>>,
+    carried: bool,
+    carried_args: Vec<DataValue>,
     input: ExecNode<'a>,
 }
 
@@ -55,8 +60,11 @@ impl<'a> ReadExecutor<'a> for StreamAggExecutor<'a> {
         ExecNode::StreamAgg(Box::new(StreamAggExecutor {
             agg_calls,
             groupby_exprs,
-            group_keys: None,
+            group_keys: Vec::new(),
+            in_group: false,
             accs: Vec::new(),
+            carried: false,
+            carried_args: Vec::new(),
             input,
         }))
     }
@@ -68,8 +76,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        self.group_keys = None;
-        self.accs.clear();
+        self.group_keys.clear();
+        self.in_group = false;
+        self.carried = false;
+        self.carried_args.clear();
         self.input.reset(arena, plan_arena)
     }
 
@@ -78,25 +88,32 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
+        let len = self.groupby_exprs.len();
+        if mem::take(&mut self.carried) {
+            prepare_accumulators(&mut self.accs, self.agg_calls, plan_arena)?;
+            for (acc, arg) in self.accs.iter_mut().zip(&self.carried_args) {
+                acc.update_value(arg)?;
+            }
+            arena.bytes_pool().recycle(&mut self.carried_args);
+        }
         loop {
             if !self.input.next_tuple(arena, plan_arena)? {
-                let Some(group_keys) = self.group_keys.take() else {
+                if !mem::take(&mut self.in_group) {
                     arena.finish();
                     return Ok(());
-                };
+                }
                 write_aggregate_output(
                     arena.output_tuple_mut(),
-                    mem::take(&mut self.accs),
-                    group_keys,
+                    &mut self.accs,
+                    self.group_keys.drain(..),
                 )?;
                 arena.resume();
                 return Ok(());
             }
 
             let tuple = arena.result_tuple();
-            let mut group_keys = Vec::with_capacity(self.groupby_exprs.len());
             for expr in self.groupby_exprs {
-                group_keys.push(
+                self.group_keys.push(
                     plan_arena
                         .expression(*expr)
                         .eval(plan_arena, Some(tuple))?
@@ -104,24 +121,31 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
                 );
             }
 
-            match &mut self.group_keys {
-                None => {
-                    self.accs = create_accumulators(self.agg_calls, plan_arena)?;
-                    update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
-                    self.group_keys = Some(group_keys);
+            if !self.in_group {
+                self.in_group = true;
+                prepare_accumulators(&mut self.accs, self.agg_calls, plan_arena)?;
+                update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
+            } else if self.group_keys[..len] == self.group_keys[len..] {
+                self.group_keys.truncate(len);
+                update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
+            } else {
+                let (tuple, pool) = arena.result_tuple_and_pool();
+                for expr in self.agg_calls {
+                    let arg = match aggregate_arg(*expr, tuple, plan_arena)? {
+                        Cow::Owned(arg) => arg,
+                        Cow::Borrowed(arg) => pool.clone_value(arg),
+                    };
+                    self.carried_args.push(arg);
                 }
-                Some(current_keys) if current_keys == &group_keys => {
-                    update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
-                }
-                Some(current_keys) => {
-                    let mut next_accs = create_accumulators(self.agg_calls, plan_arena)?;
-                    update_accumulators(&mut next_accs, self.agg_calls, tuple, plan_arena)?;
-                    mem::swap(current_keys, &mut group_keys);
-                    let current_accs = mem::replace(&mut self.accs, next_accs);
-                    write_aggregate_output(arena.output_tuple_mut(), current_accs, group_keys)?;
-                    arena.resume();
-                    return Ok(());
-                }
+                self.carried = true;
+                // Draining the closed group's keys moves the row's keys to the front.
+                write_aggregate_output(
+                    arena.output_tuple_mut(),
+                    &mut self.accs,
+                    self.group_keys.drain(..len),
+                )?;
+                arena.resume();
+                return Ok(());
             }
         }
     }

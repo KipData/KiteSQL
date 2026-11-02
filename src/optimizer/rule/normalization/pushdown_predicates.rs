@@ -24,13 +24,11 @@ use crate::planner::operator::filter::FilterOperator;
 use crate::planner::operator::join::extract_join_keys;
 use crate::planner::operator::join::{JoinCondition, JoinType};
 use crate::planner::operator::{Operator, SortOption};
-use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
-use crate::types::index::{IndexInfo, IndexLookup, IndexMetaRef};
-use crate::types::serialize::TupleValueSerializableImpl;
-use crate::types::value::DataValue;
+use crate::planner::{Childrens, ExprRef, LogicalPlan, MetaArena, PlanArena};
+use crate::types::index::{IndexInfo, IndexLookup, IndexMeta, IndexMetaRef};
 use crate::types::LogicalType;
+use std::mem;
 use std::ops::Bound;
-use std::{mem, slice};
 
 const EMPTY_SCHEMA: [crate::catalog::ColumnRef; 0] = [];
 type ClassifiedJoinFilters = (Option<ExprRef>, Option<ExprRef>, Option<ExprRef>, usize);
@@ -334,7 +332,7 @@ impl NormalizationRule for PushPredicateIntoScan {
             meta,
             lookup,
             residual_predicate,
-            covered_deserializers,
+            covered,
             cover_mapping,
             sort_option,
             sort_elimination_hint: _,
@@ -366,9 +364,9 @@ impl NormalizationRule for PushPredicateIntoScan {
             *lookup = Some(IndexLookup::Static(detached.range));
             *residual_predicate = detached.residual;
             let columns = scan_op.deserializers.read_columns();
-            (*covered_deserializers, *cover_mapping) = match index_covering(columns, *meta, arena) {
-                Some((deserializers, mapping)) => (Some(deserializers), mapping),
-                None => (None, None),
+            (*covered, *cover_mapping) = match index_covering(columns, *meta, arena) {
+                Some(mapping) => (true, mapping),
+                None => (false, None),
             };
         }
 
@@ -376,39 +374,26 @@ impl NormalizationRule for PushPredicateIntoScan {
     }
 }
 
-/// Index-only read layout when `index` holds every scanned column: deserializers for the
-/// index columns, plus a scan-to-index slot mapping when their orders differ.
+/// Index-only read layout when `index` holds every scanned column: a scan-to-index slot
+/// mapping when their orders differ. Slots after the index columns are primary key fields,
+/// which the entry's value holds.
 pub(crate) fn index_covering(
     columns: impl Iterator<Item = ColumnRef>,
     index: IndexMetaRef,
     arena: &PlanArena,
-) -> Option<(Vec<TupleValueSerializableImpl>, Option<Vec<usize>>)> {
+) -> Option<Option<Vec<usize>>> {
     let index_meta = arena.index(index);
-    let index_column_types = match &index_meta.value_ty {
-        LogicalType::Tuple(tys) => tys,
-        ty => slice::from_ref(ty),
-    };
-    let mut deserializers = (0..index_meta.column_ids.len())
-        .map(|idx| index_column_types[idx].skip_serializable())
-        .collect::<Vec<_>>();
     let mut mapping_slots = Vec::with_capacity(index_meta.column_ids.len());
     let mut needs_mapping = false;
 
     for (scan_idx, column) in columns.enumerate() {
-        let column = arena.column(column);
         // Not covered once any scanned column is missing from the index.
-        let idx = column.id().and_then(|id| {
-            index_meta
-                .column_ids
-                .iter()
-                .position(|column_id| *column_id == id)
-        })?;
-        deserializers[idx] = column.datatype().serializable();
+        let idx = covering_idx(column, index_meta, arena)?;
         mapping_slots.push(idx);
-        needs_mapping |= scan_idx != idx;
+        needs_mapping |= scan_idx != idx || idx >= index_meta.column_ids.len();
     }
 
-    Some((deserializers, needs_mapping.then_some(mapping_slots)))
+    Some(needs_mapping.then_some(mapping_slots))
 }
 
 pub(crate) fn is_index_covers(
@@ -417,12 +402,23 @@ pub(crate) fn is_index_covers(
     arena: &PlanArena,
 ) -> bool {
     let index_meta = arena.index(index);
-    columns.all(|column| {
-        arena
-            .column(column)
-            .id()
-            .is_some_and(|id| index_meta.column_ids.contains(&id))
-    })
+    columns.all(|column| covering_idx(column, index_meta, arena).is_some())
+}
+
+fn covering_idx(column: ColumnRef, index_meta: &IndexMeta, arena: &PlanArena) -> Option<usize> {
+    let id = arena.column(column).id()?;
+    if let Some(idx) = index_meta
+        .column_ids
+        .iter()
+        .position(|column_id| *column_id == id)
+    {
+        return Some(idx);
+    }
+    let primary_keys = arena.table(index_meta.table_id)?.primary_keys();
+    let idx = primary_keys
+        .iter()
+        .position(|(_, pk)| arena.column(*pk).id() == Some(id))?;
+    Some(index_meta.column_ids.len() + idx)
 }
 
 impl PushPredicateIntoScan {
@@ -471,12 +467,10 @@ impl PushPredicateIntoScan {
             if range.only_eq() && apply_column_count != column_count {
                 fn eq_to_scope(range: Range) -> Range {
                     match range {
-                        Range::Eq(DataValue::Tuple(values)) => {
-                            let min = Bound::Included(DataValue::Tuple(values.clone()));
-                            let max = Bound::Included(DataValue::Tuple(values));
-
-                            Range::Scope { min, max }
-                        }
+                        Range::Eq(value) if value.is_tuple() => Range::Scope {
+                            min: Bound::Included(value.clone()),
+                            max: Bound::Included(value),
+                        },
                         Range::SortedRanges(mut ranges) => {
                             for range in ranges.iter_mut() {
                                 let tmp = mem::replace(range, Range::Dummy);
@@ -770,7 +764,7 @@ mod tests {
             assert_eq!(
                 op.index_infos[0].lookup,
                 Some(IndexLookup::Static(Range::Scope {
-                    min: Bound::Excluded(DataValue::Int32(1)),
+                    min: Bound::Excluded(DataValue::Int32(1).into()),
                     max: Bound::Unbounded,
                 }))
             );
@@ -802,7 +796,7 @@ mod tests {
             (
                 first_range,
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)]).into()),
                     max: Bound::Unbounded,
                 },
                 0,
@@ -810,17 +804,14 @@ mod tests {
             (
                 first_eq,
                 Range::Scope {
-                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
-                    max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)])),
+                    min: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)]).into()),
+                    max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(2)]).into()),
                 },
                 1,
             ),
             (
                 full_eq,
-                Range::Eq(DataValue::Tuple(vec![
-                    DataValue::Int32(2),
-                    DataValue::Int32(3),
-                ])),
+                Range::Eq(DataValue::Tuple(vec![DataValue::Int32(2), DataValue::Int32(3)]).into()),
                 2,
             ),
         ] {
@@ -837,7 +828,7 @@ mod tests {
                         },
                         lookup: None,
                         residual_predicate: None,
-                        covered_deserializers: None,
+                        covered: false,
                         cover_mapping: None,
                         sort_elimination_hint: None,
                         stream_aggregate_hint: None,
@@ -917,17 +908,23 @@ mod tests {
         assert_eq!(ignore_prefix_len, 3);
         assert_eq!(
             detached.range,
-            Range::Eq(DataValue::Tuple(vec![
-                DataValue::Int32(1),
-                DataValue::Int32(2),
-                DataValue::Int32(3),
-            ],))
+            Range::Eq(
+                DataValue::Tuple(vec![
+                    DataValue::Int32(1),
+                    DataValue::Int32(2),
+                    DataValue::Int32(3),
+                ],)
+                .into()
+            )
         );
         let residual = detached.residual.expect("c4 predicate should remain");
         let residual_detached = RangeDetacher::new(0, &4, &mut arena)
             .detach(residual)?
             .expect("residual should be the c4 predicate");
-        assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(4)));
+        assert_eq!(
+            residual_detached.range,
+            Range::Eq(DataValue::Int32(4).into())
+        );
         assert_eq!(residual_detached.residual, None);
 
         Ok(())
@@ -978,18 +975,20 @@ mod tests {
         assert_eq!(
             detached.range,
             Range::Scope {
-                min: Bound::Excluded(DataValue::Tuple(vec![
-                    DataValue::Int32(1),
-                    DataValue::Int32(2)
-                ],)),
-                max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)])),
+                min: Bound::Excluded(
+                    DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int32(2)],).into()
+                ),
+                max: Bound::Included(DataValue::Tuple(vec![DataValue::Int32(1)]).into()),
             }
         );
         let residual = detached.residual.expect("c3 predicate should remain");
         let residual_detached = RangeDetacher::new(0, &3, &mut arena)
             .detach(residual)?
             .expect("residual should be the c3 predicate");
-        assert_eq!(residual_detached.range, Range::Eq(DataValue::Int32(3)));
+        assert_eq!(
+            residual_detached.range,
+            Range::Eq(DataValue::Int32(3).into())
+        );
         assert_eq!(residual_detached.residual, None);
 
         Ok(())
@@ -1065,7 +1064,7 @@ mod tests {
                         },
                         lookup: None,
                         residual_predicate: None,
-                        covered_deserializers: None,
+                        covered: false,
                         cover_mapping: None,
                         sort_elimination_hint: None,
                         stream_aggregate_hint: None,
@@ -1078,7 +1077,7 @@ mod tests {
                         },
                         lookup: None,
                         residual_predicate: None,
-                        covered_deserializers: None,
+                        covered: false,
                         cover_mapping: None,
                         sort_elimination_hint: None,
                         stream_aggregate_hint: None,
@@ -1119,32 +1118,13 @@ mod tests {
 
             // verify the first index (reordered scan columns) still uses mapping
             let reordered_index = &index_infos[0];
-            let deserializers = reordered_index
-                .covered_deserializers
-                .as_ref()
-                .expect("expected covering deserializers");
-            assert_eq!(deserializers.len(), 3);
-            assert_eq!(
-                deserializers[0],
-                arena.column(c2_ref).datatype().serializable(),
-                "first serializer should align with c2"
-            );
-            assert_eq!(
-                deserializers[1],
-                c3.datatype().skip_serializable(),
-                "non-projected index column should be skipped"
-            );
-            assert_eq!(
-                deserializers[2],
-                arena.column(c1_ref).datatype().serializable(),
-                "last serializer should align with c1"
-            );
+            assert!(reordered_index.covered);
             let mapping = reordered_index.cover_mapping.as_deref();
             assert_eq!(mapping, Some(&[2, 0][..]));
 
             // verify the second index matches scan order exactly so mapping is omitted
             let ordered_index = &index_infos[1];
-            assert!(ordered_index.covered_deserializers.is_some());
+            assert!(ordered_index.covered);
             assert!(
                 ordered_index.cover_mapping.is_none(),
                 "mapping should be None when index/scan order already match"

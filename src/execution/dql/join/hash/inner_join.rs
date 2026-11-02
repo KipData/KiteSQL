@@ -13,8 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::join::hash::{filter, join_rows, JoinProbeState, ProbeState};
-use crate::execution::dql::join::hash_join::BuildState;
+use crate::execution::dql::join::hash::{filter, join_rows, BuildRow, JoinProbeState, ProbeState};
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::tuple::{SplitTupleRef, TupleImpl};
@@ -25,30 +24,20 @@ impl JoinProbeState for InnerJoinState {
     fn probe_next(
         &mut self,
         probe_state: &mut ProbeState,
-        build_state: Option<&mut BuildState>,
+        build: &[BuildRow],
         filter_expr: Option<&ExprRef>,
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<Option<TupleImpl>, DatabaseError> {
-        if probe_state.is_keys_has_null {
-            probe_state.finished = true;
-            return Ok(None);
-        }
-
-        let Some(build_state) = build_state else {
-            probe_state.finished = true;
-            return Ok(None);
-        };
-
-        while probe_state.index < build_state.tuples.len() {
-            let (_, build_tuple) = &build_state.tuples[probe_state.index];
-            probe_state.index += 1;
+        while let Some(i) = probe_state.next_row {
+            probe_state.next_row = build[i].next;
+            let build_tuple = &build[i].tuple;
             if let Some(filter_expr) = filter_expr {
                 let full_values = SplitTupleRef::new(build_tuple, &probe_state.probe_tuple);
                 if !filter(&full_values, filter_expr, plan_arena)? {
                     continue;
                 }
             }
-            let is_last = probe_state.index == build_state.tuples.len();
+            let is_last = probe_state.next_row.is_none();
             if is_last {
                 probe_state.finished = true;
             }

@@ -135,9 +135,9 @@ print(list(db.run("select * from demo")))
 
 | Backend | TpmC | New-Order | Payment | Order-Status | Delivery | Stock-Level |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 187161 | 274 | 68 | 40 | 454 | 278 |
-| KiteSQL RocksDB | 46291 | 374 | 184 | 201 | 14463 | 651 |
-| SQLite (WAL, `synchronous=OFF`) | 179039 | 291 | 43 | 38 | 368 | 320 |
+| KiteSQL LMDB | 209840 | 254 | 50 | 28 | 345 | 202 |
+| KiteSQL RocksDB | 48049 | 354 | 85 | 146 | 14511 | 562 |
+| SQLite (WAL, `synchronous=OFF`) | 192435 | 270 | 40 | 33 | 344 | 265 |
 
 👉 [Details and how to reproduce](tpcc/README.md)
 

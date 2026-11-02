@@ -115,8 +115,7 @@ impl ImplementationRule for IndexScanImplementation {
                     row_count = adjust_index_row_count(index_meta.ty, range, row_count);
                     estimated_rows = Some(row_count);
                     ndv = Some(distinct_count.min(row_count));
-                    if index_info.covered_deserializers.is_none()
-                        && !matches!(index_meta.ty, IndexType::PrimaryKey { .. })
+                    if !index_info.covered && !matches!(index_meta.ty, IndexType::PrimaryKey { .. })
                     {
                         // need to return table query(non-covering index)
                         row_count *= 2;

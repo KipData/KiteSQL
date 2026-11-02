@@ -218,7 +218,7 @@ mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::execution::dql::index_scan::IndexScan;
-    use crate::expression::range_detacher::Range;
+    use crate::expression::range_detacher::{Range, RangeValue};
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::filter::FilterOperator;
     use crate::planner::operator::sort::SortField;
@@ -287,11 +287,11 @@ mod tests {
         });
         let original = Range::Scope {
             min: Bound::Unbounded,
-            max: Bound::Excluded(DataValue::Int32(5)),
+            max: Bound::Excluded(DataValue::Int32(5).into()),
         };
         let expected = Range::Scope {
-            min: Bound::Included(DataValue::Int32(3)),
-            max: Bound::Excluded(DataValue::Int32(5)),
+            min: Bound::Included(DataValue::Int32(3).into()),
+            max: Bound::Excluded(DataValue::Int32(5).into()),
         };
         let sort = SortOption::OrderBy {
             fields: vec![SortField::new(col_expr, true, false)],
@@ -349,7 +349,7 @@ mod tests {
                 lookup: Some(lookup),
                 residual_predicate: has_residual.then_some(predicate),
                 sort_option: sort.clone(),
-                covered_deserializers: None,
+                covered: false,
                 cover_mapping: None,
                 sort_elimination_hint: None,
                 stream_aggregate_hint: None,
@@ -600,21 +600,61 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn composite_index_ranges_bind_for_each_execution() -> Result<(), DatabaseError> {
-        fn index_range(plan: &LogicalPlan) -> Option<&Range> {
-            plan.physical_option
-                .as_ref()
-                .and_then(|option| match &option.plan {
-                    PlanImpl::IndexScan(info) => match &info.lookup {
-                        Some(IndexLookup::Static(range)) => Some(range),
-                        _ => None,
-                    },
+    fn index_range(plan: &LogicalPlan) -> Option<&Range> {
+        plan.physical_option
+            .as_ref()
+            .and_then(|option| match &option.plan {
+                PlanImpl::IndexScan(info) => match &info.lookup {
+                    Some(IndexLookup::Static(range)) => Some(range),
                     _ => None,
-                })
-                .or_else(|| plan.childrens.iter().find_map(index_range))
+                },
+                _ => None,
+            })
+            .or_else(|| plan.childrens.iter().find_map(index_range))
+    }
+
+    #[test]
+    fn null_parameters_empty_index_ranges() -> Result<(), DatabaseError> {
+        let mut db = DataBaseBuilder::path(".")
+            .histogram_buckets(2)
+            .build_in_memory()?;
+        db.ddl("create table t(w int, k int, primary key(w,k))")?;
+        db.run("insert into t values(1,1),(1,2),(2,1),(2,2),(2,4)")?
+            .done()?;
+        db.analyze("t")?;
+        let ty = LogicalType::Integer;
+        let mut tx = db.new_transaction(false)?;
+        // A NULL bound used to reach storage as a NULL key: the composite scope below became
+        // `(2, NULL) .. (2, 5)`, an inverted range, and `w < NULL` scanned every row.
+        for (sql, params) in [
+            (
+                "select k from t where w = $1 and k < $2 and k >= $3",
+                vec![
+                    (1, DataValue::Int32(2)),
+                    (2, DataValue::Int32(5)),
+                    (3, DataValue::Null),
+                ],
+            ),
+            ("select k from t where w < $1", vec![(1, DataValue::Null)]),
+            ("select k from t where w = $1", vec![(1, DataValue::Null)]),
+        ] {
+            let mut plan = db.program_sql(
+                sql,
+                &(1..=params.len())
+                    .map(|id| (id, ty.clone()))
+                    .collect::<Vec<_>>(),
+            )?;
+            assert!(index_range(plan.executor.plan()).is_some(), "{sql}");
+            let mut iter = plan.execute(&mut tx, &params)?;
+            assert!(iter.next_tuple(|_, _| ())?.is_none(), "{sql}");
+            iter.done()?;
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn composite_index_ranges_bind_for_each_execution() -> Result<(), DatabaseError> {
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
             .build_in_memory()?;
@@ -694,6 +734,19 @@ mod tests {
         else {
             panic!("expected index scan")
         };
+        // `$3 - 20` is computed when the range is bound, so the whole predicate is the range.
+        fn has_filter(plan: &LogicalPlan) -> bool {
+            matches!(plan.operator, Operator::Filter(_)) || plan.childrens.iter().any(has_filter)
+        }
+        assert!(matches!(
+            &info.lookup,
+            Some(IndexLookup::Static(Range::Scope {
+                min: Bound::Included(RangeValue::Computed(_)),
+                ..
+            }))
+        ));
+        assert!(info.residual_predicate.is_none());
+        assert!(!has_filter(plan.executor.plan()));
         let tables = TableCache::default();
         let context = &tables;
         let storage = MemoryStorage::new();
@@ -712,16 +765,41 @@ mod tests {
         assert_eq!(
             ranges.next(),
             Some(&Range::Scope {
-                min: Bound::Included(DataValue::Tuple(vec![
-                    DataValue::Int32(2),
-                    DataValue::Int32(2),
-                ])),
-                max: Bound::Excluded(DataValue::Tuple(vec![
-                    DataValue::Int32(2),
-                    DataValue::Int32(5),
-                ])),
+                min: Bound::Included(
+                    DataValue::Tuple(vec![DataValue::Int32(2), DataValue::Int32(2),]).into()
+                ),
+                max: Bound::Excluded(
+                    DataValue::Tuple(vec![DataValue::Int32(2), DataValue::Int32(5),]).into()
+                ),
             })
         );
+        drop(ranges);
+
+        // The computed bound follows each execution's parameters, and a NULL one matches nothing.
+        let mut tx = db.new_transaction(false)?;
+        for (lower, expected) in [
+            (DataValue::Int32(22), vec![2, 4]),
+            (DataValue::Int32(24), vec![4]),
+            (DataValue::Null, vec![]),
+        ] {
+            let mut iter = plan.execute(
+                &mut tx,
+                [
+                    (1, DataValue::Int32(2)),
+                    (2, DataValue::Int32(5)),
+                    (3, lower),
+                ],
+            )?;
+            let mut rows = Vec::new();
+            while let Some(k) = iter.next_tuple(|_, row| row.value_at(0).clone())? {
+                rows.push(k);
+            }
+            let expected = expected
+                .into_iter()
+                .map(DataValue::Int32)
+                .collect::<Vec<_>>();
+            assert_eq!(rows, expected);
+        }
         Ok(())
     }
 }
