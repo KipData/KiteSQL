@@ -458,6 +458,9 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
     }
 
     fn visit_table_scan(&mut self, op: &'a mut TableScanOperator) -> Result<(), DatabaseError> {
+        if let Some(expr) = &mut op.predicate {
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
+        }
         for index_info in &mut op.index_infos {
             if let SortOption::OrderBy { fields, .. } = &mut index_info.sort_option {
                 for field in fields {

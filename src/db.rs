@@ -543,6 +543,11 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             HepBatchStrategy::fix_point_topdown(10),
             &[NormalizationRuleImpl::PushLimitIntoTableScan],
         )
+        .after_batch(
+            "Skip Residual Filter Columns",
+            HepBatchStrategy::once_topdown(),
+            &[NormalizationRuleImpl::SkipResidualFilterColumns],
+        )
         .implementations(&[
             // DQL
             ImplementationRuleImpl::SimpleAggregate,
@@ -1526,6 +1531,7 @@ pub(crate) mod test {
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
     use crate::planner::operator::join::{JoinCondition, JoinOperator, JoinType};
     use crate::planner::operator::project::ProjectOperator;
+    use crate::planner::operator::table_scan::TableScanOperator;
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, TableArenaCell};
@@ -2155,14 +2161,18 @@ pub(crate) mod test {
         if matches!(right_child.operator, Operator::Project(_)) {
             right_child = right_child.childrens.pop_only();
         }
-        let Operator::Filter(filter_op) = right_child.operator else {
+        let Operator::TableScan(TableScanOperator {
+            predicate: Some(predicate),
+            ..
+        }) = right_child.operator
+        else {
             unreachable!("expected pushed-down filter on right child");
         };
         let ScalarExpression::Binary {
             left_expr,
             right_expr,
             ..
-        } = best_plan_arena.expression(filter_op.predicate)
+        } = best_plan_arena.expression(predicate)
         else {
             unreachable!("expected binary filter predicate");
         };
@@ -2209,7 +2219,7 @@ pub(crate) mod test {
             let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
-                "Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
+                "Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b], Filter: (t1.b > 0) [SeqScan => (Sort Option: None)]"
             );
         }
         // Aggregate
@@ -2236,7 +2246,7 @@ pub(crate) mod test {
             let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
-                "Projection [(t1.a + $1), Max((t1.b + $2))] [Project => (Sort Option: Follow)] Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate => (Sort Option: None)] Filter (t1.b > 1), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)]"
+                "Projection [(t1.a + $1), Max((t1.b + $2))] [Project => (Sort Option: Follow)] Aggregate [Max((t1.b + 0))] -> Group By [(t1.a + 0)] [HashAggregate => (Sort Option: None)] TableScan t1 -> [t1.a, t1.b], Filter: (t1.b > 1) [SeqScan => (Sort Option: None)]"
             );
         }
         {
@@ -2255,7 +2265,7 @@ pub(crate) mod test {
             let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
-                "Projection [#0.a, #0.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (#0.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [(t1.a) as (#0.a), (t1.b) as (#0.b)] [Project => (Sort Option: Follow)] Filter (t1.b > 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => ($3, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
+                "Projection [#0.a, #0.b, t1.a, t1.b, 9] [Project => (Sort Option: Follow)] LeftOuter Join Where (#0.a > 0) [NestLoopJoin => (Sort Option: None)] Projection [(t1.a) as (#0.a), (t1.b) as (#0.b)] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b], Filter: (t1.b > 0) [SeqScan => (Sort Option: None)] Projection [t1.a, t1.b] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.a, t1.b] [IndexScan By pk_index => ($3, +inf) => (Sort Option: OrderBy: (t1.a Asc Nulls Last) ignore_prefix_len: 0)]"
             );
         }
 

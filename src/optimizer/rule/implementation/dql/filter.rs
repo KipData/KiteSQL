@@ -177,13 +177,24 @@ fn estimate_filter_rows(
     ) {
         return Ok(None);
     }
+    estimate_predicate_rows(filter.predicate, input, rows, arena, loader)
+}
+
+/// Rows of the `rows` from `input` that `predicate` keeps, when it is a point filter.
+pub(crate) fn estimate_predicate_rows(
+    predicate: ExprRef,
+    input: &LogicalPlan,
+    rows: usize,
+    arena: &PlanArena,
+    loader: &StatisticMetaLoader<'_>,
+) -> Result<Option<usize>, DatabaseError> {
     let mut visitor = PointFilterVisitor {
         arena,
         column: None,
         values: HashSet::new(),
         supported: true,
     };
-    visitor.visit(filter.predicate, arena)?;
+    visitor.visit(predicate, arena)?;
     let Some(column) = visitor.column.filter(|_| visitor.supported) else {
         return Ok(None);
     };
@@ -241,6 +252,7 @@ mod tests {
                 limit: (None, None),
                 index_infos: vec![],
                 with_pk: false,
+                predicate: None,
             }),
             Childrens::None,
         );

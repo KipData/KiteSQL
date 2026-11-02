@@ -48,22 +48,22 @@ Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1
 query T
 explain select * from t1 where id = 0 and id != 0;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter (t1.id != 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By pk_index => 0 => (Sort Option: OrderBy: (t1.id Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2], Filter: (t1.id != 0) [IndexScan By pk_index => 0 => (Sort Option: OrderBy: (t1.id Asc Nulls Last) ignore_prefix_len: 0)]
 
 query T
 explain select * from t1 where id = 0 or id != 0 limit 10;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Limit 10 [Limit => (Sort Option: Follow)] Filter ((t1.id = 0) || (t1.id != 0)), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [SeqScan => (Sort Option: None)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Limit 10 [Limit => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2], Filter: ((t1.id = 0) || (t1.id != 0)) [SeqScan => (Sort Option: None)]
 
 query T
 explain select * from t1 where id = 0 and id != 0 and id = 3;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter (t1.id != 0), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By pk_index => Dummy => (Sort Option: OrderBy: (t1.id Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2], Filter: (t1.id != 0) [IndexScan By pk_index => Dummy => (Sort Option: OrderBy: (t1.id Asc Nulls Last) ignore_prefix_len: 0)]
 
 query T
 explain select * from t1 where id = 0 and id != 0 or id = 3;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter (((t1.id = 0) && (t1.id != 0)) || (t1.id = 3)), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [SeqScan => (Sort Option: None)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2], Filter: (((t1.id = 0) && (t1.id != 0)) || (t1.id = 3)) [SeqScan => (Sort Option: None)]
 
 query T
 explain select * from t1 where id > 0 and id = 3;
@@ -98,7 +98,7 @@ Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1
 query T
 explain select * from t1 where id >= 3 or id <= 9 limit 10;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Limit 10 [Limit => (Sort Option: Follow)] Filter ((t1.id >= 3) || (t1.id <= 9)), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [SeqScan => (Sort Option: None)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Limit 10 [Limit => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2], Filter: ((t1.id >= 3) || (t1.id <= 9)) [SeqScan => (Sort Option: None)]
 
 query T
 explain select * from t1 where id <= 3 or id >= 9 limit 10;
@@ -113,7 +113,7 @@ Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1
 query T
 explain select * from t1 where (id >= 0 or id <= 3) and (id >= 9 or id <= 12) limit 10;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Limit 10 [Limit => (Sort Option: Follow)] Filter (((t1.id >= 0) || (t1.id <= 3)) && ((t1.id >= 9) || (t1.id <= 12))), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [SeqScan => (Sort Option: None)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Limit 10 [Limit => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2], Filter: (((t1.id >= 0) || (t1.id <= 3)) && ((t1.id >= 9) || (t1.id <= 12))) [SeqScan => (Sort Option: None)]
 
 query T
 explain select * from t1 where id = 5 or (id > 5 and (id > 6 or id < 8) and id < 12);
@@ -123,7 +123,7 @@ Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1
 query T
 explain select * from t1 where c1 = 7 and c2 = 8;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter (t1.c2 = 8), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By u_c1_index => 7 => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2], Filter: (t1.c2 = 8) [IndexScan By u_c1_index => 7 => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
 
 query T
 explain select * from t1 where c1 = 7 and c2 < 9;
@@ -138,7 +138,7 @@ Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1
 query T
 explain select * from t1 where c1 is null and c2 is null;
 ----
-Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter t1.c2 is null, Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2] [IndexScan By u_c1_index => NULL => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.id, t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.id, t1.c1, t1.c2], Filter: t1.c2 is null [IndexScan By u_c1_index => NULL => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last) ignore_prefix_len: 0)]
 
 query T
 explain select * from t1 where c1 > 0 and c1 < 8;
@@ -212,13 +212,13 @@ drop index t1.c2_index;
 query T
 explain select c1, c2 from t1 where c1 < 10 and c1 > 0 and c2 >0 and c2 < 10;
 ----
-Projection [t1.c1, t1.c2] [Project => (Sort Option: Follow)] Filter ((t1.c2 > 0) && (t1.c2 < 10)), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.c1, t1.c2] [IndexScan By p_index => ((0), (10)) Covered => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last, t1.c2 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.c1, t1.c2] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.c1, t1.c2], Filter: ((t1.c2 > 0) && (t1.c2 < 10)) [IndexScan By p_index => ((0), (10)) Covered => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last, t1.c2 Asc Nulls Last) ignore_prefix_len: 0)]
 
 # composite covered projection reorder
 query T
 explain select c2, c1 from t1 where c1 < 10 and c1 > 0 and c2 > 0 and c2 < 10;
 ----
-Projection [t1.c2, t1.c1] [Project => (Sort Option: Follow)] Filter ((t1.c2 > 0) && (t1.c2 < 10)), Is Having: false [Filter => (Sort Option: Follow)] TableScan t1 -> [t1.c1, t1.c2] [IndexScan By p_index => ((0), (10)) Covered => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last, t1.c2 Asc Nulls Last) ignore_prefix_len: 0)]
+Projection [t1.c2, t1.c1] [Project => (Sort Option: Follow)] TableScan t1 -> [t1.c1, t1.c2], Filter: ((t1.c2 > 0) && (t1.c2 < 10)) [IndexScan By p_index => ((0), (10)) Covered => (Sort Option: OrderBy: (t1.c1 Asc Nulls Last, t1.c2 Asc Nulls Last) ignore_prefix_len: 0)]
 
 
 statement ok
@@ -241,7 +241,7 @@ create index idx_cover on t_cover (c1, c2, c3);
 query T
 explain select c2, c3 from t_cover where c1 = 2;
 ----
-Projection [t_cover.c2, t_cover.c3] [Project => (Sort Option: Follow)] Filter (t_cover.c1 = 2), Is Having: false [Filter => (Sort Option: Follow)] TableScan t_cover -> [t_cover.c1, t_cover.c2, t_cover.c3] [SeqScan => (Sort Option: None)]
+Projection [t_cover.c2, t_cover.c3] [Project => (Sort Option: Follow)] TableScan t_cover -> [t_cover.c1, t_cover.c2, t_cover.c3], Filter: (t_cover.c1 = 2) [SeqScan => (Sort Option: None)]
 
 statement ok
 drop table t_cover;

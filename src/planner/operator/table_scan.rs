@@ -18,7 +18,7 @@ use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::planner::operator::sort::SortField;
 use crate::planner::MetaArena;
-use crate::planner::{fmt_explain_list, fmt_table, Childrens, Explain, LogicalPlan};
+use crate::planner::{fmt_explain_list, fmt_table, Childrens, Explain, ExprRef, LogicalPlan};
 use crate::storage::{Bounds, TupleDeserializers};
 use crate::types::index::IndexInfo;
 use kite_sql_serde_macros::ReferenceSerialization;
@@ -34,11 +34,14 @@ pub struct TableScanOperator {
     // If pre_where is simple predicate, for example:  a > 1 then can calculate directly when read data.
     pub(crate) index_infos: Vec<IndexInfo>,
     pub(crate) with_pk: bool,
+    pub(crate) predicate: Option<ExprRef>,
 }
 
 impl TableScanOperator {
     pub(crate) fn columns(&self) -> impl Iterator<Item = ColumnRef> + '_ {
-        self.deserializers.read_columns()
+        self.deserializers
+            .read_columns()
+            .map(|column| column.column)
     }
 
     pub fn build(
@@ -87,6 +90,7 @@ impl TableScanOperator {
                 deserializers,
                 limit: (None, None),
                 with_pk,
+                predicate: None,
             }),
             Childrens::None,
         ))
@@ -104,6 +108,9 @@ impl Explain for TableScanOperator {
         f.write_str(" -> [")?;
         fmt_explain_list(self.columns(), ", ", arena, f)?;
         f.write_str("]")?;
+        if let Some(predicate) = self.predicate {
+            write!(f, ", Filter: {}", predicate.explain(arena))?;
+        }
         let (offset, limit) = self.limit;
         if let Some(limit) = limit {
             write!(f, ", Limit: {limit}")?;

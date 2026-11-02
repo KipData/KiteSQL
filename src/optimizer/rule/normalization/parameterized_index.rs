@@ -331,6 +331,10 @@ pub(crate) fn probe_index(
             probe
         }
         (Operator::TableScan(scan), _) if scan.limit == (None, None) => {
+            let key_count = keys.len();
+            if let Some(predicate) = scan.predicate {
+                constant_keys(predicate, keys, arena);
+            }
             let mut best: Option<ProbeIndex> = None;
             let mut probe = Vec::new();
             'indexes: for (position, info) in scan.index_infos.iter().enumerate() {
@@ -387,6 +391,7 @@ pub(crate) fn probe_index(
                     });
                 }
             }
+            keys.truncate(key_count);
             Ok(best)
         }
         _ => Ok(None),
@@ -429,11 +434,16 @@ fn use_probe_index(plan: &mut LogicalPlan, position: usize, arena: &PlanArena<'_
             let info = &mut scan.index_infos[position];
             info.lookup = Some(IndexLookup::Probe);
             info.residual_predicate = None;
-            (info.covered, info.cover_mapping) =
-                match index_covering(scan.deserializers.read_columns(), info.meta, arena) {
-                    Some(mapping) => (true, mapping),
-                    None => (false, None),
-                };
+            (info.covered, info.cover_mapping) = match index_covering(
+                scan.deserializers
+                    .read_columns()
+                    .map(|column| column.column),
+                info.meta,
+                arena,
+            ) {
+                Some(mapping) => (true, mapping),
+                None => (false, None),
+            };
             plan.physical_option = Some(PhysicalOption::new(
                 PlanImpl::IndexScan(Box::new(info.clone())),
                 info.sort_option.clone(),
@@ -815,6 +825,7 @@ mod inner_join_tests {
                 limit: (None, None),
                 index_infos,
                 with_pk: false,
+                predicate: None,
             }),
             Childrens::None,
         )

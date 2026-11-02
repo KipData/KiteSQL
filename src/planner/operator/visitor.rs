@@ -441,6 +441,9 @@ impl<'a, V: ExprVisitor<A>, A: MetaArena + ?Sized> OperatorVisitor<'a>
     }
 
     fn visit_table_scan(&mut self, op: &'a TableScanOperator) -> Result<(), DatabaseError> {
+        if let Some(expr) = op.predicate {
+            ExprVisitor::visit(self.visitor, expr, self.arena)?;
+        }
         for index_info in &op.index_infos {
             if let SortOption::OrderBy { fields, .. } = &index_info.sort_option {
                 for field in fields {
@@ -698,6 +701,7 @@ pub(crate) mod tests {
                 limit: (None, None),
                 index_infos: vec![index_info(expr(10), expr(11))],
                 with_pk: false,
+                predicate: None,
             }),
             Operator::FunctionScan(FunctionScanOperator { table_function }),
             Operator::Sort(SortOperator {

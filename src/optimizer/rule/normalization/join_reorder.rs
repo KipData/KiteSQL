@@ -757,6 +757,7 @@ mod tests {
                 limit: (None, None),
                 index_infos: Vec::new(),
                 with_pk: false,
+                predicate: None,
             }),
             Childrens::None,
         );

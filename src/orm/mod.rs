@@ -3999,8 +3999,8 @@ mod tests {
             plan,
             concat!(
                 "Projection [orm_unit_users.name] [Project => (Sort Option: Follow)] ",
-                "Filter (orm_unit_users.id >= 4), Is Having: false [Filter => (Sort Option: Follow)] ",
-                "TableScan orm_unit_users -> [orm_unit_users.id, orm_unit_users.name] [SeqScan => (Sort Option: None)]"
+                "TableScan orm_unit_users -> [orm_unit_users.id, orm_unit_users.name], ",
+                "Filter: (orm_unit_users.id >= 4) [SeqScan => (Sort Option: None)]"
             ),
             "{plan}"
         );
@@ -4037,8 +4037,8 @@ mod tests {
             concat!(
                 "Projection [upper_name] [Project => (Sort Option: Follow)] ",
                 "Sort By orm_unit_users.age Desc Nulls Last [Sort => (Sort Option: OrderBy: (orm_unit_users.age Desc Nulls Last) ignore_prefix_len: 0)] ",
-                "Filter ((orm_unit_users.age is not null && ((orm_unit_users.age >= 18) && (orm_unit_users.age <= 25))) && ((orm_unit_users.name != Bob) && !(orm_unit_users.name = Missing))), Is Having: false ",
-                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.name, orm_unit_users.age] [SeqScan => (Sort Option: None)]"
+                "TableScan orm_unit_users -> [orm_unit_users.name, orm_unit_users.age], ",
+                "Filter: ((orm_unit_users.age is not null && ((orm_unit_users.age >= 18) && (orm_unit_users.age <= 25))) && ((orm_unit_users.name != Bob) && !(orm_unit_users.name = Missing))) [SeqScan => (Sort Option: None)]"
             ),
             "{expression_plan}"
         );
@@ -4060,8 +4060,7 @@ mod tests {
             concat!(
                 "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
                 "Sort By 1 Asc Nulls Last [Sort => (Sort Option: OrderBy: (1 Asc Nulls Last) ignore_prefix_len: 0)] ",
-                "Filter (orm_unit_users.id != 3), Is Having: false ",
-                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.id] ",
+                "TableScan orm_unit_users -> [orm_unit_users.id], Filter: (orm_unit_users.id != 3) ",
                 "[IndexScan By pk_index => 1, 2, 3 Covered => (Sort Option: OrderBy: (orm_unit_users.id Asc Nulls Last) ignore_prefix_len: 0)]"
             ),
             "{list_plan}"
@@ -4082,8 +4081,8 @@ mod tests {
             nullable_plan,
             concat!(
                 "Projection [orm_unit_users.id] [Project => (Sort Option: Follow)] ",
-                "Filter (((orm_unit_users.age < 10) || (orm_unit_users.age > 30)) || orm_unit_users.age is null), Is Having: false ",
-                "[Filter => (Sort Option: Follow)] TableScan orm_unit_users -> [orm_unit_users.id, orm_unit_users.age] [SeqScan => (Sort Option: None)]"
+                "TableScan orm_unit_users -> [orm_unit_users.id, orm_unit_users.age], ",
+                "Filter: (((orm_unit_users.age < 10) || (orm_unit_users.age > 30)) || orm_unit_users.age is null) [SeqScan => (Sort Option: None)]"
             ),
             "{nullable_plan}"
         );
