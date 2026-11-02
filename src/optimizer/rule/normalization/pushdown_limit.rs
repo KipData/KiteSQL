@@ -124,6 +124,9 @@ impl NormalizationRule for PushLimitIntoScan {
 
         if let Some(child) = only_child_mut(plan) {
             if let Operator::TableScan(scan_op) = &mut child.operator {
+                if scan_op.predicate.is_some() {
+                    return Ok(false);
+                }
                 scan_op.limit = (offset, limit);
                 let removed = replace_with_only_child(plan);
                 return Ok(removed);

@@ -1404,6 +1404,11 @@ impl TupleMapping {
         let mut target_len = 0;
 
         for index_idx in scan_to_index {
+            // No index field fills a `usize::MAX` slot, which stays NULL.
+            if index_idx == usize::MAX {
+                target_len += 1;
+                continue;
+            }
             if index_idx >= index_to_scan.len() {
                 index_to_scan.resize(index_idx + 1, usize::MAX);
             }
@@ -1931,6 +1936,7 @@ fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
 pub struct ScanColumn {
     pub(crate) column: ColumnRef,
     pub(crate) deserializer: TupleValueSerializableImpl,
+    pub(crate) pinned: bool,
 }
 
 impl ScanColumn {
@@ -1957,6 +1963,7 @@ impl TupleDeserializers {
                 .map(|column| ScanColumn {
                     column: *column,
                     deserializer: arena.column(*column).datatype().serializable(),
+                    pinned: true,
                 })
                 .collect(),
             total_len: table.columns_len(),
@@ -1964,11 +1971,8 @@ impl TupleDeserializers {
         }
     }
 
-    pub(crate) fn read_columns(&self) -> impl Iterator<Item = ColumnRef> + '_ {
-        self.columns
-            .iter()
-            .filter(|column| column.is_read())
-            .map(|column| column.column)
+    pub(crate) fn read_columns(&self) -> impl Iterator<Item = &ScanColumn> + '_ {
+        self.columns.iter().filter(|column| column.is_read())
     }
 
     pub(crate) fn retain(
@@ -1994,6 +1998,12 @@ impl TupleDeserializers {
             }
         }
         self.columns.truncate(read_len);
+    }
+
+    pub(crate) fn unpin(&mut self) {
+        for column in &mut self.columns {
+            column.pinned = false;
+        }
     }
 
     fn deserializers(&self) -> impl Iterator<Item = &TupleValueSerializableImpl> {
@@ -2530,6 +2540,7 @@ pub(crate) fn deserializers_for_test(
         .map(|column| ScanColumn {
             column,
             deserializer: TupleValueSerializableImpl::Boolean,
+            pinned: true,
         })
         .collect();
     TupleDeserializers {

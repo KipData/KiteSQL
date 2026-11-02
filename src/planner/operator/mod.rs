@@ -272,6 +272,7 @@ pub struct PhysicalOption {
     pub(crate) sort_option: SortOption,
     pub(crate) row_count: RowCountOption,
     pub(crate) lookup_work: Option<usize>,
+    pub(crate) filtered_rows: Option<usize>,
     pub(crate) join_decided: bool,
 }
 
@@ -282,6 +283,7 @@ impl PhysicalOption {
             sort_option,
             row_count,
             lookup_work: None,
+            filtered_rows: None,
             join_decided: false,
         }
     }
@@ -325,6 +327,12 @@ impl PhysicalOption {
             (PlanImpl::Filter, Operator::Filter(_), ChildCosts::Only(child))
             | (PlanImpl::Project, Operator::Project(_), ChildCosts::Only(child)) => {
                 Some(input(child)?.work)
+            }
+            (_, Operator::TableScan(_), _) if self.filtered_rows.is_some() => {
+                Some(cost.startup?.saturating_add(rows_work(
+                    rows?.saturating_add(self.filtered_rows?),
+                    cost.width,
+                )))
             }
             (PlanImpl::MarkApply, Operator::MarkApply(op), ChildCosts::Twins(left, right))
                 if op.parameterized_probe().is_some() && !op.materialize =>
@@ -1495,6 +1503,7 @@ mod tests {
             limit: (None, None),
             index_infos: Vec::new(),
             with_pk: false,
+            predicate: None,
         });
         assert_eq!(referenced_columns(&table_scan, &mut arena)?, vec![a, d]);
 

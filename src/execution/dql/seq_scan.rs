@@ -140,6 +140,7 @@ mod tests {
             limit: (Some(1), Some(2)),
             index_infos: vec![],
             with_pk: true,
+            predicate: None,
         };
         let mut exec_buffer = crate::execution::ExecBuffer::default();
         let mut exec_arena = crate::execution::ExecArena::new(&tables, &tx);

@@ -78,6 +78,7 @@ impl ReferenceSerialization for PhysicalOption {
             sort_option: SortOption::decode(reader, context.as_deref_mut(), arena)?,
             row_count: RowCountOption::decode(reader, context, arena)?,
             lookup_work: None,
+            filtered_rows: None,
             join_decided: false,
         })
     }

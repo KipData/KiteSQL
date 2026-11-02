@@ -101,7 +101,9 @@ pub(crate) fn predicate_scan_mut<'plan>(
     &'plan mut Option<PhysicalOption>,
 )> {
     match (&mut plan.operator, plan.childrens.as_mut()) {
-        (Operator::TableScan(scan), _) if scan.limit == (None, None) => {
+        (Operator::TableScan(scan), _)
+            if scan.limit == (None, None) && scan.predicate.is_none() =>
+        {
             Some((scan, &mut plan.physical_option))
         }
         (Operator::Sort(_), Childrens::Only(input)) => predicate_scan_mut(input, arena),

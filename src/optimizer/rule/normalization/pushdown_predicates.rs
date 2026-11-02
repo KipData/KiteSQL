@@ -326,6 +326,8 @@ impl NormalizationRule for PushPredicateIntoScan {
         let Some((scan_op, _)) = predicate_scan_mut(child, arena) else {
             return Ok(false);
         };
+        // Every residual must come from this filter for the scan to take it as its predicate.
+        let fresh = scan_op.index_infos.iter().all(|info| info.lookup.is_none());
 
         let mut changed = false;
         for IndexInfo {
@@ -363,13 +365,23 @@ impl NormalizationRule for PushPredicateIntoScan {
 
             *lookup = Some(IndexLookup::Static(detached.range));
             *residual_predicate = detached.residual;
-            let columns = scan_op.deserializers.read_columns();
+            let columns = scan_op
+                .deserializers
+                .read_columns()
+                .map(|column| column.column);
             (*covered, *cover_mapping) = match index_covering(columns, *meta, arena) {
                 Some(mapping) => (true, mapping),
                 None => (false, None),
             };
         }
 
+        let (predicate, having) = (filter_op.predicate, filter_op.having);
+        if let Operator::TableScan(scan_op) = &mut child.operator {
+            if fresh && !having {
+                scan_op.predicate = Some(predicate);
+                return Ok(replace_with_only_child(plan));
+            }
+        }
         Ok(changed)
     }
 }
@@ -753,8 +765,10 @@ mod tests {
                 &mut arena,
             )?;
 
-            let mut scan = best_plan.childrens.pop_only().childrens.pop_only();
+            // The filter becomes the scan's predicate unless initialization separates them.
+            let mut scan = best_plan.childrens.pop_only();
             if through_init {
+                scan = scan.childrens.pop_only();
                 assert!(matches!(scan.operator, Operator::ScalarQueryInit(_)));
                 scan = scan.childrens.pop_twins().0;
             }
@@ -834,6 +848,7 @@ mod tests {
                         stream_aggregate_hint: None,
                     }],
                     with_pk: false,
+                    predicate: None,
                 }),
                 Childrens::None,
             );
@@ -846,8 +861,7 @@ mod tests {
                 ),
                 &mut arena,
             )?;
-            let scan = plan.childrens.pop_only();
-            let Operator::TableScan(op) = scan.operator else {
+            let Operator::TableScan(op) = plan.operator else {
                 unreachable!()
             };
             assert_eq!(
@@ -1084,6 +1098,7 @@ mod tests {
                     },
                 ],
                 with_pk: false,
+                predicate: None,
             }),
             Childrens::None,
         );
@@ -1111,8 +1126,7 @@ mod tests {
             &mut arena,
         )?;
 
-        let table_scan = best_plan.childrens.pop_only();
-        if let Operator::TableScan(op) = &table_scan.operator {
+        if let Operator::TableScan(op) = &best_plan.operator {
             let index_infos = &op.index_infos;
             assert_eq!(index_infos.len(), 2);
 

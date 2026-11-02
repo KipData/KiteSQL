@@ -27,9 +27,10 @@ use crate::planner::operator::visitor::{ChildrenVisit, OperatorExprVisitor, Oper
 use crate::planner::operator::visitor_mut::{
     ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
 };
-use crate::planner::operator::Operator;
+use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
+use crate::types::index::IndexType;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
@@ -489,6 +490,8 @@ impl ColumnPruning {
                         }
                         keep
                     });
+                    // Read by column above; an all-referenced scan stays pinned.
+                    op.deserializers.unpin();
                     if outcome.removed_positions.len() > output_start {
                         changed = true;
                     }
@@ -818,6 +821,89 @@ impl NormalizationRule for ColumnPruning {
     }
 }
 
+/// A covered index read leaves NULL the unpinned scan columns nothing reads, skipping their
+/// index fields: no operator above references them, nor does the scan's predicate, which a
+/// chosen index range has left the residual.
+#[derive(Clone)]
+pub struct SkipResidualFilterColumns;
+
+impl SkipResidualFilterColumns {
+    fn collect(
+        plan: &LogicalPlan,
+        referenced: &mut ReferencedColumns,
+        arena: &mut PlanArena,
+    ) -> Result<(), DatabaseError> {
+        match &plan.operator {
+            Operator::TableScan(scan) => ColumnPruning::extend_expr_referenced_columns(
+                scan.predicate.iter(),
+                referenced,
+                arena,
+            )?,
+            operator => {
+                ColumnPruning::extend_operator_referenced_columns(operator, referenced, arena)?
+            }
+        }
+        for child in plan.childrens.iter() {
+            Self::collect(child, referenced, arena)?;
+        }
+        Ok(())
+    }
+
+    fn skip(plan: &mut LogicalPlan, referenced: &ReferencedColumns, arena: &PlanArena) -> bool {
+        let mut changed = false;
+        match plan.childrens.as_mut() {
+            Childrens::None => (),
+            Childrens::Only(child) => changed |= Self::skip(child, referenced, arena),
+            Childrens::Twins { left, right } => {
+                changed |= Self::skip(left, referenced, arena);
+                changed |= Self::skip(right, referenced, arena);
+            }
+        }
+        let (
+            Operator::TableScan(scan),
+            Some(PhysicalOption {
+                plan: PlanImpl::IndexScan(info),
+                ..
+            }),
+        ) = (&plan.operator, plan.physical_option.as_mut())
+        else {
+            return changed;
+        };
+        // A primary key read decodes the table row rather than index fields.
+        if !info.covered || matches!(arena.index(info.meta).ty, IndexType::PrimaryKey { .. }) {
+            return changed;
+        }
+        let len = scan.columns().count();
+        for (position, column) in scan.deserializers.read_columns().enumerate() {
+            let skipped = info
+                .cover_mapping
+                .as_ref()
+                .is_some_and(|slots| slots[position] == usize::MAX);
+            if !column.pinned && !skipped && !referenced.contains(column.column, arena) {
+                info.cover_mapping.get_or_insert_with(|| (0..len).collect())[position] = usize::MAX;
+                changed = true;
+            }
+        }
+        changed
+    }
+}
+
+impl NormalizationRule for SkipResidualFilterColumns {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
+    ) -> Result<bool, DatabaseError> {
+        let mut referenced = ReferencedColumns::with_arena_capacity(arena);
+        Self::collect(plan, &mut referenced, arena)?;
+
+        let output = plan.output_schema(arena);
+        referenced.extend(output.iter().copied(), arena);
+        Ok(Self::skip(plan, &referenced, arena))
+    }
+}
+
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
@@ -1085,6 +1171,94 @@ mod tests {
         assert_single_scan_columns(&best_plan, "t1", &arena, &["c1"]);
         assert_single_scan_columns(&best_plan, "t2", &arena, &["c3"]);
 
+        Ok(())
+    }
+
+    #[test]
+    fn skip_residual_filter_columns_in_covered_index_reads() -> Result<(), DatabaseError> {
+        use crate::db::DataBaseBuilder;
+        use crate::planner::operator::{PhysicalOption, PlanImpl};
+        use crate::types::tuple::TupleLike;
+        use crate::types::value::DataValue;
+
+        fn find_scan(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+            matches!(plan.operator, Operator::TableScan(_))
+                .then_some(plan)
+                .or_else(|| plan.childrens.iter().find_map(find_scan))
+        }
+
+        let mut db = DataBaseBuilder::path(".")
+            .histogram_buckets(2)
+            .build_in_memory()?;
+        db.ddl("create table skip_t(id int primary key, a int, b int)")?;
+        db.ddl("create index skip_ab on skip_t(a, b)")?;
+        db.run("insert into skip_t values(1, 1, 10), (2, 1, 20), (3, 2, 30)")?
+            .done()?;
+        db.analyze("skip_t")?;
+        let mut tx = db.new_transaction(false)?;
+
+        for (sql, mapping, expected) in [
+            // The range eliminates `a = 1`, so nothing reads `a`.
+            (
+                "select b from skip_t where a = 1",
+                Some(vec![usize::MAX, 1]),
+                vec![10, 20],
+            ),
+            // The whole predicate is the range, so `b` goes unread.
+            (
+                "select a from skip_t where a = 1 and b > 10",
+                Some(vec![0, usize::MAX]),
+                vec![1],
+            ),
+            // The residual filter still reads `b`.
+            (
+                "select a from skip_t where a = 1 and b % 7 = 6",
+                None,
+                vec![1],
+            ),
+            // The query output reads every column.
+            ("select a, b from skip_t where a = 1", None, vec![1, 1]),
+        ] {
+            let mut program = db.program_sql(sql, &[])?;
+            let scan = find_scan(program.executor.plan()).expect("table scan");
+            let Some(PhysicalOption {
+                plan: PlanImpl::IndexScan(info),
+                ..
+            }) = &scan.physical_option
+            else {
+                panic!("expected index scan: {sql}")
+            };
+            assert!(info.covered, "{sql}");
+            assert_eq!(info.cover_mapping, mapping, "{sql}");
+
+            let mut iter = program.execute(&mut tx, [])?;
+            let mut rows = Vec::new();
+            while iter
+                .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
+                .is_some()
+            {}
+            iter.done()?;
+            let expected: Vec<_> = expected.into_iter().map(DataValue::Int32).collect();
+            assert_eq!(rows, expected, "{sql}");
+        }
+
+        // An update writes back the whole row it scans, so its scan stays pinned.
+        drop(tx);
+        db.run("update skip_t set b = b + 1 where a = 1")?.done()?;
+        let mut iter = db.run("select id, a, b from skip_t order by id")?;
+        let mut rows = Vec::new();
+        while iter
+            .next_tuple(|_, row| {
+                rows.push((0..3).map(|i| row.value_at(i).clone()).collect::<Vec<_>>())
+            })?
+            .is_some()
+        {}
+        iter.done()?;
+        let expected: Vec<Vec<_>> = [[1, 1, 11], [2, 1, 21], [3, 2, 30]]
+            .into_iter()
+            .map(|row| row.into_iter().map(DataValue::Int32).collect())
+            .collect();
+        assert_eq!(rows, expected);
         Ok(())
     }
 }

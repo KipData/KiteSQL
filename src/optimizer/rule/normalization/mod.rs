@@ -16,7 +16,9 @@ use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::optimizer::core::rule::NormalizationRule;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-use crate::optimizer::rule::normalization::column_pruning::ColumnPruning;
+use crate::optimizer::rule::normalization::column_pruning::{
+    ColumnPruning, SkipResidualFilterColumns,
+};
 use crate::optimizer::rule::normalization::combine_operators::{CollapseGroupByAgg, CombineFilter};
 use crate::optimizer::rule::normalization::compilation_in_advance::EvaluatorBind;
 use crate::optimizer::rule::normalization::constant_propagation::{
@@ -65,6 +67,7 @@ pub(crate) use simplification::constant_calculation_current;
 #[derive(Debug, Copy, Clone)]
 pub enum NormalizationRuleImpl {
     ColumnPruning,
+    SkipResidualFilterColumns,
     // Combine operators
     EliminateProject,
     CollapseGroupByAgg,
@@ -171,7 +174,8 @@ pub enum NormalizationPassKind {
 impl NormalizationRuleImpl {
     pub fn pass_kind(&self) -> NormalizationPassKind {
         match self {
-            NormalizationRuleImpl::ColumnPruning => {
+            NormalizationRuleImpl::ColumnPruning
+            | NormalizationRuleImpl::SkipResidualFilterColumns => {
                 NormalizationPassKind::WholeTreePass(WholeTreePassKind::ColumnPruning)
             }
             NormalizationRuleImpl::ConstantCalculation | NormalizationRuleImpl::EvaluatorBind => {
@@ -183,7 +187,8 @@ impl NormalizationRuleImpl {
 
     pub fn root_tag(&self) -> NormalizationRuleRootTag {
         match self {
-            NormalizationRuleImpl::ColumnPruning => NormalizationRuleRootTag::Any,
+            NormalizationRuleImpl::ColumnPruning
+            | NormalizationRuleImpl::SkipResidualFilterColumns => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EliminateProject => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::CollapseGroupByAgg => NormalizationRuleRootTag::Aggregate,
             NormalizationRuleImpl::GuardMarkApply => NormalizationRuleRootTag::Project,
@@ -201,7 +206,8 @@ impl NormalizationRuleImpl {
             NormalizationRuleImpl::ConstantCalculation => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EvaluatorBind => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::MinMaxToTopK => NormalizationRuleRootTag::Aggregate,
-            NormalizationRuleImpl::EliminateIndexFilter => NormalizationRuleRootTag::Filter,
+            // Also rewrites the predicates scans hold.
+            NormalizationRuleImpl::EliminateIndexFilter => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::ParameterizeInnerJoin
             | NormalizationRuleImpl::GreedyJoinReorder => NormalizationRuleRootTag::Join,
             NormalizationRuleImpl::ParameterizeMarkApply
@@ -219,6 +225,9 @@ impl NormalizationRule for NormalizationRuleImpl {
     ) -> Result<bool, DatabaseError> {
         match self {
             NormalizationRuleImpl::ColumnPruning => ColumnPruning.apply(plan, arena, loader),
+            NormalizationRuleImpl::SkipResidualFilterColumns => {
+                SkipResidualFilterColumns.apply(plan, arena, loader)
+            }
             NormalizationRuleImpl::GreedyJoinReorder => {
                 GreedyJoinReorder.apply(plan, arena, loader)
             }

@@ -371,6 +371,7 @@ mod tests {
                     limit: (None, None),
                     index_infos: vec![index.clone(), other.clone()],
                     with_pk: false,
+                    predicate: None,
                 }),
                 Childrens::None,
             );
@@ -454,7 +455,14 @@ mod tests {
     #[test]
     fn parameter_order_dependent_predicates_remain_correct() -> Result<(), DatabaseError> {
         fn has_filter(plan: &LogicalPlan) -> bool {
-            matches!(plan.operator, Operator::Filter(_)) || plan.childrens.iter().any(has_filter)
+            matches!(
+                &plan.operator,
+                Operator::Filter(_)
+                    | Operator::TableScan(TableScanOperator {
+                        predicate: Some(_),
+                        ..
+                    })
+            ) || plan.childrens.iter().any(has_filter)
         }
 
         let mut db = DataBaseBuilder::path(".")
@@ -736,7 +744,14 @@ mod tests {
         };
         // `$3 - 20` is computed when the range is bound, so the whole predicate is the range.
         fn has_filter(plan: &LogicalPlan) -> bool {
-            matches!(plan.operator, Operator::Filter(_)) || plan.childrens.iter().any(has_filter)
+            matches!(
+                &plan.operator,
+                Operator::Filter(_)
+                    | Operator::TableScan(TableScanOperator {
+                        predicate: Some(_),
+                        ..
+                    })
+            ) || plan.childrens.iter().any(has_filter)
         }
         assert!(matches!(
             &info.lookup,

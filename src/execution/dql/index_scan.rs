@@ -222,6 +222,7 @@ mod tests {
             limit: (None, None),
             index_infos: vec![],
             with_pk: true,
+            predicate: None,
         };
         let info = IndexInfo {
             meta: *table.indexes().next().unwrap(),

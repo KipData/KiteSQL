@@ -1013,16 +1013,20 @@ pub(crate) fn build_read<'a, B: ExecBuilder>(
             read!(ScalarSubquery<'a>, (op, plan.childrens.only()))
         }
         Operator::TableScan(op) => {
-            if let Some(PhysicalOption {
-                plan: PlanImpl::IndexScan(info),
-                ..
-            }) = physical_option
-            {
-                if let Some(lookup) = &info.lookup {
-                    return read!(IndexScan<'a>, (op, info.as_ref(), lookup));
-                }
+            let scan = match physical_option {
+                Some(PhysicalOption {
+                    plan: PlanImpl::IndexScan(info),
+                    ..
+                }) => match &info.lookup {
+                    Some(lookup) => read!(IndexScan<'a>, (op, info.as_ref(), lookup)),
+                    None => read!(SeqScan<'a>, op),
+                },
+                _ => read!(SeqScan<'a>, op),
+            };
+            match op.predicate {
+                Some(predicate) => Filter::wrap(predicate, scan),
+                None => scan,
             }
-            read!(SeqScan<'a>, op)
         }
         Operator::FunctionScan(op) => read!(FunctionScan<'a>, op),
         Operator::Sort(op) => {

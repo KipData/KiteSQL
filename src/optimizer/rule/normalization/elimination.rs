@@ -330,6 +330,23 @@ impl NormalizationRule for EliminateIndexFilter {
         arena: &mut PlanArena,
         _loader: Option<&StatisticMetaLoader<'_>>,
     ) -> Result<bool, DatabaseError> {
+        if let (
+            Operator::TableScan(scan),
+            Some(PhysicalOption {
+                plan: PlanImpl::IndexScan(index_info),
+                ..
+            }),
+        ) = (&mut plan.operator, &plan.physical_option)
+        {
+            if scan.predicate.is_none()
+                || !matches!(index_info.lookup, Some(IndexLookup::Static(_)))
+                || scan.predicate == index_info.residual_predicate
+            {
+                return Ok(false);
+            }
+            scan.predicate = index_info.residual_predicate;
+            return Ok(true);
+        }
         if !matches!(plan.operator, Operator::Filter(_)) {
             return Ok(false);
         }
@@ -1370,6 +1387,7 @@ mod tests {
                 limit: (None, None),
                 index_infos: vec![index_info.clone()],
                 with_pk: false,
+                predicate: None,
             }),
             Childrens::None,
         );
@@ -1434,6 +1452,7 @@ mod tests {
                 limit: (None, None),
                 index_infos: vec![index_info],
                 with_pk: false,
+                predicate: None,
             }),
             Childrens::None,
         );
@@ -1752,6 +1771,7 @@ mod tests {
                 limit: (None, None),
                 index_infos: vec![index_info],
                 with_pk: false,
+                predicate: None,
             }),
             Childrens::None,
         );
@@ -2000,6 +2020,7 @@ mod tests {
                 limit: (None, None),
                 index_infos: vec![index_info],
                 with_pk: false,
+                predicate: None,
             }),
             Childrens::None,
         );

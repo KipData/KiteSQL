@@ -19,6 +19,7 @@ use crate::optimizer::core::rule::{
     keep_best_physical_option, BestPhysicalOption, ImplementationRule, MatchPattern,
 };
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
+use crate::optimizer::rule::implementation::dql::filter::estimate_predicate_rows;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{LogicalPlan, PlanArena};
 use crate::types::index::{IndexLookup, IndexType};
@@ -61,12 +62,23 @@ impl ImplementationRule for SeqScanImplementation {
                 .flatten()
                 .map(|index_statistics| index_statistics.histogram().values_len());
 
-            let option = PhysicalOption::new(
+            let mut rows = cost;
+            let mut filtered_rows = None;
+            if let (Some(predicate), Some(scanned)) = (scan_op.predicate, cost) {
+                if let Some(kept) =
+                    estimate_predicate_rows(predicate, plan, scanned, arena, loader)?
+                {
+                    rows = Some(kept);
+                    filtered_rows = Some(scanned - kept);
+                }
+            }
+            let mut option = PhysicalOption::new(
                 PlanImpl::SeqScan,
                 SortOption::None,
-                cost.map(|rows| RowCountOption::Estimated { rows, ndv: None })
+                rows.map(|rows| RowCountOption::Estimated { rows, ndv: None })
                     .unwrap_or(RowCountOption::Unknown),
             );
+            option.filtered_rows = filtered_rows;
             keep_best_physical_option(best_physical_option, option, cost);
             Ok(())
         } else {
