@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::execution::dql::seq_scan::next_scan_tuple;
 use crate::execution::{
     ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
 };
@@ -20,7 +21,7 @@ use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::SortOption;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{IndexRanges, Iter, StorageTransaction};
+use crate::storage::{IndexRanges, StorageTransaction};
 use crate::types::index::{IndexInfo, IndexLookup};
 use std::borrow::Cow;
 
@@ -157,7 +158,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
 
         let state = arena.local_state(plan_arena);
         let iter = state.iters[self.iter].as_index();
-        if iter.next_tuple_into(state.table_codec, state.result.output_mut())? {
+        let output = state.result.output_mut();
+        if next_scan_tuple(self.op, iter, state.table_codec, output, plan_arena)? {
             arena.resume();
         } else {
             arena.finish();

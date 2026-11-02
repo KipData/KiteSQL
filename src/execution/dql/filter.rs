@@ -26,12 +26,6 @@ pub struct Filter<'a> {
     input: ExecNode<'a>,
 }
 
-impl<'a> Filter<'a> {
-    pub(crate) fn wrap(predicate: ExprRef, input: ExecNode<'a>) -> ExecNode<'a> {
-        ExecNode::Filter(Box::new(Filter { predicate, input }))
-    }
-}
-
 impl<'a> ReadExecutor<'a> for Filter<'a> {
     type Input = (&'a FilterOperator, &'a LogicalPlan);
 
@@ -41,7 +35,10 @@ impl<'a> ReadExecutor<'a> for Filter<'a> {
         plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let input = build_read(arena, plan_arena, input);
-        Self::wrap(*predicate, input)
+        ExecNode::Filter(Box::new(Filter {
+            predicate: *predicate,
+            input,
+        }))
     }
 }
 

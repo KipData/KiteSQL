@@ -18,7 +18,9 @@ use crate::execution::{
 };
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
+use crate::storage::table_codec::TableCodec;
 use crate::storage::{Iter, StorageTransaction};
+use crate::types::tuple::Tuple;
 
 pub(crate) struct SeqScan<'a> {
     op: &'a TableScanOperator,
@@ -74,14 +76,37 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
             state.iters[self.iter] = StorageIter::Tuple(iter);
         }
         let iter = state.iters[self.iter].as_tuple();
-
-        if iter.next_tuple_into(state.table_codec, state.result.output_mut())? {
+        let output = state.result.output_mut();
+        if next_scan_tuple(self.op, iter, state.table_codec, output, plan_arena)? {
             arena.resume();
         } else {
             arena.finish();
         }
         Ok(())
     }
+}
+
+#[inline]
+pub(crate) fn next_scan_tuple<I: Iter + ?Sized, A: MetaArena>(
+    op: &TableScanOperator,
+    iter: &mut I,
+    table_codec: &mut TableCodec,
+    tuple: &mut Tuple,
+    arena: &A,
+) -> Result<bool, DatabaseError> {
+    while iter.next_tuple_into(table_codec, tuple)? {
+        let holds = match op.predicate {
+            Some(predicate) => arena
+                .expression(predicate)
+                .eval(arena, Some(&*tuple))?
+                .is_true()?,
+            None => true,
+        };
+        if holds {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // GRCOV_EXCL_START
