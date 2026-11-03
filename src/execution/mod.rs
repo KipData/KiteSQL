@@ -186,8 +186,11 @@ impl<'a> Executor<'a> {
     ) -> Result<(), DatabaseError> {
         self.buffer.reset();
         if mem::replace(&mut self.ran, true) {
+            self.buffer.restarting = true;
             let mut context = ExecContext::new(&mut self.buffer, arena);
-            self.root.reset(&mut context, plan_arena)?;
+            let result = self.root.reset(&mut context, plan_arena);
+            self.buffer.restarting = false;
+            result?;
         }
         Ok(())
     }
@@ -247,6 +250,9 @@ pub(crate) enum ExecNode<'a> {
 
 pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
     // Restores the state the node had right after it was built, resetting its inputs too.
+    // A parent may also reset a child to rescan it within one execution; only then may a node
+    // keep what it read (see `ExecContext::restarting`), as a new execution may run in another
+    // transaction.
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
@@ -574,6 +580,7 @@ pub(crate) struct ExecBuffer {
     result: ExecResult,
     table_codec: TableCodec,
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
+    restarting: bool,
 }
 
 pub(crate) struct ExecArena<'a, 't, T: StorageTransaction + 'a> {
@@ -781,6 +788,11 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
     // Slots are allocated in build order, so a subtree built last owns the tail.
     pub(crate) fn truncate_iters(&mut self, len: usize) {
         self.arena.iters.truncate(len);
+    }
+
+    #[inline]
+    pub(crate) fn restarting(&self) -> bool {
+        self.buffer.restarting
     }
 
     #[inline]

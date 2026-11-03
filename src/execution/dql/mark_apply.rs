@@ -126,7 +126,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
     ) -> Result<(), DatabaseError> {
         // Materialization already makes the RHS reusable across left rows.
         // Keep both complete caches and paused prefixes; only reset the left input.
-        if !self.op.materialize || self.right_input.is_none() {
+        if arena.restarting() || !self.op.materialize || self.right_input.is_none() {
             self.right_input = Some(RightInput::new(self.op.materialize));
         }
         self.left_input.reset(arena, plan_arena)

@@ -817,5 +817,38 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn rerun_rebuilds_materialized_subquery() -> Result<(), DatabaseError> {
+        let mut db = DataBaseBuilder::path(".").build_in_memory()?;
+        db.ddl("create table t1 (c1 int primary key, name varchar)")?;
+        db.ddl("create table t2 (c1 int primary key, name varchar)")?;
+        db.run("insert into t1 values (0, 'a'), (1, 'b'), (2, 'c'), (3, 'd')")?
+            .done()?;
+        let mut plan =
+            db.program_sql("select c1 from t1 where name in (select name from t2)", &[])?;
+
+        // Each execution runs in its own transaction and must see what the previous one missed.
+        for (insert, expected) in [
+            ("insert into t2 values (0, 'b')", vec![1]),
+            ("insert into t2 values (1, 'd')", vec![1, 3]),
+        ] {
+            db.run(insert)?.done()?;
+            let mut tx = db.new_transaction(true)?;
+            let mut iter = plan.execute(&mut tx, [])?;
+            let mut rows = Vec::new();
+            while let Some(c1) = iter.next_tuple(|_, row| row.value_at(0).clone())? {
+                rows.push(c1);
+            }
+            iter.done()?;
+            tx.commit()?;
+            let expected = expected
+                .into_iter()
+                .map(DataValue::Int32)
+                .collect::<Vec<_>>();
+            assert_eq!(rows, expected);
+        }
+        Ok(())
+    }
 }
 // GRCOV_EXCL_STOP
