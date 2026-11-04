@@ -72,11 +72,11 @@ Local 720-second comparison on the machine above:
 
 | Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 209840 | 254 | 50 | 28 | 345 | 202 |
-| KiteSQL RocksDB | 48049 | 354 | 85 | 146 | 14511 | 562 |
-| SQLite | 192435 | 270 | 40 | 33 | 344 | 265 |
+| KiteSQL LMDB | 214271 | 252 | 46 | 26 | 340 | 192 |
+| KiteSQL RocksDB | 47415 | 360 | 79 | 144 | 15047 | 548 |
+| SQLite | 185982 | 278 | 41 | 34 | 350 | 270 |
 
-- Run date: `2026-11-01`. Latency is measured in microseconds and includes commit.
+- Run date: `2026-11-04`. Latency is measured in microseconds and includes commit.
 - Every row is pinned to `cpu8`, the highest-frequency P-core on this machine (5.4 GHz).
 - All rows use `--num-ware 1`, `--max-retry 5`, and TPCC's default 720-second measure time.
 - All rows run without `--sync`, so commits are not fsynced; SQLite uses WAL with `synchronous = OFF`.
