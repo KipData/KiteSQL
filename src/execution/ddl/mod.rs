@@ -59,7 +59,7 @@ fn read_tuple_batch<T: StorageTransaction>(
             Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
             Bound::Unbounded => Bound::Included(min),
         };
-        let mut iter = transaction.range(lower, Bound::Included(max))?;
+        let mut iter = transaction.range(lower, Bound::Included(max), pool)?;
         let mut len = 0;
 
         while len < batch_size {

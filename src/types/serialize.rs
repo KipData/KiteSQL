@@ -237,8 +237,9 @@ impl TupleValueSerializable for TupleValueSerializableImpl {
     }
 }
 
+#[doc(hidden)]
 #[derive(Debug, Default)]
-pub(crate) struct BytesPool(Vec<Vec<u8>>);
+pub struct BytesPool(Vec<Vec<u8>>);
 
 impl BytesPool {
     const CAPACITY: usize = 64;
@@ -251,6 +252,20 @@ impl BytesPool {
                 buffer
             }
             None => bytes.to_vec(),
+        }
+    }
+
+    pub(crate) fn buffer(&mut self) -> Vec<u8> {
+        self.0.pop().unwrap_or_default()
+    }
+
+    pub(crate) fn recycle_buffer(&mut self, mut buffer: Vec<u8>) {
+        if self.0.len() < Self::CAPACITY
+            && buffer.capacity() > 0
+            && buffer.capacity() <= Self::MAX_BUFFER_LEN
+        {
+            buffer.clear();
+            self.0.push(buffer);
         }
     }
 
@@ -308,12 +323,8 @@ impl BytesPool {
                 DataValue::Binary { value, .. } => value.into_owned_raw(),
                 _ => continue,
             };
-            let Some(mut buffer) = buffer else {
-                continue;
-            };
-            if self.0.len() < Self::CAPACITY && buffer.capacity() <= Self::MAX_BUFFER_LEN {
-                buffer.clear();
-                self.0.push(buffer);
+            if let Some(buffer) = buffer {
+                self.recycle_buffer(buffer);
             }
         }
     }

@@ -36,7 +36,7 @@ use crate::planner::{MetaArena, TableArenaCell};
 use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType, RuntimeIndexProbe};
 use crate::types::mapped::MappedScope;
-use crate::types::serialize::TupleValueSerializableImpl;
+use crate::types::serialize::{BytesPool, TupleValueSerializableImpl};
 use crate::types::tuple::{Tuple, TupleId, TupleImpl, TupleLike};
 use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef};
 use crate::types::{ColumnId, LogicalType};
@@ -242,8 +242,8 @@ pub trait StorageTransaction: Sized {
     ) -> Result<TupleIter<'a, Self>, DatabaseError> {
         let offset = bounds.0.unwrap_or(0);
 
-        table_codec.with_tuple_bound(table_id, |min, max, _| {
-            let iter = self.range(Bound::Included(min), Bound::Included(max))?;
+        table_codec.with_tuple_bound(table_id, |min, max, pool| {
+            let iter = self.range(Bound::Included(min), Bound::Included(max), pool)?;
 
             Ok(TupleIter {
                 table_id,
@@ -425,12 +425,12 @@ pub trait StorageTransaction: Sized {
         table: &TableCatalog,
     ) -> Result<(), DatabaseError> {
         let table_id = table.id();
-        table_codec.with_columns_bound(table_id, |min, max| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_columns_bound(table_id, |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
-        table_codec.with_index_meta_bound(table_id, |min, max| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_index_meta_bound(table_id, |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
         for column in table.columns().map(|column| arena.column(*column)) {
@@ -541,8 +541,8 @@ pub trait StorageTransaction: Sized {
             plan_arena,
         )?;
         self.rewrite_table_metadata(table_codec, plan_arena, &updated_table)?;
-        table_codec.with_statistics_bound(updated_table.id(), |min, max| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_statistics_bound(updated_table.id(), |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
         Ok(updated_table)
@@ -629,8 +629,8 @@ pub trait StorageTransaction: Sized {
                 self.remove(key)
             })?;
 
-            table_codec.with_index_bound(table_id, index_meta.id, |min, max| {
-                self.remove_range(Bound::Included(min), Bound::Included(max))
+            table_codec.with_index_bound(table_id, index_meta.id, |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
             })?;
 
             self.remove_index_statistics(table_codec, table_id, index_meta.id)?;
@@ -792,8 +792,8 @@ pub trait StorageTransaction: Sized {
             self.remove(key)
         })?;
 
-        table_codec.with_index_bound(table.id(), index_id, |min, max| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_index_bound(table.id(), index_id, |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
         self.remove_index_statistics(table_codec, table.id(), index_id)?;
@@ -823,12 +823,12 @@ pub trait StorageTransaction: Sized {
         };
         self.drop_data(table_codec, meta.id)?;
 
-        table_codec.with_columns_bound(meta.id, |min, max| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_columns_bound(meta.id, |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
-        table_codec.with_index_meta_bound(meta.id, |min, max| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_index_meta_bound(meta.id, |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
         table_codec.with_root_table(table_name.as_ref(), None, plan_arena, |key, _| {
@@ -843,16 +843,16 @@ pub trait StorageTransaction: Sized {
         table_codec: &mut TableCodec,
         table_id: TableId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_tuple_bound(table_id, |min, max, _| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_tuple_bound(table_id, |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
-        table_codec.with_all_index_bound(table_id, |min, max| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_all_index_bound(table_id, |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
-        table_codec.with_statistics_bound(table_id, |min, max| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_statistics_bound(table_id, |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })
     }
 
@@ -902,9 +902,9 @@ pub trait StorageTransaction: Sized {
         &'a self,
         table_codec: &mut TableCodec,
     ) -> Result<ViewIter<'a, Self>, DatabaseError> {
-        table_codec.with_view_bound(|min, max| {
+        table_codec.with_view_bound(|min, max, pool| {
             Ok(ViewIter {
-                iter: self.range(Bound::Included(min), Bound::Included(max))?,
+                iter: self.range(Bound::Included(min), Bound::Included(max), pool)?,
             })
         })
     }
@@ -947,9 +947,9 @@ pub trait StorageTransaction: Sized {
         &'a self,
         table_codec: &mut TableCodec,
     ) -> Result<TableIter<'a, Self>, DatabaseError> {
-        table_codec.with_root_table_bound(|min, max| {
+        table_codec.with_root_table_bound(|min, max, pool| {
             Ok(TableIter {
-                iter: self.range(Bound::Included(min), Bound::Included(max))?,
+                iter: self.range(Bound::Included(min), Bound::Included(max), pool)?,
             })
         })
     }
@@ -1058,8 +1058,8 @@ pub trait StorageTransaction: Sized {
         index_id: IndexId,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<IndexStatistics>, DatabaseError> {
-        table_codec.with_index_statistics_bound(table_id, index_id, |min, max| {
-            let mut iter = self.range(Bound::Included(min), Bound::Included(max))?;
+        table_codec.with_index_statistics_bound(table_id, index_id, |min, max, pool| {
+            let mut iter = self.range(Bound::Included(min), Bound::Included(max), pool)?;
             let mut root = None;
             let mut buckets = Vec::new();
             let mut sketch_meta = None;
@@ -1093,6 +1093,7 @@ pub trait StorageTransaction: Sized {
                     }
                 }
             }
+            iter.recycle(pool);
 
             match (root, sketch_meta) {
                 (Some(root), Some(sketch_meta)) => {
@@ -1117,8 +1118,8 @@ pub trait StorageTransaction: Sized {
         table_id: TableId,
         index_id: IndexId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_index_statistics_bound(table_id, index_id, |min, max| {
-            self.remove_range(Bound::Included(min), Bound::Included(max))
+        table_codec.with_index_statistics_bound(table_id, index_id, |min, max, pool| {
+            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
         Ok(())
@@ -1131,9 +1132,9 @@ pub trait StorageTransaction: Sized {
         table_id: TableId,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<(Vec<ColumnCatalog>, Vec<IndexMeta>)>, DatabaseError> {
-        table_codec.with_table_bound(table_id, |table_min, table_max| {
+        table_codec.with_table_bound(table_id, |table_min, table_max, pool| {
             let mut column_iter =
-                self.range(Bound::Included(table_min), Bound::Included(table_max))?;
+                self.range(Bound::Included(table_min), Bound::Included(table_max), pool)?;
 
             let mut columns = Vec::new();
             let mut index_metas = Vec::new();
@@ -1147,6 +1148,7 @@ pub trait StorageTransaction: Sized {
                     index_metas.push(TableCodec::decode_index_meta::<Self>(value, arena)?);
                 }
             }
+            column_iter.recycle(pool);
 
             Ok((!columns.is_empty()).then_some((columns, index_metas)))
         })
@@ -1227,15 +1229,22 @@ pub trait StorageTransaction: Sized {
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
+        pool: &mut BytesPool,
     ) -> Result<Self::IterType<'txn>, DatabaseError>;
 
     fn range_rev<'txn, 'key>(
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
+        pool: &mut BytesPool,
     ) -> Result<Self::RevIterType<'txn>, DatabaseError>;
 
-    fn remove_range(&mut self, min: Bound<&[u8]>, max: Bound<&[u8]>) -> Result<(), DatabaseError> {
+    fn remove_range(
+        &mut self,
+        min: Bound<&[u8]>,
+        max: Bound<&[u8]>,
+        pool: &mut BytesPool,
+    ) -> Result<(), DatabaseError> {
         const DELETE_BATCH_SIZE: usize = 1024;
 
         let mut lower = owned_bound(min);
@@ -1244,8 +1253,11 @@ pub trait StorageTransaction: Sized {
 
         loop {
             data_keys.clear();
-            let mut iter =
-                self.range(bytes_bound_as_slice(&lower), bytes_bound_as_slice(&upper))?;
+            let mut iter = self.range(
+                bytes_bound_as_slice(&lower),
+                bytes_bound_as_slice(&upper),
+                pool,
+            )?;
 
             while data_keys.len() < DELETE_BATCH_SIZE {
                 let Some((key, _)) = iter.try_next()? else {
@@ -1253,7 +1265,7 @@ pub trait StorageTransaction: Sized {
                 };
                 data_keys.push(key.to_vec());
             }
-            drop(iter);
+            iter.recycle(pool);
 
             let Some(last_key) = data_keys.pop() else {
                 return Ok(());
@@ -1502,12 +1514,20 @@ impl<'a, T: StorageTransaction + 'a> RangeIter<'a, T> {
         min: Bound<&[u8]>,
         max: Bound<&[u8]>,
         reverse: bool,
+        pool: &mut BytesPool,
     ) -> Result<Self, DatabaseError> {
         Ok(if reverse {
-            RangeIter::Reverse(tx.range_rev(min, max)?)
+            RangeIter::Reverse(tx.range_rev(min, max, pool)?)
         } else {
-            RangeIter::Forward(tx.range(min, max)?)
+            RangeIter::Forward(tx.range(min, max, pool)?)
         })
+    }
+
+    fn recycle(self, pool: &mut BytesPool) {
+        match self {
+            RangeIter::Forward(iter) => iter.recycle(pool),
+            RangeIter::Reverse(iter) => iter.recycle(pool),
+        }
     }
 }
 
@@ -1948,6 +1968,7 @@ fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
         Bound::Included(encode_min.as_slice()),
         Bound::Included(encode_max.as_slice()),
         params.reverse,
+        table_codec.bytes_pool(),
     )?;
     Ok(IndexResult::Scope(iter))
 }
@@ -2041,15 +2062,20 @@ pub struct TupleIter<'a, T: StorageTransaction + 'a> {
 }
 
 impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
+    pub(crate) fn recycle(self, pool: &mut BytesPool) {
+        self.iter.recycle(pool);
+    }
+
     pub(crate) fn reset(
         &mut self,
         tx: &'a T,
         table_codec: &mut TableCodec,
         bounds: Bounds,
     ) -> Result<(), DatabaseError> {
-        self.iter = table_codec.with_tuple_bound(self.table_id, |min, max, _| {
-            tx.range(Bound::Included(min), Bound::Included(max))
+        let iter = table_codec.with_tuple_bound(self.table_id, |min, max, pool| {
+            tx.range(Bound::Included(min), Bound::Included(max), pool)
         })?;
+        mem::replace(&mut self.iter, iter).recycle(table_codec.bytes_pool());
         self.mapped = tx.mapped_scope();
         self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
         Ok(())
@@ -2231,6 +2257,14 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
         self.rewind(bounds);
     }
 
+    pub(crate) fn recycle(self, pool: &mut BytesPool) {
+        pool.recycle_buffer(self.encode_min_buffer);
+        pool.recycle_buffer(self.encode_max_buffer);
+        if let IndexIterState::Range(iter) = self.state {
+            iter.recycle(pool);
+        }
+    }
+
     pub(crate) fn rewind(&mut self, bounds: Bounds) {
         self.state = IndexIterState::Init;
         self.ranges.next = 0;
@@ -2253,6 +2287,12 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
         loop {
             match &mut self.state {
                 IndexIterState::Init => {
+                    // Encode bounds into buffers that earlier iterators handed back.
+                    for buffer in [&mut self.encode_min_buffer, &mut self.encode_max_buffer] {
+                        if buffer.capacity() == 0 {
+                            *buffer = table_codec.bytes_pool().buffer();
+                        }
+                    }
                     let Some(binary) = self.ranges.next() else {
                         self.state = IndexIterState::Over;
                         continue;
@@ -2280,17 +2320,18 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
 
                             let tx = self.params.tx;
                             let reverse = self.params.reverse;
-                            let open_iter = move |bound_min: &[u8], bound_max: &[u8]| {
-                                RangeIter::open(
-                                    tx,
-                                    fill_default_bound(encode_min, bound_min),
-                                    fill_default_bound(encode_max, bound_max),
-                                    reverse,
-                                )
-                            };
+                            let open_iter =
+                                move |bound_min: &[u8], bound_max: &[u8], pool: &mut BytesPool| {
+                                    RangeIter::open(
+                                        tx,
+                                        fill_default_bound(encode_min, bound_min),
+                                        fill_default_bound(encode_max, bound_max),
+                                        reverse,
+                                        pool,
+                                    )
+                                };
                             let iter = if matches!(index_meta.ty, IndexType::PrimaryKey { .. }) {
-                                table_codec
-                                    .with_tuple_bound(table_id, |min, max, _| open_iter(min, max))?
+                                table_codec.with_tuple_bound(table_id, open_iter)?
                             } else {
                                 table_codec.with_index_bound(table_id, index_meta.id, open_iter)?
                             };
@@ -2342,7 +2383,11 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
 
                         return Ok(true);
                     }
-                    self.state = IndexIterState::Init;
+                    if let IndexIterState::Range(iter) =
+                        mem::replace(&mut self.state, IndexIterState::Init)
+                    {
+                        iter.recycle(table_codec.bytes_pool());
+                    }
                 }
                 IndexIterState::Over => return Ok(false),
             }
@@ -2352,6 +2397,14 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
 
 pub trait InnerIter {
     fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError>;
+
+    #[doc(hidden)]
+    fn recycle(self, pool: &mut BytesPool)
+    where
+        Self: Sized,
+    {
+        let _ = pool;
+    }
 }
 
 pub trait Iter {
@@ -2363,7 +2416,7 @@ pub trait Iter {
 }
 
 pub struct TableIter<'a, T: StorageTransaction + 'a> {
-    iter: T::IterType<'a>,
+    pub(crate) iter: T::IterType<'a>,
 }
 
 impl<T: StorageTransaction> TableIter<'_, T> {
@@ -2383,7 +2436,7 @@ impl<T: StorageTransaction> TableIter<'_, T> {
 }
 
 pub struct ViewIter<'a, T: StorageTransaction + 'a> {
-    iter: T::IterType<'a>,
+    pub(crate) iter: T::IterType<'a>,
 }
 
 impl<T: StorageTransaction> ViewIter<'_, T> {
@@ -2439,6 +2492,7 @@ pub(crate) fn check_range_rev_matches_range<T: StorageTransaction>(
         b"z",
         b"zz",
     ];
+    let mut pool = BytesPool::default();
     let mut bounds = vec![(None, Bound::Unbounded)];
     for (rank, probe) in probes.iter().enumerate() {
         bounds.push((Some(rank), Bound::Included(*probe)));
@@ -2463,12 +2517,12 @@ pub(crate) fn check_range_rev_matches_range<T: StorageTransaction>(
                 .cloned()
                 .collect();
             assert_eq!(
-                keys(tx.range(*min, *max)?)?,
+                keys(tx.range(*min, *max, &mut pool)?)?,
                 expected,
                 "min={min:?} max={max:?}"
             );
             expected.reverse();
-            let actual = keys(tx.range_rev(*min, *max)?)?;
+            let actual = keys(tx.range_rev(*min, *max, &mut pool)?)?;
             assert_eq!(actual, expected, "min={min:?} max={max:?}");
         }
     }
@@ -2515,13 +2569,14 @@ pub(crate) fn check_remove_range<T: StorageTransaction>(tx: &mut T) -> Result<()
         (Bound::Unbounded, Bound::Excluded(&k1)),
         (Bound::Included(&k5000), Bound::Unbounded),
     ];
+    let mut pool = BytesPool::default();
     for (min, max) in cases {
         for key in &data {
             tx.set(key, &[7; 64])?;
         }
-        tx.remove_range(min, max)?;
+        tx.remove_range(min, max, &mut pool)?;
 
-        let mut iter = tx.range(Bound::Unbounded, Bound::Unbounded)?;
+        let mut iter = tx.range(Bound::Unbounded, Bound::Unbounded, &mut pool)?;
         let mut remaining = Vec::new();
         while let Some((key, _)) = iter.try_next()? {
             remaining.push(key.to_vec());
@@ -2830,8 +2885,8 @@ mod test {
                 tuples[2]
             );
 
-            let mut iter = table_codec.with_tuple_bound(0, |min, max, _| {
-                transaction.range(Bound::Included(min), Bound::Included(max))
+            let mut iter = table_codec.with_tuple_bound(0, |min, max, pool| {
+                transaction.range(Bound::Included(min), Bound::Included(max), pool)
             })?;
 
             let (_, value) = iter.try_next()?.unwrap();
@@ -2869,8 +2924,8 @@ mod test {
                 tuples[2]
             );
 
-            let mut iter = table_codec.with_tuple_bound(0, |min, max, _| {
-                transaction.range(Bound::Included(min), Bound::Included(max))
+            let mut iter = table_codec.with_tuple_bound(0, |min, max, pool| {
+                transaction.range(Bound::Included(min), Bound::Included(max), pool)
             })?;
 
             let (_, value) = iter.try_next()?.unwrap();
@@ -2968,8 +3023,8 @@ mod test {
         let mut plan_arena = PlanArena::new(&table_arena);
         fn_assert(&mut transaction, &reloaded_names, &reloaded_table_cache)?;
         {
-            let mut iter = table_codec.with_index_meta_bound(0, |min, max| {
-                transaction.range(Bound::Included(min), Bound::Included(max))
+            let mut iter = table_codec.with_index_meta_bound(0, |min, max, pool| {
+                transaction.range(Bound::Included(min), Bound::Included(max), pool)
             })?;
 
             let (_, value) = iter.try_next()?.unwrap();
@@ -3000,8 +3055,8 @@ mod test {
             assert_eq!(i2_meta.name, "i2".to_string());
             assert_eq!(i2_meta.ty, IndexType::Composite);
 
-            let mut iter = table_codec.with_index_meta_bound(0, |min, max| {
-                transaction.range(Bound::Included(min), Bound::Included(max))
+            let mut iter = table_codec.with_index_meta_bound(0, |min, max, pool| {
+                transaction.range(Bound::Included(min), Bound::Included(max), pool)
             })?;
 
             let (_, value) = iter.try_next()?.unwrap();
@@ -3153,8 +3208,8 @@ mod test {
                 tuples[1]
             );
 
-            let mut iter = table_codec.with_index_bound(0, 1, |min, max| {
-                transaction.range(Bound::Included(min), Bound::Included(max))
+            let mut iter = table_codec.with_index_bound(0, 1, |min, max, pool| {
+                transaction.range(Bound::Included(min), Bound::Included(max), pool)
             })?;
 
             let (_, value) = iter.try_next()?.unwrap();
@@ -3193,8 +3248,8 @@ mod test {
             tuples[1]
         );
 
-        let mut iter = table_codec.with_index_bound(0, 1, |min, max| {
-            transaction.range(Bound::Included(min), Bound::Included(max))
+        let mut iter = table_codec.with_index_bound(0, 1, |min, max, pool| {
+            transaction.range(Bound::Included(min), Bound::Included(max), pool)
         })?;
 
         let (_, value) = iter.try_next()?.unwrap();

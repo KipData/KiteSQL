@@ -16,6 +16,7 @@ use crate::errors::DatabaseError;
 use crate::storage::{
     CheckpointableStorage, InnerIter, Storage, StorageTransaction, TransactionIsolationLevel,
 };
+use crate::types::serialize::BytesPool;
 use rocksdb::{
     checkpoint::Checkpoint,
     statistics::{StatsLevel, Ticker},
@@ -608,6 +609,7 @@ macro_rules! impl_transaction {
                 &'a self,
                 min: Bound<&'key [u8]>,
                 max: Bound<&'key [u8]>,
+                _: &mut BytesPool,
             ) -> Result<Self::IterType<'a>, DatabaseError> {
                 let mut read_opts = build_read_options(&self.snapshot);
                 set_prefix_same_as_start(&mut read_opts, min, max);
@@ -636,6 +638,7 @@ macro_rules! impl_transaction {
                 &'a self,
                 min: Bound<&'key [u8]>,
                 max: Bound<&'key [u8]>,
+                _: &mut BytesPool,
             ) -> Result<Self::RevIterType<'a>, DatabaseError> {
                 let mut read_opts = build_read_options(&self.snapshot);
                 set_prefix_same_as_start(&mut read_opts, min, max);
@@ -801,6 +804,7 @@ mod test {
         PrimaryKeyIndexImpl, Storage, StorageTransaction,
     };
     use crate::types::index::IndexType;
+    use crate::types::serialize::BytesPool;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -915,14 +919,17 @@ mod test {
         transaction.set(b"b\0", b"3")?;
         transaction.set(b"c", b"4")?;
 
-        let mut inclusive_iter = transaction.range(Bound::Included(b"a"), Bound::Included(b"b"))?;
+        let mut pool = BytesPool::default();
+        let mut inclusive_iter =
+            transaction.range(Bound::Included(b"a"), Bound::Included(b"b"), &mut pool)?;
         let mut inclusive_keys = Vec::new();
         while let Some((key, _)) = inclusive_iter.try_next()? {
             inclusive_keys.push(key.to_vec());
         }
         assert_eq!(inclusive_keys, vec![b"a".to_vec(), b"b".to_vec()]);
 
-        let mut exclusive_iter = transaction.range(Bound::Included(b"a"), Bound::Excluded(b"b"))?;
+        let mut exclusive_iter =
+            transaction.range(Bound::Included(b"a"), Bound::Excluded(b"b"), &mut pool)?;
         let mut exclusive_keys = Vec::new();
         while let Some((key, _)) = exclusive_iter.try_next()? {
             exclusive_keys.push(key.to_vec());

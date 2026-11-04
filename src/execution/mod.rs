@@ -78,7 +78,9 @@ use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanArena, PlanKeeper};
 use crate::storage::table_codec::TableCodec;
-use crate::storage::{IndexIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter};
+use crate::storage::{
+    IndexIter, InnerIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter,
+};
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::serialize::BytesPool;
 use crate::types::tuple::{ConcatPool, Input, Schema, Tuple, TupleId, TupleImpl};
@@ -610,6 +612,16 @@ impl<'t, T: StorageTransaction + 't> StorageIter<'t, T> {
         matches!(self, StorageIter::Empty)
     }
 
+    fn recycle(self, pool: &mut BytesPool) {
+        match self {
+            StorageIter::Tuple(iter) => iter.recycle(pool),
+            StorageIter::Index(iter) => iter.recycle(pool),
+            StorageIter::Table(iter) => iter.iter.recycle(pool),
+            StorageIter::View(iter) => iter.iter.recycle(pool),
+            StorageIter::Empty => (),
+        }
+    }
+
     pub(crate) fn as_tuple(&mut self) -> &mut TupleIter<'t, T> {
         match self {
             StorageIter::Tuple(iter) => iter,
@@ -699,6 +711,10 @@ impl ExecBuffer {
     pub(crate) fn result_mut(&mut self) -> &mut TupleImpl {
         &mut self.result.tuple
     }
+
+    pub(crate) fn bytes_pool(&mut self) -> &mut BytesPool {
+        self.table_codec.bytes_pool()
+    }
 }
 
 impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
@@ -718,8 +734,14 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
         self
     }
 
-    pub(crate) fn release_iters(&mut self) {
-        self.iters.fill_with(|| StorageIter::Empty);
+    /// Drops every storage iterator, handing their buffers back to `pool` when there is one.
+    pub(crate) fn release_iters(&mut self, mut pool: Option<&mut BytesPool>) {
+        for iter in &mut self.iters {
+            let iter = mem::replace(iter, StorageIter::Empty);
+            if let Some(pool) = pool.as_deref_mut() {
+                iter.recycle(pool);
+            }
+        }
     }
 
     pub(crate) fn take_ddl_apply(&mut self) -> Vec<DDLApply> {

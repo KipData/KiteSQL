@@ -15,10 +15,11 @@
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::Bytes;
 use crate::storage::{
-    bounds_contain, bytes_bound_as_slice, owned_bound, InnerIter, KeyValueRef, Storage,
-    StorageTransaction, TransactionIsolationLevel,
+    bounds_contain, bytes_bound_as_slice, InnerIter, KeyValueRef, Storage, StorageTransaction,
+    TransactionIsolationLevel,
 };
 use crate::types::mapped::MappedScope;
+use crate::types::serialize::BytesPool;
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RoTransaction,
     RwTransaction, Transaction as _, WriteFlags,
@@ -239,11 +240,21 @@ enum Step {
 type BytesRange = (Bound<Bytes>, Bound<Bytes>);
 
 impl Scan {
-    fn new(min: Bound<&[u8]>, max: Bound<&[u8]>, reverse: bool) -> Self {
+    fn new(min: Bound<&[u8]>, max: Bound<&[u8]>, reverse: bool, pool: &mut BytesPool) -> Self {
+        let mut owned = |bound: Bound<&[u8]>| bound.map(|key| pool.bytes(key));
         Self {
             step: Step::Seek,
-            range: (owned_bound(min), owned_bound(max)),
+            range: (owned(min), owned(max)),
             reverse,
+        }
+    }
+
+    fn recycle(self, pool: &mut BytesPool) {
+        let (min, max) = self.range;
+        for bound in [min, max] {
+            if let Bound::Included(bytes) | Bound::Excluded(bytes) = bound {
+                pool.recycle_buffer(bytes);
+            }
         }
     }
 
@@ -312,6 +323,10 @@ impl Scan {
 impl InnerIter for LmdbIter<'_> {
     fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
         self.scan.next(&self.cursor)
+    }
+
+    fn recycle(self, pool: &mut BytesPool) {
+        self.scan.recycle(pool);
     }
 }
 
@@ -409,10 +424,11 @@ impl StorageTransaction for LmdbTransaction<'_> {
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
+        pool: &mut BytesPool,
     ) -> Result<Self::IterType<'txn>, DatabaseError> {
         Ok(LmdbIter {
             cursor: self.tx.open_ro_cursor(self.db)?,
-            scan: Scan::new(min, max, false),
+            scan: Scan::new(min, max, false, pool),
         })
     }
 
@@ -420,19 +436,26 @@ impl StorageTransaction for LmdbTransaction<'_> {
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
+        pool: &mut BytesPool,
     ) -> Result<Self::RevIterType<'txn>, DatabaseError> {
         Ok(LmdbIter {
             cursor: self.tx.open_ro_cursor(self.db)?,
-            scan: Scan::new(min, max, true),
+            scan: Scan::new(min, max, true, pool),
         })
     }
 
-    fn remove_range(&mut self, min: Bound<&[u8]>, max: Bound<&[u8]>) -> Result<(), DatabaseError> {
+    fn remove_range(
+        &mut self,
+        min: Bound<&[u8]>,
+        max: Bound<&[u8]>,
+        pool: &mut BytesPool,
+    ) -> Result<(), DatabaseError> {
         let mut cursor = self.tx.writable()?.open_rw_cursor(self.db)?;
-        let mut scan = Scan::new(min, max, false);
+        let mut scan = Scan::new(min, max, false, pool);
         while scan.next(&cursor)?.is_some() {
             cursor.del(WriteFlags::empty())?;
         }
+        scan.recycle(pool);
         Ok(())
     }
 

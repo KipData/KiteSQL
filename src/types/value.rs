@@ -132,7 +132,6 @@ pub enum Utf8Type {
     Fixed(u32),
 }
 
-#[derive(Clone)]
 pub enum DataValue {
     /// A typed placeholder used only while preparing a plan.
     Parameter {
@@ -173,6 +172,80 @@ pub enum DataValue {
         value: BinaryBytes,
         len: Option<u32>,
     },
+}
+
+impl Clone for DataValue {
+    fn clone(&self) -> Self {
+        match self {
+            DataValue::Parameter { id, ty } => DataValue::Parameter {
+                id: *id,
+                ty: ty.clone(),
+            },
+            DataValue::InitValue { id, ty } => DataValue::InitValue {
+                id: *id,
+                ty: ty.clone(),
+            },
+            DataValue::Null => DataValue::Null,
+            DataValue::Boolean(v) => DataValue::Boolean(*v),
+            DataValue::Float32(v) => DataValue::Float32(*v),
+            DataValue::Float64(v) => DataValue::Float64(*v),
+            DataValue::Int8(v) => DataValue::Int8(*v),
+            DataValue::Int16(v) => DataValue::Int16(*v),
+            DataValue::Int32(v) => DataValue::Int32(*v),
+            DataValue::Int64(v) => DataValue::Int64(*v),
+            DataValue::UInt8(v) => DataValue::UInt8(*v),
+            DataValue::UInt16(v) => DataValue::UInt16(*v),
+            DataValue::UInt32(v) => DataValue::UInt32(*v),
+            DataValue::UInt64(v) => DataValue::UInt64(*v),
+            DataValue::Utf8 { value, ty, unit } => DataValue::Utf8 {
+                value: value.clone(),
+                ty: ty.clone(),
+                unit: *unit,
+            },
+            DataValue::Date32(v) => DataValue::Date32(*v),
+            DataValue::Date64(v) => DataValue::Date64(*v),
+            DataValue::Time32(v, precision) => DataValue::Time32(*v, *precision),
+            DataValue::Time64(v, precision, zone) => DataValue::Time64(*v, *precision, *zone),
+            #[cfg(feature = "decimal")]
+            DataValue::Decimal(v) => DataValue::Decimal(*v),
+            DataValue::Tuple(values) => DataValue::Tuple(values.clone()),
+            DataValue::Binary { value, len } => DataValue::Binary {
+                value: value.clone(),
+                len: *len,
+            },
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        match (self, source) {
+            (
+                DataValue::Utf8 { value, ty, unit },
+                DataValue::Utf8 {
+                    value: source_value,
+                    ty: source_ty,
+                    unit: source_unit,
+                },
+            ) => {
+                value.clone_from(source_value);
+                ty.clone_from(source_ty);
+                *unit = *source_unit;
+            }
+            (
+                DataValue::Binary { value, len },
+                DataValue::Binary {
+                    value: source_value,
+                    len: source_len,
+                },
+            ) => {
+                value.clone_from(source_value);
+                *len = *source_len;
+            }
+            (DataValue::Tuple(values), DataValue::Tuple(source_values)) => {
+                values.clone_from(source_values)
+            }
+            (target, source) => *target = source.clone(),
+        }
+    }
 }
 
 /// A read-only view of a value, including an unmaterialized tuple slice.

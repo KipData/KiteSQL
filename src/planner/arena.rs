@@ -31,6 +31,7 @@ use crate::types::LogicalType;
 use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::fmt;
+use std::mem;
 
 struct ScalarQueryRelocator {
     source_arena: usize,
@@ -1218,26 +1219,31 @@ impl<'a> ParamArena<'a> {
                 unreachable!("parameter expression must be a single parameter constant");
             };
             let id = *id;
-            let value = params
+            let source = params
                 .iter()
                 .find_map(|(candidate, value)| (*candidate == id).then_some(value))
-                .ok_or_else(|| DatabaseError::parameter_not_found(format!("${id}")))?
-                .clone()
-                .cast(ty)?;
-            // reuse
-            match self.expressions.get_mut(slot) {
-                Some((
-                    _,
-                    ArenaExpr {
-                        expression: ScalarExpression::Constant(bound),
-                        param: None,
-                    },
-                )) => *bound = value,
+                .ok_or_else(|| DatabaseError::parameter_not_found(format!("${id}")))?;
+            let constant = || ArenaExpr::new(ScalarExpression::Constant(DataValue::Null));
+            if self.expressions.len() == slot {
+                self.expressions.push((Some(id), constant()));
+            }
+            let (_, expr) = &mut self.expressions[slot];
+            if !matches!(
+                expr,
+                ArenaExpr {
+                    expression: ScalarExpression::Constant(_),
+                    param: None,
+                }
+            ) {
                 // An execution rewrote the slot; rebuild it.
-                Some((_, expr)) => *expr = ArenaExpr::new(ScalarExpression::Constant(value)),
-                None => self
-                    .expressions
-                    .push((Some(id), ArenaExpr::new(ScalarExpression::Constant(value)))),
+                *expr = constant();
+            }
+            let ScalarExpression::Constant(value) = &mut expr.expression else {
+                unreachable!("the slot was just made a constant");
+            };
+            value.clone_from(source);
+            if value.logical_type() != *ty {
+                *value = mem::replace(value, DataValue::Null).cast(ty)?;
             }
         }
         Ok(())

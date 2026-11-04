@@ -54,6 +54,7 @@ use crate::storage::{
     CheckpointableStorage, NameMapping, StatisticsMetaCache, Storage, StorageTransaction,
     TableCache, TransactionIsolationLevel, ViewCache,
 };
+use crate::types::serialize::BytesPool;
 use crate::types::tuple::{Schema, SchemaView, TupleImpl};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
@@ -1562,12 +1563,12 @@ struct TransactionGuard<'a, 'p, T: StorageTransaction + 'p> {
 
 impl<T: StorageTransaction> TransactionGuard<'_, '_, T> {
     #[inline]
-    fn finish(&mut self) {
+    fn finish(&mut self, pool: Option<&mut BytesPool>) {
         if !self.active {
             return;
         }
         self.active = false;
-        self.arena.release_iters();
+        self.arena.release_iters(pool);
     }
 }
 
@@ -1595,11 +1596,11 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
                 )))
             }
             Ok(false) => {
-                self.finish();
+                self.finish(Some(executor.buffer.bytes_pool()));
                 Ok(None)
             }
             Err(err) => {
-                self.finish();
+                self.finish(Some(executor.buffer.bytes_pool()));
                 Err(err)
             }
         }
@@ -1608,7 +1609,7 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
 
 impl<T: StorageTransaction> Drop for TransactionGuard<'_, '_, T> {
     fn drop(&mut self) {
-        self.finish();
+        self.finish(None);
     }
 }
 

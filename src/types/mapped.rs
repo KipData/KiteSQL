@@ -261,6 +261,13 @@ impl<B: ?Sized + Mappable> Clone for MaybeMapped<B> {
     fn clone(&self) -> Self {
         MaybeMapped(Repr::Owned((**self).to_owned()))
     }
+
+    fn clone_from(&mut self, source: &Self) {
+        match &mut self.0 {
+            Repr::Owned(owned) => (**source).clone_into(owned),
+            Repr::Mapped(_) => *self = source.clone(),
+        }
+    }
 }
 
 impl<B: ?Sized + Mappable> Default for MaybeMapped<B>
