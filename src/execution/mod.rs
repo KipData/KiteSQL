@@ -115,17 +115,38 @@ impl ExecResult {
 /// Resolves either an arena-backed expression or a direct scalar expression.
 pub(crate) trait RewriteExpression {
     fn expression<'a>(&'a self, arena: &'a dyn MetaArena) -> &'a ScalarExpression;
+
+    /// The position of the rewritten row this expression moves out instead of evaluating.
+    fn moved(&self) -> Option<usize>;
 }
 
 impl RewriteExpression for ExprRef {
     fn expression<'a>(&'a self, arena: &'a dyn MetaArena) -> &'a ScalarExpression {
         arena.expression(*self)
     }
+
+    fn moved(&self) -> Option<usize> {
+        None
+    }
 }
 
 impl RewriteExpression for ScalarExpression {
     fn expression<'a>(&'a self, _arena: &'a dyn MetaArena) -> &'a ScalarExpression {
         self
+    }
+
+    fn moved(&self) -> Option<usize> {
+        None
+    }
+}
+
+impl RewriteExpression for (Option<usize>, ExprRef) {
+    fn expression<'a>(&'a self, arena: &'a dyn MetaArena) -> &'a ScalarExpression {
+        arena.expression(self.1)
+    }
+
+    fn moved(&self) -> Option<usize> {
+        self.0
     }
 }
 
@@ -943,6 +964,11 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
         let pool = self.buffer.table_codec.bytes_pool();
         result.spare_values.reserve(exprs.len());
         for expr in exprs {
+            if let (Some(position), None) = (expr.moved(), input) {
+                let value = mem::replace(&mut result.tuple[position], DataValue::Null);
+                result.spare_values.push(value);
+                continue;
+            }
             let expression = expr.expression(arena);
             let value = match input {
                 Some(input) => expression.eval(arena, Some(input)),

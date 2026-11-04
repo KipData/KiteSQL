@@ -237,9 +237,10 @@ impl ColumnPruning {
         column_references.contains(output_column, arena)
     }
 
-    fn clear_exprs(
+    fn clear_exprs<E>(
         column_references: &ReferencedColumns,
-        exprs: &mut Vec<ExprRef>,
+        exprs: &mut Vec<E>,
+        expr_of: fn(&E) -> ExprRef,
         removed_positions: &mut Vec<usize>,
         output_start: usize,
         arena: &mut crate::planner::PlanArena,
@@ -248,7 +249,7 @@ impl ColumnPruning {
         removed_positions.reserve(exprs.len());
         let mut position = 0;
         exprs.retain(|expr| {
-            let keep = Self::output_column_is_required(*expr, column_references, arena);
+            let keep = Self::output_column_is_required(expr_of(expr), column_references, arena);
             if !keep {
                 removed_positions.push(position);
             }
@@ -366,6 +367,7 @@ impl ColumnPruning {
                     Self::clear_exprs(
                         &required_columns,
                         &mut op.agg_calls,
+                        |expr| *expr,
                         &mut outcome.removed_positions,
                         output_start,
                         arena,
@@ -429,7 +431,7 @@ impl ColumnPruning {
             }
             Operator::Project(op) => {
                 let mut has_count_star = HasCountStar::default();
-                for expr in &op.exprs {
+                for (_, expr) in &op.exprs {
                     has_count_star.visit(*expr, arena)?;
                 }
                 if !has_count_star.value {
@@ -437,6 +439,7 @@ impl ColumnPruning {
                         Self::clear_exprs(
                             &required_columns,
                             &mut op.exprs,
+                            |(_, expr)| *expr,
                             &mut outcome.removed_positions,
                             output_start,
                             arena,
@@ -452,7 +455,7 @@ impl ColumnPruning {
                     let child_changed = {
                         required_columns.clear();
                         Self::extend_expr_referenced_columns(
-                            op.exprs.iter(),
+                            op.exprs.iter().map(|(_, expr)| expr),
                             &mut required_columns,
                             arena,
                         )?;
@@ -859,20 +862,26 @@ impl SkipResidualFilterColumns {
                 changed |= Self::skip(right, referenced, arena);
             }
         }
-        let (
-            Operator::TableScan(scan),
+        let Operator::TableScan(scan) = &mut plan.operator else {
+            return changed;
+        };
+        let info = match plan.physical_option.as_mut() {
+            // A primary key read decodes the table row rather than index fields.
             Some(PhysicalOption {
                 plan: PlanImpl::IndexScan(info),
                 ..
-            }),
-        ) = (&plan.operator, plan.physical_option.as_mut())
-        else {
-            return changed;
+            }) if info.covered
+                && !matches!(arena.index(info.meta).ty, IndexType::PrimaryKey { .. }) =>
+            {
+                info
+            }
+            _ => {
+                return changed
+                    | scan
+                        .deserializers
+                        .null_unread(arena, |column| referenced.contains(column, arena))
+            }
         };
-        // A primary key read decodes the table row rather than index fields.
-        if !info.covered || matches!(arena.index(info.meta).ty, IndexType::PrimaryKey { .. }) {
-            return changed;
-        }
         let len = scan.columns().count();
         for (position, column) in scan.deserializers.read_columns().enumerate() {
             let skipped = info
@@ -1175,9 +1184,10 @@ mod tests {
     }
 
     #[test]
-    fn skip_residual_filter_columns_in_covered_index_reads() -> Result<(), DatabaseError> {
+    fn skip_residual_filter_columns_in_index_reads() -> Result<(), DatabaseError> {
         use crate::db::DataBaseBuilder;
         use crate::planner::operator::{PhysicalOption, PlanImpl};
+        use crate::types::serialize::TupleValueSerializableImpl;
         use crate::types::tuple::TupleLike;
         use crate::types::value::DataValue;
 
@@ -1190,10 +1200,15 @@ mod tests {
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
             .build_in_memory()?;
-        db.ddl("create table skip_t(id int primary key, a int, b int)")?;
+        db.ddl("create table skip_t(id int primary key, a int, b int, c int)")?;
         db.ddl("create index skip_ab on skip_t(a, b)")?;
-        db.run("insert into skip_t values(1, 1, 10), (2, 1, 20), (3, 2, 30)")?
+        db.run("insert into skip_t values(1, 1, 10, 100), (2, 1, 20, 200), (3, 2, 30, 300)")?
             .done()?;
+        // Rows of other `a`s, so that `a = 1` is selective enough for the index.
+        for id in 4..64 {
+            db.run(format!("insert into skip_t values({id}, {id}, 0, 0)"))?
+                .done()?;
+        }
         db.analyze("skip_t")?;
         let mut tx = db.new_transaction(false)?;
 
@@ -1242,10 +1257,45 @@ mod tests {
             assert_eq!(rows, expected, "{sql}");
         }
 
+        // A row looked up through the index: the range eliminates `a = 1`, so `a` keeps its slot
+        // as a NULL without being decoded.
+        let mut program = db.program_sql("select c from skip_t where a = 1 and c > 150", &[])?;
+        let scan = find_scan(program.executor.plan()).expect("table scan");
+        let (
+            Operator::TableScan(op),
+            Some(PhysicalOption {
+                plan: PlanImpl::IndexScan(info),
+                ..
+            }),
+        ) = (&scan.operator, &scan.physical_option)
+        else {
+            panic!("expected an index scan")
+        };
+        assert!(!info.covered);
+        let skipped = op
+            .deserializers
+            .read_columns()
+            .map(|column| {
+                matches!(
+                    column.deserializer,
+                    TupleValueSerializableImpl::SkipFixed { null: true, .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(skipped, vec![true, false]);
+        let mut iter = program.execute(&mut tx, [])?;
+        let mut rows = Vec::new();
+        while iter
+            .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
+            .is_some()
+        {}
+        iter.done()?;
+        assert_eq!(rows, vec![DataValue::Int32(200)]);
+
         // An update writes back the whole row it scans, so its scan stays pinned.
         drop(tx);
         db.run("update skip_t set b = b + 1 where a = 1")?.done()?;
-        let mut iter = db.run("select id, a, b from skip_t order by id")?;
+        let mut iter = db.run("select id, a, b from skip_t where id <= 3 order by id")?;
         let mut rows = Vec::new();
         while iter
             .next_tuple(|_, row| {

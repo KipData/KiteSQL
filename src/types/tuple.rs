@@ -782,8 +782,8 @@ impl Tuple {
                 // pushing one here would shift every later projected column.
                 if !matches!(
                     deserializer.borrow(),
-                    TupleValueSerializableImpl::SkipFixed(_)
-                        | TupleValueSerializableImpl::SkipVariable
+                    TupleValueSerializableImpl::SkipFixed { null: false, .. }
+                        | TupleValueSerializableImpl::SkipVariable { null: false }
                 ) {
                     self.values.push(DataValue::Null);
                 }
@@ -1095,8 +1095,8 @@ mod tests {
         {
             let projection_serializers = vec![
                 columns[0].datatype().serializable(),
-                columns[1].datatype().skip_serializable(),
-                columns[2].datatype().skip_serializable(),
+                columns[1].datatype().skip_serializable(false),
+                columns[2].datatype().skip_serializable(false),
                 columns[3].datatype().serializable(),
             ];
             let mut tuple_2 = Tuple {

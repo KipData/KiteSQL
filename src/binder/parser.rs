@@ -1291,8 +1291,7 @@ where
                             column,
                             target_offset + index,
                         ))
-                    })
-                    .collect();
+                    });
                 plan = LogicalPlan::new(
                     Operator::Project(ProjectOperator::new(exprs)),
                     Childrens::Only(Box::new(plan)),

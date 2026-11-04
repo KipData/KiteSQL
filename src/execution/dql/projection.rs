@@ -24,7 +24,7 @@ use crate::storage::StorageTransaction;
 use crate::types::value::DataValue;
 
 pub struct Projection<'a> {
-    exprs: &'a [ExprRef],
+    exprs: &'a [(Option<usize>, ExprRef)],
     input: ExecNode<'a>,
 }
 

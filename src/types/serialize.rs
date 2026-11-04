@@ -22,7 +22,9 @@ use ordered_float::OrderedFloat;
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
 use std::fmt::Debug;
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+#[cfg(feature = "decimal")]
+use std::io::Read;
+use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::str;
 
 macro_rules! impl_tuple_value_serializable {
@@ -103,8 +105,13 @@ pub enum TupleValueSerializableImpl {
         zone: bool,
     },
     Decimal,
-    SkipFixed(usize),
-    SkipVariable,
+    SkipFixed {
+        len: usize,
+        null: bool,
+    },
+    SkipVariable {
+        null: bool,
+    },
     Varbinary {
         len: Option<u32>,
     },
@@ -149,8 +156,14 @@ impl TupleValueSerializable for TupleValueSerializableImpl {
             }
             .to_raw(value, writer),
             TupleValueSerializableImpl::Decimal => DecimalSerializable.to_raw(value, writer),
-            TupleValueSerializableImpl::SkipFixed(len) => SkipFixed(*len).to_raw(value, writer),
-            TupleValueSerializableImpl::SkipVariable => SkipVariable.to_raw(value, writer),
+            TupleValueSerializableImpl::SkipFixed { len, null } => SkipFixed {
+                len: *len,
+                null: *null,
+            }
+            .to_raw(value, writer),
+            TupleValueSerializableImpl::SkipVariable { null } => {
+                SkipVariable { null: *null }.to_raw(value, writer)
+            }
         }
     }
 
@@ -227,11 +240,13 @@ impl TupleValueSerializable for TupleValueSerializableImpl {
             TupleValueSerializableImpl::Decimal => {
                 DecimalSerializable.filling_value(reader, values, pool, scope)
             }
-            TupleValueSerializableImpl::SkipFixed(len) => {
-                SkipFixed(*len).filling_value(reader, values, pool, scope)
+            TupleValueSerializableImpl::SkipFixed { len, null } => SkipFixed {
+                len: *len,
+                null: *null,
             }
-            TupleValueSerializableImpl::SkipVariable => {
-                SkipVariable.filling_value(reader, values, pool, scope)
+            .filling_value(reader, values, pool, scope),
+            TupleValueSerializableImpl::SkipVariable { null } => {
+                SkipVariable { null: *null }.filling_value(reader, values, pool, scope)
             }
         }
     }
@@ -397,9 +412,14 @@ struct TimeStampSerializable {
 struct DecimalSerializable;
 
 #[derive(Debug)]
-struct SkipFixed(usize);
+struct SkipFixed {
+    len: usize,
+    null: bool,
+}
 #[derive(Debug)]
-struct SkipVariable;
+struct SkipVariable {
+    null: bool,
+}
 
 fn write_spaces<W: Write>(writer: &mut W, mut len: usize) -> Result<(), DatabaseError> {
     const SPACES: [u8; 64] = [b' '; 64];
@@ -418,10 +438,16 @@ macro_rules! define_le_io {
                 writer.write_all(&value.to_le_bytes())
             }
 
-            fn $read_fn<R: Read + ?Sized>(reader: &mut R) -> std::io::Result<$ty> {
-                let mut bytes = [0u8; std::mem::size_of::<$ty>()];
-                reader.read_exact(&mut bytes)?;
-                Ok(<$ty>::from_le_bytes(bytes))
+            fn $read_fn(reader: &mut Cursor<&[u8]>) -> std::io::Result<$ty> {
+                // Straight from the slice: `Read::read_exact` costs a call per value.
+                let start = reader.position() as usize;
+                let bytes = reader
+                    .get_ref()
+                    .get(start..)
+                    .and_then(|rest| rest.first_chunk::<{ std::mem::size_of::<$ty>() }>())
+                    .ok_or(std::io::ErrorKind::UnexpectedEof)?;
+                reader.set_position((start + bytes.len()) as u64);
+                Ok(<$ty>::from_le_bytes(*bytes))
             }
         )*
     };
@@ -735,11 +761,14 @@ impl TupleValueSerializable for SkipFixed {
     unsafe fn filling_value(
         &self,
         reader: &mut Cursor<&[u8]>,
-        _: &mut Vec<DataValue>,
+        values: &mut Vec<DataValue>,
         _: &mut BytesPool,
         _: Option<&MappedScope>,
     ) -> Result<(), DatabaseError> {
-        reader.seek(SeekFrom::Current(self.0 as i64))?;
+        reader.seek(SeekFrom::Current(self.len as i64))?;
+        if self.null {
+            values.push(DataValue::Null);
+        }
         Ok(())
     }
 }
@@ -752,21 +781,25 @@ impl TupleValueSerializable for SkipVariable {
     unsafe fn filling_value(
         &self,
         reader: &mut Cursor<&[u8]>,
-        _: &mut Vec<DataValue>,
+        values: &mut Vec<DataValue>,
         _: &mut BytesPool,
         _: Option<&MappedScope>,
     ) -> Result<(), DatabaseError> {
         let len = read_u32_le(reader)? as usize;
         reader.seek(SeekFrom::Current(len as i64))?;
+        if self.null {
+            values.push(DataValue::Null);
+        }
         Ok(())
     }
 }
 
 impl LogicalType {
-    pub fn skip_serializable(&self) -> TupleValueSerializableImpl {
-        self.raw_len()
-            .map(TupleValueSerializableImpl::SkipFixed)
-            .unwrap_or(TupleValueSerializableImpl::SkipVariable)
+    pub fn skip_serializable(&self, null: bool) -> TupleValueSerializableImpl {
+        match self.raw_len() {
+            Some(len) => TupleValueSerializableImpl::SkipFixed { len, null },
+            None => TupleValueSerializableImpl::SkipVariable { null },
+        }
     }
 
     pub fn serializable(&self) -> TupleValueSerializableImpl {
@@ -1000,7 +1033,10 @@ mod tests {
         };
         assert_eq!(values, vec![value]);
 
-        let skip_fixed = TupleValueSerializableImpl::SkipFixed(2);
+        let skip_fixed = TupleValueSerializableImpl::SkipFixed {
+            len: 2,
+            null: false,
+        };
         let mut values = vec![DataValue::Int32(1)];
         let mut cursor = Cursor::new([1_u8, 2, 3].as_slice());
         // SAFETY: without a scope every value is copied.
@@ -1010,7 +1046,7 @@ mod tests {
         assert_eq!(values, vec![DataValue::Int32(1)]);
         assert_eq!(cursor.position(), 2);
 
-        let skip_variable = TupleValueSerializableImpl::SkipVariable;
+        let skip_variable = TupleValueSerializableImpl::SkipVariable { null: false };
         let mut bytes = Vec::new();
         write_u32_le(&mut bytes, 3)?;
         bytes.extend_from_slice(&[1, 2, 3, 4]);
@@ -1038,16 +1074,22 @@ mod tests {
             TupleValueSerializableImpl::UInt64
         );
         assert_eq!(
-            LogicalType::Char(8, CharLengthUnits::Octets).skip_serializable(),
-            TupleValueSerializableImpl::SkipFixed(8)
+            LogicalType::Char(8, CharLengthUnits::Octets).skip_serializable(false),
+            TupleValueSerializableImpl::SkipFixed {
+                len: 8,
+                null: false
+            }
         );
         assert_eq!(
-            LogicalType::Varchar(None, CharLengthUnits::Characters).skip_serializable(),
-            TupleValueSerializableImpl::SkipVariable
+            LogicalType::Varchar(None, CharLengthUnits::Characters).skip_serializable(true),
+            TupleValueSerializableImpl::SkipVariable { null: true }
         );
         assert_eq!(
-            LogicalType::SqlNull.skip_serializable(),
-            TupleValueSerializableImpl::SkipFixed(0)
+            LogicalType::SqlNull.skip_serializable(false),
+            TupleValueSerializableImpl::SkipFixed {
+                len: 0,
+                null: false
+            }
         );
         assert_panics(|| {
             let _ = LogicalType::SqlNull.serializable();

@@ -59,7 +59,7 @@ mod top_k;
 pub(crate) use compilation_in_advance::evaluator_bind_current;
 pub(crate) use elimination::{
     apply_annotated_post_rules, apply_scan_order_hint, EliminateIndexFilter, EliminateProject,
-    OrderHintKind, ScanOrderHint,
+    MapProjectColumns, OrderHintKind, ScanOrderHint,
 };
 pub(crate) use parameterized_index::{ParameterizeInnerJoin, ParameterizeMarkApply};
 pub(crate) use simplification::constant_calculation_current;
@@ -70,6 +70,7 @@ pub enum NormalizationRuleImpl {
     SkipResidualFilterColumns,
     // Combine operators
     EliminateProject,
+    MapProjectColumns,
     CollapseGroupByAgg,
     CombineFilter,
     // PushDown limit
@@ -191,7 +192,9 @@ impl NormalizationRuleImpl {
             | NormalizationRuleImpl::SkipResidualFilterColumns => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::EliminateProject => NormalizationRuleRootTag::Any,
             NormalizationRuleImpl::CollapseGroupByAgg => NormalizationRuleRootTag::Aggregate,
-            NormalizationRuleImpl::GuardMarkApply => NormalizationRuleRootTag::Project,
+            NormalizationRuleImpl::GuardMarkApply | NormalizationRuleImpl::MapProjectColumns => {
+                NormalizationRuleRootTag::Project
+            }
             NormalizationRuleImpl::CombineFilter => NormalizationRuleRootTag::Filter,
             NormalizationRuleImpl::LimitProjectTranspose
             | NormalizationRuleImpl::PushLimitThroughJoin
@@ -233,6 +236,9 @@ impl NormalizationRule for NormalizationRuleImpl {
             }
             NormalizationRuleImpl::GuardMarkApply => GuardMarkApply.apply(plan, arena, loader),
             NormalizationRuleImpl::EliminateProject => EliminateProject.apply(plan, arena, loader),
+            NormalizationRuleImpl::MapProjectColumns => {
+                MapProjectColumns.apply(plan, arena, loader)
+            }
             NormalizationRuleImpl::CollapseGroupByAgg => {
                 CollapseGroupByAgg.apply(plan, arena, loader)
             }

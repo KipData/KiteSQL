@@ -550,6 +550,11 @@ fn optimizer_pipeline() -> HepOptimizerPipeline {
             HepBatchStrategy::once_topdown(),
             &[NormalizationRuleImpl::SkipResidualFilterColumns],
         )
+        .after_batch(
+            "Map Project Columns",
+            HepBatchStrategy::fix_point_topdown(1),
+            &[NormalizationRuleImpl::MapProjectColumns],
+        )
         .implementations(&[
             // DQL
             ImplementationRuleImpl::SimpleAggregate,

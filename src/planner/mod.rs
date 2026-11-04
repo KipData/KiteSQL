@@ -365,7 +365,7 @@ impl LogicalPlan {
             Operator::Project(op) => op
                 .exprs
                 .iter()
-                .map(|expr| expr.output_column_ref(arena))
+                .map(|(_, expr)| expr.output_column_ref(arena))
                 .collect(),
             Operator::TableScan(op) => op.columns().collect(),
             Operator::FunctionScan(op) => {

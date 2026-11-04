@@ -835,7 +835,7 @@ impl Operator {
                 op: &'operator ProjectOperator,
                 _children: &mut ChildrenVisit<'operator>,
             ) -> Result<(), DatabaseError> {
-                for expr in &op.exprs {
+                for (_, expr) in &op.exprs {
                     ExprVisitor::visit(self, *expr, self.arena)?;
                 }
                 Ok(())

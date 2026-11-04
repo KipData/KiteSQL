@@ -1984,7 +1984,8 @@ impl ScanColumn {
     pub(crate) fn is_read(&self) -> bool {
         !matches!(
             self.deserializer,
-            TupleValueSerializableImpl::SkipFixed(_) | TupleValueSerializableImpl::SkipVariable
+            TupleValueSerializableImpl::SkipFixed { null: false, .. }
+                | TupleValueSerializableImpl::SkipVariable { null: false }
         )
     }
 }
@@ -2035,10 +2036,36 @@ impl TupleDeserializers {
             if forced || keep(position, scan_column.column) {
                 read_len = index + 1;
             } else {
-                scan_column.deserializer = table_column.datatype().skip_serializable();
+                scan_column.deserializer = table_column.datatype().skip_serializable(false);
             }
         }
         self.columns.truncate(read_len);
+    }
+
+    pub(crate) fn null_unread<A: MetaArena + ?Sized>(
+        &mut self,
+        arena: &A,
+        mut keep: impl FnMut(ColumnRef) -> bool,
+    ) -> bool {
+        let with_pk = self.pk_ty.is_some();
+        let mut changed = false;
+        for scan_column in self.columns.iter_mut().filter(|column| column.is_read()) {
+            let table_column = arena.column(scan_column.column);
+            if scan_column.pinned
+                || (with_pk && table_column.desc().primary().is_some())
+                || matches!(
+                    scan_column.deserializer,
+                    TupleValueSerializableImpl::SkipFixed { .. }
+                        | TupleValueSerializableImpl::SkipVariable { .. }
+                )
+                || keep(scan_column.column)
+            {
+                continue;
+            }
+            scan_column.deserializer = table_column.datatype().skip_serializable(true);
+            changed = true;
+        }
+        changed
     }
 
     pub(crate) fn unpin(&mut self) {

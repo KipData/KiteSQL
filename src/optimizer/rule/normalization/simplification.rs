@@ -171,13 +171,13 @@ mod test {
         if let Operator::Project(project_op) = best_plan.clone().operator {
             let constant_expr = ScalarExpression::Constant(DataValue::Int32(3));
             if let ScalarExpression::Binary { right_expr, .. } =
-                arena.expression(project_op.exprs[0])
+                arena.expression(project_op.exprs[0].1)
             {
                 assert_eq!(arena.expression(*right_expr), &constant_expr);
             } else {
                 unreachable!();
             }
-            assert_eq!(arena.expression(project_op.exprs[1]), &constant_expr);
+            assert_eq!(arena.expression(project_op.exprs[1].1), &constant_expr);
         } else {
             unreachable!();
         }
@@ -224,11 +224,11 @@ mod test {
 
         if let Operator::Project(project_op) = best_plan.operator {
             assert_eq!(
-                arena.expression(project_op.exprs[0]),
+                arena.expression(project_op.exprs[0].1),
                 &ScalarExpression::Constant(DataValue::Int32(1))
             );
             assert_eq!(
-                arena.expression(project_op.exprs[1]),
+                arena.expression(project_op.exprs[1].1),
                 &ScalarExpression::Constant(DataValue::Int32(3))
             );
         } else {
