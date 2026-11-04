@@ -56,11 +56,11 @@ mod app {
 
         let mut iter = database.run("select * from t1")?;
         iter.next_tuple(|_, tuple| {
-            assert_eq!(*tuple, vec![DataValue::Int32(0), DataValue::Int32(0)]);
+            assert_eq!(**tuple, vec![DataValue::Int32(0), DataValue::Int32(0)]);
         })?
         .unwrap();
         iter.next_tuple(|_, tuple| {
-            assert_eq!(*tuple, vec![DataValue::Int32(1), DataValue::Int32(1)]);
+            assert_eq!(**tuple, vec![DataValue::Int32(1), DataValue::Int32(1)]);
         })?
         .unwrap();
         assert!(iter.next_tuple(|_, _| ())?.is_none());

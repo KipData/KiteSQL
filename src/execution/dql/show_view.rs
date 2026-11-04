@@ -70,7 +70,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowViews {
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: name.to_string(),
+            value: name.to_string().into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });

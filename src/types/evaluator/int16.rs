@@ -80,7 +80,7 @@ mod test {
         assert_eq!(
             int16_to_char_cast_eval(1, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
-                value: "1".to_string(),
+                value: "1".into(),
                 ty: Utf8Type::Fixed(1),
                 unit: CharLengthUnits::Characters,
             }
@@ -89,7 +89,7 @@ mod test {
             int16_to_varchar_cast_eval(Some(1), CharLengthUnits::Characters, value.clone())
                 .unwrap(),
             DataValue::Utf8 {
-                value: "1".to_string(),
+                value: "1".into(),
                 ty: Utf8Type::Variable(Some(1)),
                 unit: CharLengthUnits::Characters,
             }

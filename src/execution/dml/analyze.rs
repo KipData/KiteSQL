@@ -228,7 +228,7 @@ impl<'a> Analyze<'a> {
                 meta,
             });
             values.push(DataValue::Utf8 {
-                value: format!("{table_name}/{index_id}"),
+                value: format!("{table_name}/{index_id}").into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             });

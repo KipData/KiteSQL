@@ -281,7 +281,7 @@ mod test {
         assert_eq!(
             time32_to_char_cast_eval(12, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
-                value: "03:04:05.123".to_string(),
+                value: "03:04:05.123".into(),
                 ty: Utf8Type::Fixed(12),
                 unit: CharLengthUnits::Characters,
             }
@@ -290,7 +290,7 @@ mod test {
             time32_to_varchar_cast_eval(Some(12), CharLengthUnits::Characters, value.clone())
                 .unwrap(),
             DataValue::Utf8 {
-                value: "03:04:05.123".to_string(),
+                value: "03:04:05.123".into(),
                 ty: Utf8Type::Variable(Some(12)),
                 unit: CharLengthUnits::Characters,
             }

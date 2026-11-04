@@ -386,7 +386,7 @@ mod test {
             .iter()
             .map(|value| match value {
                 DataValue::Null => None,
-                DataValue::Utf8 { value, .. } => Some(value.clone()),
+                DataValue::Utf8 { value, .. } => Some(value.to_string()),
                 other => Some(other.to_string()),
             })
             .collect()

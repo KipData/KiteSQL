@@ -18,6 +18,7 @@ use crate::storage::{
     bounds_contain, bytes_bound_as_slice, owned_bound, InnerIter, KeyValueRef, Storage,
     StorageTransaction, TransactionIsolationLevel,
 };
+use crate::types::mapped::MappedScope;
 use lmdb::{
     Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RoTransaction,
     RwTransaction, Transaction as _, WriteFlags,
@@ -133,12 +134,16 @@ impl Storage for LmdbStorage {
         read_only: bool,
     ) -> Result<Self::TransactionType<'_>, DatabaseError> {
         self.validate_transaction_isolation(isolation)?;
-        let tx = if read_only {
-            LmdbTxn::Ro(self.env.begin_ro_txn()?)
+        let (tx, mapped) = if read_only {
+            // SAFETY: a read-only transaction reads its snapshot of the memory map, which stays
+            // mapped and unchanged until the transaction ends, and the scope is dropped first.
+            let mapped = unsafe { MappedScope::new() };
+            (LmdbTxn::Ro(self.env.begin_ro_txn()?), Some(mapped))
         } else {
-            LmdbTxn::Rw(self.env.begin_rw_txn()?)
+            (LmdbTxn::Rw(self.env.begin_rw_txn()?), None)
         };
         Ok(LmdbTransaction {
+            mapped,
             tx,
             db: self.db,
             statements: 0,
@@ -168,6 +173,8 @@ impl Storage for LmdbStorage {
 }
 
 pub struct LmdbTransaction<'env> {
+    // Declared before `tx` so it is dropped before the snapshot its reads point into.
+    mapped: Option<MappedScope>,
     tx: LmdbTxn<'env>,
     db: Database,
     statements: u64,
@@ -364,6 +371,10 @@ impl StorageTransaction for LmdbTransaction<'_> {
         }
     }
 
+    fn mapped_scope(&self) -> Option<&MappedScope> {
+        self.mapped.as_ref()
+    }
+
     fn point_cursor(&self) -> Result<Self::PointCursor<'_>, DatabaseError> {
         Ok(self.tx.open_ro_cursor(self.db)?)
     }
@@ -426,7 +437,9 @@ impl StorageTransaction for LmdbTransaction<'_> {
     }
 
     fn commit(self) -> Result<(), DatabaseError> {
-        match self.tx {
+        let LmdbTransaction { mapped, tx, .. } = self;
+        drop(mapped);
+        match tx {
             LmdbTxn::Ro(tx) => tx.commit()?,
             LmdbTxn::Rw(tx) => tx.commit()?,
         }
@@ -438,9 +451,139 @@ impl StorageTransaction for LmdbTransaction<'_> {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::{LmdbConfig, LmdbStorage};
+    use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::{CatalogKind, DataBaseBuilder};
+    use crate::planner::{PlanArena, TableArenaCell};
+    use crate::storage::table_codec::TableCodec;
+    use crate::storage::{Iter, ScanColumn, Storage, StorageTransaction, TupleDeserializers};
+    use crate::types::tuple::Tuple;
+    use crate::types::value::{DataValue, Utf8Type};
+    use crate::types::{CharLengthUnits, LogicalType};
     use lmdb::EnvironmentFlags;
+    use std::borrow::Cow;
     use tempfile::TempDir;
+
+    #[test]
+    fn read_transactions_map_decoded_strings() {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let storage = LmdbStorage::new(temp_dir.path().join("kite_sql.lmdb")).unwrap();
+        let isolation = storage.default_transaction_isolation();
+        let types = [
+            LogicalType::Varchar(None, CharLengthUnits::Characters),
+            LogicalType::Char(4, CharLengthUnits::Characters),
+        ];
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let columns = types
+            .iter()
+            .map(|ty| ScanColumn {
+                column: arena.alloc_column(ColumnCatalog::new(
+                    "c".to_string(),
+                    false,
+                    ColumnDesc::new(ty.clone(), None, false, None).unwrap(),
+                )),
+                deserializer: ty.serializable(),
+                pinned: true,
+            })
+            .collect();
+        let deserializers = TupleDeserializers {
+            columns,
+            total_len: types.len(),
+            pk_ty: None,
+        };
+        let mut codec = TableCodec::default();
+        let mut writer = storage.transaction().unwrap();
+        let row = Tuple::new(
+            Some(DataValue::Int32(1)),
+            vec![
+                DataValue::from("kite".to_string()),
+                DataValue::Utf8 {
+                    value: "db".into(),
+                    ty: Utf8Type::Fixed(4),
+                    unit: CharLengthUnits::Characters,
+                },
+            ],
+        );
+        let serializers = types.iter().map(LogicalType::serializable);
+        writer
+            .append_tuple(&mut codec, 0, &row.into(), serializers, false)
+            .unwrap();
+        writer.commit().unwrap();
+
+        // Only a read-only transaction keeps its reads mapped until it ends.
+        for read_only in [false, true] {
+            let tx = storage
+                .transaction_with_isolation(isolation, read_only)
+                .unwrap();
+            let mut iter = tx
+                .read(&mut codec, &deserializers, 0, (None, None))
+                .unwrap();
+            let mut tuple = Tuple::default();
+            assert!(iter.next_tuple_into(&mut codec, &mut tuple).unwrap());
+            for (value, expected) in tuple.values.iter().zip(["kite", "db"]) {
+                let DataValue::Utf8 { value, .. } = value else {
+                    panic!("expected a string, got {value:?}")
+                };
+                assert_eq!(value, expected);
+                assert_eq!(value.is_mapped(), read_only);
+            }
+        }
+    }
+
+    #[test]
+    fn transaction_rows_lend_strings_until_the_transaction_ends() {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut db = DataBaseBuilder::path(temp_dir.path()).build_lmdb().unwrap();
+        db.ddl("create table t (a int primary key, b varchar)")
+            .unwrap();
+        db.run("insert into t values (1, 'kite')")
+            .unwrap()
+            .done()
+            .unwrap();
+
+        // Only a read-only transaction's reads stay mapped; a computed string is always owned.
+        for read_only in [false, true] {
+            let mut tx = db.new_transaction(read_only).unwrap();
+            let mut iter = tx.run("select b, upper(b) from t").unwrap();
+            let (b, upper) = iter
+                .next_tuple(|_, row| {
+                    let b = row.take_txn_value(0).unwrap().into_str().unwrap();
+                    let upper = row.take_txn_value(1).unwrap().into_str().unwrap();
+                    (b, upper)
+                })
+                .unwrap()
+                .unwrap();
+            iter.done().unwrap();
+            assert_eq!((b.as_ref(), upper.as_ref()), ("kite", "KITE"));
+            assert_eq!(matches!(b, Cow::Borrowed(_)), read_only);
+            assert!(matches!(upper, Cow::Owned(_)));
+            drop((b, upper));
+            tx.commit().unwrap();
+        }
+    }
+
+    #[test]
+    fn rows_from_read_transactions_outlive_them() {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut db = DataBaseBuilder::path(temp_dir.path()).build_lmdb().unwrap();
+        db.ddl("create table t (a int primary key, b varchar)")
+            .unwrap();
+        db.run("insert into t values (1, 'kite')")
+            .unwrap()
+            .done()
+            .unwrap();
+
+        let mut reader = db.new_transaction(true).unwrap();
+        let mut iter = reader.run("select b from t").unwrap();
+        let row = iter.next_tuple(|_, row| row.take()).unwrap().unwrap();
+        iter.done().unwrap();
+        reader.commit().unwrap();
+        let DataValue::Utf8 { value, .. } = &row[0] else {
+            panic!("expected a string")
+        };
+        assert!(!value.is_mapped());
+        assert_eq!(value, "kite");
+    }
 
     #[test]
     fn lmdb_backend_smoke() {

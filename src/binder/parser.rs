@@ -2344,7 +2344,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                     DatabaseError::InvalidValue("typed string literal must be a string".to_string())
                 })?;
                 let value = DataValue::Utf8 {
-                    value: raw,
+                    value: raw.into(),
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 }

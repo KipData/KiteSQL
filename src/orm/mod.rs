@@ -6,7 +6,8 @@ use crate::binder::{
 };
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog};
 use crate::db::{
-    BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, Transaction, TransactionIter,
+    BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, ResultRow, Transaction,
+    TransactionIter, TxnOrmIter, TxnResultIter, TxnValue,
 };
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
@@ -18,7 +19,7 @@ use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::sort::SortField;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, StorageTransaction};
-use crate::types::tuple::{SchemaView, TupleImpl};
+use crate::types::tuple::SchemaView;
 use crate::types::value::DataValue;
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
@@ -85,7 +86,7 @@ pub struct DescribeColumn {
 impl FromQueryRow for DescribeColumn {
     fn from_query_row(
         _: &SchemaView<'_, '_>,
-        tuple: &mut TupleImpl,
+        tuple: &mut ResultRow<'_, '_>,
     ) -> Result<Self, DatabaseError> {
         let field = describe_text_value(take_projected_value(tuple, 0));
         let data_type = describe_text_value(take_projected_value(tuple, 1));
@@ -2575,7 +2576,7 @@ where
 }
 
 #[doc(hidden)]
-pub trait Projection: FromQueryRow {
+pub trait Projection {
     fn bind_projection<'ctx, 'bind, 'parent, 'arena, T, A>(
         scope: &mut ExprBindScope<'ctx, 'bind, 'parent, 'arena, T, A>,
         relation: &str,
@@ -2710,7 +2711,7 @@ where
 
 fn describe_text_value(value: Option<DataValue>) -> String {
     match value {
-        Some(DataValue::Utf8 { value, .. }) => value,
+        Some(DataValue::Utf8 { value, .. }) => value.into_string(),
         Some(other) => other.to_string(),
         None => String::new(),
     }
@@ -2790,7 +2791,7 @@ pub trait FromDataValue: Sized {
 /// ```
 pub trait FromQueryTuple: Sized {
     /// Decodes one projected tuple into `Self`.
-    fn from_query_tuple(tuple: &mut TupleImpl) -> Result<Self, DatabaseError>;
+    fn from_query_tuple(tuple: &mut ResultRow<'_, '_>) -> Result<Self, DatabaseError>;
 }
 
 /// Conversion trait from a query result row into a Rust value.
@@ -2800,9 +2801,64 @@ pub trait FromQueryRow: Sized {
     /// Decodes one result row into `Self`.
     fn from_query_row(
         schema: &SchemaView<'_, '_>,
-        tuple: &mut TupleImpl,
+        tuple: &mut ResultRow<'_, '_>,
     ) -> Result<Self, DatabaseError>;
 }
+
+pub trait FromTxnRow<'txn>: Sized {
+    fn from_txn_row(
+        schema: &SchemaView<'_, '_>,
+        row: &mut ResultRow<'_, 'txn>,
+    ) -> Result<Self, DatabaseError>;
+}
+
+pub trait FromTxnValue<'txn>: Sized {
+    fn logical_type() -> Option<LogicalType>;
+
+    fn from_txn_value(value: TxnValue<'txn>) -> Result<Self, DatabaseError>;
+}
+
+impl<'txn, T: FromDataValue> FromTxnValue<'txn> for T {
+    fn logical_type() -> Option<LogicalType> {
+        T::logical_type()
+    }
+
+    fn from_txn_value(value: TxnValue<'txn>) -> Result<Self, DatabaseError> {
+        T::from_data_value(value.into_value())
+    }
+}
+
+macro_rules! impl_from_txn_value_for_cow {
+    ($borrowed:ty, $owned:ty, $into:ident) => {
+        impl<'txn> FromTxnValue<'txn> for Cow<'txn, $borrowed> {
+            fn logical_type() -> Option<LogicalType> {
+                <$owned as FromDataValue>::logical_type()
+            }
+
+            fn from_txn_value(value: TxnValue<'txn>) -> Result<Self, DatabaseError> {
+                value
+                    .$into()
+                    .map_err(|value| invalid_from_data_value::<Self>(&value))
+            }
+        }
+
+        impl<'txn> FromTxnValue<'txn> for Option<Cow<'txn, $borrowed>> {
+            fn logical_type() -> Option<LogicalType> {
+                <$owned as FromDataValue>::logical_type()
+            }
+
+            fn from_txn_value(value: TxnValue<'txn>) -> Result<Self, DatabaseError> {
+                if value.is_null() {
+                    return Ok(None);
+                }
+                Cow::from_txn_value(value).map(Some)
+            }
+        }
+    };
+}
+
+impl_from_txn_value_for_cow!(str, String, into_str);
+impl_from_txn_value_for_cow!([u8], Vec<u8>, into_bytes);
 
 /// Typed adapter over a [`ResultIter`] that yields projected values instead of raw tuples.
 ///
@@ -2974,7 +3030,7 @@ pub trait DecimalType {}
 
 #[doc(hidden)]
 pub fn take_value_at<T: FromDataValue>(
-    tuple: &mut TupleImpl,
+    tuple: &mut ResultRow<'_, '_>,
     index: Option<usize>,
     field_name: &str,
 ) -> Result<T, DatabaseError> {
@@ -2982,17 +3038,38 @@ pub fn take_value_at<T: FromDataValue>(
         name: field_name.to_string(),
         span: None,
     })?;
-    let value = tuple.get_mut(idx).ok_or(DatabaseError::MisMatch(
+    let value = tuple.take_value(idx).ok_or(DatabaseError::MisMatch(
         "the query result schema",
         "the query result tuple",
     ))?;
-    let value = std::mem::replace(value, DataValue::Null);
     let value = match T::logical_type() {
         Some(ty) => value.cast(&ty)?,
         None => value,
     };
 
     T::from_data_value(value)
+}
+
+#[doc(hidden)]
+pub fn take_txn_value_at<'txn, T: FromTxnValue<'txn>>(
+    row: &mut ResultRow<'_, 'txn>,
+    index: Option<usize>,
+    field_name: &str,
+) -> Result<T, DatabaseError> {
+    let idx = index.ok_or_else(|| DatabaseError::ColumnNotFound {
+        name: field_name.to_string(),
+        span: None,
+    })?;
+    let value = row.take_txn_value(idx).ok_or(DatabaseError::MisMatch(
+        "the query result schema",
+        "the query result tuple",
+    ))?;
+    let value = match T::logical_type() {
+        Some(ty) => value.cast(&ty)?,
+        None => value,
+    };
+
+    T::from_txn_value(value)
 }
 
 macro_rules! impl_from_data_value_by_method {
@@ -3067,7 +3144,7 @@ macro_rules! impl_model_column_type {
     };
 }
 
-impl_model_column_type!(LogicalType::Varbinary(None); Vec<u8>);
+impl_model_column_type!(LogicalType::Varbinary(None); Vec<u8>, Cow<'_, [u8]>);
 impl_model_column_type!(LogicalType::Boolean; bool);
 impl_model_column_type!(LogicalType::Tinyint; i8);
 impl_model_column_type!(LogicalType::Smallint; i16);
@@ -3081,10 +3158,16 @@ impl_model_column_type!(LogicalType::Float; f32);
 impl_model_column_type!(LogicalType::Double; f64);
 #[cfg(feature = "decimal")]
 impl_model_column_type!(LogicalType::Decimal(None, None); Decimal);
-impl_model_column_type!(LogicalType::Varchar(None, CharLengthUnits::Characters); String, Arc<str>);
+impl_model_column_type!(
+    LogicalType::Varchar(None, CharLengthUnits::Characters);
+    String,
+    Arc<str>,
+    Cow<'_, str>
+);
 
 impl StringType for String {}
 impl StringType for Arc<str> {}
+impl StringType for Cow<'_, str> {}
 #[cfg(feature = "decimal")]
 impl DecimalType for Decimal {}
 
@@ -3129,7 +3212,7 @@ impl FromDataValue for Vec<u8> {
 
     fn from_data_value(value: DataValue) -> Result<Self, DatabaseError> {
         if let DataValue::Binary { value, .. } = value {
-            Ok(value)
+            Ok(value.into_vec())
         } else {
             Err(invalid_from_data_value::<Self>(&value))
         }
@@ -3143,7 +3226,7 @@ impl FromDataValue for String {
 
     fn from_data_value(value: DataValue) -> Result<Self, DatabaseError> {
         if let DataValue::Utf8 { value, .. } = value {
-            Ok(value)
+            Ok(value.into_string())
         } else {
             Err(invalid_from_data_value::<Self>(&value))
         }
@@ -3157,7 +3240,7 @@ impl FromDataValue for Arc<str> {
 
     fn from_data_value(value: DataValue) -> Result<Self, DatabaseError> {
         if let DataValue::Utf8 { value, .. } = value {
-            Ok(value.into())
+            Ok(value.as_str().into())
         } else {
             Err(invalid_from_data_value::<Self>(&value))
         }
@@ -3179,6 +3262,18 @@ impl ToDataValue for str {
 impl ToDataValue for &str {
     fn to_data_value(&self) -> DataValue {
         DataValue::from((*self).to_string())
+    }
+}
+
+impl ToDataValue for Cow<'_, str> {
+    fn to_data_value(&self) -> DataValue {
+        DataValue::from(self.to_string())
+    }
+}
+
+impl ToDataValue for Cow<'_, [u8]> {
+    fn to_data_value(&self) -> DataValue {
+        DataValue::from(self.to_vec())
     }
 }
 
@@ -3226,7 +3321,7 @@ macro_rules! impl_from_query_tuple {
                 $($name: FromDataValue,)+
             {
                 #[allow(non_snake_case)]
-                fn from_query_tuple(tuple: &mut TupleImpl) -> Result<Self, DatabaseError> {
+                fn from_query_tuple(tuple: &mut ResultRow<'_, '_>) -> Result<Self, DatabaseError> {
                     let expected_len = [$(stringify!($name)),+].len();
                     if tuple.len() != expected_len {
                         return Err(DatabaseError::MisMatch(
@@ -3340,10 +3435,8 @@ fn invalid_from_data_value<T>(value: &DataValue) -> DatabaseError {
     ))
 }
 
-fn take_projected_value(tuple: &mut TupleImpl, index: usize) -> Option<DataValue> {
-    tuple
-        .get_mut(index)
-        .map(|value| std::mem::replace(value, DataValue::Null))
+fn take_projected_value(tuple: &mut ResultRow<'_, '_>, index: usize) -> Option<DataValue> {
+    tuple.take_value(index)
 }
 
 fn extract_projected_data_value<T: FromDataValue>(
@@ -3357,7 +3450,9 @@ fn extract_projected_data_value<T: FromDataValue>(
     convert_projected_value::<T>(value)
 }
 
-fn extract_value_from_tuple<T: FromDataValue>(tuple: &mut TupleImpl) -> Result<T, DatabaseError> {
+fn extract_value_from_tuple<T: FromDataValue>(
+    tuple: &mut ResultRow<'_, '_>,
+) -> Result<T, DatabaseError> {
     let value = if tuple.len() == 1 {
         take_projected_value(tuple, 0).expect("checked one projected expression")
     } else {
@@ -3370,7 +3465,9 @@ fn extract_value_from_tuple<T: FromDataValue>(tuple: &mut TupleImpl) -> Result<T
     convert_projected_value::<T>(value)
 }
 
-fn extract_projected_tuple<T: FromQueryTuple>(tuple: &mut TupleImpl) -> Result<T, DatabaseError> {
+fn extract_projected_tuple<T: FromQueryTuple>(
+    tuple: &mut ResultRow<'_, '_>,
+) -> Result<T, DatabaseError> {
     T::from_query_tuple(tuple)
 }
 
@@ -3406,9 +3503,17 @@ fn orm_get<'a, E: BindSource<'a>, M: Model>(
     executor: E,
     key: &M::PrimaryKey,
 ) -> Result<Option<M>, DatabaseError> {
+    extract_optional_model(bind_get::<_, M>(executor, key)?)
+}
+
+/// Binds the lookup of one `M` by primary key.
+fn bind_get<'a, E: BindSource<'a>, M: Model>(
+    executor: E,
+    key: &M::PrimaryKey,
+) -> Result<E::Iter, DatabaseError> {
     let primary_key = M::primary_key_field();
     let key = key.to_data_value();
-    extract_optional_model(bind_orm_context(executor, true, |ctx| {
+    bind_orm_context(executor, true, |ctx| {
         let plan: LogicalPlan = ctx
             .from::<M>()?
             .filter(|expr| {
@@ -3420,17 +3525,7 @@ fn orm_get<'a, E: BindSource<'a>, M: Model>(
             })?
             .finish()?;
         Ok(plan)
-    })?)
-}
-
-fn orm_list<'a, E: BindSource<'a>, M: Model>(
-    executor: E,
-) -> Result<OrmIter<E::Iter, M>, DatabaseError> {
-    Ok(bind_orm_context(executor, true, |ctx| {
-        let plan: LogicalPlan = ctx.from::<M>()?.finish()?;
-        Ok(plan)
-    })?
-    .orm::<M>())
+    })
 }
 
 // GRCOV_EXCL_START
@@ -3438,7 +3533,7 @@ fn orm_list<'a, E: BindSource<'a>, M: Model>(
 mod tests {
     use super::*;
     use crate::expression::BinaryOperator;
-    use crate::types::tuple::{Schema, SchemaView, Tuple};
+    use crate::types::tuple::{Schema, SchemaView, Tuple, TupleImpl};
     use std::sync::Arc;
 
     #[derive(Debug, PartialEq, Eq)]
@@ -3498,13 +3593,22 @@ mod tests {
     impl FromQueryRow for OrmUnitUser {
         fn from_query_row(
             schema: &SchemaView<'_, '_>,
-            tuple: &mut TupleImpl,
+            tuple: &mut ResultRow<'_, '_>,
         ) -> Result<Self, DatabaseError> {
             Ok(Self {
                 id: take_value_at(tuple, schema.position("id"), "id")?,
                 name: take_value_at(tuple, schema.position("name"), "name")?,
                 age: take_value_at(tuple, schema.position("age"), "age")?,
             })
+        }
+    }
+
+    impl<'txn> FromTxnRow<'txn> for OrmUnitUser {
+        fn from_txn_row(
+            schema: &SchemaView<'_, '_>,
+            row: &mut ResultRow<'_, 'txn>,
+        ) -> Result<Self, DatabaseError> {
+            Self::from_query_row(schema, row)
         }
     }
 
@@ -3586,7 +3690,7 @@ mod tests {
     impl FromQueryRow for OrmUnitOrder {
         fn from_query_row(
             schema: &SchemaView<'_, '_>,
-            tuple: &mut TupleImpl,
+            tuple: &mut ResultRow<'_, '_>,
         ) -> Result<Self, DatabaseError> {
             Ok(Self {
                 id: take_value_at(tuple, schema.position("id"), "id")?,
@@ -3714,7 +3818,7 @@ mod tests {
         )
         .into();
 
-        let column = DescribeColumn::from_query_row(&schema_view, &mut tuple)?;
+        let column = DescribeColumn::from_query_row(&schema_view, &mut ResultRow::new(&mut tuple))?;
         assert_eq!(
             column,
             DescribeColumn {
@@ -3796,10 +3900,11 @@ mod tests {
             vec![DataValue::Int8(7), DataValue::from("seven".to_string())],
         )
         .into();
-        assert_eq!(take_value_at::<i32>(&mut tuple, Some(0), "id")?, 7);
-        assert!(matches!(tuple[0], DataValue::Null));
+        let mut row = ResultRow::new(&mut tuple);
+        assert_eq!(take_value_at::<i32>(&mut row, Some(0), "id")?, 7);
+        assert!(matches!(row[0], DataValue::Null));
         assert!(matches!(
-            take_value_at::<i32>(&mut tuple, None, "missing"),
+            take_value_at::<i32>(&mut row, None, "missing"),
             Err(DatabaseError::ColumnNotFound { .. })
         ));
 
@@ -3808,14 +3913,15 @@ mod tests {
             vec![DataValue::Int32(1), DataValue::from("one".to_string())],
         )
         .into();
-        let projected = <(i32, String) as FromQueryTuple>::from_query_tuple(&mut tuple)?;
+        let projected =
+            <(i32, String) as FromQueryTuple>::from_query_tuple(&mut ResultRow::new(&mut tuple))?;
         assert_eq!(projected, (1, "one".to_string()));
         assert!(tuple.iter().all(|value| matches!(value, DataValue::Null)));
 
         let mut too_wide: TupleImpl =
             Tuple::new(None, vec![DataValue::Int32(1), DataValue::Int32(2)]).into();
         assert!(matches!(
-            extract_value_from_tuple::<i32>(&mut too_wide),
+            extract_value_from_tuple::<i32>(&mut ResultRow::new(&mut too_wide)),
             Err(DatabaseError::MisMatch(
                 "one projected expression",
                 "the query result"
@@ -3824,7 +3930,7 @@ mod tests {
 
         let mut too_narrow: TupleImpl = Tuple::new(None, vec![DataValue::Int32(1)]).into();
         assert!(matches!(
-            <(i32, i32) as FromQueryTuple>::from_query_tuple(&mut too_narrow),
+            <(i32, i32) as FromQueryTuple>::from_query_tuple(&mut ResultRow::new(&mut too_narrow)),
             Err(DatabaseError::MisMatch(
                 "the expected tuple projection width",
                 "the query result"

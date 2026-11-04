@@ -1010,7 +1010,7 @@ mod test {
     #[test]
     fn test_binary_eval_rejects_invalid_positions_and_params() {
         let value = DataValue::Utf8 {
-            value: "abc".to_string(),
+            value: "abc".into(),
             ty: crate::types::value::Utf8Type::Variable(None),
             unit: crate::types::CharLengthUnits::Characters,
         };

@@ -18,6 +18,7 @@ use crate::iter_ext::Itertools;
 use crate::planner::ScalarQueryRef;
 use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};
 use crate::types::evaluator::cast::cast_create;
+pub use crate::types::mapped::{BinaryBytes, Utf8Str};
 use crate::types::CharLengthUnits;
 #[cfg(feature = "time")]
 use chrono::{
@@ -155,7 +156,7 @@ pub enum DataValue {
     UInt32(u32),
     UInt64(u64),
     Utf8 {
-        value: String,
+        value: Utf8Str,
         ty: Utf8Type,
         unit: CharLengthUnits,
     },
@@ -169,7 +170,7 @@ pub enum DataValue {
     Decimal(Decimal),
     Tuple(Vec<DataValue>),
     Binary {
-        value: Vec<u8>,
+        value: BinaryBytes,
         len: Option<u32>,
     },
 }
@@ -759,7 +760,7 @@ impl DataValue {
     pub fn new_utf8(string: String) -> Self {
         DataValue::Utf8 {
             ty: Utf8Type::Fixed(string.len() as u32),
-            value: string,
+            value: string.into(),
             unit: CharLengthUnits::Characters,
         }
     }
@@ -867,6 +868,16 @@ impl DataValue {
         )
     }
 
+    /// Copies every mapped string and binary so the value outlives its transaction.
+    pub(crate) fn materialize(&mut self) {
+        match self {
+            DataValue::Utf8 { value, .. } => value.materialize(),
+            DataValue::Binary { value, .. } => value.materialize(),
+            DataValue::Tuple(values) => values.iter_mut().for_each(DataValue::materialize),
+            _ => (),
+        }
+    }
+
     #[inline]
     pub fn is_null(&self) -> bool {
         matches!(self, DataValue::Null)
@@ -917,17 +928,17 @@ impl DataValue {
             LogicalType::Float => DataValue::Float32(OrderedFloat(0.0)),
             LogicalType::Double => DataValue::Float64(OrderedFloat(0.0)),
             LogicalType::Char(len, unit) => DataValue::Utf8 {
-                value: String::new(),
+                value: String::new().into(),
                 ty: Utf8Type::Fixed(*len),
                 unit: *unit,
             },
             LogicalType::Varchar(len, unit) => DataValue::Utf8 {
-                value: String::new(),
+                value: String::new().into(),
                 ty: Utf8Type::Variable(*len),
                 unit: *unit,
             },
             LogicalType::Varbinary(len) => DataValue::Binary {
-                value: Vec::new(),
+                value: Vec::new().into(),
                 len: *len,
             },
             LogicalType::Date => {
@@ -1384,16 +1395,16 @@ impl DataValue {
                 Ok(DataValue::Boolean(b[0] == b'1'))
             }
             LogicalType::Varbinary(len) => Ok(DataValue::Binary {
-                value: Self::decode_string(reader)?,
+                value: Self::decode_string(reader)?.into(),
                 len: *len,
             }),
             LogicalType::Varchar(len, unit) => Ok(DataValue::Utf8 {
-                value: String::from_utf8(Self::decode_string(reader)?)?,
+                value: String::from_utf8(Self::decode_string(reader)?)?.into(),
                 ty: Utf8Type::Variable(*len),
                 unit: *unit,
             }),
             LogicalType::Char(len, unit) => Ok(DataValue::Utf8 {
-                value: String::from_utf8(Self::decode_string(reader)?)?,
+                value: String::from_utf8(Self::decode_string(reader)?)?.into(),
                 ty: Utf8Type::Fixed(*len),
                 unit: *unit,
             }),
@@ -1838,14 +1849,17 @@ impl From<Option<f64>> for DataValue {
 
 impl From<Vec<u8>> for DataValue {
     fn from(value: Vec<u8>) -> Self {
-        Self::Binary { value, len: None }
+        Self::Binary {
+            value: value.into(),
+            len: None,
+        }
     }
 }
 
 impl From<String> for DataValue {
     fn from(value: String) -> Self {
         DataValue::Utf8 {
-            value,
+            value: value.into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         }
@@ -1856,7 +1870,7 @@ impl From<Option<String>> for DataValue {
     fn from(value: Option<String>) -> Self {
         if let Some(value) = value {
             DataValue::Utf8 {
-                value,
+                value: value.into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             }
@@ -1957,7 +1971,7 @@ impl fmt::Display for DataValue {
             DataValue::UInt64(e) => write!(f, "{e}")?,
             DataValue::Binary { value, .. } => {
                 write!(f, "X'")?;
-                for byte in value {
+                for byte in value.iter() {
                     write!(f, "{byte:02X}")?;
                 }
                 write!(f, "'")?;
@@ -2067,7 +2081,7 @@ mod test {
     #[test]
     fn memcomparable_len_hint_matches_encoding() -> Result<(), DatabaseError> {
         let utf8 = |value: &str| DataValue::Utf8 {
-            value: value.to_string(),
+            value: value.to_string().into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };
@@ -2091,7 +2105,7 @@ mod test {
             utf8(""),
             utf8("kite_sql"),
             DataValue::Binary {
-                value: vec![1; 9],
+                value: vec![1; 9].into(),
                 len: None,
             },
             DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Null, utf8("a")]),
@@ -2206,7 +2220,7 @@ mod test {
 
     fn utf8(value: &str) -> DataValue {
         DataValue::Utf8 {
-            value: value.to_string(),
+            value: value.to_string().into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         }
@@ -2214,7 +2228,7 @@ mod test {
 
     fn fixed_utf8(value: &str, len: u32, unit: CharLengthUnits) -> DataValue {
         DataValue::Utf8 {
-            value: value.to_string(),
+            value: value.to_string().into(),
             ty: Utf8Type::Fixed(len),
             unit,
         }
@@ -2249,7 +2263,7 @@ mod test {
         assert_eq!(
             DataValue::new_utf8("kite".to_string()),
             DataValue::Utf8 {
-                value: "kite".to_string(),
+                value: "kite".into(),
                 ty: Utf8Type::Fixed(4),
                 unit: CharLengthUnits::Characters,
             }
@@ -2360,7 +2374,7 @@ mod test {
             (
                 LogicalType::Varchar(Some(3), CharLengthUnits::Octets),
                 DataValue::Utf8 {
-                    value: String::new(),
+                    value: String::new().into(),
                     ty: Utf8Type::Variable(Some(3)),
                     unit: CharLengthUnits::Octets,
                 },
@@ -2553,7 +2567,7 @@ mod test {
         for length in [0, 7, 8, 9, 65] {
             cases.push((
                 DataValue::Binary {
-                    value: vec![0xff; length],
+                    value: vec![0xff; length].into(),
                     len: None,
                 },
                 LogicalType::Varbinary(None),
@@ -2864,7 +2878,7 @@ mod test {
         assert_eq!(
             DataValue::from(Some("abc".to_string())),
             DataValue::Utf8 {
-                value: "abc".to_string(),
+                value: "abc".into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             }
@@ -3633,25 +3647,25 @@ mod test {
         let v_null = DataValue::Null;
 
         let v_a = DataValue::Utf8 {
-            value: "a".to_string(),
+            value: "a".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };
 
         let v_ab = DataValue::Utf8 {
-            value: "ab".to_string(),
+            value: "ab".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };
 
         let v_b = DataValue::Utf8 {
-            value: "b".to_string(),
+            value: "b".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };
 
         let v_zh = DataValue::Utf8 {
-            value: "中".to_string(),
+            value: "中".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };

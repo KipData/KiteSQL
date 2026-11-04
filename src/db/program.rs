@@ -171,7 +171,7 @@ pub struct ProgramIter<'a, 'p, T: StorageTransaction + 'p> {
     program: &'a mut Program<'p>,
 }
 
-impl<'p, T: StorageTransaction + 'p> ProgramIter<'_, 'p, T> {
+impl<'a, 'p, T: StorageTransaction + 'p> ProgramIter<'a, 'p, T> {
     #[inline]
     pub fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         let Program { executor, arena } = &*self.program;
@@ -181,17 +181,25 @@ impl<'p, T: StorageTransaction + 'p> ProgramIter<'_, 'p, T> {
     #[inline]
     pub fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         let Program { executor, arena } = &mut *self.program;
-        // A program never applies DDL.
-        self.guard.next_tuple(executor, arena, &mut Vec::new(), f)
+        self.guard.next_tuple(executor, arena, f)
     }
 
     #[inline]
     pub fn done(mut self) -> Result<(), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         Ok(())
+    }
+}
+
+impl<'a, 'p, T: StorageTransaction + 'p> TxnResultIter<'a> for ProgramIter<'a, 'p, T> {
+    fn next_txn_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R,
+    ) -> Result<Option<R>, DatabaseError> {
+        ProgramIter::next_tuple(self, f)
     }
 }
 
@@ -202,7 +210,7 @@ impl<'p, T: StorageTransaction + 'p> ResultIter for ProgramIter<'_, 'p, T> {
 
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         ProgramIter::next_tuple(self, f)
     }

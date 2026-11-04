@@ -230,7 +230,7 @@ mod test {
         assert_eq!(
             boolean_to_char_cast_eval(4, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
-                value: "true".to_string(),
+                value: "true".into(),
                 ty: Utf8Type::Fixed(4),
                 unit: CharLengthUnits::Characters,
             }
@@ -239,7 +239,7 @@ mod test {
             boolean_to_varchar_cast_eval(Some(4), CharLengthUnits::Characters, value.clone())
                 .unwrap(),
             DataValue::Utf8 {
-                value: "true".to_string(),
+                value: "true".into(),
                 ty: Utf8Type::Variable(Some(4)),
                 unit: CharLengthUnits::Characters,
             }
@@ -256,7 +256,7 @@ mod test {
             )
             .unwrap(),
             DataValue::Utf8 {
-                value: "false".to_string(),
+                value: "false".into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             }

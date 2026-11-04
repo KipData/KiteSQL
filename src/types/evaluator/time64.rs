@@ -238,7 +238,7 @@ mod test {
         assert_eq!(
             time64_to_char_cast_eval(23, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
-                value: "2024-01-02 03:04:05.123".to_string(),
+                value: "2024-01-02 03:04:05.123".into(),
                 ty: Utf8Type::Fixed(23),
                 unit: CharLengthUnits::Characters,
             }
@@ -247,7 +247,7 @@ mod test {
             time64_to_varchar_cast_eval(Some(23), CharLengthUnits::Characters, value.clone())
                 .unwrap(),
             DataValue::Utf8 {
-                value: "2024-01-02 03:04:05.123".to_string(),
+                value: "2024-01-02 03:04:05.123".into(),
                 ty: Utf8Type::Variable(Some(23)),
                 unit: CharLengthUnits::Characters,
             }

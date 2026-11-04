@@ -18,7 +18,7 @@ fn main() {}
 #[cfg(test)]
 mod test {
     use kite_sql::catalog::column::{ColumnCatalog, ColumnDesc};
-    use kite_sql::db::{DataBaseBuilder, Database, ResultIter};
+    use kite_sql::db::{DataBaseBuilder, Database, ResultIter, ResultRow, TxnResultIter};
     use kite_sql::errors::DatabaseError;
     use kite_sql::expression::function::scala::ScalarFunctionImpl;
     use kite_sql::expression::function::table::TableFunctionImpl;
@@ -59,7 +59,7 @@ mod test {
         let values = vec![
             DataValue::Int32(9),
             DataValue::Utf8 {
-                value: "LOL".to_string(),
+                value: "LOL".into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             },
@@ -98,7 +98,7 @@ mod test {
     #[test]
     fn test_from_data_value_reports_conversion_error() {
         let err = <i32 as kite_sql::orm::FromDataValue>::from_data_value(DataValue::Utf8 {
-            value: "not an integer".to_string(),
+            value: "not an integer".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         })
@@ -242,10 +242,10 @@ mod test {
     }
 
     #[derive(Default, Debug, PartialEq, Projection)]
-    struct UserSummary {
+    struct UserSummary<'a> {
         id: i32,
         #[projection(rename = "user_name")]
-        display_name: String,
+        display_name: Cow<'a, str>,
         age: Option<i32>,
     }
 
@@ -332,7 +332,7 @@ mod test {
             },
             c2: String => |inner: &mut MyStruct, value| {
                 if let DataValue::Utf8 { value, .. } = value {
-                    inner.c2 = value;
+                    inner.c2 = value.into_string();
                 }
             }
         )
@@ -344,9 +344,11 @@ mod test {
         let mut plan_arena = PlanArena::new(&table_arena);
         let (tuple, schema) = build_tuple(&mut plan_arena);
         let schema = SchemaView::new(&schema, &plan_arena);
-        let my_struct =
-            <MyStruct as kite_sql::orm::FromQueryRow>::from_query_row(&schema, &mut tuple.into())
-                .unwrap();
+        let my_struct = <MyStruct as kite_sql::orm::FromQueryRow>::from_query_row(
+            &schema,
+            &mut ResultRow::new(&mut tuple.into()),
+        )
+        .unwrap();
 
         println!("{:?}", my_struct);
 
@@ -377,7 +379,7 @@ mod test {
             vec![
                 DataValue::Int32(9),
                 DataValue::Utf8 {
-                    value: "LOL".to_string(),
+                    value: "LOL".into(),
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },
@@ -388,7 +390,7 @@ mod test {
         let schema = SchemaView::new(&schema, &plan_arena);
         let derived = <DerivedStruct as kite_sql::orm::FromQueryRow>::from_query_row(
             &schema,
-            &mut tuple.into(),
+            &mut ResultRow::new(&mut tuple.into()),
         )
         .unwrap();
 
@@ -1093,21 +1095,37 @@ mod test {
             vec![
                 UserSummary {
                     id: 1,
-                    display_name: "Alice".to_string(),
+                    display_name: "Alice".into(),
                     age: Some(18),
                 },
                 UserSummary {
                     id: 2,
-                    display_name: "Bob".to_string(),
+                    display_name: "Bob".into(),
                     age: Some(30),
                 },
                 UserSummary {
                     id: 3,
-                    display_name: "A'lex".to_string(),
+                    display_name: "A'lex".into(),
                     age: None,
                 },
             ]
         );
+
+        // The same projection decodes from a transaction's rows too, where it may borrow its
+        // strings from the transaction.
+        let mut tx = database.new_transaction(true)?;
+        let borrowed_users = tx
+            .bind(|ctx| {
+                ctx.from::<User>()?
+                    .project::<UserSummary<'_>>()?
+                    .order_by(User::id())?
+                    .finish()
+            })?
+            .txn_orm::<UserSummary<'_>>()
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(borrowed_users, projected_users);
+        drop(borrowed_users);
+        tx.commit()?;
 
         let projected_user = database
             .bind(|ctx| {
@@ -1123,7 +1141,7 @@ mod test {
             projected_user,
             Some(UserSummary {
                 id: 1,
-                display_name: "Alice".to_string(),
+                display_name: "Alice".into(),
                 age: Some(18),
             })
         );
@@ -1306,7 +1324,7 @@ mod test {
             aliased_projection,
             Some(UserSummary {
                 id: 2,
-                display_name: "Bob".to_string(),
+                display_name: "Bob".into(),
                 age: Some(30),
             })
         );
@@ -2022,7 +2040,7 @@ mod test {
             union_projection,
             Some(UserSummary {
                 id: 2,
-                display_name: "Bob".to_string(),
+                display_name: "Bob".into(),
                 age: Some(30),
             })
         );
@@ -2053,7 +2071,7 @@ mod test {
             ordered_union_projection,
             Some(UserSummary {
                 id: 2,
-                display_name: "Bob".to_string(),
+                display_name: "Bob".into(),
                 age: Some(30),
             })
         );
@@ -3043,7 +3061,7 @@ mod test {
             &[
                 arena.alloc_expression(ScalarExpression::Constant(DataValue::Int8(1))),
                 arena.alloc_expression(ScalarExpression::Constant(DataValue::Utf8 {
-                    value: "1".to_string(),
+                    value: "1".into(),
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 })),
@@ -3057,7 +3075,7 @@ mod test {
         assert_eq!(
             function.summary,
             FunctionSummary {
-                name: "sum".to_string().into(),
+                name: "sum".into(),
                 arg_types: vec![LogicalType::Integer, LogicalType::Integer],
             }
         );
@@ -3080,7 +3098,7 @@ mod test {
         assert_eq!(
             function.summary,
             FunctionSummary {
-                name: "test_numbers".to_string().into(),
+                name: "test_numbers".into(),
                 arg_types: vec![LogicalType::Integer],
             }
         );

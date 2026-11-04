@@ -35,6 +35,7 @@ use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNul
 use crate::planner::{MetaArena, TableArenaCell};
 use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType, RuntimeIndexProbe};
+use crate::types::mapped::MappedScope;
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::{Tuple, TupleId, TupleImpl, TupleLike};
 use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef};
@@ -225,6 +226,12 @@ pub trait StorageTransaction: Sized {
         Ok(0)
     }
 
+    /// The scope of a transaction whose reads stay valid, unchanged and at the same address
+    /// until it ends. Strings decoded from its reads then point into them instead of copying.
+    fn mapped_scope(&self) -> Option<&MappedScope> {
+        None
+    }
+
     /// The bounds is applied to the whole data batches, not per batch.
     fn read<'a>(
         &'a self,
@@ -243,6 +250,7 @@ pub trait StorageTransaction: Sized {
                 bounds: IterBounds::new(offset, bounds.1),
                 deserializers,
                 iter,
+                mapped: self.mapped_scope(),
             })
         })
     }
@@ -1460,14 +1468,18 @@ impl<T: StorageTransaction> IndexImplParams<'_, T> {
             let Some(bytes) = self.tx.get_borrowed(key)? else {
                 return Ok(false);
             };
-            TableCodec::decode_tuple_into(
-                tuple,
-                self.deserializers.deserializers(),
-                Some(tuple_id.clone()),
-                bytes.as_ref(),
-                self.deserializers.total_len,
-                pool,
-            )?;
+            // SAFETY: `bytes` was read from `self.tx`.
+            unsafe {
+                TableCodec::decode_tuple_into(
+                    tuple,
+                    self.deserializers.deserializers(),
+                    Some(tuple_id.clone()),
+                    bytes.as_ref(),
+                    self.deserializers.total_len,
+                    pool,
+                    self.tx.mapped_scope(),
+                )?
+            };
             Ok(true)
         })
     }
@@ -1605,14 +1617,18 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
             .with_pk
             .then(|| TableCodec::decode_tuple_key(key, &params.index_meta().pk_ty))
             .transpose()?;
-        TableCodec::decode_tuple_into(
-            tuple,
-            params.deserializers.deserializers(),
-            tuple_id,
-            value,
-            params.deserializers.total_len,
-            table_codec.bytes_pool(),
-        )
+        // SAFETY: index iterators only scan ranges of `params.tx`, so `value` was read from it.
+        unsafe {
+            TableCodec::decode_tuple_into(
+                tuple,
+                params.deserializers.deserializers(),
+                tuple_id,
+                value,
+                params.deserializers.total_len,
+                table_codec.bytes_pool(),
+                params.tx.mapped_scope(),
+            )
+        }
     }
 
     fn eq_to_res<'a>(
@@ -1633,14 +1649,18 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
                 let Some(bytes) = bytes else {
                     return Ok(false);
                 };
-                TableCodec::decode_tuple_into(
-                    tuple,
-                    params.deserializers.deserializers(),
-                    params.with_pk.then(|| value.clone()),
-                    bytes.as_ref(),
-                    params.deserializers.total_len,
-                    pool,
-                )?;
+                // SAFETY: `bytes` was read from `params.tx`.
+                unsafe {
+                    TableCodec::decode_tuple_into(
+                        tuple,
+                        params.deserializers.deserializers(),
+                        params.with_pk.then(|| value.clone()),
+                        bytes.as_ref(),
+                        params.deserializers.total_len,
+                        pool,
+                        params.tx.mapped_scope(),
+                    )?
+                };
                 Ok(true)
             })?;
         Ok(if found {
@@ -2016,6 +2036,8 @@ pub struct TupleIter<'a, T: StorageTransaction + 'a> {
     bounds: IterBounds,
     deserializers: &'a TupleDeserializers,
     iter: T::IterType<'a>,
+    // The scope of the transaction `iter` reads.
+    mapped: Option<&'a MappedScope>,
 }
 
 impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
@@ -2028,6 +2050,7 @@ impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
         self.iter = table_codec.with_tuple_bound(self.table_id, |min, max, _| {
             tx.range(Bound::Included(min), Bound::Included(max))
         })?;
+        self.mapped = tx.mapped_scope();
         self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
         Ok(())
     }
@@ -2052,14 +2075,18 @@ impl<'a, T: StorageTransaction + 'a> Iter for TupleIter<'a, T> {
             } else {
                 None
             };
-            TableCodec::decode_tuple_into(
-                tuple,
-                self.deserializers.deserializers(),
-                tuple_id,
-                value,
-                self.deserializers.total_len,
-                table_codec.bytes_pool(),
-            )?;
+            // SAFETY: `value` was read from the transaction `self.mapped` belongs to.
+            unsafe {
+                TableCodec::decode_tuple_into(
+                    tuple,
+                    self.deserializers.deserializers(),
+                    tuple_id,
+                    value,
+                    self.deserializers.total_len,
+                    table_codec.bytes_pool(),
+                    self.mapped,
+                )?
+            };
 
             return Ok(true);
         }

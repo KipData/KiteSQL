@@ -25,6 +25,7 @@ use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
 use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
+use crate::types::mapped::MappedScope;
 use crate::types::serialize::{BytesPool, TupleValueSerializableImpl};
 use crate::types::tuple::{Tuple, TupleId, TupleLike};
 use crate::types::value::{DataValue, IndexKeyMapping};
@@ -828,21 +829,30 @@ impl TableCodec {
         DataValue::memcomparable_decode(&mut Cursor::new(&bytes[TUPLE_KEY_PREFIX_LEN..]), pk_ty)
     }
 
+    /// Decodes a stored row. With a `scope` strings and binaries point into `bytes`, otherwise
+    /// they are copied.
+    ///
+    /// # Safety
+    ///
+    /// With a `scope`, `bytes` must be a read of the transaction holding it.
     #[inline]
-    pub(crate) fn decode_tuple_into<I, S>(
+    pub(crate) unsafe fn decode_tuple_into<I, S>(
         tuple: &mut Tuple,
         deserializers: I,
         tuple_id: Option<TupleId>,
         bytes: &[u8],
         total_len: usize,
         pool: &mut BytesPool,
+        scope: Option<&MappedScope>,
     ) -> Result<(), DatabaseError>
     where
         I: IntoIterator<Item = S>,
         S: Borrow<TupleValueSerializableImpl>,
     {
         tuple.pk = tuple_id;
-        tuple.deserialize_from_into(deserializers, Self::strip_stamp(bytes)?, total_len, pool)
+        let bytes = Self::strip_stamp(bytes)?;
+        // SAFETY: the caller guarantees `bytes` is a read of `scope`'s transaction.
+        unsafe { tuple.deserialize_from_into(deserializers, bytes, total_len, pool, scope) }
     }
 
     fn encode_index_meta_value_into(
@@ -1225,14 +1235,18 @@ mod tests {
             .collect_vec();
 
         let mut tuple = Tuple::default();
-        TableCodec::decode_tuple_into(
-            &mut tuple,
-            &deserializers,
-            None,
-            &bytes,
-            2,
-            &mut crate::types::serialize::BytesPool::default(),
-        )?;
+        // SAFETY: without a scope every value is copied.
+        unsafe {
+            TableCodec::decode_tuple_into(
+                &mut tuple,
+                &deserializers,
+                None,
+                &bytes,
+                2,
+                &mut crate::types::serialize::BytesPool::default(),
+                None,
+            )?
+        };
         assert_eq!(
             tuple,
             Tuple::new(

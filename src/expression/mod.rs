@@ -1194,7 +1194,7 @@ mod test {
         fn_assert(
             &mut cursor,
             ScalarExpression::Constant(DataValue::Utf8 {
-                value: "hello".to_string(),
+                value: "hello".into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             }),

@@ -376,7 +376,7 @@ impl ColumnPruning {
 
                     if op.agg_calls.is_empty() && op.groupby_exprs.is_empty() {
                         let value = DataValue::Utf8 {
-                            value: "*".to_string(),
+                            value: "*".into(),
                             ty: Utf8Type::Variable(None),
                             unit: CharLengthUnits::Characters,
                         };

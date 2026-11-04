@@ -239,8 +239,8 @@ fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
         DataValue::UInt16(v) => Value::Integer(*v as i64),
         DataValue::UInt32(v) => Value::Integer(*v as i64),
         DataValue::UInt64(v) => Value::Integer(*v as i64),
-        DataValue::Binary { value, .. } => Value::Binary(value.clone()),
-        DataValue::Utf8 { value, .. } => Value::String(value.clone()),
+        DataValue::Binary { value, .. } => Value::Binary(value.to_vec()),
+        DataValue::Utf8 { value, .. } => Value::String(value.to_string()),
         DataValue::Date32(v) => Value::Integer(*v as i64),
         DataValue::Date64(v) => Value::String(
             Utc.timestamp_opt(*v, 0)
@@ -369,7 +369,7 @@ fn convert_statement_row(
             LogicalType::Bigint => DataValue::Int64(statement.read::<i64, _>(idx)?),
             LogicalType::Decimal(..) => DataValue::Decimal(read_decimal(statement, idx)?),
             LogicalType::Varchar(..) | LogicalType::Char(..) => DataValue::Utf8 {
-                value: statement.read::<String, _>(idx)?,
+                value: statement.read::<String, _>(idx)?.into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             },

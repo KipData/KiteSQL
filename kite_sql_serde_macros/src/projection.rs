@@ -1,3 +1,4 @@
+use crate::row::{row_impls, single_lifetime};
 use darling::ast::Data;
 use darling::{FromDeriveInput, FromField};
 use proc_macro2::{Span, TokenStream};
@@ -33,6 +34,8 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         ));
     };
 
+    let lifetime = single_lifetime(&projection_opts.generics, struct_name, "Projection")?;
+
     let mut projection_exprs = Vec::new();
     let mut field_initializers = Vec::new();
     let mut field_index_declarations = Vec::new();
@@ -63,7 +66,12 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
         generics
             .make_where_clause()
             .predicates
-            .push(parse_quote!(#field_ty : ::kite_sql::orm::FromDataValue));
+            .push(match &lifetime {
+                Some(lifetime) => {
+                    parse_quote!(#field_ty : ::kite_sql::orm::FromTxnValue<#lifetime>)
+                }
+                None => parse_quote!(#field_ty : ::kite_sql::orm::FromDataValue),
+            });
 
         projection_exprs.push(if rename.is_some() {
             quote! {
@@ -86,17 +94,43 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
                 __kite_orm_found_fields += 1;
             }
         });
-        field_initializers.push(quote! {
-            #field_name: ::kite_sql::orm::take_value_at::<#field_ty>(
-                tuple,
-                #field_index_ident,
-                #field_name_lit,
-            )?
+        field_initializers.push(if lifetime.is_some() {
+            quote! {
+                #field_name: ::kite_sql::orm::take_txn_value_at::<#field_ty>(
+                    tuple,
+                    #field_index_ident,
+                    #field_name_lit,
+                )?
+            }
+        } else {
+            quote! {
+                #field_name: ::kite_sql::orm::take_value_at::<#field_ty>(
+                    tuple,
+                    #field_index_ident,
+                    #field_name_lit,
+                )?
+            }
         });
     }
 
     let field_count = field_index_declarations.len();
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let decode = quote! {
+        let mut __kite_orm_found_fields = 0usize;
+        #(#field_index_declarations)*
+        for (__kite_orm_index, __kite_orm_column) in schema.iter().enumerate() {
+            let __kite_orm_column_name = __kite_orm_column.name();
+            #(#field_index_resolvers)*
+            if __kite_orm_found_fields == #field_count {
+                break;
+            }
+        }
+
+        Ok(Self {
+            #(#field_initializers),*
+        })
+    };
+    let row_impls = row_impls(struct_name, &generics, lifetime.as_ref(), decode);
 
     Ok(quote! {
         impl #impl_generics ::kite_sql::orm::Projection for #struct_name #ty_generics
@@ -116,27 +150,6 @@ pub(crate) fn handle(ast: DeriveInput) -> Result<TokenStream, Error> {
             }
         }
 
-        impl #impl_generics ::kite_sql::orm::FromQueryRow for #struct_name #ty_generics
-        #where_clause
-        {
-            fn from_query_row(
-                schema: &::kite_sql::types::tuple::SchemaView<'_, '_>,
-                tuple: &mut ::kite_sql::types::tuple::TupleImpl,
-            ) -> ::std::result::Result<Self, ::kite_sql::errors::DatabaseError> {
-                let mut __kite_orm_found_fields = 0usize;
-                #(#field_index_declarations)*
-                for (__kite_orm_index, __kite_orm_column) in schema.iter().enumerate() {
-                    let __kite_orm_column_name = __kite_orm_column.name();
-                    #(#field_index_resolvers)*
-                    if __kite_orm_found_fields == #field_count {
-                        break;
-                    }
-                }
-
-                Ok(Self {
-                    #(#field_initializers),*
-                })
-            }
-        }
+        #row_impls
     })
 }

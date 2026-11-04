@@ -41,7 +41,7 @@ use crate::optimizer::heuristic::optimizer::HepOptimizerPipeline;
 use crate::optimizer::rule::implementation::ImplementationRuleImpl;
 use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 #[cfg(feature = "orm")]
-use crate::orm::FromQueryRow;
+use crate::orm::{FromQueryRow, FromTxnRow};
 use crate::planner::operator::Operator;
 use crate::planner::{ExecMetaArena, LogicalPlan, MetaArena, PlanArena, TableArenaCell};
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
@@ -59,9 +59,11 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ordered_float::OrderedFloat;
 pub use program::{Program, ProgramIter};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::mem;
+use std::ops::Deref;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1190,6 +1192,140 @@ where
     }
 }
 
+/// A result row, lent to the callback of an iterator's `next_tuple`.
+///
+/// It reads as a [`TupleImpl`] without copying. Its strings and binaries may point into the
+/// transaction's reads, so values leave the row copied out of those through [`ResultRow::take`],
+/// [`ResultRow::take_values`], [`ResultRow::take_value`] or `clone`, or lent for `'txn` through
+/// [`ResultRow::take_txn_value`]. `'txn` lasts as long as [`TransactionIter`] or `ProgramIter`
+/// borrows its transaction, and only the callback for [`DatabaseIter`] or through
+/// [`ResultIter`].
+#[derive(Debug)]
+pub struct ResultRow<'r, 'txn> {
+    tuple: &'r mut TupleImpl,
+    _txn: PhantomData<&'txn ()>,
+}
+
+impl<'r, 'txn> ResultRow<'r, 'txn> {
+    pub fn new(tuple: &'r mut TupleImpl) -> Self {
+        Self {
+            tuple,
+            _txn: PhantomData,
+        }
+    }
+
+    /// Lends `row` after copying its values out of the transaction's reads, so nothing it hands
+    /// out borrows the transaction, whatever `'txn` is.
+    #[doc(hidden)]
+    pub fn materialized(row: &'r mut ResultRow<'_, '_>) -> Self {
+        row.tuple.materialize();
+        Self::new(&mut *row.tuple)
+    }
+
+    /// Takes the whole row, leaving it empty.
+    pub fn take(&mut self) -> TupleImpl {
+        let mut tuple = mem::take(self.tuple);
+        tuple.materialize();
+        tuple
+    }
+
+    /// Takes every value of the row, leaving it empty.
+    pub fn take_values(&mut self) -> Vec<DataValue> {
+        let mut values = self.tuple.take_values();
+        values.iter_mut().for_each(DataValue::materialize);
+        values
+    }
+
+    /// Takes the value at `index`, leaving NULL in its place.
+    pub fn take_value(&mut self, index: usize) -> Option<DataValue> {
+        let mut value = mem::replace(self.tuple.get_mut(index)?, DataValue::Null);
+        value.materialize();
+        Some(value)
+    }
+
+    /// Takes the value at `index` without copying its strings and binaries, leaving NULL in its
+    /// place.
+    pub fn take_txn_value(&mut self, index: usize) -> Option<TxnValue<'txn>> {
+        let value = mem::replace(self.tuple.get_mut(index)?, DataValue::Null);
+        Some(TxnValue {
+            value,
+            _txn: PhantomData,
+        })
+    }
+}
+
+impl Deref for ResultRow<'_, '_> {
+    type Target = TupleImpl;
+
+    fn deref(&self) -> &TupleImpl {
+        self.tuple
+    }
+}
+
+/// A value taken from a [`ResultRow`] without copying. Its strings and binaries may still point
+/// into the transaction's reads, which stay valid for `'txn`.
+#[derive(Debug)]
+pub struct TxnValue<'txn> {
+    value: DataValue,
+    _txn: PhantomData<&'txn ()>,
+}
+
+impl<'txn> TxnValue<'txn> {
+    pub fn is_null(&self) -> bool {
+        self.value.is_null()
+    }
+
+    pub fn cast(self, ty: &LogicalType) -> Result<Self, DatabaseError> {
+        Ok(Self {
+            value: self.value.cast(ty)?,
+            _txn: PhantomData,
+        })
+    }
+
+    pub fn into_str(self) -> Result<Cow<'txn, str>, DataValue> {
+        match self.value {
+            // SAFETY: a mapped value comes from the transaction borrowed for `'txn`, which cannot
+            // end before `'txn` does.
+            DataValue::Utf8 { value, .. } => Ok(unsafe { value.into_cow() }),
+            value => Err(value),
+        }
+    }
+
+    pub fn into_bytes(self) -> Result<Cow<'txn, [u8]>, DataValue> {
+        match self.value {
+            // SAFETY: as in `into_str`.
+            DataValue::Binary { value, .. } => Ok(unsafe { value.into_cow() }),
+            value => Err(value),
+        }
+    }
+
+    pub fn into_value(self) -> DataValue {
+        let mut value = self.value;
+        value.materialize();
+        value
+    }
+}
+
+/// A result iterator that borrows its transaction for `'txn`, such as [`TransactionIter`], so its
+/// rows lend values for as long.
+pub trait TxnResultIter<'txn>: ResultIter {
+    /// Like [`ResultIter::next_tuple`], but the row lends values for `'txn`. The iterators' own
+    /// `next_tuple` does the same; this is for code generic over them.
+    fn next_txn_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'txn>) -> R,
+    ) -> Result<Option<R>, DatabaseError>;
+
+    #[cfg(feature = "orm")]
+    fn txn_orm<T>(self) -> TxnOrmIter<'txn, Self, T>
+    where
+        Self: Sized,
+        T: FromTxnRow<'txn>,
+    {
+        TxnOrmIter::new(self)
+    }
+}
+
 /// Common interface for result iterators returned by database execution APIs.
 pub trait ResultIter {
     /// Borrows the output schema for the current result set.
@@ -1198,7 +1334,7 @@ pub trait ResultIter {
     /// Advances to the next row and runs `f` while the executor row slot is borrowed.
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
     ) -> Result<Option<R>, DatabaseError>;
 
     /// Finishes consuming the iterator and flushes any remaining work.
@@ -1266,6 +1402,46 @@ where
     }
 }
 
+#[cfg(feature = "orm")]
+pub struct TxnOrmIter<'txn, I, T> {
+    inner: I,
+    _marker: PhantomData<(&'txn (), T)>,
+}
+
+#[cfg(feature = "orm")]
+impl<'txn, I, T> TxnOrmIter<'txn, I, T>
+where
+    I: TxnResultIter<'txn>,
+    T: FromTxnRow<'txn>,
+{
+    fn new(inner: I) -> Self {
+        Self {
+            inner,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done()
+    }
+}
+
+#[cfg(feature = "orm")]
+impl<'txn, I, T> Iterator for TxnOrmIter<'txn, I, T>
+where
+    I: TxnResultIter<'txn>,
+    T: FromTxnRow<'txn>,
+{
+    type Item = Result<T, DatabaseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next_txn_tuple(|schema, row| T::from_txn_row(schema, row))
+            .transpose()
+            .map(|row| row.and_then(std::convert::identity))
+    }
+}
+
 /// Raw result iterator returned by database execution APIs.
 pub struct DatabaseIter<'a, S: Storage + 'a> {
     pub(crate) transaction: *mut S::TransactionType<'a>,
@@ -1292,7 +1468,7 @@ impl<'a, S: Storage> DatabaseIter<'a, S> {
     #[inline]
     pub fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         unsafe { (*self.inner).next_tuple(f) }
     }
@@ -1316,7 +1492,7 @@ impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
 
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         DatabaseIter::next_tuple(self, f)
     }
@@ -1386,26 +1562,26 @@ struct TransactionGuard<'a, 'p, T: StorageTransaction + 'p> {
 
 impl<T: StorageTransaction> TransactionGuard<'_, '_, T> {
     #[inline]
-    fn finish(&mut self, ddl_apply: &mut Vec<DDLApply>) {
+    fn finish(&mut self) {
         if !self.active {
             return;
         }
         self.active = false;
         self.arena.release_iters();
-        ddl_apply.extend(self.arena.take_ddl_apply());
     }
 }
 
 impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
     /// Pulls the next row of `executor`, finishing the execution once the rows run out
     /// or the execution fails.
+    ///
+    /// The row lends values for `'txn`, which the caller must not let outlive the transaction.
     #[inline]
-    fn next_tuple<A: MetaArena + 'p, R>(
+    fn next_tuple<'txn, A: MetaArena + 'p, R>(
         &mut self,
         executor: &mut Executor<'p>,
         plan_arena: &mut ExecMetaArena<A>,
-        ddl_apply: &mut Vec<DDLApply>,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'txn>) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         if !self.active {
             return Ok(None);
@@ -1413,14 +1589,17 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
         match executor.next_tuple(&mut self.arena, plan_arena) {
             Ok(true) => {
                 let schema = SchemaView::new(&executor.schema, plan_arena);
-                Ok(Some(f(&schema, executor.buffer.result_mut())))
+                Ok(Some(f(
+                    &schema,
+                    &mut ResultRow::new(executor.buffer.result_mut()),
+                )))
             }
             Ok(false) => {
-                self.finish(ddl_apply);
+                self.finish();
                 Ok(None)
             }
             Err(err) => {
-                self.finish(ddl_apply);
+                self.finish();
                 Err(err)
             }
         }
@@ -1429,7 +1608,7 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
 
 impl<T: StorageTransaction> Drop for TransactionGuard<'_, '_, T> {
     fn drop(&mut self) {
-        self.finish(&mut Vec::new());
+        self.finish();
     }
 }
 
@@ -1442,7 +1621,6 @@ pub struct TransactionIter<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p
     guard: TransactionGuard<'a, 'p, T>,
     executor: Executor<'p>,
     plan_arena: ExecMetaArena<A>,
-    ddl_apply: Vec<DDLApply>,
 }
 
 impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TransactionIter<'a, 'p, T, A> {
@@ -1457,7 +1635,6 @@ impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TransactionIter<'a, 
             },
             executor,
             plan_arena,
-            ddl_apply: Vec::new(),
         }
     }
 
@@ -1466,17 +1643,15 @@ impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TransactionIter<'a, 
         f(&SchemaView::new(&self.executor.schema, &self.plan_arena))
     }
 
+    /// Advances to the next row and runs `f` on it. The iterator borrows its transaction for
+    /// `'a`, so the row lends values for as long (see [`ResultRow::take_txn_value`]).
     #[inline]
     pub fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R,
     ) -> Result<Option<R>, DatabaseError> {
-        self.guard.next_tuple(
-            &mut self.executor,
-            &mut self.plan_arena,
-            &mut self.ddl_apply,
-            f,
-        )
+        self.guard
+            .next_tuple(&mut self.executor, &mut self.plan_arena, f)
     }
 
     #[inline]
@@ -1490,11 +1665,11 @@ impl<'a, T: StorageTransaction + 'a> TransactionIter<'a, 'a, T, PlanArena<'a>> {
     fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
         while self.next_tuple(|_, _| ())?.is_some() {}
         let Self {
-            guard,
+            mut guard,
             plan_arena,
-            ddl_apply,
             ..
         } = self;
+        let ddl_apply = guard.arena.take_ddl_apply();
         drop(guard);
         Ok((plan_arena.into_parent(), ddl_apply))
     }
@@ -1509,13 +1684,24 @@ impl<'p, T: StorageTransaction + 'p, A: MetaArena + 'p> ResultIter
 
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut TupleImpl) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         TransactionIter::next_tuple(self, f)
     }
 
     fn done(self) -> Result<(), DatabaseError> {
         TransactionIter::done(self)
+    }
+}
+
+impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TxnResultIter<'a>
+    for TransactionIter<'a, 'p, T, A>
+{
+    fn next_txn_tuple<R>(
+        &mut self,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R,
+    ) -> Result<Option<R>, DatabaseError> {
+        TransactionIter::next_tuple(self, f)
     }
 }
 

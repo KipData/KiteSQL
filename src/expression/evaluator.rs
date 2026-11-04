@@ -217,7 +217,7 @@ impl ScalarExpression {
                     }
 
                     Ok(Cow::Owned(DataValue::Utf8 {
-                        value: string,
+                        value: string.into(),
                         ty: Utf8Type::Variable(None),
                         unit: CharLengthUnits::Characters,
                     }))
@@ -259,7 +259,7 @@ impl ScalarExpression {
                     let string_trimmed = trim_string(string, &trim_what, *trim_where);
 
                     Ok(Cow::Owned(DataValue::Utf8 {
-                        value: string_trimmed,
+                        value: string_trimmed.into(),
                         ty: Utf8Type::Variable(None),
                         unit: CharLengthUnits::Characters,
                     }))

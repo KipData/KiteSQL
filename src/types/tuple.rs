@@ -16,6 +16,7 @@ use crate::catalog::{ColumnCatalog, ColumnRef};
 use crate::errors::DatabaseError;
 use crate::iter_ext::Itertools;
 use crate::planner::MetaArena;
+use crate::types::mapped::MappedScope;
 use crate::types::serialize::{BytesPool, TupleValueSerializable, TupleValueSerializableImpl};
 use crate::types::value::DataValue;
 use std::borrow::Borrow;
@@ -350,6 +351,21 @@ impl TupleImpl {
     #[inline]
     pub fn pk(&self) -> Option<&TupleId> {
         self.pk_slot().as_ref()
+    }
+
+    /// Copies every mapped string and binary so the tuple outlives its transaction.
+    pub(crate) fn materialize(&mut self) {
+        match self {
+            TupleImpl::Tuple(tuple) => {
+                tuple.pk.iter_mut().for_each(DataValue::materialize);
+                tuple.values.iter_mut().for_each(DataValue::materialize);
+            }
+            TupleImpl::Concat(concat) => {
+                concat.pk.iter_mut().for_each(DataValue::materialize);
+                concat.left.materialize();
+                concat.right.materialize();
+            }
+        }
     }
 
     /// The stored `Option` itself, for callers that encode it as a whole.
@@ -731,13 +747,20 @@ impl Tuple {
         Tuple { pk, values }
     }
 
+    /// Decodes a stored row. With a `scope` strings point into `bytes`, otherwise they are
+    /// copied.
+    ///
+    /// # Safety
+    ///
+    /// With a `scope`, `bytes` must be a read of the transaction holding it.
     #[inline]
-    pub(crate) fn deserialize_from_into<I, S>(
+    pub(crate) unsafe fn deserialize_from_into<I, S>(
         &mut self,
         deserializers: I,
         bytes: &[u8],
         total_len: usize,
         pool: &mut BytesPool,
+        scope: Option<&MappedScope>,
     ) -> Result<(), DatabaseError>
     where
         I: IntoIterator<Item = S>,
@@ -766,9 +789,12 @@ impl Tuple {
                 }
                 continue;
             }
-            deserializer
-                .borrow()
-                .filling_value(&mut cursor, &mut self.values, pool)?;
+            // SAFETY: the caller guarantees `bytes` is a read of `scope`'s transaction.
+            unsafe {
+                deserializer
+                    .borrow()
+                    .filling_value(&mut cursor, &mut self.values, pool, scope)?
+            };
         }
         Ok(())
     }
@@ -960,7 +986,7 @@ mod tests {
                     DataValue::Int32(0),
                     DataValue::UInt32(1),
                     DataValue::Utf8 {
-                        value: "LOL".to_string(),
+                        value: "LOL".into(),
                         ty: Utf8Type::Variable(Some(2)),
                         unit: CharLengthUnits::Characters,
                     },
@@ -975,22 +1001,22 @@ mod tests {
                     DataValue::Date32(0),
                     DataValue::Decimal(Decimal::new(0, 3)),
                     DataValue::Utf8 {
-                        value: "K".to_string(),
+                        value: "K".into(),
                         ty: Utf8Type::Fixed(1),
                         unit: CharLengthUnits::Characters,
                     },
                     DataValue::Utf8 {
-                        value: "LOL".to_string(),
+                        value: "LOL".into(),
                         ty: Utf8Type::Variable(Some(2)),
                         unit: CharLengthUnits::Octets,
                     },
                     DataValue::Utf8 {
-                        value: "K".to_string(),
+                        value: "K".into(),
                         ty: Utf8Type::Fixed(10),
                         unit: CharLengthUnits::Octets,
                     },
                     DataValue::Utf8 {
-                        value: "你".to_string(),
+                        value: "你".into(),
                         ty: Utf8Type::Fixed(3),
                         unit: CharLengthUnits::Characters,
                     },
@@ -1031,14 +1057,17 @@ mod tests {
                 values: Vec::with_capacity(serializers.len()),
             };
             tuples[0].serialize_to(&serializers, &mut bytes).unwrap();
-            tuple_0
-                .deserialize_from_into(
+            // SAFETY: without a scope strings are copied.
+            unsafe {
+                tuple_0.deserialize_from_into(
                     &serializers,
                     &bytes,
                     columns.len(),
                     &mut crate::types::serialize::BytesPool::default(),
+                    None,
                 )
-                .unwrap();
+            }
+            .unwrap();
 
             assert_eq!(tuples[0], TupleImpl::from(tuple_0));
         }
@@ -1048,14 +1077,17 @@ mod tests {
                 values: Vec::with_capacity(serializers.len()),
             };
             tuples[1].serialize_to(&serializers, &mut bytes).unwrap();
-            tuple_1
-                .deserialize_from_into(
+            // SAFETY: without a scope strings are copied.
+            unsafe {
+                tuple_1.deserialize_from_into(
                     &serializers,
                     &bytes,
                     columns.len(),
                     &mut crate::types::serialize::BytesPool::default(),
+                    None,
                 )
-                .unwrap();
+            }
+            .unwrap();
 
             assert_eq!(tuples[1], TupleImpl::from(tuple_1));
         }
@@ -1072,14 +1104,17 @@ mod tests {
                 values: Vec::with_capacity(2),
             };
             tuples[0].serialize_to(&serializers, &mut bytes).unwrap();
-            tuple_2
-                .deserialize_from_into(
+            // SAFETY: without a scope strings are copied.
+            unsafe {
+                tuple_2.deserialize_from_into(
                     &projection_serializers,
                     &bytes,
                     columns.len(),
                     &mut crate::types::serialize::BytesPool::default(),
+                    None,
                 )
-                .unwrap();
+            }
+            .unwrap();
 
             assert_eq!(
                 tuple_2,
@@ -1093,14 +1128,17 @@ mod tests {
             let mut null_skipped = tuples[0].clone();
             null_skipped[1] = DataValue::Null;
             null_skipped.serialize_to(&serializers, &mut bytes).unwrap();
-            tuple_2
-                .deserialize_from_into(
+            // SAFETY: without a scope strings are copied.
+            unsafe {
+                tuple_2.deserialize_from_into(
                     &projection_serializers,
                     &bytes,
                     columns.len(),
                     &mut crate::types::serialize::BytesPool::default(),
+                    None,
                 )
-                .unwrap();
+            }
+            .unwrap();
 
             assert_eq!(
                 tuple_2.values,
@@ -1125,14 +1163,17 @@ mod tests {
             multi_pk_tuple
                 .serialize_to(&serializers, &mut bytes)
                 .unwrap();
-            tuple_3
-                .deserialize_from_into(
+            // SAFETY: without a scope strings are copied.
+            unsafe {
+                tuple_3.deserialize_from_into(
                     &multiple_pk_serializers,
                     &bytes,
                     columns.len(),
                     &mut crate::types::serialize::BytesPool::default(),
+                    None,
                 )
-                .unwrap();
+            }
+            .unwrap();
 
             assert_eq!(
                 tuple_3,
@@ -1142,7 +1183,7 @@ mod tests {
                         DataValue::Int32(0),
                         DataValue::UInt32(1),
                         DataValue::Utf8 {
-                            value: "LOL".to_string(),
+                            value: "LOL".into(),
                             ty: Utf8Type::Variable(Some(2)),
                             unit: CharLengthUnits::Characters,
                         },
@@ -1273,14 +1314,17 @@ mod tests {
             .unwrap();
 
         let mut tuple = Tuple::default();
-        tuple
-            .deserialize_from_into(
+        // SAFETY: without a scope strings are copied.
+        unsafe {
+            tuple.deserialize_from_into(
                 serializers.iter(),
                 &bytes,
                 2,
                 &mut crate::types::serialize::BytesPool::default(),
+                None,
             )
-            .unwrap();
+        }
+        .unwrap();
         assert_eq!(tuple.values, vec![DataValue::Null, DataValue::Int32(7)]);
 
         assert_eq!(

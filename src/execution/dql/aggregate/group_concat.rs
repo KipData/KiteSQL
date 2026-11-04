@@ -47,12 +47,13 @@ impl Accumulator for GroupConcatAccumulator {
         }
         match &mut self.result {
             DataValue::Utf8 { value: text, .. } => {
+                let text = text.to_mut();
                 text.push(',');
                 let _ = write!(text, "{value}");
             }
             result => {
                 *result = DataValue::Utf8 {
-                    value: value.to_string(),
+                    value: value.to_string().into(),
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 }

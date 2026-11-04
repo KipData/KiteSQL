@@ -374,8 +374,8 @@ fn seq_encoded_len<'v, T: SpillCodec + 'v>(
 
 fn estimated_dynamic_value_size(value: &DataValue) -> usize {
     match value {
-        DataValue::Utf8 { value, .. } => value.capacity(),
-        DataValue::Binary { value, .. } => value.capacity(),
+        DataValue::Utf8 { value, .. } => value.heap_size(),
+        DataValue::Binary { value, .. } => value.heap_size(),
         DataValue::Tuple(values) => values
             .capacity()
             .saturating_mul(size_of::<DataValue>())
@@ -411,7 +411,7 @@ mod tests {
     fn values() -> Vec<DataValue> {
         let values = vec![
             DataValue::Binary {
-                value: vec![0, 255, 128],
+                value: vec![0, 255, 128].into(),
                 len: Some(8),
             },
             DataValue::from(Vec::<u8>::new()),
