@@ -18,7 +18,7 @@ pub use crate::binder::Statement;
 use crate::binder::{Binder, BinderContext};
 use crate::errors::DatabaseError;
 pub use crate::execution::Executor;
-use crate::execution::{DDLApply, ExecArena};
+use crate::execution::{DDLApply, ExecArena, ExecBuffer};
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::table::{
     ArcTableFunctionImpl, TableFunctionCatalog, TableFunctionImpl,
@@ -54,12 +54,11 @@ use crate::storage::{
     CheckpointableStorage, NameMapping, StatisticsMetaCache, Storage, StorageTransaction,
     TableCache, TransactionIsolationLevel, ViewCache,
 };
-use crate::types::serialize::BytesPool;
 use crate::types::tuple::{Schema, SchemaView, TupleImpl};
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ordered_float::OrderedFloat;
-pub use program::{Program, ProgramIter};
+pub use program::{Param, Program, ProgramIter};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -629,7 +628,8 @@ fn start_execution_inner<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
     plan_arena: &mut ExecMetaArena<A>,
 ) -> Result<ExecArena<'p, 'a, T>, DatabaseError> {
     let stamp = statement_stamp(transaction, executor.plan())?;
-    let mut arena = ExecArena::new(table_cache, transaction).with_iters(executor.iters());
+    let iters = executor.buffer.iter_slots(executor.iters());
+    let mut arena = ExecArena::new(table_cache, transaction).with_iters(iters);
     executor.buffer.set_statement_stamp(stamp);
     executor.start(&mut arena, plan_arena)?;
 
@@ -1563,12 +1563,12 @@ struct TransactionGuard<'a, 'p, T: StorageTransaction + 'p> {
 
 impl<T: StorageTransaction> TransactionGuard<'_, '_, T> {
     #[inline]
-    fn finish(&mut self, pool: Option<&mut BytesPool>) {
+    fn finish(&mut self, buffer: Option<&mut ExecBuffer>) {
         if !self.active {
             return;
         }
         self.active = false;
-        self.arena.release_iters(pool);
+        self.arena.release_iters(buffer);
     }
 }
 
@@ -1596,11 +1596,11 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
                 )))
             }
             Ok(false) => {
-                self.finish(Some(executor.buffer.bytes_pool()));
+                self.finish(Some(&mut executor.buffer));
                 Ok(None)
             }
             Err(err) => {
-                self.finish(Some(executor.buffer.bytes_pool()));
+                self.finish(Some(&mut executor.buffer));
                 Err(err)
             }
         }
@@ -2400,7 +2400,7 @@ pub(crate) mod test {
                 &[(1, LogicalType::Integer)],
             )?;
 
-            let mut iter = statement.execute(&mut tx, &[(1, DataValue::Int32(0))])?;
+            let mut iter = statement.execute(&mut tx, &[(1, DataValue::Int32(0).into())])?;
 
             let row = next_tuple_owned(&mut iter)?.unwrap();
             let plan = row[0].utf8().unwrap();
@@ -2423,10 +2423,10 @@ pub(crate) mod test {
             let mut iter = statement.execute(
                 &mut tx,
                 &[
-                    (1, DataValue::Int32(0)),
-                    (2, DataValue::Int32(0)),
-                    (3, DataValue::Int32(1)),
-                    (4, DataValue::Int32(0)),
+                    (1, DataValue::Int32(0).into()),
+                    (2, DataValue::Int32(0).into()),
+                    (3, DataValue::Int32(1).into()),
+                    (4, DataValue::Int32(0).into()),
                 ],
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();
@@ -2442,10 +2442,10 @@ pub(crate) mod test {
             let mut iter = statement.execute(
                 &mut tx,
                 &[
-                    (1, DataValue::Int32(9)),
-                    (2, DataValue::Int32(0)),
-                    (3, DataValue::Int32(1)),
-                    (4, DataValue::Int32(0)),
+                    (1, DataValue::Int32(9).into()),
+                    (2, DataValue::Int32(0).into()),
+                    (3, DataValue::Int32(1).into()),
+                    (4, DataValue::Int32(0).into()),
                 ],
             )?;
             let row = next_tuple_owned(&mut iter)?.unwrap();

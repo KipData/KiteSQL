@@ -14,6 +14,7 @@
 
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, SourceId, TableCatalog, TableId, TableName};
+use crate::db::Param;
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::ScalarExpression;
@@ -26,8 +27,8 @@ use crate::planner::{LogicalPlan, ScalarQueryRef};
 use crate::storage::{NameMapping, TableCache, ViewCache};
 use crate::types::index::{IndexMeta, IndexMetaRef};
 use crate::types::tuple::Schema;
-use crate::types::value::DataValue;
-use crate::types::LogicalType;
+use crate::types::value::{DataValue, Utf8Type};
+use crate::types::{CharLengthUnits, LogicalType};
 use std::cell::UnsafeCell;
 use std::collections::HashSet;
 use std::fmt;
@@ -1206,7 +1207,7 @@ impl<'a> ParamArena<'a> {
         }
     }
 
-    pub(crate) fn bind(&mut self, params: &[(usize, DataValue)]) -> Result<(), DatabaseError> {
+    pub(crate) fn bind(&mut self, params: &[(usize, Param<'_>)]) -> Result<(), DatabaseError> {
         let parent = &self.parent;
         // Keep the parameter slots of the previous execution and overwrite their values.
         self.expressions.truncate(self.parameter_count);
@@ -1236,12 +1237,33 @@ impl<'a> ParamArena<'a> {
                     param: None,
                 } => {
                     // Overwrite the previous execution's value, reusing its buffer.
-                    value.clone_from(source);
+                    match (&mut *value, source) {
+                        (value, Param::Value(source)) => value.clone_from(source),
+                        (
+                            DataValue::Utf8 {
+                                value,
+                                ty: utf8_ty,
+                                unit,
+                            },
+                            Param::Str(source),
+                        ) => {
+                            (*source).clone_into(value.to_mut());
+                            *utf8_ty = Utf8Type::Variable(None);
+                            *unit = CharLengthUnits::Characters;
+                        }
+                        (DataValue::Binary { value, len }, Param::Bytes(source)) => {
+                            (*source).clone_into(value.to_mut());
+                            *len = None;
+                        }
+                        (value, source) => *value = source.to_value(),
+                    }
                     if value.logical_type() != *ty {
                         *value = mem::replace(value, DataValue::Null).cast(ty)?;
                     }
                 }
-                _ => *expr = ArenaExpr::new(ScalarExpression::Constant(source.clone().cast(ty)?)),
+                _ => {
+                    *expr = ArenaExpr::new(ScalarExpression::Constant(source.to_value().cast(ty)?))
+                }
             }
         }
         Ok(())
@@ -1366,8 +1388,12 @@ mod tests {
         parameter_expressions: &[ExprRef],
         params: &[(usize, DataValue)],
     ) -> Result<ParamArena<'a>, DatabaseError> {
+        let params = params
+            .iter()
+            .map(|(id, value)| (*id, Param::Value(value.clone())))
+            .collect::<Vec<_>>();
         let mut arena = ParamArena::new(parent.clone(), parameter_expressions.to_vec());
-        arena.bind(params)?;
+        arena.bind(&params)?;
         Ok(arena)
     }
 

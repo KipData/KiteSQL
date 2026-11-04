@@ -19,12 +19,11 @@ pub mod kitesql_rocksdb;
 pub mod sqlite;
 
 use crate::TpccError;
-use kite_sql::db::Program;
+use kite_sql::db::{Param, Program};
 use kite_sql::types::tuple::TupleImpl;
-use kite_sql::types::value::DataValue;
 use kite_sql::types::LogicalType;
 
-pub type DbParam = (usize, DataValue);
+pub type DbParam<'a> = (usize, Param<'a>);
 
 pub trait SimpleExecutor {
     fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError>;

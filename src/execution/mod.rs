@@ -85,9 +85,11 @@ use crate::types::index::RuntimeIndexProbe;
 use crate::types::serialize::BytesPool;
 use crate::types::tuple::{ConcatPool, Input, Schema, Tuple, TupleId, TupleImpl};
 use crate::types::value::DataValue;
+use std::alloc::{dealloc, Layout};
 use std::borrow::Cow;
 use std::marker::PhantomData;
-use std::mem;
+use std::mem::{self, ManuallyDrop};
+use std::ptr::NonNull;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecStatus {
@@ -584,6 +586,58 @@ pub(crate) struct ExecBuffer {
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
     restarting: bool,
     bound_buffers: [Bytes; 2],
+    spare_iters: Option<SpareIters>,
+}
+
+/// The emptied allocation of an execution's storage iterator slots, kept for the next execution.
+/// It is untyped because the slots borrow the transaction an execution reads.
+struct SpareIters {
+    ptr: NonNull<u8>,
+    capacity: usize,
+    slot: Layout,
+}
+
+unsafe impl Send for SpareIters {}
+unsafe impl Sync for SpareIters {}
+
+impl SpareIters {
+    fn new<E>(iters: Vec<E>) -> Option<Self> {
+        debug_assert!(iters.is_empty());
+        if iters.capacity() == 0 || size_of::<E>() == 0 {
+            return None;
+        }
+        let mut iters = ManuallyDrop::new(iters);
+        Some(SpareIters {
+            ptr: NonNull::new(iters.as_mut_ptr())?.cast(),
+            capacity: iters.capacity(),
+            slot: Layout::new::<E>(),
+        })
+    }
+
+    fn into_vec<E>(self) -> Option<Vec<E>> {
+        if self.slot != Layout::new::<E>() {
+            return None;
+        }
+        let spare = ManuallyDrop::new(self);
+        // SAFETY: a `Vec` of an element type with the layout of `E` allocated `ptr` for
+        // `capacity` elements, and none of them is initialized.
+        Some(unsafe { Vec::from_raw_parts(spare.ptr.as_ptr().cast(), 0, spare.capacity) })
+    }
+}
+
+impl Drop for SpareIters {
+    fn drop(&mut self) {
+        // SAFETY: the `Vec` that allocated `ptr` did so with this layout.
+        unsafe {
+            dealloc(
+                self.ptr.as_ptr(),
+                Layout::from_size_align_unchecked(
+                    self.slot.size() * self.capacity,
+                    self.slot.align(),
+                ),
+            )
+        }
+    }
 }
 
 pub(crate) struct ExecArena<'a, 't, T: StorageTransaction + 'a> {
@@ -714,8 +768,18 @@ impl ExecBuffer {
         &mut self.result.tuple
     }
 
-    pub(crate) fn bytes_pool(&mut self) -> &mut BytesPool {
-        self.table_codec.bytes_pool()
+    pub(crate) fn iter_slots<'t, T: StorageTransaction + 't>(
+        &mut self,
+        len: usize,
+    ) -> Vec<StorageIter<'t, T>> {
+        let mut iters = self
+            .spare_iters
+            .take()
+            .and_then(SpareIters::into_vec)
+            .unwrap_or_default();
+        iters.reserve_exact(len);
+        iters.resize_with(len, || StorageIter::Empty);
+        iters
     }
 }
 
@@ -731,19 +795,21 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
         }
     }
 
-    pub(crate) fn with_iters(mut self, iters: usize) -> Self {
-        self.iters.resize_with(iters, || StorageIter::Empty);
+    pub(crate) fn with_iters(mut self, iters: Vec<StorageIter<'t, T>>) -> Self {
+        self.iters = iters;
         self
     }
 
-    /// Drops every storage iterator, handing their buffers back to `pool` when there is one.
-    pub(crate) fn release_iters(&mut self, mut pool: Option<&mut BytesPool>) {
-        for iter in &mut self.iters {
-            let iter = mem::replace(iter, StorageIter::Empty);
-            if let Some(pool) = pool.as_deref_mut() {
-                iter.recycle(pool);
-            }
+    pub(crate) fn release_iters(&mut self, buffer: Option<&mut ExecBuffer>) {
+        let Some(buffer) = buffer else {
+            self.iters.fill_with(|| StorageIter::Empty);
+            return;
+        };
+        let pool = buffer.table_codec.bytes_pool();
+        for iter in self.iters.drain(..) {
+            iter.recycle(pool);
         }
+        buffer.spare_iters = SpareIters::new(mem::take(&mut self.iters));
     }
 
     pub(crate) fn take_ddl_apply(&mut self) -> Vec<DDLApply> {

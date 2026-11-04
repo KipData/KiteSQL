@@ -1409,9 +1409,7 @@ impl TupleMapping {
         let columns_len = deserializers.read_columns().count();
         match indices {
             Some(slots) => Some(TupleMapping::new(slots.iter().copied(), tuple_len)),
-            None if columns_len < tuple_len => {
-                Some(TupleMapping::new(0..columns_len, tuple_len))
-            }
+            None if columns_len < tuple_len => Some(TupleMapping::new(0..columns_len, tuple_len)),
             None => None,
         }
     }

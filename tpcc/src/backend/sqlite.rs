@@ -17,6 +17,7 @@ use super::{
 };
 use crate::TpccError;
 use chrono::{NaiveDateTime, TimeZone, Utc};
+use kite_sql::db::Param;
 use kite_sql::types::tuple::{Tuple, TupleImpl};
 use kite_sql::types::value::{DataValue, Utf8Type};
 use kite_sql::types::{CharLengthUnits, LogicalType};
@@ -216,8 +217,13 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
 }
 
 fn bind_params(statement: &mut SqliteStatement<'_>, params: &[DbParam]) -> Result<(), TpccError> {
-    for (id, value) in params {
-        statement.bind((*id, convert_value(value)?))?;
+    for (id, param) in params {
+        let value = match param {
+            Param::Value(value) => convert_value(value)?,
+            Param::Str(value) => Value::String(value.to_string()),
+            Param::Bytes(value) => Value::Binary(value.to_vec()),
+        };
+        statement.bind((*id, value))?;
     }
     Ok(())
 }

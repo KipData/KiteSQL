@@ -3968,7 +3968,7 @@ mod tests {
         let mut tx = database.new_transaction(false)?;
         for (id, expected) in [(1, "Alice"), (3, "Cara"), (2, "Bob")] {
             let rows = plan
-                .execute(&mut tx, [(1, DataValue::Int32(id))])?
+                .execute(&mut tx, [(1, DataValue::Int32(id).into())])?
                 .orm::<OrmUnitUser>()
                 .collect::<Result<Vec<_>, _>>()?;
             assert_eq!(rows.len(), 1);
@@ -3980,7 +3980,7 @@ mod tests {
                 .finish()
         })?;
         let rows = tx_plan
-            .execute(&mut tx, [(1, DataValue::Int32(2))])?
+            .execute(&mut tx, [(1, DataValue::Int32(2).into())])?
             .orm::<OrmUnitUser>()
             .collect::<Result<Vec<_>, _>>()?;
         assert_eq!(rows[0].name, "Bob");
