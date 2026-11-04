@@ -135,20 +135,24 @@ pub(crate) fn filter<T: TupleLike + ?Sized>(
     }
 }
 
+/// Joins `build` with `probe`. The joined row passes through this execution like the rows it
+/// joins, so their mapped strings stay mapped in it.
 pub(crate) fn join_rows(
     build: &TupleImpl,
     probe: &mut TupleImpl,
     consume_probe: bool,
 ) -> TupleImpl {
+    // SAFETY: the joined row is read in this execution, as the rows it copies from are.
+    let copy = |value: &DataValue| unsafe { value.clone_in_txn() };
     if consume_probe {
-        let pk = build.pk().cloned().or_else(|| probe.take_pk());
+        let pk = build.pk().map(copy).or_else(|| probe.take_pk());
         let mut row = std::mem::take(probe);
-        row.prepend(build.iter().cloned());
+        row.prepend(build.iter().map(copy));
         row.set_pk(pk);
         return row;
     }
     let mut values = Vec::with_capacity(build.len() + probe.len());
-    values.extend(build.iter().cloned());
-    values.extend(probe.iter().cloned());
-    Tuple::new(build.pk().or(probe.pk()).cloned(), values).into()
+    values.extend(build.iter().map(copy));
+    values.extend(probe.iter().map(copy));
+    Tuple::new(build.pk().or(probe.pk()).map(copy), values).into()
 }

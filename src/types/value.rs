@@ -28,6 +28,7 @@ use chrono::{
 use ordered_float::OrderedFloat;
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
 use std::hash::Hash;
@@ -975,6 +976,38 @@ impl DataValue {
             DataValue::Binary { value, .. } => value.materialize(),
             DataValue::Tuple(values) => values.iter_mut().for_each(DataValue::materialize),
             _ => (),
+        }
+    }
+
+    pub(crate) unsafe fn clone_in_txn(&self) -> DataValue {
+        match self {
+            DataValue::Utf8 { value, ty, unit } => DataValue::Utf8 {
+                // SAFETY: the caller's guarantee covers the copy.
+                value: unsafe { value.clone_in_txn() },
+                ty: ty.clone(),
+                unit: *unit,
+            },
+            DataValue::Binary { value, len } => DataValue::Binary {
+                // SAFETY: as above.
+                value: unsafe { value.clone_in_txn() },
+                len: *len,
+            },
+            DataValue::Tuple(values) => DataValue::Tuple(
+                values
+                    .iter()
+                    // SAFETY: as above.
+                    .map(|value| unsafe { value.clone_in_txn() })
+                    .collect(),
+            ),
+            value => value.clone(),
+        }
+    }
+
+    pub(crate) unsafe fn own_in_txn(value: Cow<'_, DataValue>) -> DataValue {
+        match value {
+            Cow::Owned(value) => value,
+            // SAFETY: the caller's guarantee covers the copy.
+            Cow::Borrowed(value) => unsafe { value.clone_in_txn() },
         }
     }
 

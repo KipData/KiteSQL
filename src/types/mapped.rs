@@ -115,7 +115,8 @@ pub type BinaryBytes = MaybeMapped<[u8]>;
 /// A mapped value is only valid until its transaction ends, so it never leaves the engine as is:
 /// cloning one copies it into an owned value, a result row hands its values out only through
 /// copying methods, and an executor must not read a value kept from an earlier execution (see
-/// `ExecutorNode::reset`).
+/// `ExecutorNode::reset`). An executor that keeps a value while it runs, such as a grouping key,
+/// copies it with `MaybeMapped::clone_in_txn`, which leaves a mapped value mapped.
 pub struct MaybeMapped<B: ?Sized + Mappable>(Repr<B>);
 
 enum Repr<B: ?Sized + Mappable> {
@@ -191,6 +192,13 @@ impl<B: ?Sized + Mappable> MaybeMapped<B> {
         if let Repr::Mapped(_) = self.0 {
             self.0 = Repr::Owned((**self).to_owned());
         }
+    }
+
+    pub(crate) unsafe fn clone_in_txn(&self) -> Self {
+        MaybeMapped(match &self.0 {
+            Repr::Owned(_) => Repr::Owned((**self).to_owned()),
+            Repr::Mapped(mapped) => Repr::Mapped(mapped.clone()),
+        })
     }
 
     pub(crate) unsafe fn clone_with(&self, copy: impl FnOnce(&[u8]) -> Vec<u8>) -> Self {

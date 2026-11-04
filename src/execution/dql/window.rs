@@ -144,9 +144,13 @@ impl<'a> Window<'a> {
                 } else if boundary.is_none() {
                     boundary = Some(Boundary::Peer);
                 }
-                self.state.sort_values[index] = value.into_owned();
+                // SAFETY: the keys live until `reset` clears them, before the next execution.
+                self.state.sort_values[index] = unsafe { DataValue::own_in_txn(value) };
             } else if !self.state.started {
-                self.state.sort_values.push(value.into_owned());
+                // SAFETY: as above.
+                self.state
+                    .sort_values
+                    .push(unsafe { DataValue::own_in_txn(value) });
             }
         }
         self.state.started = true;

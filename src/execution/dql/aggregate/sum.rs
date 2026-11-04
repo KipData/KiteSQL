@@ -125,7 +125,8 @@ impl DistinctSumAccumulator {
 impl Accumulator for DistinctSumAccumulator {
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError> {
         if !self.distinct_values.contains(value) {
-            self.distinct_values.insert(value.clone());
+            // SAFETY: an executor resets its accumulators before it runs again.
+            self.distinct_values.insert(unsafe { value.clone_in_txn() });
             self.inner.update_value(value)?;
         }
 

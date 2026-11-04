@@ -609,6 +609,107 @@ mod tests {
     }
 
     #[test]
+    fn materializing_operators_keep_strings_mapped_across_executions() {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut db = DataBaseBuilder::path(temp_dir.path()).build_lmdb().unwrap();
+        db.ddl("create table t (a int primary key, b varchar, c int)")
+            .unwrap();
+        db.ddl("create table u (a int primary key, b varchar)")
+            .unwrap();
+        db.run("insert into t values (1, 'kite', 1), (2, 'db', 1), (3, 'kite', 2)")
+            .unwrap()
+            .done()
+            .unwrap();
+        db.run("insert into u values (1, 'kite')")
+            .unwrap()
+            .done()
+            .unwrap();
+
+        // Each query keeps strings in an operator: grouping, distinct, sort and join keys, joined
+        // rows of a hash and a nested-loop join, an aggregate and a window result, an `IN`
+        // subquery's materialized keys and a set operation's right rows. Every string a query
+        // returns must still point into the read; strings an operator only compares, such as the
+        // right rows, are covered by the reruns below.
+        let queries = [
+            "select b from t group by b order by b",
+            "select distinct b from t order by b",
+            "select max(b) from t",
+            "select t.b, u.b from t join u on t.b = u.b order by t.a",
+            "select max(b) over (partition by c) from t order by a",
+            "select b from t where b in (select b from u) order by a",
+            "select b from (select b from t intersect select b from u) s order by b",
+            "select t.b, u.b from t join u on t.b >= u.b order by t.a, u.a",
+        ];
+        let mut programs = queries
+            .iter()
+            .map(|sql| db.program_sql(sql, &[]).unwrap())
+            .collect::<Vec<_>>();
+        let rounds: [(&[&str], [&[&str]; 8]); 2] = [
+            (
+                &[],
+                [
+                    &["db", "kite"],
+                    &["db", "kite"],
+                    &["kite"],
+                    &["kite", "kite"],
+                    &["kite", "kite", "kite"],
+                    &["kite", "kite"],
+                    &["kite"],
+                    &["kite", "kite"],
+                ],
+            ),
+            (
+                &[
+                    "insert into t values (4, 'lmdb', 2)",
+                    "update t set b = 'sql' where a = 2",
+                    "insert into u values (2, 'lmdb')",
+                ],
+                [
+                    &["kite", "lmdb", "sql"],
+                    &["kite", "lmdb", "sql"],
+                    &["sql"],
+                    &["kite", "kite", "lmdb"],
+                    &["sql", "sql", "lmdb", "lmdb"],
+                    &["kite", "kite", "lmdb"],
+                    &["kite", "lmdb"],
+                    &["kite", "sql", "sql", "kite", "lmdb", "lmdb"],
+                ],
+            ),
+        ];
+
+        // Every round runs the same programs in a new read-only transaction after writes, so a
+        // string kept from the previous execution would be read after its transaction ended,
+        // which debug builds catch.
+        for (writes, expected) in rounds {
+            for write in writes {
+                db.run(write).unwrap().done().unwrap();
+            }
+            let mut tx = db.new_transaction(true).unwrap();
+            for ((program, sql), expected) in programs.iter_mut().zip(queries).zip(expected) {
+                let mut iter = program.execute(&mut tx, []).unwrap();
+                let mut rows = Vec::new();
+                while let Some(row) = iter
+                    .next_tuple(|_, row| {
+                        for value in row.iter() {
+                            let DataValue::Utf8 { value, .. } = value else {
+                                panic!("{sql}: expected a string, got {value:?}")
+                            };
+                            assert!(value.is_mapped(), "{sql}: {value} was copied");
+                        }
+                        row[0].to_string()
+                    })
+                    .unwrap()
+                {
+                    rows.push(row);
+                }
+                iter.done().unwrap();
+                assert_eq!(rows, expected, "{sql}");
+            }
+            tx.commit().unwrap();
+        }
+    }
+
+    #[test]
     fn lmdb_backend_smoke() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let db_path = temp_dir.path().join("kite_sql.lmdb");

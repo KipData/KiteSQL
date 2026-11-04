@@ -196,7 +196,9 @@ impl<'a> MarkApply<'a> {
                 plan_arena
                     .expression(*probe)
                     .eval(plan_arena, Some(left_tuple))
-                    .map(|value| value.into_owned())
+                    // SAFETY: the probe is popped by the right input during this execution, and
+                    // the probe stack is cleared before the next one.
+                    .map(|value| unsafe { DataValue::own_in_txn(value) })
             })
             .transpose()
     }
@@ -281,8 +283,10 @@ impl<'a> MarkApply<'a> {
             let values = SplitTupleRef::new(left_tuple, arena.result_tuple());
             let key = plan_arena
                 .expression(right_expr)
-                .eval(plan_arena, Some(&values))?
-                .into_owned();
+                .eval(plan_arena, Some(&values))?;
+            // SAFETY: the materialized keys are rebuilt when a new execution resets this node
+            // (see `reset`), so they are only read in the execution that read them.
+            let key = unsafe { DataValue::own_in_txn(key) };
             is_empty = false;
             if key.is_null() {
                 has_null = true;

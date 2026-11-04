@@ -45,7 +45,8 @@ impl Accumulator for AvgAccumulator {
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError> {
         if !value.is_null() {
             if let Some(values) = &mut self.distinct_values {
-                if !values.insert(value.clone()) {
+                // SAFETY: an executor resets its accumulators before it runs again.
+                if !values.insert(unsafe { value.clone_in_txn() }) {
                     return Ok(());
                 }
             }

@@ -91,7 +91,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership<'a> {
                     continue;
                 }
                 let offset = self.right_rows.len();
-                self.right_rows.extend(tuple.iter().cloned());
+                // SAFETY: the rows live until `reset` clears them, before the next execution.
+                self.right_rows
+                    .extend(tuple.iter().map(|value| unsafe { value.clone_in_txn() }));
                 let (hasher, rows) = (&self.hasher, &self.right_rows);
                 self.right_counts
                     .insert_unique(hash, RightRow { offset, count: 1 }, |row| {
