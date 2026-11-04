@@ -77,7 +77,7 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanArena, PlanKeeper};
-use crate::storage::table_codec::TableCodec;
+use crate::storage::table_codec::{Bytes, TableCodec};
 use crate::storage::{
     IndexIter, InnerIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter,
 };
@@ -583,6 +583,7 @@ pub(crate) struct ExecBuffer {
     table_codec: TableCodec,
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
     restarting: bool,
+    bound_buffers: [Bytes; 2],
 }
 
 pub(crate) struct ExecArena<'a, 't, T: StorageTransaction + 'a> {
@@ -602,7 +603,7 @@ pub(crate) struct ExecContext<'c, 'a, 't, T: StorageTransaction + 'a> {
 pub(crate) enum StorageIter<'t, T: StorageTransaction + 't> {
     Empty,
     Tuple(TupleIter<'t, T>),
-    Index(Box<IndexIter<'t, T>>),
+    Index(IndexIter<'t, T>),
     Table(TableIter<'t, T>),
     View(ViewIter<'t, T>),
 }
@@ -654,6 +655,7 @@ impl<'t, T: StorageTransaction + 't> StorageIter<'t, T> {
 pub(crate) struct ExecArenaLocalState<'b, 'a, 't, T: StorageTransaction + 'a> {
     transaction: *mut T,
     pub(crate) table_codec: &'b mut TableCodec,
+    pub(crate) bound_buffers: &'b mut [Bytes; 2],
     pub(crate) result: &'b mut ExecResult,
     pub(crate) plan_arena: &'b (dyn MetaArena + 'a),
     pub(crate) iters: &'b mut [StorageIter<'t, T>],
@@ -780,6 +782,7 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
         ExecArenaLocalState {
             transaction: self.arena.transaction,
             table_codec: &mut self.buffer.table_codec,
+            bound_buffers: &mut self.buffer.bound_buffers,
             result: &mut self.buffer.result,
             plan_arena,
             iters: &mut self.arena.iters,

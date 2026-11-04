@@ -32,9 +32,7 @@ use std::cmp::Ordering;
 use std::fmt::Formatter;
 use std::hash::Hash;
 use std::io::Read;
-#[cfg(feature = "decimal")]
-use std::mem;
-use std::{cmp, fmt, slice};
+use std::{cmp, fmt, mem, slice};
 
 trait ReadByteExt: Read {
     fn read_u8(&mut self) -> std::io::Result<u8> {
@@ -722,8 +720,9 @@ impl DataValue {
         digits.parse().ok()
     }
 
-    pub(crate) fn bind_parameters<'p, F, G>(
+    pub(crate) fn bind_from<'p, F, G>(
         &mut self,
+        template: &DataValue,
         params: &F,
         init_values: &G,
     ) -> Result<bool, DatabaseError>
@@ -731,32 +730,60 @@ impl DataValue {
         F: Fn(usize) -> Option<&'p DataValue>,
         G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
     {
-        match self {
-            DataValue::Parameter { id, ty } => {
-                let Some(input) = params(*id) else {
-                    return Err(DatabaseError::parameter_not_found(format!("${id}")));
+        let (input, ty) = match template {
+            DataValue::Parameter { id, ty } => (
+                params(*id).ok_or_else(|| DatabaseError::parameter_not_found(format!("${id}")))?,
+                ty,
+            ),
+            DataValue::InitValue { id, ty } => (
+                init_values(*id).ok_or_else(|| {
+                    DatabaseError::InvalidValue(format!("scalar query {id} is not initialized"))
+                })?,
+                ty,
+            ),
+            DataValue::Tuple(templates) => {
+                return match self {
+                    DataValue::Tuple(values) => {
+                        Self::bind_values_from(values, templates, params, init_values)
+                    }
+                    _ => {
+                        let mut values = Vec::with_capacity(templates.len());
+                        let has_null =
+                            Self::bind_values_from(&mut values, templates, params, init_values)?;
+                        *self = DataValue::Tuple(values);
+                        Ok(has_null)
+                    }
                 };
-                *self = input.clone().cast(ty)?;
-                Ok(self.is_null())
             }
-            DataValue::InitValue { id, ty } => {
-                let Some(input) = init_values(*id) else {
-                    return Err(DatabaseError::InvalidValue(format!(
-                        "scalar query {id} is not initialized"
-                    )));
-                };
-                *self = input.clone().cast(ty)?;
-                Ok(self.is_null())
+            template => {
+                self.clone_from(template);
+                return Ok(false);
             }
-            DataValue::Tuple(values) => {
-                let mut has_null = false;
-                for value in values {
-                    has_null |= value.bind_parameters(params, init_values)?;
-                }
-                Ok(has_null)
-            }
-            _ => Ok(false),
+        };
+        self.clone_from(input);
+        if self.logical_type() != *ty {
+            *self = mem::replace(self, DataValue::Null).cast(ty)?;
         }
+        Ok(self.is_null())
+    }
+
+    pub(crate) fn bind_values_from<'p, F, G>(
+        values: &mut Vec<DataValue>,
+        templates: &[DataValue],
+        params: &F,
+        init_values: &G,
+    ) -> Result<bool, DatabaseError>
+    where
+        F: Fn(usize) -> Option<&'p DataValue>,
+        G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
+    {
+        values.truncate(templates.len());
+        values.resize_with(templates.len(), || DataValue::Null);
+        let mut has_null = false;
+        for (value, template) in values.iter_mut().zip(templates) {
+            has_null |= value.bind_from(template, params, init_values)?;
+        }
+        Ok(has_null)
     }
 
     pub(crate) fn has_parameter(&self) -> bool {

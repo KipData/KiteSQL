@@ -23,7 +23,6 @@ use crate::types::index::IndexId;
 use crate::types::value::DataValue;
 use crate::types::ColumnId;
 use kite_sql_serde_macros::ReferenceSerialization;
-use std::slice;
 
 pub struct StatisticMetaLoader<'a> {
     cache: &'a StatisticsMetaCache,
@@ -57,15 +56,9 @@ impl<'a> StatisticMetaLoader<'a> {
         let Some(entry) = self.load(table_id, index_id)? else {
             return Ok(None);
         };
-        let ranges = if let Range::SortedRanges(ranges) = range {
-            ranges.as_slice()
-        } else {
-            slice::from_ref(range)
-        };
-
         entry
             .histogram()
-            .collect_count(ranges, entry.sketch(), entry.top_n(), buf)
+            .collect_count(range.as_slice(), entry.sketch(), entry.top_n(), buf)
             .map(|rows| Some((rows, entry.histogram().distinct_values_len())))
     }
 }

@@ -1223,27 +1223,25 @@ impl<'a> ParamArena<'a> {
                 .iter()
                 .find_map(|(candidate, value)| (*candidate == id).then_some(value))
                 .ok_or_else(|| DatabaseError::parameter_not_found(format!("${id}")))?;
-            let constant = || ArenaExpr::new(ScalarExpression::Constant(DataValue::Null));
             if self.expressions.len() == slot {
-                self.expressions.push((Some(id), constant()));
+                self.expressions.push((
+                    Some(id),
+                    ArenaExpr::new(ScalarExpression::Constant(DataValue::Null)),
+                ));
             }
             let (_, expr) = &mut self.expressions[slot];
-            if !matches!(
-                expr,
+            match expr {
                 ArenaExpr {
-                    expression: ScalarExpression::Constant(_),
+                    expression: ScalarExpression::Constant(value),
                     param: None,
+                } => {
+                    // Overwrite the previous execution's value, reusing its buffer.
+                    value.clone_from(source);
+                    if value.logical_type() != *ty {
+                        *value = mem::replace(value, DataValue::Null).cast(ty)?;
+                    }
                 }
-            ) {
-                // An execution rewrote the slot; rebuild it.
-                *expr = constant();
-            }
-            let ScalarExpression::Constant(value) = &mut expr.expression else {
-                unreachable!("the slot was just made a constant");
-            };
-            value.clone_from(source);
-            if value.logical_type() != *ty {
-                *value = mem::replace(value, DataValue::Null).cast(ty)?;
+                _ => *expr = ArenaExpr::new(ScalarExpression::Constant(source.clone().cast(ty)?)),
             }
         }
         Ok(())

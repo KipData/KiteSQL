@@ -800,8 +800,8 @@ mod test {
     use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
-        IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, InnerIter, IterBounds,
-        PrimaryKeyIndexImpl, Storage, StorageTransaction,
+        IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, IndexScanView, InnerIter, Iter,
+        IterBounds, PrimaryKeyIndexImpl, Storage, StorageTransaction, TupleMapping,
     };
     use crate::types::index::IndexType;
     use crate::types::serialize::BytesPool;
@@ -1031,10 +1031,12 @@ mod test {
             (Some(1), Some(1)),
         )?;
 
-        let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
+        let option_1 =
+            crate::storage::next_tuple_for_test(|codec, tuple| iter.next_tuple_into(codec, tuple))?;
         assert_eq!(option_1.unwrap().pk, Some(DataValue::Int32(2)));
 
-        let option_2 = crate::storage::next_tuple_for_test(&mut iter)?;
+        let option_2 =
+            crate::storage::next_tuple_for_test(|codec, tuple| iter.next_tuple_into(codec, tuple))?;
         assert_eq!(option_2, None);
 
         Ok(())
@@ -1095,19 +1097,27 @@ mod test {
                 deserializers: &deserializers,
                 tx: &transaction,
                 cursor: None,
-                cover_mapping: None,
                 with_pk: true,
                 reverse: false,
             },
-            ranges: (&ranges[..]).into(),
+            range_pos: 0,
             state: IndexIterState::Init,
             inner: IndexImplEnum::PrimaryKey(PrimaryKeyIndexImpl),
-            encode_min_buffer: Vec::new(),
-            encode_max_buffer: Vec::new(),
         };
+        let range = Range::SortedRanges(ranges.to_vec());
         let mut result = Vec::new();
 
-        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(|codec, tuple| {
+            iter.next_tuple_into(
+                IndexScanView {
+                    range: &range,
+                    cover_mapping: None,
+                },
+                &mut Default::default(),
+                codec,
+                tuple,
+            )
+        })? {
             result.push(tuple.pk.unwrap());
         }
 
@@ -1141,6 +1151,10 @@ mod test {
                 &plan_arena,
                 true,
             );
+            let range = Range::Scope {
+                min: Bound::Excluded(DataValue::Int32(0).into()),
+                max: Bound::Unbounded,
+            };
             let mut iter = transaction
                 .read_by_index(
                     &plan_arena,
@@ -1152,18 +1166,24 @@ mod test {
                         .id(),
                     (Some(0), Some(1)),
                     table.indexes[0],
-                    Range::Scope {
-                        min: Bound::Excluded(DataValue::Int32(0).into()),
-                        max: Bound::Unbounded,
-                    },
+                    false,
                     true,
                     &deserializers,
                     false,
-                    None,
                 )
                 .unwrap();
 
-            while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
+            while let Some(tuple) = crate::storage::next_tuple_for_test(|codec, tuple| {
+                iter.next_tuple_into(
+                    IndexScanView {
+                        range: &range,
+                        cover_mapping: None,
+                    },
+                    &mut Default::default(),
+                    codec,
+                    tuple,
+                )
+            })? {
                 assert_eq!(tuple.pk, Some(DataValue::Int32(1)));
                 assert_eq!(tuple.values, vec![DataValue::Int32(1), DataValue::Int32(1)])
             }
@@ -1181,6 +1201,10 @@ mod test {
                 &plan_arena,
                 true,
             );
+            let range = Range::Scope {
+                min: Bound::Excluded(DataValue::Int32(3).into()),
+                max: Bound::Unbounded,
+            };
             let mut iter = transaction
                 .read_by_index(
                     &plan_arena,
@@ -1192,18 +1216,24 @@ mod test {
                         .id(),
                     (Some(0), Some(1)),
                     table.indexes[0],
-                    Range::Scope {
-                        min: Bound::Excluded(DataValue::Int32(3).into()),
-                        max: Bound::Unbounded,
-                    },
+                    false,
                     true,
                     &deserializers,
                     false,
-                    None,
                 )
                 .unwrap();
 
-            while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
+            while let Some(tuple) = crate::storage::next_tuple_for_test(|codec, tuple| {
+                iter.next_tuple_into(
+                    IndexScanView {
+                        range: &range,
+                        cover_mapping: None,
+                    },
+                    &mut Default::default(),
+                    codec,
+                    tuple,
+                )
+            })? {
                 assert_eq!(tuple.pk, Some(DataValue::Int32(3)));
                 assert_eq!(tuple.values, vec![DataValue::Int32(3)])
             }
@@ -1251,6 +1281,8 @@ mod test {
             &plan_arena,
             false,
         );
+        let range = Range::SortedRanges(c1_ranges.to_vec());
+        let mapping = TupleMapping::cover(plan_arena.index(idx_c1), &deserializers, None);
         let mut iter = transaction.read_by_index(
             &plan_arena,
             kite_sql
@@ -1261,15 +1293,24 @@ mod test {
                 .id(),
             (None, None),
             idx_c1,
-            &c1_ranges[..],
+            false,
             false,
             &deserializers,
             true,
-            None,
         )?;
 
         let mut values = Vec::new();
-        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(|codec, tuple| {
+            iter.next_tuple_into(
+                IndexScanView {
+                    range: &range,
+                    cover_mapping: mapping.as_ref(),
+                },
+                &mut Default::default(),
+                codec,
+                tuple,
+            )
+        })? {
             values.push(tuple.values[0].clone());
         }
         assert_eq!(
@@ -1355,6 +1396,15 @@ mod test {
             &plan_arena,
             false,
         );
+        let range = Range::Scope {
+            min: Bound::Unbounded,
+            max: Bound::Unbounded,
+        };
+        let mapping = TupleMapping::cover(
+            plan_arena.index(composite_index),
+            &deserializers,
+            Some(&cover_mapping),
+        );
         let mut iter = transaction.read_by_index(
             &plan_arena,
             kite_sql
@@ -1365,16 +1415,23 @@ mod test {
                 .id(),
             (None, None),
             composite_index,
-            &[Range::Scope {
-                min: Bound::Unbounded,
-                max: Bound::Unbounded,
-            }][..],
+            false,
             false,
             &deserializers,
             true,
-            Some(&cover_mapping),
         )?;
-        let first_tuple = crate::storage::next_tuple_for_test(&mut iter)?.unwrap();
+        let first_tuple = crate::storage::next_tuple_for_test(|codec, tuple| {
+            iter.next_tuple_into(
+                IndexScanView {
+                    range: &range,
+                    cover_mapping: mapping.as_ref(),
+                },
+                &mut Default::default(),
+                codec,
+                tuple,
+            )
+        })?
+        .unwrap();
         assert_eq!(
             first_tuple.values,
             vec![DataValue::Int32(0), DataValue::Int32(0)]
@@ -1391,6 +1448,11 @@ mod test {
             &plan_arena,
             false,
         );
+        let range = Range::Scope {
+            min: Bound::Unbounded,
+            max: Bound::Unbounded,
+        };
+        let mapping = TupleMapping::cover(plan_arena.index(composite_index), &deserializers, None);
         let mut iter = transaction.read_by_index(
             &plan_arena,
             kite_sql
@@ -1401,20 +1463,38 @@ mod test {
                 .id(),
             (None, None),
             composite_index,
-            &[Range::Scope {
-                min: Bound::Unbounded,
-                max: Bound::Unbounded,
-            }][..],
+            false,
             false,
             &deserializers,
             true,
-            None,
         )?;
         for value in [0, 1, 2, 4] {
-            let tuple = crate::storage::next_tuple_for_test(&mut iter)?.unwrap();
+            let tuple = crate::storage::next_tuple_for_test(|codec, tuple| {
+                iter.next_tuple_into(
+                    IndexScanView {
+                        range: &range,
+                        cover_mapping: mapping.as_ref(),
+                    },
+                    &mut Default::default(),
+                    codec,
+                    tuple,
+                )
+            })?
+            .unwrap();
             assert_eq!(tuple.values, vec![DataValue::Int32(value)]);
         }
-        assert!(crate::storage::next_tuple_for_test(&mut iter)?.is_none());
+        assert!(crate::storage::next_tuple_for_test(|codec, tuple| {
+            iter.next_tuple_into(
+                IndexScanView {
+                    range: &range,
+                    cover_mapping: mapping.as_ref(),
+                },
+                &mut Default::default(),
+                codec,
+                tuple,
+            )
+        })?
+        .is_none());
         drop(iter);
 
         let target_pk = DataValue::Int32(3);
@@ -1431,6 +1511,8 @@ mod test {
             &plan_arena,
             false,
         );
+        let range = Range::SortedRanges(covered_ranges.to_vec());
+        let mapping = TupleMapping::cover(plan_arena.index(unique_index), &deserializers, None);
         let mut iter = transaction.read_by_index(
             &plan_arena,
             kite_sql
@@ -1441,15 +1523,24 @@ mod test {
                 .id(),
             (Some(0), Some(1)),
             unique_index,
-            &covered_ranges[..],
+            false,
             false,
             &deserializers,
             true,
-            None,
         )?;
 
         let mut tuples = Vec::new();
-        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(|codec, tuple| {
+            iter.next_tuple_into(
+                IndexScanView {
+                    range: &range,
+                    cover_mapping: mapping.as_ref(),
+                },
+                &mut Default::default(),
+                codec,
+                tuple,
+            )
+        })? {
             tuples.push(tuple);
         }
 
@@ -1472,6 +1563,11 @@ mod test {
             &plan_arena,
             false,
         );
+        let range = Range::Scope {
+            min: Bound::Unbounded,
+            max: Bound::Unbounded,
+        };
+        let mapping = TupleMapping::cover(plan_arena.index(pk_index), &deserializers, Some(&[0]));
         let mut iter = transaction.read_by_index(
             &plan_arena,
             kite_sql
@@ -1482,17 +1578,23 @@ mod test {
                 .id(),
             (None, None),
             pk_index,
-            &[Range::Scope {
-                min: Bound::Unbounded,
-                max: Bound::Unbounded,
-            }][..],
+            false,
             false,
             &deserializers,
             true,
-            Some(&[0]),
         )?;
         let mut row_count = 0;
-        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(|codec, tuple| {
+            iter.next_tuple_into(
+                IndexScanView {
+                    range: &range,
+                    cover_mapping: mapping.as_ref(),
+                },
+                &mut Default::default(),
+                codec,
+                tuple,
+            )
+        })? {
             assert_eq!(tuple.values.len(), 1);
             row_count += 1;
         }

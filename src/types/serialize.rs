@@ -255,10 +255,6 @@ impl BytesPool {
         }
     }
 
-    pub(crate) fn buffer(&mut self) -> Vec<u8> {
-        self.0.pop().unwrap_or_default()
-    }
-
     pub(crate) fn recycle_buffer(&mut self, mut buffer: Vec<u8>) {
         if self.0.len() < Self::CAPACITY
             && buffer.capacity() > 0

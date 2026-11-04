@@ -77,7 +77,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
         }
         let iter = state.iters[self.iter].as_tuple();
         let output = state.result.output_mut();
-        if next_scan_tuple(self.op, iter, state.table_codec, output, plan_arena)? {
+        if next_scan_tuple(
+            self.op,
+            |table_codec, tuple| iter.next_tuple_into(table_codec, tuple),
+            state.table_codec,
+            output,
+            plan_arena,
+        )? {
             arena.resume();
         } else {
             arena.finish();
@@ -87,14 +93,14 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
 }
 
 #[inline]
-pub(crate) fn next_scan_tuple<I: Iter + ?Sized, A: MetaArena>(
+pub(crate) fn next_scan_tuple<A: MetaArena>(
     op: &TableScanOperator,
-    iter: &mut I,
+    mut next: impl FnMut(&mut TableCodec, &mut Tuple) -> Result<bool, DatabaseError>,
     table_codec: &mut TableCodec,
     tuple: &mut Tuple,
     arena: &A,
 ) -> Result<bool, DatabaseError> {
-    while iter.next_tuple_into(table_codec, tuple)? {
+    while next(table_codec, tuple)? {
         let holds = match op.predicate {
             Some(predicate) => arena
                 .expression(predicate)

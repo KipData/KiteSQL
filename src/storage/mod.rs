@@ -34,7 +34,7 @@ use crate::optimizer::core::statistics_meta::IndexStatistics;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::{MetaArena, TableArenaCell};
 use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
-use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType, RuntimeIndexProbe};
+use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
 use crate::types::mapped::MappedScope;
 use crate::types::serialize::{BytesPool, TupleValueSerializableImpl};
 use crate::types::tuple::{Tuple, TupleId, TupleImpl, TupleLike};
@@ -256,42 +256,18 @@ pub trait StorageTransaction: Sized {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn read_by_index<'a, R>(
+    fn read_by_index<'a>(
         &'a self,
         arena: &(dyn MetaArena + 'a),
         table_id: TableId,
         (offset_option, limit_option): Bounds,
         index_meta: IndexMetaRef,
-        ranges: R,
+        reverse: bool,
         with_pk: bool,
         deserializers: &'a TupleDeserializers,
         covered: bool,
-        cover_mapping_indices: Option<&[usize]>,
-    ) -> Result<IndexIter<'a, Self>, DatabaseError>
-    where
-        R: Into<IndexRanges<'a>>,
-    {
-        let meta = arena.index(index_meta);
-        let (inner, cover_mapping) = if covered && !matches!(meta.ty, IndexType::PrimaryKey { .. })
-        {
-            let tuple_len = match &meta.value_ty {
-                LogicalType::Tuple(tys) => tys.len(),
-                _ => 1,
-            };
-            let columns_len = deserializers.read_columns().count();
-            let cover_mapping = match cover_mapping_indices {
-                Some(slots) => Some(TupleMapping::new(slots.iter().copied(), tuple_len)),
-                None if columns_len < tuple_len => {
-                    // Omitted mapping denotes an ordered prefix, not every key field.
-                    Some(TupleMapping::new(0..columns_len, tuple_len))
-                }
-                None => None,
-            };
-            (IndexImplEnum::Covered(CoveredIndexImpl), cover_mapping)
-        } else {
-            (IndexImplEnum::instance(meta.ty), None)
-        };
-        let ranges = ranges.into();
+    ) -> Result<IndexIter<'a, Self>, DatabaseError> {
+        let inner = IndexImplEnum::instance(arena.index(index_meta).ty, covered);
 
         Ok(IndexIter {
             bounds: IterBounds::new(offset_option.unwrap_or(0), limit_option),
@@ -302,15 +278,12 @@ pub trait StorageTransaction: Sized {
                 deserializers,
                 tx: self,
                 cursor: None,
-                cover_mapping,
                 with_pk,
-                reverse: ranges.reverse,
+                reverse,
             },
             inner,
-            ranges,
+            range_pos: 0,
             state: IndexIterState::Init,
-            encode_min_buffer: Bytes::new(),
-            encode_max_buffer: Bytes::new(),
         })
     }
 
@@ -1366,6 +1339,7 @@ trait IndexImpl<T: StorageTransaction> {
         key: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
+        cover_mapping: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError>;
 
     fn eq_to_res<'a>(
@@ -1397,9 +1371,10 @@ enum IndexImplEnum {
 }
 
 impl IndexImplEnum {
-    fn instance(index_type: IndexType) -> IndexImplEnum {
+    fn instance(index_type: IndexType, covered: bool) -> IndexImplEnum {
         match index_type {
             IndexType::PrimaryKey { .. } => IndexImplEnum::PrimaryKey(PrimaryKeyIndexImpl),
+            _ if covered => IndexImplEnum::Covered(CoveredIndexImpl),
             IndexType::Unique => IndexImplEnum::Unique(UniqueIndexImpl),
             IndexType::Normal => IndexImplEnum::Normal(NormalIndexImpl),
             IndexType::Composite => IndexImplEnum::Composite(CompositeIndexImpl),
@@ -1413,12 +1388,34 @@ struct NormalIndexImpl;
 struct CompositeIndexImpl;
 struct CoveredIndexImpl;
 
-struct TupleMapping {
+pub(crate) struct TupleMapping {
     index_to_scan: Vec<usize>,
     target_len: usize,
 }
 
 impl TupleMapping {
+    pub(crate) fn cover(
+        meta: &IndexMeta,
+        deserializers: &TupleDeserializers,
+        indices: Option<&[usize]>,
+    ) -> Option<Self> {
+        if matches!(meta.ty, IndexType::PrimaryKey { .. }) {
+            return None;
+        }
+        let tuple_len = match &meta.value_ty {
+            LogicalType::Tuple(tys) => tys.len(),
+            _ => 1,
+        };
+        let columns_len = deserializers.read_columns().count();
+        match indices {
+            Some(slots) => Some(TupleMapping::new(slots.iter().copied(), tuple_len)),
+            None if columns_len < tuple_len => {
+                Some(TupleMapping::new(0..columns_len, tuple_len))
+            }
+            None => None,
+        }
+    }
+
     fn new(scan_to_index: impl Iterator<Item = usize>, tuple_len: usize) -> Self {
         let mut index_to_scan = vec![usize::MAX; tuple_len];
         let mut target_len = 0;
@@ -1453,7 +1450,6 @@ struct IndexImplParams<'a, T: StorageTransaction> {
     deserializers: &'a TupleDeserializers,
     tx: &'a T,
     cursor: Option<T::PointCursor<'a>>,
-    cover_mapping: Option<TupleMapping>,
     with_pk: bool,
     reverse: bool,
 }
@@ -1548,22 +1544,23 @@ impl<T: StorageTransaction> IndexImpl<T> for IndexImplEnum {
         key: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
+        cover_mapping: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         match self {
             IndexImplEnum::PrimaryKey(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params)
+                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
             }
             IndexImplEnum::Unique(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params)
+                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
             }
             IndexImplEnum::Normal(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params)
+                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
             }
             IndexImplEnum::Composite(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params)
+                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
             }
             IndexImplEnum::Covered(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params)
+                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
             }
         }
     }
@@ -1632,6 +1629,7 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         key: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
+        _: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         let tuple_id = params
             .with_pk
@@ -1728,6 +1726,7 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
         _: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
+        _: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         secondary_index_lookup(table_codec, tuple, value, params)
     }
@@ -1787,6 +1786,7 @@ impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
         _: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
+        _: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         secondary_index_lookup(table_codec, tuple, value, params)
     }
@@ -1835,6 +1835,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
         _: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
+        _: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         secondary_index_lookup(table_codec, tuple, value, params)
     }
@@ -1887,9 +1888,10 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
         key: &[u8],
         value: &[u8],
         params: &IndexImplParams<T>,
+        cover_mapping: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         let ty = params.value_ty();
-        match &params.cover_mapping {
+        match cover_mapping {
             Some(mapping) => TableCodec::decode_index_into(
                 tuple,
                 key,
@@ -2121,78 +2123,6 @@ impl<'a, T: StorageTransaction + 'a> Iter for TupleIter<'a, T> {
     }
 }
 
-enum RangeSource<'r> {
-    Borrowed(&'r [Range]),
-    Owned(Range),
-}
-
-pub struct IndexRanges<'r> {
-    source: RangeSource<'r>,
-    next: usize,
-    reverse: bool,
-}
-
-impl IndexRanges<'_> {
-    pub(crate) fn reversed(mut self, reverse: bool) -> Self {
-        self.reverse = reverse;
-        self
-    }
-
-    pub(crate) fn next(&mut self) -> Option<&Range> {
-        let ranges = match &self.source {
-            RangeSource::Borrowed(ranges) => ranges,
-            RangeSource::Owned(Range::SortedRanges(ranges)) => ranges.as_slice(),
-            RangeSource::Owned(range) => std::slice::from_ref(range),
-        };
-        let idx = if self.reverse {
-            ranges.len().checked_sub(self.next + 1)?
-        } else {
-            self.next
-        };
-        let range = ranges.get(idx)?;
-        self.next += 1;
-        Some(range)
-    }
-}
-
-impl<'r> From<&'r [Range]> for IndexRanges<'r> {
-    fn from(ranges: &'r [Range]) -> Self {
-        IndexRanges {
-            source: RangeSource::Borrowed(ranges),
-            next: 0,
-            reverse: false,
-        }
-    }
-}
-
-impl<'r> From<&'r Range> for IndexRanges<'r> {
-    fn from(range: &'r Range) -> Self {
-        match range {
-            Range::SortedRanges(ranges) => ranges.as_slice().into(),
-            range => std::slice::from_ref(range).into(),
-        }
-    }
-}
-
-impl From<Range> for IndexRanges<'_> {
-    fn from(range: Range) -> Self {
-        IndexRanges {
-            source: RangeSource::Owned(range),
-            next: 0,
-            reverse: false,
-        }
-    }
-}
-
-impl<'r> From<Cow<'r, Range>> for IndexRanges<'r> {
-    fn from(range: Cow<'r, Range>) -> Self {
-        match range {
-            Cow::Borrowed(range) => range.into(),
-            Cow::Owned(range) => range.into(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct IterBounds {
     offset: usize,
@@ -2224,14 +2154,18 @@ impl IterBounds {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct IndexScanView<'s> {
+    pub(crate) range: &'s Range,
+    pub(crate) cover_mapping: Option<&'s TupleMapping>,
+}
+
 pub struct IndexIter<'a, T: StorageTransaction> {
     bounds: IterBounds,
     params: IndexImplParams<'a, T>,
     inner: IndexImplEnum,
-    ranges: IndexRanges<'a>,
+    range_pos: usize,
     state: IndexIterState<'a, T>,
-    encode_min_buffer: Bytes,
-    encode_max_buffer: Bytes,
 }
 
 pub enum IndexIterState<'a, T: StorageTransaction + 'a> {
@@ -2241,25 +2175,7 @@ pub enum IndexIterState<'a, T: StorageTransaction + 'a> {
 }
 
 impl<'a, T: StorageTransaction> IndexIter<'a, T> {
-    pub(crate) fn reset(&mut self, ranges: IndexRanges<'a>, bounds: Bounds) {
-        self.params.reverse = ranges.reverse;
-        self.ranges = ranges;
-        self.rewind(bounds);
-    }
-
-    pub(crate) fn reset_probe(&mut self, probe: RuntimeIndexProbe, bounds: Bounds) {
-        match (&mut self.ranges.source, probe) {
-            (RangeSource::Owned(Range::Eq(value)), RuntimeIndexProbe::Eq(probe)) => {
-                *value = RangeValue::Value(probe)
-            }
-            (source, probe) => *source = RangeSource::Owned(probe.into()),
-        }
-        self.rewind(bounds);
-    }
-
     pub(crate) fn recycle(self, pool: &mut BytesPool) {
-        pool.recycle_buffer(self.encode_min_buffer);
-        pool.recycle_buffer(self.encode_max_buffer);
         if let IndexIterState::Range(iter) = self.state {
             iter.recycle(pool);
         }
@@ -2267,14 +2183,26 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
 
     pub(crate) fn rewind(&mut self, bounds: Bounds) {
         self.state = IndexIterState::Init;
-        self.ranges.next = 0;
+        self.range_pos = 0;
         self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
     }
-}
 
-impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
-    fn next_tuple_into(
+    fn next_range<'r>(&mut self, range: &'r Range) -> Option<&'r Range> {
+        let ranges = range.as_slice();
+        let idx = if self.params.reverse {
+            ranges.len().checked_sub(self.range_pos + 1)?
+        } else {
+            self.range_pos
+        };
+        let range = ranges.get(idx)?;
+        self.range_pos += 1;
+        Some(range)
+    }
+
+    pub(crate) fn next_tuple_into(
         &mut self,
+        view: IndexScanView<'_>,
+        bound_buffers: &mut [Bytes; 2],
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
     ) -> Result<bool, DatabaseError> {
@@ -2287,13 +2215,7 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
         loop {
             match &mut self.state {
                 IndexIterState::Init => {
-                    // Encode bounds into buffers that earlier iterators handed back.
-                    for buffer in [&mut self.encode_min_buffer, &mut self.encode_max_buffer] {
-                        if buffer.capacity() == 0 {
-                            *buffer = table_codec.bytes_pool().buffer();
-                        }
-                    }
-                    let Some(binary) = self.ranges.next() else {
+                    let Some(binary) = self.next_range(view.range) else {
                         self.state = IndexIterState::Over;
                         continue;
                     };
@@ -2301,11 +2223,12 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
                         Range::Scope { min, max } => {
                             let table_id = self.params.table_id;
                             let index_meta = self.params.index_meta();
+                            let [encode_min, encode_max] = &mut *bound_buffers;
                             let encode_min = encode_bound(
                                 table_codec,
                                 min,
                                 false,
-                                &mut self.encode_min_buffer,
+                                encode_min,
                                 &self.params,
                                 &self.inner,
                             )?;
@@ -2313,7 +2236,7 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
                                 table_codec,
                                 max,
                                 true,
-                                &mut self.encode_max_buffer,
+                                encode_max,
                                 &self.params,
                                 &self.inner,
                             )?;
@@ -2338,6 +2261,7 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
                             self.state = IndexIterState::Range(iter);
                         }
                         Range::Eq(val) => {
+                            let [encode_min, encode_max] = &mut *bound_buffers;
                             if self.params.cursor.is_none()
                                 && matches!(self.inner, IndexImplEnum::PrimaryKey(_))
                             {
@@ -2348,8 +2272,8 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
                                 tuple,
                                 val.value()?,
                                 &self.params,
-                                &mut self.encode_min_buffer,
-                                &mut self.encode_max_buffer,
+                                encode_min,
+                                encode_max,
                             )? {
                                 IndexResult::Hit => {
                                     if self.bounds.consume_offset() {
@@ -2379,6 +2303,7 @@ impl<T: StorageTransaction> Iter for IndexIter<'_, T> {
                             key,
                             value,
                             &self.params,
+                            view.cover_mapping,
                         )?;
 
                         return Ok(true);
@@ -2632,15 +2557,14 @@ pub(crate) fn deserializers_for_test(
     }
 }
 
+/// Reads one tuple with `next`, which is given a fresh codec and tuple.
 #[cfg(test)]
-pub(crate) fn next_tuple_for_test<I: Iter>(iter: &mut I) -> Result<Option<Tuple>, DatabaseError> {
+pub(crate) fn next_tuple_for_test(
+    mut next: impl FnMut(&mut TableCodec, &mut Tuple) -> Result<bool, DatabaseError>,
+) -> Result<Option<Tuple>, DatabaseError> {
     let mut tuple = Tuple::default();
     let mut table_codec = TableCodec::default();
-    if iter.next_tuple_into(&mut table_codec, &mut tuple)? {
-        Ok(Some(tuple))
-    } else {
-        Ok(None)
-    }
+    Ok(next(&mut table_codec, &mut tuple)?.then_some(tuple))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -2658,8 +2582,8 @@ mod test {
     use crate::storage::table_codec::TableCodec;
     use crate::storage::NameMapping;
     use crate::storage::{
-        project_deserializers_for_test, IndexIter, InnerIter, Storage, StorageTransaction,
-        TableCache, TupleDeserializers,
+        project_deserializers_for_test, IndexIter, IndexScanView, InnerIter, Iter, Storage,
+        StorageTransaction, TableCache, TupleDeserializers,
     };
     use crate::types::index::{Index, IndexType};
     use crate::types::tuple::Tuple;
@@ -2873,15 +2797,15 @@ mod test {
             )?;
 
             assert_eq!(
-                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
                 tuples[0]
             );
             assert_eq!(
-                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
                 tuples[1]
             );
             assert_eq!(
-                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
                 tuples[2]
             );
 
@@ -2916,11 +2840,11 @@ mod test {
             )?;
 
             assert_eq!(
-                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
                 tuples[0]
             );
             assert_eq!(
-                super::next_tuple_for_test(&mut tuple_iter)?.unwrap(),
+                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
                 tuples[2]
             );
 
@@ -3093,16 +3017,16 @@ mod test {
                 names.table(table_cache, "t1").unwrap().id(),
                 (None, None),
                 index_meta,
-                &[Range::Scope {
-                    min: Bound::Unbounded,
-                    max: Bound::Unbounded,
-                }][..],
+                false,
                 true,
                 deserializers,
                 false,
-                None,
             )
         }
+        let full = Range::Scope {
+            min: Bound::Unbounded,
+            max: Bound::Unbounded,
+        };
 
         let mut table_codec = TableCodec::default();
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -3196,15 +3120,48 @@ mod test {
             )?;
 
             assert_eq!(
-                super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+                super::next_tuple_for_test(|codec, tuple| {
+                    index_iter.next_tuple_into(
+                        IndexScanView {
+                            range: &full,
+                            cover_mapping: None,
+                        },
+                        &mut Default::default(),
+                        codec,
+                        tuple,
+                    )
+                })?
+                .unwrap(),
                 tuples[0]
             );
             assert_eq!(
-                super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+                super::next_tuple_for_test(|codec, tuple| {
+                    index_iter.next_tuple_into(
+                        IndexScanView {
+                            range: &full,
+                            cover_mapping: None,
+                        },
+                        &mut Default::default(),
+                        codec,
+                        tuple,
+                    )
+                })?
+                .unwrap(),
                 tuples[2]
             );
             assert_eq!(
-                super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+                super::next_tuple_for_test(|codec, tuple| {
+                    index_iter.next_tuple_into(
+                        IndexScanView {
+                            range: &full,
+                            cover_mapping: None,
+                        },
+                        &mut Default::default(),
+                        codec,
+                        tuple,
+                    )
+                })?
+                .unwrap(),
                 tuples[1]
             );
 
@@ -3240,11 +3197,33 @@ mod test {
         )?;
 
         assert_eq!(
-            super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+            super::next_tuple_for_test(|codec, tuple| {
+                index_iter.next_tuple_into(
+                    IndexScanView {
+                        range: &full,
+                        cover_mapping: None,
+                    },
+                    &mut Default::default(),
+                    codec,
+                    tuple,
+                )
+            })?
+            .unwrap(),
             tuples[2]
         );
         assert_eq!(
-            super::next_tuple_for_test(&mut index_iter)?.unwrap(),
+            super::next_tuple_for_test(|codec, tuple| {
+                index_iter.next_tuple_into(
+                    IndexScanView {
+                        range: &full,
+                        cover_mapping: None,
+                    },
+                    &mut Default::default(),
+                    codec,
+                    tuple,
+                )
+            })?
+            .unwrap(),
             tuples[1]
         );
 

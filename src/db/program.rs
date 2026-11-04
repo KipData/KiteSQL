@@ -225,7 +225,7 @@ impl<'p, T: StorageTransaction + 'p> ResultIter for ProgramIter<'_, 'p, T> {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
-    use crate::execution::dql::index_scan::IndexScan;
+    use crate::execution::dql::index_scan::{IndexScan, ScanRanges};
     use crate::expression::range_detacher::{Range, RangeValue};
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::filter::FilterOperator;
@@ -421,11 +421,13 @@ mod tests {
             let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
             let mut execution_arena =
                 crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
-            let ranges = IndexScan::ranges(
+            let mut ranges = ScanRanges::Owned(Range::Dummy);
+            IndexScan::bind_ranges(
                 info,
                 info.lookup.as_ref().expect("lookup"),
                 &mut execution_arena,
                 &mut arena,
+                &mut ranges,
             )?;
             let expected_range = match &expected_index.lookup {
                 Some(IndexLookup::Static(range)) => range,
@@ -437,8 +439,7 @@ mod tests {
                 } else {
                     original
                 };
-                let mut ranges = ranges;
-                assert_eq!(ranges.next(), Some(want));
+                assert_eq!(ranges.range(), want);
             }
             assert_eq!(
                 scan.physical_option.as_ref().unwrap().plan,
@@ -778,25 +779,25 @@ mod tests {
         let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
         let mut execution_arena =
             crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
-        let ranges = IndexScan::ranges(
+        let mut ranges = ScanRanges::Owned(Range::Dummy);
+        IndexScan::bind_ranges(
             info,
             info.lookup.as_ref().expect("lookup"),
             &mut execution_arena,
             &mut plan.arena,
+            &mut ranges,
         )?;
-        let mut ranges = ranges;
         assert_eq!(
-            ranges.next(),
-            Some(&Range::Scope {
+            ranges.range(),
+            &Range::Scope {
                 min: Bound::Included(
                     DataValue::Tuple(vec![DataValue::Int32(2), DataValue::Int32(2),]).into()
                 ),
                 max: Bound::Excluded(
                     DataValue::Tuple(vec![DataValue::Int32(2), DataValue::Int32(5),]).into()
                 ),
-            })
+            }
         );
-        drop(ranges);
 
         // The computed bound follows each execution's parameters, and a NULL one matches nothing.
         let mut tx = db.new_transaction(false)?;
