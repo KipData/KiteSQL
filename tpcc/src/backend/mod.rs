@@ -46,7 +46,7 @@ pub trait BackendControl: SimpleExecutor {
     where
         Self: 'a;
 
-    fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError>;
+    fn new_transaction(&self, read_only: bool) -> Result<Self::Transaction<'_>, TpccError>;
 
     fn worker(&self) -> Result<Self::Worker<'_>, TpccError>;
 

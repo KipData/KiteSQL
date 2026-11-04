@@ -64,7 +64,8 @@ pub(crate) trait TupleValueSerializable: Debug {
     ///
     /// # Safety
     ///
-    /// With a `scope`, those bytes must be a read of the transaction holding it.
+    /// Those bytes must be a value this crate encoded, since strings are not checked again as
+    /// UTF-8. With a `scope`, they must be a read of the transaction holding it.
     unsafe fn filling_value(
         &self,
         reader: &mut Cursor<&[u8]>,
@@ -282,17 +283,18 @@ impl BytesPool {
 
     /// # Safety
     ///
-    /// With a `scope`, `bytes` must be a read of the transaction holding it.
-    pub(crate) unsafe fn string(
-        &mut self,
-        bytes: &[u8],
-        scope: Option<&MappedScope>,
-    ) -> Result<Utf8Str, DatabaseError> {
-        Ok(match scope {
+    /// `bytes` must be UTF-8, as every string this crate encodes is, and is not checked again
+    /// outside debug builds. With a `scope`, `bytes` must be a read of the transaction holding it.
+    pub(crate) unsafe fn string(&mut self, bytes: &[u8], scope: Option<&MappedScope>) -> Utf8Str {
+        debug_assert!(str::from_utf8(bytes).is_ok(), "stored string is not UTF-8");
+        // SAFETY: the caller guarantees `bytes` is UTF-8.
+        let value = unsafe { str::from_utf8_unchecked(bytes) };
+        match scope {
             // SAFETY: the caller guarantees `bytes` is a read of `scope`'s transaction.
-            Some(scope) => unsafe { Utf8Str::mapped(str::from_utf8(bytes)?, scope) },
-            None => String::from_utf8(self.bytes(bytes))?.into(),
-        })
+            Some(scope) => unsafe { Utf8Str::mapped(value, scope) },
+            // SAFETY: the buffer holds exactly `bytes`, which are UTF-8.
+            None => unsafe { String::from_utf8_unchecked(self.bytes(bytes)) }.into(),
+        }
     }
 
     /// # Safety
@@ -588,7 +590,7 @@ impl TupleValueSerializable for CharSerializable {
 
         values.push(DataValue::Utf8 {
             // SAFETY: the caller's guarantee covers `bytes`.
-            value: unsafe { pool.string(&bytes[..trimmed_len], scope)? },
+            value: unsafe { pool.string(&bytes[..trimmed_len], scope) },
             ty: Utf8Type::Fixed(self.len),
             unit: self.unit,
         });
@@ -623,7 +625,7 @@ impl TupleValueSerializable for VarcharSerializable {
         let len = read_u32_le(reader)? as usize;
         values.push(DataValue::Utf8 {
             // SAFETY: the caller's guarantee covers the bytes under `reader`.
-            value: unsafe { pool.string(read_slice(reader, len)?, scope)? },
+            value: unsafe { pool.string(read_slice(reader, len)?, scope) },
             ty: Utf8Type::Variable(self.len),
             unit: self.unit,
         });
@@ -872,7 +874,7 @@ mod tests {
     fn bytes_pool_reuses_recycled_buffers() -> Result<(), DatabaseError> {
         let mut pool = BytesPool::default();
         // SAFETY: without a scope the string is copied.
-        let value = unsafe { pool.string(b"abc", None)? };
+        let value = unsafe { pool.string(b"abc", None) };
         let buffer = value.as_ptr();
         let large = vec![0; BytesPool::MAX_BUFFER_LEN + 1];
         let mut values = vec![

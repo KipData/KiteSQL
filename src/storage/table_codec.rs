@@ -834,6 +834,7 @@ impl TableCodec {
     ///
     /// # Safety
     ///
+    /// `bytes` must be a row this crate encoded, since strings are not checked again as UTF-8.
     /// With a `scope`, `bytes` must be a read of the transaction holding it.
     #[inline]
     pub(crate) unsafe fn decode_tuple_into<I, S>(

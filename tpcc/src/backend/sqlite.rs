@@ -66,8 +66,12 @@ impl SqliteBackend {
         Ok(groups)
     }
 
-    fn start_transaction(&self) -> Result<SqliteTransaction<'_>, TpccError> {
-        self.connection.execute("BEGIN IMMEDIATE")?;
+    fn start_transaction(&self, read_only: bool) -> Result<SqliteTransaction<'_>, TpccError> {
+        self.connection.execute(if read_only {
+            "BEGIN"
+        } else {
+            "BEGIN IMMEDIATE"
+        })?;
         Ok(SqliteTransaction {
             connection: &self.connection,
             finished: false,
@@ -98,8 +102,8 @@ impl BackendControl for SqliteBackend {
     where
         Self: 'a;
 
-    fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
-        self.start_transaction()
+    fn new_transaction(&self, read_only: bool) -> Result<Self::Transaction<'_>, TpccError> {
+        self.start_transaction(read_only)
     }
 
     fn worker(&self) -> Result<Self::Worker<'_>, TpccError> {

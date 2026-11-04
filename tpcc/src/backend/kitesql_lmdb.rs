@@ -51,9 +51,12 @@ impl KiteSqlLmdbBackend {
         Ok(groups)
     }
 
-    fn start_transaction(&self) -> Result<KiteSqlLmdbTransactionWrapper<'_>, TpccError> {
+    fn start_transaction(
+        &self,
+        read_only: bool,
+    ) -> Result<KiteSqlLmdbTransactionWrapper<'_>, TpccError> {
         Ok(KiteSqlLmdbTransactionWrapper {
-            inner: self.database.new_transaction(false)?,
+            inner: self.database.new_transaction(read_only)?,
         })
     }
 }
@@ -81,8 +84,8 @@ impl BackendControl for KiteSqlLmdbBackend {
     where
         Self: 'a;
 
-    fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
-        self.start_transaction()
+    fn new_transaction(&self, read_only: bool) -> Result<Self::Transaction<'_>, TpccError> {
+        self.start_transaction(read_only)
     }
 
     fn worker(&self) -> Result<Self::Worker<'_>, TpccError> {
