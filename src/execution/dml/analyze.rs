@@ -228,7 +228,7 @@ impl<'a> Analyze<'a> {
                 meta,
             });
             values.push(DataValue::Utf8 {
-                value: format!("{table_name}/{index_id}"),
+                value: format!("{table_name}/{index_id}").into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             });
@@ -597,14 +597,16 @@ mod test {
         );
         let mut transaction = kite_sql.storage.transaction()?;
         let mut table_codec = TableCodec::default();
-        let keys: Vec<Vec<u8>> = table_codec.with_index_statistics_bound(0, 1, |min, max| {
-            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
-            let mut keys = Vec::new();
-            while let Some((key, _)) = iter.try_next()? {
-                keys.push(key.to_vec());
-            }
-            Ok(keys)
-        })?;
+        let keys: Vec<Vec<u8>> =
+            table_codec.with_index_statistics_bound(0, 1, |min, max, pool| {
+                let mut iter =
+                    transaction.range(Bound::Included(min), Bound::Included(max), pool)?;
+                let mut keys = Vec::new();
+                while let Some((key, _)) = iter.try_next()? {
+                    keys.push(key.to_vec());
+                }
+                Ok(keys)
+            })?;
         for key in keys {
             transaction.remove(&key)?;
         }
@@ -669,8 +671,9 @@ mod test {
         let count = {
             let transaction = kite_sql.storage.transaction()?;
             let mut table_codec = TableCodec::default();
-            table_codec.with_statistics_bound(0, |min, max| {
-                let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+            table_codec.with_statistics_bound(0, |min, max, pool| {
+                let mut iter =
+                    transaction.range(Bound::Included(min), Bound::Included(max), pool)?;
                 let mut count = 0;
                 while iter.try_next()?.is_some() {
                     count += 1;
@@ -685,8 +688,8 @@ mod test {
 
         let transaction = kite_sql.storage.transaction()?;
         let mut table_codec = TableCodec::default();
-        let keys = table_codec.with_statistics_bound(0, |min, max| {
-            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max))?;
+        let keys = table_codec.with_statistics_bound(0, |min, max, pool| {
+            let mut iter = transaction.range(Bound::Included(min), Bound::Included(max), pool)?;
             let mut keys = 0;
             while iter.try_next()?.is_some() {
                 keys += 1;
@@ -714,9 +717,9 @@ mod test {
         assert!(kite_sql.state.meta_cache().columns.is_empty());
         assert!(kite_sql.state.meta_cache().indexes.is_empty());
         let transaction = kite_sql.storage.transaction()?;
-        table_codec.with_statistics_bound(0, |min, max| {
+        table_codec.with_statistics_bound(0, |min, max, pool| {
             assert!(transaction
-                .range(Bound::Included(min), Bound::Included(max))?
+                .range(Bound::Included(min), Bound::Included(max), pool)?
                 .try_next()?
                 .is_none());
             Ok(())

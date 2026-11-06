@@ -41,18 +41,20 @@ impl Accumulator for GroupConcatAccumulator {
             return Ok(());
         }
         if let Some(values) = &mut self.distinct_values {
-            if !values.insert(value.clone()) {
+            // SAFETY: an executor resets its accumulators before it runs again.
+            if !values.insert(unsafe { value.clone_in_txn() }) {
                 return Ok(());
             }
         }
         match &mut self.result {
             DataValue::Utf8 { value: text, .. } => {
+                let text = text.to_mut();
                 text.push(',');
                 let _ = write!(text, "{value}");
             }
             result => {
                 *result = DataValue::Utf8 {
-                    value: value.to_string(),
+                    value: value.to_string().into(),
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 }

@@ -205,7 +205,7 @@ impl<'plan, A: MetaArena> OperatorVisitor<'plan> for ScanColumnVisitor<'_, A> {
             return Ok(());
         };
         let arena = self.arena;
-        for &candidate in &project.exprs {
+        for &(_, candidate) in &project.exprs {
             let source = match arena.expression(candidate) {
                 ScalarExpression::Alias {
                     expr,

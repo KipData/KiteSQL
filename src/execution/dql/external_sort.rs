@@ -384,7 +384,7 @@ mod test {
             plan_arena.set_init_value(
                 reference,
                 DataValue::Utf8 {
-                    value: format!("row-{sequence}"),
+                    value: format!("row-{sequence}").into(),
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 },

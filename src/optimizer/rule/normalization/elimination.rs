@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::visitor::ExprVisitor;
 use crate::expression::visitor_mut::ExprVisitorMut;
@@ -36,7 +37,7 @@ use crate::types::index::{IndexLookup, IndexOrderHint};
 pub struct EliminateProject;
 
 struct Substitute<'m> {
-    exprs: Option<&'m [ExprRef]>,
+    exprs: Option<&'m [(Option<usize>, ExprRef)]>,
     offset: usize,
 }
 
@@ -80,7 +81,7 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for Substitute<'_> {
         match arena.expression(*expr) {
             ScalarExpression::ColumnRef { position, column } => {
                 let (position, column) = (*position, *column);
-                if let Some(replacement) = self.exprs.and_then(|exprs| exprs.get(position)) {
+                if let Some((_, replacement)) = self.exprs.and_then(|exprs| exprs.get(position)) {
                     // Do not revisit or mutate the replacement's input expression.
                     *expr = *replacement;
                 } else if self.offset != 0 {
@@ -113,7 +114,10 @@ fn movable_project(plan: &LogicalPlan, arena: &PlanArena) -> Result<bool, Databa
     else {
         return Ok(false);
     };
-    Ok(!contains_opaque(op.exprs.iter().copied(), arena)?)
+    Ok(!contains_opaque(
+        op.exprs.iter().map(|(_, expr)| *expr),
+        arena,
+    )?)
 }
 
 fn lift_cross_project(
@@ -145,7 +149,7 @@ fn lift_cross_project(
             exprs: None,
             offset,
         };
-        for expr in &mut op.exprs {
+        for (_, expr) in &mut op.exprs {
             ExprVisitorMut::visit(&mut shift, expr, arena)?;
         }
     }
@@ -153,10 +157,11 @@ fn lift_cross_project(
     let columns = other.output_schema(arena);
     op.exprs
         .extend(columns.iter().enumerate().map(|(index, column)| {
-            arena.alloc_expression(ScalarExpression::column_expr(
+            let expr = arena.alloc_expression(ScalarExpression::column_expr(
                 *column,
                 identity_start + index,
-            ))
+            ));
+            (None, expr)
         }));
     if from_right {
         op.exprs.rotate_right(offset);
@@ -225,7 +230,7 @@ impl NormalizationRule for EliminateProject {
             Some(
                 op.exprs
                     .iter()
-                    .map(|expr| expr.output_column_ref(arena))
+                    .map(|(_, expr)| expr.output_column_ref(arena))
                     .collect::<Vec<_>>(),
             )
         } else {
@@ -239,7 +244,7 @@ impl NormalizationRule for EliminateProject {
         match &mut plan.operator {
             Operator::Project(op) => {
                 if let Some(schema) = schema {
-                    for (expr, column) in op.exprs.iter_mut().zip(schema) {
+                    for ((_, expr), column) in op.exprs.iter_mut().zip(schema) {
                         let current = expr.output_column_ref(arena);
                         if arena.column(current).name() != arena.column(column).name() {
                             let alias = AliasType::Name(arena.column(column).name().to_string());
@@ -272,6 +277,52 @@ impl NormalizationRule for EliminateProject {
         }
         plan.reset_output_schema_cache();
         Ok(true)
+    }
+}
+
+pub struct MapProjectColumns;
+
+struct ColumnPositions(Vec<usize>);
+
+impl<A: MetaArena + ?Sized> ExprVisitor<A> for ColumnPositions {
+    fn visit_column_ref(&mut self, _: &ColumnRef, position: usize) -> Result<(), DatabaseError> {
+        self.0.push(position);
+        Ok(())
+    }
+}
+
+impl NormalizationRule for MapProjectColumns {
+    fn apply(
+        &self,
+        plan: &mut LogicalPlan,
+        arena: &mut PlanArena,
+        _loader: Option<&StatisticMetaLoader<'_>>,
+    ) -> Result<bool, DatabaseError> {
+        let Operator::Project(op) = &mut plan.operator else {
+            return Ok(false);
+        };
+        let mut reads = ColumnPositions(Vec::new());
+        for (_, expr) in &op.exprs {
+            reads.visit(*expr, &*arena)?;
+        }
+        let mut changed = false;
+        for (moved, expr) in op.exprs.iter_mut().filter(|(moved, _)| moved.is_none()) {
+            let mut expression = arena.expression(*expr);
+            let position = loop {
+                match expression {
+                    ScalarExpression::ColumnRef { position, .. } => break Some(*position),
+                    ScalarExpression::Alias { expr, .. } => expression = arena.expression(*expr),
+                    _ => break None,
+                }
+            };
+            if let Some(position) = position
+                .filter(|position| reads.0.iter().filter(|read| *read == position).count() == 1)
+            {
+                *moved = Some(position);
+                changed = true;
+            }
+        }
+        Ok(changed)
     }
 }
 
@@ -850,10 +901,10 @@ mod tests {
         let Operator::Project(op) = plan.operator else {
             unreachable!()
         };
-        let expr = binary(arena, op.exprs[1], BinaryOperator::Plus, 1);
+        let expr = binary(arena, op.exprs[1].1, BinaryOperator::Plus, 1);
         let input = plan.childrens.pop_only();
         plan = LogicalPlan::new(
-            Operator::Project(ProjectOperator::new(vec![expr, op.exprs[0]])),
+            Operator::Project(ProjectOperator::new(vec![expr, op.exprs[0].1])),
             Childrens::Only(Box::new(input)),
         );
         (plan, expr)
@@ -913,7 +964,7 @@ mod tests {
         let Operator::Project(op) = &plan.operator else {
             unreachable!()
         };
-        let ScalarExpression::Binary { left_expr, .. } = op.exprs[0].unpack_alias_ref(&arena)
+        let ScalarExpression::Binary { left_expr, .. } = op.exprs[0].1.unpack_alias_ref(&arena)
         else {
             unreachable!()
         };
@@ -977,7 +1028,7 @@ mod tests {
         let Operator::Project(op) = &plan.operator else {
             unreachable!()
         };
-        assert_eq!(op.exprs[0], output);
+        assert_eq!(op.exprs[0].1, output);
         let Childrens::Only(aggregate) = plan.childrens.as_ref() else {
             unreachable!()
         };
@@ -994,7 +1045,7 @@ mod tests {
         let Operator::Project(op) = &input.operator else {
             unreachable!()
         };
-        assert_eq!(op.exprs[0], replacement);
+        assert_eq!(op.exprs[0].1, replacement);
         assert!(matches!(
             input.childrens.only().operator,
             Operator::TableScan(_)
@@ -1031,7 +1082,7 @@ mod tests {
         let Operator::Filter(filter) = &plan.childrens.only().operator else {
             unreachable!()
         };
-        for rewritten in [project.exprs[0], filter.predicate] {
+        for rewritten in [project.exprs[0].1, filter.predicate] {
             let ScalarExpression::Binary { left_expr, .. } = rewritten.unpack_alias_ref(&arena)
             else {
                 unreachable!()
@@ -1068,12 +1119,9 @@ mod tests {
 
     fn permutation(arena: &mut PlanArena, mut input: LogicalPlan, slots: &[usize]) -> LogicalPlan {
         let schema = input.output_schema(arena).clone();
-        let exprs = slots
-            .iter()
-            .map(|position| {
-                arena.alloc_expression(ScalarExpression::column_expr(schema[*position], *position))
-            })
-            .collect();
+        let exprs = slots.iter().map(|position| {
+            arena.alloc_expression(ScalarExpression::column_expr(schema[*position], *position))
+        });
         LogicalPlan::new(
             Operator::Project(ProjectOperator::new(exprs)),
             Childrens::Only(Box::new(input)),
@@ -1100,7 +1148,7 @@ mod tests {
         let Operator::Project(op) = &mut plan.operator else {
             unreachable!()
         };
-        for expr in &mut op.exprs {
+        for (_, expr) in &mut op.exprs {
             *expr = binary(&mut arena, *expr, BinaryOperator::Multiply, 2);
         }
         let schema = plan.output_schema(&mut arena).clone();
@@ -1111,7 +1159,7 @@ mod tests {
         let Operator::Project(op) = &plan.operator else {
             unreachable!()
         };
-        for (expr, expected) in op.exprs.iter().zip([0, 1, 2, 10, 11, 8, 9, 3, 4, 5, 6, 7]) {
+        for ((_, expr), expected) in op.exprs.iter().zip([0, 1, 2, 10, 11, 8, 9, 3, 4, 5, 6, 7]) {
             let ScalarExpression::Binary { left_expr, .. } = expr.unpack_alias_ref(&arena) else {
                 unreachable!()
             };
@@ -1169,7 +1217,7 @@ mod tests {
             let positions: Vec<_> = op
                 .exprs
                 .iter()
-                .map(|expr| match expr.unpack_alias_ref(&arena) {
+                .map(|(_, expr)| match expr.unpack_alias_ref(&arena) {
                     ScalarExpression::ColumnRef { position, .. } => *position,
                     _ => unreachable!(),
                 })
@@ -1196,7 +1244,7 @@ mod tests {
         let Operator::Project(op) = &plan.operator else {
             unreachable!()
         };
-        for (expr, expected) in [(op.exprs[1], 2), (original, 1)] {
+        for (expr, expected) in [(op.exprs[1].1, 2), (original, 1)] {
             let ScalarExpression::Binary { left_expr, .. } = expr.unpack_alias_ref(&arena) else {
                 unreachable!()
             };
@@ -1259,7 +1307,7 @@ mod tests {
         let Operator::Project(op) = &plan.operator else {
             unreachable!("expected project");
         };
-        let ScalarExpression::ColumnRef { position, .. } = op.exprs[0].unpack_alias_ref(&arena)
+        let ScalarExpression::ColumnRef { position, .. } = op.exprs[0].1.unpack_alias_ref(&arena)
         else {
             unreachable!("expected column ref");
         };

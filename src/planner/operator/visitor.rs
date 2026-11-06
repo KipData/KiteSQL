@@ -434,7 +434,7 @@ impl<'a, V: ExprVisitor<A>, A: MetaArena + ?Sized> OperatorVisitor<'a>
         op: &'a ProjectOperator,
         _children: &mut ChildrenVisit<'a>,
     ) -> Result<(), DatabaseError> {
-        for expr in &op.exprs {
+        for (_, expr) in &op.exprs {
             ExprVisitor::visit(self.visitor, *expr, self.arena)?;
         }
         Ok(())

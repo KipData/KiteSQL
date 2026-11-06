@@ -48,7 +48,7 @@ fn data_value_to_js(value: &DataValue) -> Result<JsValue, JsValue> {
         DataValue::UInt16(value) => Ok(JsValue::from_f64(*value as f64)),
         DataValue::UInt32(value) => Ok(JsValue::from_f64(*value as f64)),
         DataValue::UInt64(value) => Ok(JsValue::from_f64(*value as f64)),
-        DataValue::Binary { value, .. } => Ok(Uint8Array::from(value.as_slice()).into()),
+        DataValue::Binary { value, .. } => Ok(Uint8Array::from(value.as_bytes()).into()),
         DataValue::Utf8 { value, ty, unit } => {
             let object = Object::new();
             set_prop(&object, "value", JsValue::from_str(value))?;

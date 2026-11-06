@@ -693,7 +693,7 @@ impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_,
 
     pub(crate) fn wildcard_expr() -> ScalarExpression {
         ScalarExpression::Constant(DataValue::Utf8 {
-            value: "*".to_string(),
+            value: "*".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         })

@@ -116,7 +116,8 @@ impl WindowFunction for Aggregate {
         accumulator.evaluate()?;
         let result = accumulator.result();
         for (_, row) in &mut rows[peer] {
-            row[output_position] = result.clone();
+            // SAFETY: the rows only pass through this execution, as the values they were read with.
+            row[output_position] = unsafe { result.clone_in_txn() };
         }
         Ok(())
     }

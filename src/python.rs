@@ -14,7 +14,7 @@
 
 #![cfg(all(not(target_arch = "wasm32"), feature = "python"))]
 
-use crate::db::{DataBaseBuilder, Database, DatabaseIter};
+use crate::db::{DataBaseBuilder, Database, DatabaseIter, ResultRow};
 use crate::errors::DatabaseError;
 #[cfg(feature = "lmdb")]
 use crate::storage::lmdb::LmdbStorage;
@@ -169,7 +169,7 @@ enum PythonResultIterInner {
 impl PythonResultIterInner {
     fn next_tuple<R>(
         &mut self,
-        f: impl FnOnce(&mut TupleImpl) -> R,
+        f: impl FnOnce(&mut ResultRow<'_, '_>) -> R,
     ) -> Result<Option<R>, DatabaseError> {
         match self {
             #[cfg(feature = "lmdb")]

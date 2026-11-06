@@ -72,7 +72,8 @@ impl DistinctCountAccumulator {
 impl Accumulator for DistinctCountAccumulator {
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError> {
         if !value.is_null() && !self.distinct_values.contains(value) {
-            self.distinct_values.insert(value.clone());
+            // SAFETY: an executor resets its accumulators before it runs again.
+            self.distinct_values.insert(unsafe { value.clone_in_txn() });
             self.result = DataValue::Int32(self.distinct_values.len() as i32);
         }
 

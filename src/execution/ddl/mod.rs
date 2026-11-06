@@ -59,7 +59,7 @@ fn read_tuple_batch<T: StorageTransaction>(
             Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
             Bound::Unbounded => Bound::Included(min),
         };
-        let mut iter = transaction.range(lower, Bound::Included(max))?;
+        let mut iter = transaction.range(lower, Bound::Included(max), pool)?;
         let mut len = 0;
 
         while len < batch_size {
@@ -78,14 +78,18 @@ fn read_tuple_batch<T: StorageTransaction>(
                     .last_mut()
                     .expect("batch contains the tuple that was just pushed")
             };
-            TableCodec::decode_tuple_into(
-                tuple.output_mut(),
-                old_deserializers,
-                Some(tuple_id),
-                value,
-                old_deserializers.len(),
-                pool,
-            )?;
+            // SAFETY: without a scope every value is copied.
+            unsafe {
+                TableCodec::decode_tuple_into(
+                    tuple.output_mut(),
+                    old_deserializers,
+                    Some(tuple_id),
+                    value,
+                    old_deserializers.len(),
+                    pool,
+                    None,
+                )?
+            };
             len += 1;
         }
 

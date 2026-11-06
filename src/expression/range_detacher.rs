@@ -158,8 +158,9 @@ impl RangeValue {
         }
     }
 
-    fn bind_parameters<'p, F, G>(
+    fn bind_from<'p, F, G>(
         &mut self,
+        template: &RangeValue,
         params: &F,
         init_values: &G,
     ) -> Result<bool, DatabaseError>
@@ -167,13 +168,15 @@ impl RangeValue {
         F: Fn(usize) -> Option<&'p DataValue>,
         G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
     {
+        let bind = |value: &mut DataValue| match template {
+            RangeValue::Value(template) => value.bind_from(template, params, init_values),
+            RangeValue::Computed(computed) => computed.compute(value, params, init_values),
+        };
         match self {
-            RangeValue::Value(value) => value.bind_parameters(params, init_values),
-            RangeValue::Computed(computed) => {
-                let Some(mut value) = computed.compute(params, init_values)? else {
-                    return Ok(true);
-                };
-                let has_null = value.bind_parameters(params, init_values)?;
+            RangeValue::Value(value) => bind(value),
+            RangeValue::Computed(_) => {
+                let mut value = DataValue::Null;
+                let has_null = bind(&mut value)?;
                 *self = RangeValue::Value(value);
                 Ok(has_null)
             }
@@ -189,20 +192,22 @@ impl RangeValue {
 }
 
 impl ComputedValue {
-    /// Computes the value, moving the operands out; `None` when the result is NULL.
+    /// Computes the value into `target`. Returns whether the result or a bound prefix value is
+    /// NULL.
     fn compute<'p, F, G>(
-        &mut self,
+        &self,
+        target: &mut DataValue,
         params: &F,
         init_values: &G,
-    ) -> Result<Option<DataValue>, DatabaseError>
+    ) -> Result<bool, DatabaseError>
     where
         F: Fn(usize) -> Option<&'p DataValue>,
         G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
     {
-        let mut left = mem::replace(&mut self.left, DataValue::Null);
-        let mut right = mem::replace(&mut self.right, DataValue::Null);
-        left.bind_parameters(params, init_values)?;
-        right.bind_parameters(params, init_values)?;
+        let mut left = DataValue::Null;
+        let mut right = DataValue::Null;
+        left.bind_from(&self.left, params, init_values)?;
+        right.bind_from(&self.right, params, init_values)?;
         let value = binary_create(Cow::Borrowed(&self.eval_ty), self.op)?
             .binary_eval(
                 Cow::Owned(left.cast(&self.eval_ty)?),
@@ -210,15 +215,26 @@ impl ComputedValue {
             )?
             .cast(&self.ty)?;
         if value.is_null() {
-            return Ok(None);
+            return Ok(true);
         }
-        Ok(Some(match self.prefix.take() {
-            Some(mut values) => {
-                values.push(value);
-                DataValue::Tuple(values)
+        let Some(prefix) = &self.prefix else {
+            *target = value;
+            return Ok(false);
+        };
+        let fill = |values: &mut Vec<DataValue>| {
+            let has_null = DataValue::bind_values_from(values, prefix, params, init_values)?;
+            values.push(value);
+            Ok(has_null)
+        };
+        match target {
+            DataValue::Tuple(values) => fill(values),
+            _ => {
+                let mut values = Vec::with_capacity(prefix.len() + 1);
+                let has_null = fill(&mut values)?;
+                *target = DataValue::Tuple(values);
+                Ok(has_null)
             }
-            None => value,
-        }))
+        }
     }
 }
 
@@ -403,8 +419,16 @@ fn build_tree<I: EqRangeInput + ?Sized>(
 }
 
 impl Range {
-    pub(crate) fn bind_parameters<'p, F, G>(
+    pub(crate) fn as_slice(&self) -> &[Range] {
+        match self {
+            Range::SortedRanges(ranges) => ranges,
+            range => std::slice::from_ref(range),
+        }
+    }
+
+    pub(crate) fn bind_from<'p, F, G>(
         &mut self,
+        template: &Range,
         params: &F,
         init_values: &G,
     ) -> Result<(), DatabaseError>
@@ -412,24 +436,82 @@ impl Range {
         F: Fn(usize) -> Option<&'p DataValue>,
         G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
     {
-        let has_null = match self {
+        let has_null = match template {
             Self::Scope { min, max } => {
-                let mut has_null = false;
-                for bound in [min, max] {
-                    if let Bound::Included(value) | Bound::Excluded(value) = bound {
-                        has_null |= value.bind_parameters(params, init_values)?;
+                let bind_bound =
+                    |target: &mut Bound<RangeValue>, template: &Bound<RangeValue>| match (
+                        target, template,
+                    ) {
+                        (Bound::Included(value), Bound::Included(template))
+                        | (Bound::Excluded(value), Bound::Excluded(template)) => {
+                            value.bind_from(template, params, init_values)
+                        }
+                        (target, Bound::Unbounded) => {
+                            *target = Bound::Unbounded;
+                            Ok(false)
+                        }
+                        (target, Bound::Included(template)) => {
+                            let mut value = RangeValue::NULL;
+                            let has_null = value.bind_from(template, params, init_values)?;
+                            *target = Bound::Included(value);
+                            Ok(has_null)
+                        }
+                        (target, Bound::Excluded(template)) => {
+                            let mut value = RangeValue::NULL;
+                            let has_null = value.bind_from(template, params, init_values)?;
+                            *target = Bound::Excluded(value);
+                            Ok(has_null)
+                        }
+                    };
+                match self {
+                    Self::Scope {
+                        min: target_min,
+                        max: target_max,
+                    } => bind_bound(target_min, min)? | bind_bound(target_max, max)?,
+                    _ => {
+                        let (mut target_min, mut target_max) = (Bound::Unbounded, Bound::Unbounded);
+                        let has_null =
+                            bind_bound(&mut target_min, min)? | bind_bound(&mut target_max, max)?;
+                        *self = Self::Scope {
+                            min: target_min,
+                            max: target_max,
+                        };
+                        has_null
                     }
                 }
-                has_null
             }
-            Self::Eq(value) => value.bind_parameters(params, init_values)?,
-            Self::SortedRanges(ranges) => {
-                for range in ranges {
-                    range.bind_parameters(params, init_values)?;
+            Self::Eq(template) => match self {
+                Self::Eq(value) => value.bind_from(template, params, init_values)?,
+                _ => {
+                    let mut value = RangeValue::NULL;
+                    let has_null = value.bind_from(template, params, init_values)?;
+                    *self = Self::Eq(value);
+                    has_null
+                }
+            },
+            Self::SortedRanges(templates) => {
+                let bind = |ranges: &mut Vec<Range>| {
+                    ranges.truncate(templates.len());
+                    ranges.resize_with(templates.len(), || Self::Dummy);
+                    for (range, template) in ranges.iter_mut().zip(templates) {
+                        range.bind_from(template, params, init_values)?;
+                    }
+                    Ok::<_, DatabaseError>(())
+                };
+                match self {
+                    Self::SortedRanges(ranges) => bind(ranges)?,
+                    _ => {
+                        let mut ranges = Vec::with_capacity(templates.len());
+                        bind(&mut ranges)?;
+                        *self = Self::SortedRanges(ranges);
+                    }
                 }
                 false
             }
-            Self::Dummy => false,
+            Self::Dummy => {
+                *self = Self::Dummy;
+                false
+            }
         };
         if has_null {
             *self = Self::Dummy;
@@ -3487,35 +3569,39 @@ mod test {
             _ => None,
         };
 
-        let mut point = Range::Eq(DataValue::Tuple(vec![DataValue::Int32(1), init(first)]).into());
-        assert!(point.has_parameter());
-        point.bind_parameters(&|_| None, &get)?;
+        let template = Range::Eq(DataValue::Tuple(vec![DataValue::Int32(1), init(first)]).into());
+        assert!(template.has_parameter());
+        let mut point = Range::Dummy;
+        point.bind_from(&template, &|_| None, &get)?;
         assert!(!point.has_parameter());
         assert_eq!(
             point,
             Range::Eq(DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Int64(7)]).into())
         );
 
-        let mut null_point =
-            Range::Eq(DataValue::Tuple(vec![DataValue::Null, init(second)]).into());
-        null_point.bind_parameters(&|_| None, &get)?;
-        assert_eq!(null_point, Range::Dummy);
+        let null_template = Range::Eq(DataValue::Tuple(vec![DataValue::Null, init(second)]).into());
+        // Rebinding into the bound point overwrites it.
+        point.bind_from(&null_template, &|_| None, &get)?;
+        assert_eq!(point, Range::Dummy);
 
-        let mut ranges = Range::SortedRanges(vec![
+        let template = Range::SortedRanges(vec![
             Range::Eq(init(first).into()),
             Range::Scope {
                 min: Bound::Excluded(init(second).into()),
                 max: Bound::Excluded(DataValue::Null.into()),
             },
         ]);
-        ranges.bind_parameters(&|_| None, &get)?;
+        let mut ranges = Range::Dummy;
+        ranges.bind_from(&template, &|_| None, &get)?;
         assert_eq!(
             ranges,
             Range::SortedRanges(vec![Range::Eq(DataValue::Int64(7).into()), Range::Dummy])
         );
 
-        let mut unset = Range::Eq(init(first).into());
-        assert!(unset.bind_parameters(&|_| None, &|_| None).is_err());
+        let unset = Range::Eq(init(first).into());
+        assert!(Range::Dummy
+            .bind_from(&unset, &|_| None, &|_| None)
+            .is_err());
         Ok(())
     }
 
@@ -3542,31 +3628,35 @@ mod test {
             ),
             Err((left.clone(), right.clone())),
         );
-        let mut ranges = Range::SortedRanges(vec![left, right]);
-        let low = DataValue::Int32(8);
-        let high = DataValue::Int32(3);
-        ranges.bind_parameters(
-            &|id| match id {
-                1 => Some(&low),
-                2 => Some(&high),
-                _ => None,
-            },
-            &|_| None,
-        )?;
-        assert!(!ranges.has_parameter());
-        assert_eq!(
-            ranges,
+        let template = Range::SortedRanges(vec![left, right]);
+        let expected = |low: &DataValue, high: &DataValue| {
             Range::SortedRanges(vec![
                 Range::Scope {
-                    min: Bound::Included(low.into()),
-                    max: Bound::Unbounded
+                    min: Bound::Included(low.clone().into()),
+                    max: Bound::Unbounded,
                 },
                 Range::Scope {
                     min: Bound::Unbounded,
-                    max: Bound::Excluded(high.into())
+                    max: Bound::Excluded(high.clone().into()),
                 },
             ])
-        );
+        };
+        // The second binding writes over the first, as a rerun of a prepared statement does.
+        let mut ranges = Range::Dummy;
+        for (low, high) in [(8, 3), (1, 9)] {
+            let (low, high) = (DataValue::Int32(low), DataValue::Int32(high));
+            ranges.bind_from(
+                &template,
+                &|id| match id {
+                    1 => Some(&low),
+                    2 => Some(&high),
+                    _ => None,
+                },
+                &|_| None,
+            )?;
+            assert!(!ranges.has_parameter());
+            assert_eq!(ranges, expected(&low, &high));
+        }
         Ok(())
     }
 

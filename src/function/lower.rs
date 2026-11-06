@@ -60,7 +60,7 @@ impl ScalarFunctionImpl for Lower {
         }
         Ok(match value.as_ref() {
             DataValue::Utf8 { value, ty, unit } => DataValue::Utf8 {
-                value: value.to_lowercase(),
+                value: value.to_lowercase().into(),
                 ty: ty.clone(),
                 unit: *unit,
             },

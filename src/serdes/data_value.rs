@@ -212,10 +212,13 @@ impl DataValue {
                 } else {
                     None
                 };
-                Ok(DataValue::Binary { value, len })
+                Ok(DataValue::Binary {
+                    value: value.into(),
+                    len,
+                })
             }
             TAG_UTF8 => Ok(DataValue::Utf8 {
-                value: read_string(reader)?,
+                value: read_string(reader)?.into(),
                 ty: read_utf8_type(reader)?,
                 unit: read_char_length_units(reader)?,
             }),
@@ -438,7 +441,7 @@ pub(crate) mod test {
     fn test_serialization() -> Result<(), DatabaseError> {
         let sources = vec![
             DataValue::Binary {
-                value: vec![0, 255, 128],
+                value: vec![0, 255, 128].into(),
                 len: Some(8),
             },
             DataValue::from(Vec::<u8>::new()),
@@ -455,12 +458,12 @@ pub(crate) mod test {
             DataValue::UInt32(32),
             DataValue::UInt64(64),
             DataValue::Utf8 {
-                value: "hello".to_string(),
+                value: "hello".into(),
                 ty: Utf8Type::Variable(Some(16)),
                 unit: CharLengthUnits::Characters,
             },
             DataValue::Utf8 {
-                value: "octets".to_string(),
+                value: "octets".into(),
                 ty: Utf8Type::Fixed(8),
                 unit: CharLengthUnits::Octets,
             },

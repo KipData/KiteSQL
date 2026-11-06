@@ -65,7 +65,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Explain<'a> {
         output.pk = None;
         output.values.clear();
         output.values.push(DataValue::Utf8 {
-            value: plan,
+            value: plan.into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });

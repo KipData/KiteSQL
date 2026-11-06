@@ -55,7 +55,8 @@ impl Accumulator for MinMaxAccumulator {
             } else {
                 true
             }
-            .then(|| self.result = value.clone());
+            // SAFETY: an executor resets its accumulators before it runs again.
+            .then(|| self.result = unsafe { value.clone_in_txn() });
         }
 
         Ok(())

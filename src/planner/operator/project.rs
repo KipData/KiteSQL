@@ -18,12 +18,14 @@ use kite_sql_serde_macros::ReferenceSerialization;
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct ProjectOperator {
-    pub exprs: Vec<ExprRef>,
+    pub exprs: Vec<(Option<usize>, ExprRef)>,
 }
 
 impl ProjectOperator {
-    pub fn new(exprs: Vec<ExprRef>) -> Self {
-        Self { exprs }
+    pub fn new(exprs: impl IntoIterator<Item = ExprRef>) -> Self {
+        Self {
+            exprs: exprs.into_iter().map(|expr| (None, expr)).collect(),
+        }
     }
 }
 
@@ -34,7 +36,7 @@ impl Explain for ProjectOperator {
         f: &mut std::fmt::Formatter<'_>,
     ) -> std::fmt::Result {
         f.write_str("Projection [")?;
-        fmt_explain_list(&self.exprs, ", ", arena, f)?;
+        fmt_explain_list(self.exprs.iter().map(|(_, expr)| expr), ", ", arena, f)?;
         f.write_str("]")
     }
 }

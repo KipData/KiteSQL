@@ -64,8 +64,7 @@ fn project_join_output(
         .zip(positions)
         .map(|(column, position)| {
             arena.alloc_expression(ScalarExpression::column_expr(column, position))
-        })
-        .collect();
+        });
     let mut plan = LogicalPlan::new(
         Operator::Project(ProjectOperator::new(exprs)),
         Childrens::Only(Box::new(join)),
@@ -1126,17 +1125,12 @@ mod tests {
             },
         ));
         let schema = join.output_schema(arena);
-        let exprs = schema
-            .iter()
-            .enumerate()
-            .map(|(position, column)| {
-                arena.alloc_expression(ScalarExpression::column_expr(*column, position))
-            })
-            .collect();
-        let mut project = LogicalPlan::new(
-            Operator::Project(ProjectOperator::new(exprs)),
-            Childrens::Only(Box::new(join)),
-        );
+        let exprs = schema.iter().enumerate().map(|(position, column)| {
+            arena.alloc_expression(ScalarExpression::column_expr(*column, position))
+        });
+        let project = ProjectOperator::new(exprs);
+        let mut project =
+            LogicalPlan::new(Operator::Project(project), Childrens::Only(Box::new(join)));
         project.physical_option = Some(PhysicalOption::new(
             PlanImpl::Project,
             SortOption::Follow,
@@ -1210,7 +1204,7 @@ mod tests {
         let Operator::Project(project) = &plan.operator else {
             unreachable!()
         };
-        for (expr, position) in project.exprs.iter().zip([2, 0, 1]) {
+        for ((_, expr), position) in project.exprs.iter().zip([2, 0, 1]) {
             assert!(matches!(
                 arena.expression(*expr),
                 ScalarExpression::ColumnRef { position: actual, .. } if *actual == position
@@ -1318,7 +1312,7 @@ mod tests {
         let Operator::Project(project) = &plan.operator else {
             unreachable!()
         };
-        for (expr, expected) in project.exprs.iter().zip([0, 2, 1]) {
+        for ((_, expr), expected) in project.exprs.iter().zip([0, 2, 1]) {
             assert!(
                 matches!(arena.expression(*expr), ScalarExpression::ColumnRef { position, .. } if *position == expected)
             );

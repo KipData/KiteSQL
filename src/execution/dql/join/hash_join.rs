@@ -139,12 +139,10 @@ impl<'a> HashJoin<'a> {
         plan_arena: &(dyn MetaArena + '_),
     ) -> Result<(), DatabaseError> {
         for expr in on_keys {
-            buf.push(
-                plan_arena
-                    .expression(*expr)
-                    .eval(plan_arena, Some(tuple))?
-                    .into_owned(),
-            );
+            let key = plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?;
+            // SAFETY: the build table and probe keys are dropped when `reset` returns to
+            // `HashJoinState::Build`, before the next execution.
+            buf.push(unsafe { DataValue::own_in_txn(key) });
         }
         Ok(())
     }

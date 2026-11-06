@@ -329,13 +329,15 @@ impl NestedLoopJoin<'_> {
     /// `right`: current inner tuple (logical left for RightOuter).
     /// `ty`: the type of join
     fn emit_tuple(left: &TupleImpl, right: &mut TupleImpl, ty: JoinType) {
-        let values = left.iter().cloned();
+        // SAFETY: the joined row is read in this execution, as the rows it copies from are.
+        let copy = |value: &DataValue| unsafe { value.clone_in_txn() };
+        let values = left.iter().map(copy);
         let pk = if matches!(ty, JoinType::RightOuter) {
             right.extend(values);
-            right.take_pk().or_else(|| left.pk().cloned())
+            right.take_pk().or_else(|| left.pk().map(copy))
         } else {
             right.prepend(values);
-            left.pk().cloned().or_else(|| right.take_pk())
+            left.pk().map(copy).or_else(|| right.take_pk())
         };
         right.set_pk(pk);
     }
@@ -386,7 +388,7 @@ mod test {
             .iter()
             .map(|value| match value {
                 DataValue::Null => None,
-                DataValue::Utf8 { value, .. } => Some(value.clone()),
+                DataValue::Utf8 { value, .. } => Some(value.to_string()),
                 other => Some(other.to_string()),
             })
             .collect()

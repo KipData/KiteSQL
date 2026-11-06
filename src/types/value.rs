@@ -18,6 +18,7 @@ use crate::iter_ext::Itertools;
 use crate::planner::ScalarQueryRef;
 use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};
 use crate::types::evaluator::cast::cast_create;
+pub use crate::types::mapped::{BinaryBytes, Utf8Str};
 use crate::types::CharLengthUnits;
 #[cfg(feature = "time")]
 use chrono::{
@@ -27,13 +28,12 @@ use chrono::{
 use ordered_float::OrderedFloat;
 #[cfg(feature = "decimal")]
 use rust_decimal::Decimal;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::fmt::Formatter;
 use std::hash::Hash;
 use std::io::Read;
-#[cfg(feature = "decimal")]
-use std::mem;
-use std::{cmp, fmt, slice};
+use std::{cmp, fmt, mem, slice};
 
 trait ReadByteExt: Read {
     fn read_u8(&mut self) -> std::io::Result<u8> {
@@ -131,7 +131,6 @@ pub enum Utf8Type {
     Fixed(u32),
 }
 
-#[derive(Clone)]
 pub enum DataValue {
     /// A typed placeholder used only while preparing a plan.
     Parameter {
@@ -155,7 +154,7 @@ pub enum DataValue {
     UInt32(u32),
     UInt64(u64),
     Utf8 {
-        value: String,
+        value: Utf8Str,
         ty: Utf8Type,
         unit: CharLengthUnits,
     },
@@ -169,9 +168,83 @@ pub enum DataValue {
     Decimal(Decimal),
     Tuple(Vec<DataValue>),
     Binary {
-        value: Vec<u8>,
+        value: BinaryBytes,
         len: Option<u32>,
     },
+}
+
+impl Clone for DataValue {
+    fn clone(&self) -> Self {
+        match self {
+            DataValue::Parameter { id, ty } => DataValue::Parameter {
+                id: *id,
+                ty: ty.clone(),
+            },
+            DataValue::InitValue { id, ty } => DataValue::InitValue {
+                id: *id,
+                ty: ty.clone(),
+            },
+            DataValue::Null => DataValue::Null,
+            DataValue::Boolean(v) => DataValue::Boolean(*v),
+            DataValue::Float32(v) => DataValue::Float32(*v),
+            DataValue::Float64(v) => DataValue::Float64(*v),
+            DataValue::Int8(v) => DataValue::Int8(*v),
+            DataValue::Int16(v) => DataValue::Int16(*v),
+            DataValue::Int32(v) => DataValue::Int32(*v),
+            DataValue::Int64(v) => DataValue::Int64(*v),
+            DataValue::UInt8(v) => DataValue::UInt8(*v),
+            DataValue::UInt16(v) => DataValue::UInt16(*v),
+            DataValue::UInt32(v) => DataValue::UInt32(*v),
+            DataValue::UInt64(v) => DataValue::UInt64(*v),
+            DataValue::Utf8 { value, ty, unit } => DataValue::Utf8 {
+                value: value.clone(),
+                ty: ty.clone(),
+                unit: *unit,
+            },
+            DataValue::Date32(v) => DataValue::Date32(*v),
+            DataValue::Date64(v) => DataValue::Date64(*v),
+            DataValue::Time32(v, precision) => DataValue::Time32(*v, *precision),
+            DataValue::Time64(v, precision, zone) => DataValue::Time64(*v, *precision, *zone),
+            #[cfg(feature = "decimal")]
+            DataValue::Decimal(v) => DataValue::Decimal(*v),
+            DataValue::Tuple(values) => DataValue::Tuple(values.clone()),
+            DataValue::Binary { value, len } => DataValue::Binary {
+                value: value.clone(),
+                len: *len,
+            },
+        }
+    }
+
+    fn clone_from(&mut self, source: &Self) {
+        match (self, source) {
+            (
+                DataValue::Utf8 { value, ty, unit },
+                DataValue::Utf8 {
+                    value: source_value,
+                    ty: source_ty,
+                    unit: source_unit,
+                },
+            ) => {
+                value.clone_from(source_value);
+                ty.clone_from(source_ty);
+                *unit = *source_unit;
+            }
+            (
+                DataValue::Binary { value, len },
+                DataValue::Binary {
+                    value: source_value,
+                    len: source_len,
+                },
+            ) => {
+                value.clone_from(source_value);
+                *len = *source_len;
+            }
+            (DataValue::Tuple(values), DataValue::Tuple(source_values)) => {
+                values.clone_from(source_values)
+            }
+            (target, source) => *target = source.clone(),
+        }
+    }
 }
 
 /// A read-only view of a value, including an unmaterialized tuple slice.
@@ -648,8 +721,9 @@ impl DataValue {
         digits.parse().ok()
     }
 
-    pub(crate) fn bind_parameters<'p, F, G>(
+    pub(crate) fn bind_from<'p, F, G>(
         &mut self,
+        template: &DataValue,
         params: &F,
         init_values: &G,
     ) -> Result<bool, DatabaseError>
@@ -657,32 +731,60 @@ impl DataValue {
         F: Fn(usize) -> Option<&'p DataValue>,
         G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
     {
-        match self {
-            DataValue::Parameter { id, ty } => {
-                let Some(input) = params(*id) else {
-                    return Err(DatabaseError::parameter_not_found(format!("${id}")));
+        let (input, ty) = match template {
+            DataValue::Parameter { id, ty } => (
+                params(*id).ok_or_else(|| DatabaseError::parameter_not_found(format!("${id}")))?,
+                ty,
+            ),
+            DataValue::InitValue { id, ty } => (
+                init_values(*id).ok_or_else(|| {
+                    DatabaseError::InvalidValue(format!("scalar query {id} is not initialized"))
+                })?,
+                ty,
+            ),
+            DataValue::Tuple(templates) => {
+                return match self {
+                    DataValue::Tuple(values) => {
+                        Self::bind_values_from(values, templates, params, init_values)
+                    }
+                    _ => {
+                        let mut values = Vec::with_capacity(templates.len());
+                        let has_null =
+                            Self::bind_values_from(&mut values, templates, params, init_values)?;
+                        *self = DataValue::Tuple(values);
+                        Ok(has_null)
+                    }
                 };
-                *self = input.clone().cast(ty)?;
-                Ok(self.is_null())
             }
-            DataValue::InitValue { id, ty } => {
-                let Some(input) = init_values(*id) else {
-                    return Err(DatabaseError::InvalidValue(format!(
-                        "scalar query {id} is not initialized"
-                    )));
-                };
-                *self = input.clone().cast(ty)?;
-                Ok(self.is_null())
+            template => {
+                self.clone_from(template);
+                return Ok(false);
             }
-            DataValue::Tuple(values) => {
-                let mut has_null = false;
-                for value in values {
-                    has_null |= value.bind_parameters(params, init_values)?;
-                }
-                Ok(has_null)
-            }
-            _ => Ok(false),
+        };
+        self.clone_from(input);
+        if self.logical_type() != *ty {
+            *self = mem::replace(self, DataValue::Null).cast(ty)?;
         }
+        Ok(self.is_null())
+    }
+
+    pub(crate) fn bind_values_from<'p, F, G>(
+        values: &mut Vec<DataValue>,
+        templates: &[DataValue],
+        params: &F,
+        init_values: &G,
+    ) -> Result<bool, DatabaseError>
+    where
+        F: Fn(usize) -> Option<&'p DataValue>,
+        G: Fn(ScalarQueryRef) -> Option<&'p DataValue>,
+    {
+        values.truncate(templates.len());
+        values.resize_with(templates.len(), || DataValue::Null);
+        let mut has_null = false;
+        for (value, template) in values.iter_mut().zip(templates) {
+            has_null |= value.bind_from(template, params, init_values)?;
+        }
+        Ok(has_null)
     }
 
     pub(crate) fn has_parameter(&self) -> bool {
@@ -759,7 +861,7 @@ impl DataValue {
     pub fn new_utf8(string: String) -> Self {
         DataValue::Utf8 {
             ty: Utf8Type::Fixed(string.len() as u32),
-            value: string,
+            value: string.into(),
             unit: CharLengthUnits::Characters,
         }
     }
@@ -867,6 +969,48 @@ impl DataValue {
         )
     }
 
+    /// Copies every mapped string and binary so the value outlives its transaction.
+    pub(crate) fn materialize(&mut self) {
+        match self {
+            DataValue::Utf8 { value, .. } => value.materialize(),
+            DataValue::Binary { value, .. } => value.materialize(),
+            DataValue::Tuple(values) => values.iter_mut().for_each(DataValue::materialize),
+            _ => (),
+        }
+    }
+
+    pub(crate) unsafe fn clone_in_txn(&self) -> DataValue {
+        match self {
+            DataValue::Utf8 { value, ty, unit } => DataValue::Utf8 {
+                // SAFETY: the caller's guarantee covers the copy.
+                value: unsafe { value.clone_in_txn() },
+                ty: ty.clone(),
+                unit: *unit,
+            },
+            DataValue::Binary { value, len } => DataValue::Binary {
+                // SAFETY: as above.
+                value: unsafe { value.clone_in_txn() },
+                len: *len,
+            },
+            DataValue::Tuple(values) => DataValue::Tuple(
+                values
+                    .iter()
+                    // SAFETY: as above.
+                    .map(|value| unsafe { value.clone_in_txn() })
+                    .collect(),
+            ),
+            value => value.clone(),
+        }
+    }
+
+    pub(crate) unsafe fn own_in_txn(value: Cow<'_, DataValue>) -> DataValue {
+        match value {
+            Cow::Owned(value) => value,
+            // SAFETY: the caller's guarantee covers the copy.
+            Cow::Borrowed(value) => unsafe { value.clone_in_txn() },
+        }
+    }
+
     #[inline]
     pub fn is_null(&self) -> bool {
         matches!(self, DataValue::Null)
@@ -917,17 +1061,17 @@ impl DataValue {
             LogicalType::Float => DataValue::Float32(OrderedFloat(0.0)),
             LogicalType::Double => DataValue::Float64(OrderedFloat(0.0)),
             LogicalType::Char(len, unit) => DataValue::Utf8 {
-                value: String::new(),
+                value: String::new().into(),
                 ty: Utf8Type::Fixed(*len),
                 unit: *unit,
             },
             LogicalType::Varchar(len, unit) => DataValue::Utf8 {
-                value: String::new(),
+                value: String::new().into(),
                 ty: Utf8Type::Variable(*len),
                 unit: *unit,
             },
             LogicalType::Varbinary(len) => DataValue::Binary {
-                value: Vec::new(),
+                value: Vec::new().into(),
                 len: *len,
             },
             LogicalType::Date => {
@@ -1384,16 +1528,16 @@ impl DataValue {
                 Ok(DataValue::Boolean(b[0] == b'1'))
             }
             LogicalType::Varbinary(len) => Ok(DataValue::Binary {
-                value: Self::decode_string(reader)?,
+                value: Self::decode_string(reader)?.into(),
                 len: *len,
             }),
             LogicalType::Varchar(len, unit) => Ok(DataValue::Utf8 {
-                value: String::from_utf8(Self::decode_string(reader)?)?,
+                value: String::from_utf8(Self::decode_string(reader)?)?.into(),
                 ty: Utf8Type::Variable(*len),
                 unit: *unit,
             }),
             LogicalType::Char(len, unit) => Ok(DataValue::Utf8 {
-                value: String::from_utf8(Self::decode_string(reader)?)?,
+                value: String::from_utf8(Self::decode_string(reader)?)?.into(),
                 ty: Utf8Type::Fixed(*len),
                 unit: *unit,
             }),
@@ -1838,14 +1982,17 @@ impl From<Option<f64>> for DataValue {
 
 impl From<Vec<u8>> for DataValue {
     fn from(value: Vec<u8>) -> Self {
-        Self::Binary { value, len: None }
+        Self::Binary {
+            value: value.into(),
+            len: None,
+        }
     }
 }
 
 impl From<String> for DataValue {
     fn from(value: String) -> Self {
         DataValue::Utf8 {
-            value,
+            value: value.into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         }
@@ -1856,7 +2003,7 @@ impl From<Option<String>> for DataValue {
     fn from(value: Option<String>) -> Self {
         if let Some(value) = value {
             DataValue::Utf8 {
-                value,
+                value: value.into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             }
@@ -1957,7 +2104,7 @@ impl fmt::Display for DataValue {
             DataValue::UInt64(e) => write!(f, "{e}")?,
             DataValue::Binary { value, .. } => {
                 write!(f, "X'")?;
-                for byte in value {
+                for byte in value.iter() {
                     write!(f, "{byte:02X}")?;
                 }
                 write!(f, "'")?;
@@ -2067,7 +2214,7 @@ mod test {
     #[test]
     fn memcomparable_len_hint_matches_encoding() -> Result<(), DatabaseError> {
         let utf8 = |value: &str| DataValue::Utf8 {
-            value: value.to_string(),
+            value: value.to_string().into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };
@@ -2091,7 +2238,7 @@ mod test {
             utf8(""),
             utf8("kite_sql"),
             DataValue::Binary {
-                value: vec![1; 9],
+                value: vec![1; 9].into(),
                 len: None,
             },
             DataValue::Tuple(vec![DataValue::Int32(1), DataValue::Null, utf8("a")]),
@@ -2206,7 +2353,7 @@ mod test {
 
     fn utf8(value: &str) -> DataValue {
         DataValue::Utf8 {
-            value: value.to_string(),
+            value: value.to_string().into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         }
@@ -2214,7 +2361,7 @@ mod test {
 
     fn fixed_utf8(value: &str, len: u32, unit: CharLengthUnits) -> DataValue {
         DataValue::Utf8 {
-            value: value.to_string(),
+            value: value.to_string().into(),
             ty: Utf8Type::Fixed(len),
             unit,
         }
@@ -2249,7 +2396,7 @@ mod test {
         assert_eq!(
             DataValue::new_utf8("kite".to_string()),
             DataValue::Utf8 {
-                value: "kite".to_string(),
+                value: "kite".into(),
                 ty: Utf8Type::Fixed(4),
                 unit: CharLengthUnits::Characters,
             }
@@ -2360,7 +2507,7 @@ mod test {
             (
                 LogicalType::Varchar(Some(3), CharLengthUnits::Octets),
                 DataValue::Utf8 {
-                    value: String::new(),
+                    value: String::new().into(),
                     ty: Utf8Type::Variable(Some(3)),
                     unit: CharLengthUnits::Octets,
                 },
@@ -2553,7 +2700,7 @@ mod test {
         for length in [0, 7, 8, 9, 65] {
             cases.push((
                 DataValue::Binary {
-                    value: vec![0xff; length],
+                    value: vec![0xff; length].into(),
                     len: None,
                 },
                 LogicalType::Varbinary(None),
@@ -2864,7 +3011,7 @@ mod test {
         assert_eq!(
             DataValue::from(Some("abc".to_string())),
             DataValue::Utf8 {
-                value: "abc".to_string(),
+                value: "abc".into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             }
@@ -3633,25 +3780,25 @@ mod test {
         let v_null = DataValue::Null;
 
         let v_a = DataValue::Utf8 {
-            value: "a".to_string(),
+            value: "a".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };
 
         let v_ab = DataValue::Utf8 {
-            value: "ab".to_string(),
+            value: "ab".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };
 
         let v_b = DataValue::Utf8 {
-            value: "b".to_string(),
+            value: "b".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };
 
         let v_zh = DataValue::Utf8 {
-            value: "中".to_string(),
+            value: "中".into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         };

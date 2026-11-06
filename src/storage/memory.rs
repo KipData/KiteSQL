@@ -15,9 +15,10 @@
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::Bytes;
 use crate::storage::{
-    bytes_bound_as_slice, owned_bound, EmptyStorageMetrics, InnerIter, Storage, StorageTransaction,
+    bytes_bound_as_slice, EmptyStorageMetrics, InnerIter, Storage, StorageTransaction,
     TransactionIsolationLevel,
 };
+use crate::types::serialize::BytesPool;
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::{BTreeMap, Bound};
 use std::rc::Rc;
@@ -89,11 +90,13 @@ impl<'txn> MemoryIter<'txn> {
         min: Bound<&[u8]>,
         max: Bound<&[u8]>,
         reverse: bool,
+        pool: &mut BytesPool,
     ) -> Self {
+        let mut owned = |bound: Bound<&[u8]>| bound.map(|key| pool.bytes(key));
         Self {
             map,
             position: Position::Start,
-            range: (owned_bound(min), owned_bound(max)),
+            range: (owned(min), owned(max)),
             reverse,
         }
     }
@@ -141,6 +144,18 @@ impl InnerIter for MemoryIter<'_> {
         // returned slice before issuing the next write, so the allocation is still alive and
         // unmodified for as long as the slice is used (the same contract as LMDB cursors).
         Ok(Some((key.as_slice(), unsafe { &*value })))
+    }
+
+    fn recycle(self, pool: &mut BytesPool) {
+        let (min, max) = self.range;
+        for bound in [min, max] {
+            if let Bound::Included(bytes) | Bound::Excluded(bytes) = bound {
+                pool.recycle_buffer(bytes);
+            }
+        }
+        if let Position::After(bytes) = self.position {
+            pool.recycle_buffer(bytes);
+        }
     }
 }
 
@@ -201,16 +216,18 @@ impl StorageTransaction for MemoryTransaction {
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
+        pool: &mut BytesPool,
     ) -> Result<Self::IterType<'txn>, DatabaseError> {
-        Ok(MemoryIter::new(&self.inner, min, max, false))
+        Ok(MemoryIter::new(&self.inner, min, max, false, pool))
     }
 
     fn range_rev<'txn, 'key>(
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
+        pool: &mut BytesPool,
     ) -> Result<Self::RevIterType<'txn>, DatabaseError> {
-        Ok(MemoryIter::new(&self.inner, min, max, true))
+        Ok(MemoryIter::new(&self.inner, min, max, true, pool))
     }
 
     fn commit(self) -> Result<(), DatabaseError> {
@@ -227,6 +244,7 @@ mod wasm_tests {
     use crate::expression::range_detacher::Range;
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::table_codec::TableCodec;
+    use crate::storage::{IndexScanView, Iter};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -320,10 +338,12 @@ mod wasm_tests {
             (Some(1), Some(1)),
         )?;
 
-        let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
+        let option_1 =
+            crate::storage::next_tuple_for_test(|codec, tuple| iter.next_tuple_into(codec, tuple))?;
         assert_eq!(option_1.unwrap().pk, Some(DataValue::Int32(2)));
 
-        let option_2 = crate::storage::next_tuple_for_test(&mut iter)?;
+        let option_2 =
+            crate::storage::next_tuple_for_test(|codec, tuple| iter.next_tuple_into(codec, tuple))?;
         assert_eq!(option_2, None);
 
         Ok(())
@@ -358,6 +378,10 @@ mod wasm_tests {
             &plan_arena,
             true,
         );
+        let range = Range::Scope {
+            min: Bound::Excluded(DataValue::Int32(0).into()),
+            max: Bound::Included(DataValue::Int32(2).into()),
+        };
         let mut iter = transaction.read_by_index(
             &plan_arena,
             kite_sql
@@ -368,18 +392,24 @@ mod wasm_tests {
                 .id(),
             (Some(0), None),
             pk_index,
-            Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(0).into()),
-                max: Bound::Included(DataValue::Int32(2).into()),
-            },
+            false,
             true,
             &deserializers,
             false,
-            None,
         )?;
 
         let mut result = Vec::new();
-        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(|codec, tuple| {
+            iter.next_tuple_into(
+                IndexScanView {
+                    range: &range,
+                    cover_mapping: None,
+                },
+                &mut Default::default(),
+                codec,
+                tuple,
+            )
+        })? {
             result.push(tuple.pk.unwrap());
         }
 
@@ -397,6 +427,7 @@ mod native_tests {
     use crate::expression::range_detacher::Range;
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::table_codec::TableCodec;
+    use crate::storage::{IndexScanView, Iter};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -509,10 +540,12 @@ mod native_tests {
             (Some(1), Some(1)),
         )?;
 
-        let option_1 = crate::storage::next_tuple_for_test(&mut iter)?;
+        let option_1 =
+            crate::storage::next_tuple_for_test(|codec, tuple| iter.next_tuple_into(codec, tuple))?;
         assert_eq!(option_1.unwrap().pk, Some(DataValue::Int32(2)));
 
-        let option_2 = crate::storage::next_tuple_for_test(&mut iter)?;
+        let option_2 =
+            crate::storage::next_tuple_for_test(|codec, tuple| iter.next_tuple_into(codec, tuple))?;
         assert_eq!(option_2, None);
 
         Ok(())
@@ -547,6 +580,10 @@ mod native_tests {
             &plan_arena,
             true,
         );
+        let range = Range::Scope {
+            min: Bound::Excluded(DataValue::Int32(0).into()),
+            max: Bound::Included(DataValue::Int32(2).into()),
+        };
         let mut iter = transaction.read_by_index(
             &plan_arena,
             kite_sql
@@ -557,18 +594,24 @@ mod native_tests {
                 .id(),
             (Some(0), None),
             pk_index,
-            Range::Scope {
-                min: Bound::Excluded(DataValue::Int32(0).into()),
-                max: Bound::Included(DataValue::Int32(2).into()),
-            },
+            false,
             true,
             &deserializers,
             false,
-            None,
         )?;
 
         let mut result = Vec::new();
-        while let Some(tuple) = crate::storage::next_tuple_for_test(&mut iter)? {
+        while let Some(tuple) = crate::storage::next_tuple_for_test(|codec, tuple| {
+            iter.next_tuple_into(
+                IndexScanView {
+                    range: &range,
+                    cover_mapping: None,
+                },
+                &mut Default::default(),
+                codec,
+                tuple,
+            )
+        })? {
             result.push(tuple.pk.unwrap());
         }
 

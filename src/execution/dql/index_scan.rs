@@ -17,12 +17,12 @@ use crate::execution::dql::seq_scan::next_scan_tuple;
 use crate::execution::{
     ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
 };
-use crate::expression::range_detacher::{IndexRangeColumn, RangeDetacher};
+use crate::expression::range_detacher::{IndexRangeColumn, Range, RangeDetacher, RangeValue};
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::operator::SortOption;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::{IndexRanges, StorageTransaction};
-use crate::types::index::{IndexInfo, IndexLookup};
+use crate::storage::{IndexScanView, StorageTransaction, TupleMapping};
+use crate::types::index::{IndexInfo, IndexLookup, RuntimeIndexProbe};
 use std::borrow::Cow;
 
 pub(crate) struct IndexScan<'a> {
@@ -30,6 +30,9 @@ pub(crate) struct IndexScan<'a> {
     info: &'a IndexInfo,
     lookup: &'a IndexLookup,
     iter: IterSlot,
+    /// Borrows the plan's static range, or owns one that parameters bind into.
+    ranges: Cow<'a, Range>,
+    cover_mapping: Option<TupleMapping>,
 }
 
 impl<'a> IndexScan<'a> {
@@ -38,33 +41,62 @@ impl<'a> IndexScan<'a> {
         info: &'a IndexInfo,
         lookup: &'a IndexLookup,
         iter: IterSlot,
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> Self {
+        let cover_mapping = info
+            .covered
+            .then(|| {
+                TupleMapping::cover(
+                    plan_arena.index(info.meta),
+                    &op.deserializers,
+                    info.cover_mapping.as_deref(),
+                )
+            })
+            .flatten();
         Self {
             op,
             info,
             lookup,
             iter,
+            ranges: Cow::Owned(Range::Dummy),
+            cover_mapping,
         }
     }
 
-    pub(crate) fn ranges<T: StorageTransaction + 'a>(
+    /// Binds the ranges of this execution into `ranges`.
+    pub(crate) fn bind_ranges<T: StorageTransaction + 'a>(
         info: &'a IndexInfo,
         lookup: &'a IndexLookup,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-    ) -> Result<IndexRanges<'a>, DatabaseError> {
-        let mut range = match lookup {
-            IndexLookup::Static(range) => Cow::Borrowed(range),
-            IndexLookup::Probe => Cow::Owned(arena.pop_runtime_probe().into()),
-        };
-
-        if range.has_parameter() {
-            let plan_arena = &*plan_arena;
-            range
-                .to_mut()
-                .bind_parameters(&|id| plan_arena.bound_param(id), &|id| {
-                    plan_arena.init_value(id)
-                })?;
+        ranges: &mut Cow<'a, Range>,
+    ) -> Result<(), DatabaseError> {
+        match lookup {
+            IndexLookup::Static(template) if !template.has_parameter() => {
+                *ranges = Cow::Borrowed(template)
+            }
+            IndexLookup::Static(template) => {
+                let plan_arena = &*plan_arena;
+                let bind = |range: &mut Range| {
+                    range.bind_from(template, &|id| plan_arena.bound_param(id), &|id| {
+                        plan_arena.init_value(id)
+                    })
+                };
+                match ranges {
+                    Cow::Owned(range) => bind(range)?,
+                    Cow::Borrowed(_) => {
+                        let mut range = Range::Dummy;
+                        bind(&mut range)?;
+                        *ranges = Cow::Owned(range);
+                    }
+                }
+            }
+            IndexLookup::Probe => match (&mut *ranges, arena.pop_runtime_probe()) {
+                (Cow::Owned(Range::Eq(value)), RuntimeIndexProbe::Eq(probe)) => {
+                    *value = RangeValue::Value(probe)
+                }
+                (ranges, probe) => *ranges = Cow::Owned(probe.into()),
+            },
         }
         if let (
             Some(predicate),
@@ -75,15 +107,15 @@ impl<'a> IndexScan<'a> {
         {
             if let Some(specialized) = RangeDetacher::<IndexRangeColumn, _>::specialize_range(
                 info.meta,
-                &range,
+                ranges,
                 predicate,
                 *ignore_prefix_len,
                 plan_arena,
             )? {
-                range = Cow::Owned(specialized);
+                *ranges = Cow::Owned(specialized);
             }
         }
-        Ok(IndexRanges::from(range).reversed(info.is_reverse()))
+        Ok(())
     }
 }
 
@@ -93,10 +125,10 @@ impl<'a> ReadExecutor<'a> for IndexScan<'a> {
     fn into_executor<B: ExecBuilder>(
         (op, info, lookup): Self::Input,
         arena: &mut B,
-        _plan_arena: &(dyn MetaArena + 'a),
+        plan_arena: &(dyn MetaArena + 'a),
     ) -> ExecNode<'a> {
         let iter = arena.alloc_iter();
-        ExecNode::IndexScan(Box::new(IndexScan::new(op, info, lookup, iter)))
+        ExecNode::IndexScan(Box::new(IndexScan::new(op, info, lookup, iter, plan_arena)))
     }
 }
 
@@ -110,20 +142,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
         if arena.iter_mut(slot).is_empty() {
             return Ok(());
         }
-        match self.lookup {
-            IndexLookup::Static(_) => arena.iter_mut(slot).as_index().rewind(self.op.limit),
-            IndexLookup::Probe if self.info.residual_predicate.is_none() => {
-                let probe = arena.pop_runtime_probe();
-                arena
-                    .iter_mut(slot)
-                    .as_index()
-                    .reset_probe(probe, self.op.limit)
-            }
-            IndexLookup::Probe => {
-                let ranges = Self::ranges(self.info, self.lookup, arena, plan_arena)?;
-                arena.iter_mut(slot).as_index().reset(ranges, self.op.limit);
-            }
+        if let IndexLookup::Probe = self.lookup {
+            Self::bind_ranges(self.info, self.lookup, arena, plan_arena, &mut self.ranges)?;
         }
+        arena.iter_mut(slot).as_index().rewind(self.op.limit);
         Ok(())
     }
 
@@ -133,7 +155,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if arena.iter_mut(self.iter).is_empty() {
-            let ranges = Self::ranges(self.info, self.lookup, arena, plan_arena)?;
+            Self::bind_ranges(self.info, self.lookup, arena, plan_arena, &mut self.ranges)?;
             let TableScanOperator {
                 table_id,
                 deserializers,
@@ -147,19 +169,29 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
                 *table_id,
                 *limit,
                 self.info.meta,
-                ranges,
+                self.info.is_reverse(),
                 *with_pk,
                 deserializers,
                 self.info.covered,
-                self.info.cover_mapping.as_deref(),
             )?;
-            state.iters[self.iter] = StorageIter::Index(Box::new(iter));
+            state.iters[self.iter] = StorageIter::Index(iter);
         }
 
+        let view = IndexScanView {
+            range: &self.ranges,
+            cover_mapping: self.cover_mapping.as_ref(),
+        };
         let state = arena.local_state(plan_arena);
         let iter = state.iters[self.iter].as_index();
+        let bound_buffers = state.bound_buffers;
         let output = state.result.output_mut();
-        if next_scan_tuple(self.op, iter, state.table_codec, output, plan_arena)? {
+        if next_scan_tuple(
+            self.op,
+            |table_codec, tuple| iter.next_tuple_into(view, bound_buffers, table_codec, tuple),
+            state.table_codec,
+            output,
+            plan_arena,
+        )? {
             arena.resume();
         } else {
             arena.finish();
@@ -241,7 +273,7 @@ mod tests {
         let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut meta = ExecMetaArena::new(meta);
         let slot = arena.alloc_iter();
-        let mut scan = IndexScan::new(&op, &info, &IndexLookup::Probe, slot);
+        let mut scan = IndexScan::new(&op, &info, &IndexLookup::Probe, slot, &meta);
         arena.push_runtime_probe(RuntimeIndexProbe::Scope {
             min: Bound::Included(DataValue::Int32(1)),
             max: Bound::Included(DataValue::Int32(4)),

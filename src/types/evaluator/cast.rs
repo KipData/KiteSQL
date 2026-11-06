@@ -39,7 +39,7 @@ use crate::types::evaluator::uint64::*;
 use crate::types::evaluator::uint8::*;
 use crate::types::evaluator::utf8::*;
 use crate::types::evaluator::{CastEvaluatorParams, CastEvaluatorRef};
-use crate::types::value::{DataValue, Utf8Type};
+use crate::types::value::{BinaryBytes, DataValue, Utf8Str, Utf8Type};
 use crate::types::CharLengthUnits;
 use crate::types::LogicalType;
 use paste::paste;
@@ -128,10 +128,11 @@ fn is_chrono_type_code(code: u16) -> bool {
 }
 
 pub(crate) fn to_char(
-    value: String,
+    value: impl Into<Utf8Str>,
     len: u32,
     unit: CharLengthUnits,
 ) -> Result<DataValue, DatabaseError> {
+    let value = value.into();
     if DataValue::check_string_len(&value, len as usize, unit) {
         return Err(DatabaseError::TooLong);
     }
@@ -143,17 +144,24 @@ pub(crate) fn to_char(
     })
 }
 
-pub(crate) fn to_varbinary(value: Vec<u8>, len: Option<u32>) -> Result<DataValue, DatabaseError> {
-    let result = DataValue::Binary { value, len };
+pub(crate) fn to_varbinary(
+    value: impl Into<BinaryBytes>,
+    len: Option<u32>,
+) -> Result<DataValue, DatabaseError> {
+    let result = DataValue::Binary {
+        value: value.into(),
+        len,
+    };
     result.check_len(&LogicalType::Varbinary(len))?;
     Ok(result)
 }
 
 pub(crate) fn to_varchar(
-    value: String,
+    value: impl Into<Utf8Str>,
     len: Option<u32>,
     unit: CharLengthUnits,
 ) -> Result<DataValue, DatabaseError> {
+    let value = value.into();
     if let Some(len) = len {
         if DataValue::check_string_len(&value, len as usize, unit) {
             return Err(DatabaseError::TooLong);
@@ -1316,7 +1324,7 @@ mod test {
 
     fn utf8(value: &str) -> DataValue {
         DataValue::Utf8 {
-            value: value.to_string(),
+            value: value.to_string().into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         }
@@ -1444,7 +1452,7 @@ mod test {
             (
                 LogicalType::Char(4, CharLengthUnits::Characters),
                 DataValue::Utf8 {
-                    value: "true".to_string(),
+                    value: "true".into(),
                     ty: Utf8Type::Fixed(4),
                     unit: CharLengthUnits::Characters,
                 },
@@ -1452,7 +1460,7 @@ mod test {
             (
                 LogicalType::Varchar(Some(4), CharLengthUnits::Characters),
                 DataValue::Utf8 {
-                    value: "true".to_string(),
+                    value: "true".into(),
                     ty: Utf8Type::Variable(Some(4)),
                     unit: CharLengthUnits::Characters,
                 },
@@ -1501,7 +1509,7 @@ mod test {
             (
                 LogicalType::Char(3, CharLengthUnits::Characters),
                 DataValue::Utf8 {
-                    value: "1.5".to_string(),
+                    value: "1.5".into(),
                     ty: Utf8Type::Fixed(3),
                     unit: CharLengthUnits::Characters,
                 },
@@ -1509,7 +1517,7 @@ mod test {
             (
                 LogicalType::Varchar(Some(3), CharLengthUnits::Characters),
                 DataValue::Utf8 {
-                    value: "1.5".to_string(),
+                    value: "1.5".into(),
                     ty: Utf8Type::Variable(Some(3)),
                     unit: CharLengthUnits::Characters,
                 },
@@ -1538,7 +1546,7 @@ mod test {
             (
                 LogicalType::Char(3, CharLengthUnits::Characters),
                 DataValue::Utf8 {
-                    value: "1.5".to_string(),
+                    value: "1.5".into(),
                     ty: Utf8Type::Fixed(3),
                     unit: CharLengthUnits::Characters,
                 },
@@ -1546,7 +1554,7 @@ mod test {
             (
                 LogicalType::Varchar(Some(3), CharLengthUnits::Characters),
                 DataValue::Utf8 {
-                    value: "1.5".to_string(),
+                    value: "1.5".into(),
                     ty: Utf8Type::Variable(Some(3)),
                     unit: CharLengthUnits::Characters,
                 },
@@ -1666,7 +1674,7 @@ mod test {
                 DataValue::Int32(9),
             )?,
             DataValue::Utf8 {
-                value: "9".to_string(),
+                value: "9".into(),
                 ty: Utf8Type::Fixed(1),
                 unit: CharLengthUnits::Characters,
             }
@@ -1678,7 +1686,7 @@ mod test {
                 DataValue::UInt32(10),
             )?,
             DataValue::Utf8 {
-                value: "10".to_string(),
+                value: "10".into(),
                 ty: Utf8Type::Variable(Some(2)),
                 unit: CharLengthUnits::Characters,
             }
@@ -1727,7 +1735,7 @@ mod test {
                 utf8("中\0")
             )?,
             DataValue::Binary {
-                value: "中\0".as_bytes().to_vec(),
+                value: "中\0".as_bytes().to_vec().into(),
                 len: Some(4)
             }
         );
@@ -1828,13 +1836,13 @@ mod test {
                 LogicalType::Char(2, CharLengthUnits::Characters),
                 LogicalType::Varchar(Some(2), CharLengthUnits::Characters),
                 DataValue::Utf8 {
-                    value: "ab".to_string(),
+                    value: "ab".into(),
                     ty: Utf8Type::Fixed(2),
                     unit: CharLengthUnits::Characters,
                 },
             )?,
             DataValue::Utf8 {
-                value: "ab".to_string(),
+                value: "ab".into(),
                 ty: Utf8Type::Variable(Some(2)),
                 unit: CharLengthUnits::Characters,
             }
@@ -1846,7 +1854,7 @@ mod test {
                 utf8("ab"),
             )?,
             DataValue::Utf8 {
-                value: "ab".to_string(),
+                value: "ab".into(),
                 ty: Utf8Type::Fixed(2),
                 unit: CharLengthUnits::Characters,
             }
@@ -1931,7 +1939,7 @@ mod test {
                 date.clone(),
             )?,
             DataValue::Utf8 {
-                value: "2024-01-02".to_string(),
+                value: "2024-01-02".into(),
                 ty: Utf8Type::Fixed(10),
                 unit: CharLengthUnits::Characters,
             }
@@ -1943,7 +1951,7 @@ mod test {
                 date.clone(),
             )?,
             DataValue::Utf8 {
-                value: "2024-01-02".to_string(),
+                value: "2024-01-02".into(),
                 ty: Utf8Type::Variable(Some(10)),
                 unit: CharLengthUnits::Characters,
             }
@@ -1972,7 +1980,7 @@ mod test {
                 datetime.clone(),
             )?,
             DataValue::Utf8 {
-                value: "2024-01-02 03:04:05".to_string(),
+                value: "2024-01-02 03:04:05".into(),
                 ty: Utf8Type::Fixed(19),
                 unit: CharLengthUnits::Characters,
             }
@@ -1984,7 +1992,7 @@ mod test {
                 datetime.clone(),
             )?,
             DataValue::Utf8 {
-                value: "2024-01-02 03:04:05".to_string(),
+                value: "2024-01-02 03:04:05".into(),
                 ty: Utf8Type::Variable(Some(19)),
                 unit: CharLengthUnits::Characters,
             }
@@ -2082,7 +2090,7 @@ mod test {
                 DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0),
             )?,
             DataValue::Utf8 {
-                value: "03:04:05".to_string(),
+                value: "03:04:05".into(),
                 ty: Utf8Type::Fixed(8),
                 unit: CharLengthUnits::Characters,
             }
@@ -2094,7 +2102,7 @@ mod test {
                 DataValue::Time32(DataValue::pack_time(3 * 3600 + 4 * 60 + 5, 0, 0), 0),
             )?,
             DataValue::Utf8 {
-                value: "03:04:05".to_string(),
+                value: "03:04:05".into(),
                 ty: Utf8Type::Variable(Some(8)),
                 unit: CharLengthUnits::Characters,
             }
@@ -2106,7 +2114,7 @@ mod test {
                 timestamp.clone(),
             )?,
             DataValue::Utf8 {
-                value: "2024-01-02 03:04:05.123".to_string(),
+                value: "2024-01-02 03:04:05.123".into(),
                 ty: Utf8Type::Fixed(23),
                 unit: CharLengthUnits::Characters,
             }
@@ -2118,7 +2126,7 @@ mod test {
                 timestamp.clone(),
             )?,
             DataValue::Utf8 {
-                value: "2024-01-02 03:04:05.123".to_string(),
+                value: "2024-01-02 03:04:05.123".into(),
                 ty: Utf8Type::Variable(Some(23)),
                 unit: CharLengthUnits::Characters,
             }
@@ -2147,7 +2155,7 @@ mod test {
         assert_eq!(
             binary.clone().cast(&LogicalType::Varbinary(Some(2)))?,
             DataValue::Binary {
-                value: vec![0, 255],
+                value: vec![0, 255].into(),
                 len: Some(2)
             }
         );
@@ -2247,7 +2255,7 @@ mod test {
             (
                 LogicalType::Char(4, CharLengthUnits::Characters),
                 DataValue::Utf8 {
-                    value: "12.5".to_string(),
+                    value: "12.5".into(),
                     ty: Utf8Type::Fixed(4),
                     unit: CharLengthUnits::Characters,
                 },
@@ -2255,7 +2263,7 @@ mod test {
             (
                 LogicalType::Varchar(Some(4), CharLengthUnits::Characters),
                 DataValue::Utf8 {
-                    value: "12.5".to_string(),
+                    value: "12.5".into(),
                     ty: Utf8Type::Variable(Some(4)),
                     unit: CharLengthUnits::Characters,
                 },

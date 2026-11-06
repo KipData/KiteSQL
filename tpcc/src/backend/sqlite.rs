@@ -17,6 +17,7 @@ use super::{
 };
 use crate::TpccError;
 use chrono::{NaiveDateTime, TimeZone, Utc};
+use kite_sql::db::Param;
 use kite_sql::types::tuple::{Tuple, TupleImpl};
 use kite_sql::types::value::{DataValue, Utf8Type};
 use kite_sql::types::{CharLengthUnits, LogicalType};
@@ -65,8 +66,12 @@ impl SqliteBackend {
         Ok(groups)
     }
 
-    fn start_transaction(&self) -> Result<SqliteTransaction<'_>, TpccError> {
-        self.connection.execute("BEGIN IMMEDIATE")?;
+    fn start_transaction(&self, read_only: bool) -> Result<SqliteTransaction<'_>, TpccError> {
+        self.connection.execute(if read_only {
+            "BEGIN"
+        } else {
+            "BEGIN IMMEDIATE"
+        })?;
         Ok(SqliteTransaction {
             connection: &self.connection,
             finished: false,
@@ -97,8 +102,8 @@ impl BackendControl for SqliteBackend {
     where
         Self: 'a;
 
-    fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
-        self.start_transaction()
+    fn new_transaction(&self, read_only: bool) -> Result<Self::Transaction<'_>, TpccError> {
+        self.start_transaction(read_only)
     }
 
     fn worker(&self) -> Result<Self::Worker<'_>, TpccError> {
@@ -216,8 +221,13 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
 }
 
 fn bind_params(statement: &mut SqliteStatement<'_>, params: &[DbParam]) -> Result<(), TpccError> {
-    for (id, value) in params {
-        statement.bind((*id, convert_value(value)?))?;
+    for (id, param) in params {
+        let value = match param {
+            Param::Value(value) => convert_value(value)?,
+            Param::Str(value) => Value::String(value.to_string()),
+            Param::Bytes(value) => Value::Binary(value.to_vec()),
+        };
+        statement.bind((*id, value))?;
     }
     Ok(())
 }
@@ -239,8 +249,8 @@ fn convert_value(value: &DataValue) -> Result<Value, TpccError> {
         DataValue::UInt16(v) => Value::Integer(*v as i64),
         DataValue::UInt32(v) => Value::Integer(*v as i64),
         DataValue::UInt64(v) => Value::Integer(*v as i64),
-        DataValue::Binary { value, .. } => Value::Binary(value.clone()),
-        DataValue::Utf8 { value, .. } => Value::String(value.clone()),
+        DataValue::Binary { value, .. } => Value::Binary(value.to_vec()),
+        DataValue::Utf8 { value, .. } => Value::String(value.to_string()),
         DataValue::Date32(v) => Value::Integer(*v as i64),
         DataValue::Date64(v) => Value::String(
             Utc.timestamp_opt(*v, 0)
@@ -369,7 +379,7 @@ fn convert_statement_row(
             LogicalType::Bigint => DataValue::Int64(statement.read::<i64, _>(idx)?),
             LogicalType::Decimal(..) => DataValue::Decimal(read_decimal(statement, idx)?),
             LogicalType::Varchar(..) | LogicalType::Char(..) => DataValue::Utf8 {
-                value: statement.read::<String, _>(idx)?,
+                value: statement.read::<String, _>(idx)?.into(),
                 ty: Utf8Type::Variable(None),
                 unit: CharLengthUnits::Characters,
             },

@@ -62,6 +62,7 @@ pub(crate) const RT_LIMITS: [Duration; 5] = [
     Duration::from_secs(8),
     Duration::from_secs(2),
 ];
+const TX_READ_ONLY: [bool; 5] = [false, false, true, false, true];
 const TX_NAMES: [&str; 5] = [
     "New-Order",
     "Payment",
@@ -266,7 +267,7 @@ fn measure<B: BackendControl>(
         let mut last_error = None;
         for _attempt in 0..=args.max_retry {
             let transaction_start = Instant::now();
-            let mut tx = backend.new_transaction()?;
+            let mut tx = backend.new_transaction(TX_READ_ONLY[i])?;
 
             if let Err(err) =
                 do_tpcc_transaction::<B>(i, rng, &mut tx, args.num_ware, &tpcc_args, statement)

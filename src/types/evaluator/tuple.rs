@@ -210,7 +210,7 @@ mod test {
                 .eval(DataValue::Tuple(vec![
                     DataValue::Int32(1),
                     DataValue::Utf8 {
-                        value: "2".to_string(),
+                        value: "2".into(),
                         ty: crate::types::value::Utf8Type::Variable(None),
                         unit: CharLengthUnits::Characters,
                     },

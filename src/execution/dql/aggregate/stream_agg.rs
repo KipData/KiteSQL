@@ -113,12 +113,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
 
             let tuple = arena.result_tuple();
             for expr in self.groupby_exprs {
-                self.group_keys.push(
-                    plan_arena
-                        .expression(*expr)
-                        .eval(plan_arena, Some(tuple))?
-                        .into_owned(),
-                );
+                let key = plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?;
+                // SAFETY: the keys live until `reset` clears them, before the next execution.
+                self.group_keys.push(unsafe { DataValue::own_in_txn(key) });
             }
 
             if !self.in_group {

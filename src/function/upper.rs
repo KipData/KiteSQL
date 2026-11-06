@@ -60,7 +60,7 @@ impl ScalarFunctionImpl for Upper {
         }
         Ok(match value.as_ref() {
             DataValue::Utf8 { value, ty, unit } => DataValue::Utf8 {
-                value: value.to_uppercase(),
+                value: value.to_uppercase().into(),
                 ty: ty.clone(),
                 unit: *unit,
             },

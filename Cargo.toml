@@ -52,6 +52,14 @@ path    = "benchmarks/query_benchmark.rs"
 harness = false
 required-features = ["pprof"]
 
+[[example]]
+name              = "alloc_trace"
+required-features = ["lmdb", "orm", "parser"]
+
+[[example]]
+name              = "borrowed_parse"
+required-features = ["lmdb", "orm", "parser"]
+
 [dependencies]
 bumpalo               = { version = "3", default-features = false, features = ["collections"] }
 hashbrown             = { version = "0.15", default-features = false }
@@ -76,6 +84,8 @@ indicatif             = { version = "0.17" }
 tempfile              = { version = "3.10" }
 # Benchmark
 sqlite                = { version = "0.34" }
+serde                 = { version = "1", features = ["derive"] }
+serde_json            = { version = "1" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Optional dependencies for features

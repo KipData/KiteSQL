@@ -93,10 +93,10 @@ impl BackendControl for DualBackend {
         Err(TpccError::InvalidBackend)
     }
 
-    fn new_transaction(&self) -> Result<Self::Transaction<'_>, TpccError> {
+    fn new_transaction(&self, read_only: bool) -> Result<Self::Transaction<'_>, TpccError> {
         Ok(DualTransaction {
-            kitesql: self.kitesql.new_transaction()?,
-            sqlite: self.sqlite.new_transaction()?,
+            kitesql: self.kitesql.new_transaction(read_only)?,
+            sqlite: self.sqlite.new_transaction(read_only)?,
         })
     }
 

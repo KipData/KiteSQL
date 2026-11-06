@@ -167,7 +167,7 @@ mod test {
         assert_eq!(
             float32_to_char_cast_eval(3, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
-                value: "1.5".to_string(),
+                value: "1.5".into(),
                 ty: Utf8Type::Fixed(3),
                 unit: CharLengthUnits::Characters,
             }
@@ -176,7 +176,7 @@ mod test {
             float32_to_varchar_cast_eval(Some(3), CharLengthUnits::Characters, value.clone())
                 .unwrap(),
             DataValue::Utf8 {
-                value: "1.5".to_string(),
+                value: "1.5".into(),
                 ty: Utf8Type::Variable(Some(3)),
                 unit: CharLengthUnits::Characters,
             }

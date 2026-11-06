@@ -119,7 +119,7 @@ impl<S: Storage> Database<S> {
     /// assert_eq!(users[0].name, "Alice");
     /// ```
     pub fn fetch<M: Model>(&self) -> Result<OrmIter<DatabaseIter<'_, S>, M>, DatabaseError> {
-        orm_list::<_, M>(self)
+        Ok(bind_orm_context(self, true, |ctx| ctx.from::<M>()?.finish())?.orm::<M>())
     }
 
     /// Lists all table names.
@@ -249,16 +249,28 @@ impl<'a, S: Storage> Transaction<'a, S> {
         explain_orm_context(self, build)
     }
 
-    /// Loads a single model by primary key inside the current transaction.
-    pub fn get<M: Model>(&mut self, key: &M::PrimaryKey) -> Result<Option<M>, DatabaseError> {
-        orm_get::<_, M>(self, key)
+    /// Loads a single model by primary key inside the current transaction. A model with a
+    /// lifetime may borrow its strings and binaries from the transaction.
+    pub fn get<'t, M: Model + FromTxnRow<'t>>(
+        &'t mut self,
+        key: &M::PrimaryKey,
+    ) -> Result<Option<M>, DatabaseError> {
+        let mut iter = bind_get::<_, M>(self, key)?;
+        Ok(
+            match iter.next_tuple(|schema, row| M::from_txn_row(schema, row))? {
+                Some(row) => Some(row?),
+                None => None,
+            },
+        )
     }
 
-    /// Fetches all rows for a model inside the current transaction.
-    pub fn fetch<M: Model>(
-        &mut self,
-    ) -> Result<OrmIter<TransactionIter<'_, '_, S::TransactionType<'a>>, M>, DatabaseError> {
-        orm_list::<_, M>(self)
+    /// Fetches all rows for a model inside the current transaction. A model with a lifetime may
+    /// borrow its strings and binaries from the transaction.
+    pub fn fetch<'t, M: Model + FromTxnRow<'t>>(
+        &'t mut self,
+    ) -> Result<TxnOrmIter<'t, TransactionIter<'t, 't, S::TransactionType<'a>>, M>, DatabaseError>
+    {
+        Ok(bind_orm_context(self, true, |ctx| ctx.from::<M>()?.finish())?.txn_orm::<M>())
     }
 
     /// Lists all table names inside the current transaction.

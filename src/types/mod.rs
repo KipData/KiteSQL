@@ -15,6 +15,7 @@
 pub mod bitset;
 pub mod evaluator;
 pub mod index;
+pub mod mapped;
 pub mod serialize;
 pub mod tuple;
 pub mod tuple_builder;

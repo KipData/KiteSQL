@@ -65,13 +65,14 @@ mod app {
                     .execute(
                         &mut transaction,
                         [
-                            (1, DataValue::Int32(c1)),
-                            (2, DataValue::Int32(c1 * 10 * round)),
+                            (1, DataValue::Int32(c1).into()),
+                            (2, DataValue::Int32(c1 * 10 * round).into()),
                         ],
                     )?
                     .done()?;
 
-                let mut iter = select.execute(&mut transaction, [(1, DataValue::Int32(c1))])?;
+                let mut iter =
+                    select.execute(&mut transaction, [(1, DataValue::Int32(c1).into())])?;
                 let c2 = iter.next_tuple(|_, tuple| tuple[0].i32())?.unwrap();
                 assert_eq!(c2, Some(c1 * 10 * round));
             }
@@ -80,7 +81,7 @@ mod app {
 
         // A later transaction sees what the earlier ones committed.
         let mut transaction = database.new_transaction(true)?;
-        let mut iter = select.execute(&mut transaction, [(1, DataValue::Int32(2))])?;
+        let mut iter = select.execute(&mut transaction, [(1, DataValue::Int32(2).into())])?;
         let c2 = iter.next_tuple(|_, tuple| tuple[0].i32())?.unwrap();
         assert_eq!(c2, Some(40));
         drop(iter);

@@ -25,6 +25,7 @@ use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
 use crate::storage::StorageTransaction;
 use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
+use crate::types::mapped::MappedScope;
 use crate::types::serialize::{BytesPool, TupleValueSerializableImpl};
 use crate::types::tuple::{Tuple, TupleId, TupleLike};
 use crate::types::value::{DataValue, IndexKeyMapping};
@@ -357,18 +358,18 @@ impl TableCodec {
     pub fn with_index_meta_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper| {
-            Self::write_key_prefix(lower, CodecType::IndexMeta, prefix);
-            lower.push(BOUND_MIN_TAG);
+        let prefix = table_id.to_be_bytes();
+        let [lower, upper] = &mut self.buffers;
+        Self::write_key_prefix(lower, CodecType::IndexMeta, prefix);
+        lower.push(BOUND_MIN_TAG);
 
-            Self::write_key_prefix(upper, CodecType::IndexMeta, prefix);
-            upper.push(BOUND_MAX_TAG);
+        Self::write_key_prefix(upper, CodecType::IndexMeta, prefix);
+        upper.push(BOUND_MAX_TAG);
 
-            f(lower.as_slice(), upper.as_slice())
-        })
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     /// Range bounds covering a single secondary index.
@@ -376,40 +377,40 @@ impl TableCodec {
         &mut self,
         table_id: TableId,
         index_id: IndexId,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper| {
-            Self::write_key_prefix(lower, CodecType::Index, prefix);
-            lower.push(BOUND_MIN_TAG);
-            lower.extend_from_slice(&index_id.to_le_bytes());
-            lower.push(BOUND_MIN_TAG);
+        let prefix = table_id.to_be_bytes();
+        let [lower, upper] = &mut self.buffers;
+        Self::write_key_prefix(lower, CodecType::Index, prefix);
+        lower.push(BOUND_MIN_TAG);
+        lower.extend_from_slice(&index_id.to_le_bytes());
+        lower.push(BOUND_MIN_TAG);
 
-            Self::write_key_prefix(upper, CodecType::Index, prefix);
-            upper.push(BOUND_MIN_TAG);
-            upper.extend_from_slice(&index_id.to_le_bytes());
-            upper.push(BOUND_MAX_TAG);
+        Self::write_key_prefix(upper, CodecType::Index, prefix);
+        upper.push(BOUND_MIN_TAG);
+        upper.extend_from_slice(&index_id.to_le_bytes());
+        upper.push(BOUND_MAX_TAG);
 
-            f(lower.as_slice(), upper.as_slice())
-        })
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     /// Range bounds covering all secondary indexes for a table.
     pub fn with_all_index_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper| {
-            Self::write_key_prefix(lower, CodecType::Index, prefix);
-            lower.push(BOUND_MIN_TAG);
+        let prefix = table_id.to_be_bytes();
+        let [lower, upper] = &mut self.buffers;
+        Self::write_key_prefix(lower, CodecType::Index, prefix);
+        lower.push(BOUND_MIN_TAG);
 
-            Self::write_key_prefix(upper, CodecType::Index, prefix);
-            upper.push(BOUND_MAX_TAG);
+        Self::write_key_prefix(upper, CodecType::Index, prefix);
+        upper.push(BOUND_MAX_TAG);
 
-            f(lower.as_slice(), upper.as_slice())
-        })
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     /// Non-unique index key:
@@ -495,54 +496,54 @@ impl TableCodec {
     pub fn with_columns_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper| {
-            Self::write_key_prefix(lower, CodecType::Column, prefix);
-            lower.push(BOUND_MIN_TAG);
+        let prefix = table_id.to_be_bytes();
+        let [lower, upper] = &mut self.buffers;
+        Self::write_key_prefix(lower, CodecType::Column, prefix);
+        lower.push(BOUND_MIN_TAG);
 
-            Self::write_key_prefix(upper, CodecType::Column, prefix);
-            upper.push(BOUND_MAX_TAG);
+        Self::write_key_prefix(upper, CodecType::Column, prefix);
+        upper.push(BOUND_MAX_TAG);
 
-            f(lower.as_slice(), upper.as_slice())
-        })
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     /// Range bounds spanning a table's `Column` and `IndexMeta` metadata.
     pub fn with_table_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper| {
-            Self::write_key_prefix(lower, CodecType::Column, prefix);
-            lower.push(BOUND_MIN_TAG);
+        let prefix = table_id.to_be_bytes();
+        let [lower, upper] = &mut self.buffers;
+        Self::write_key_prefix(lower, CodecType::Column, prefix);
+        lower.push(BOUND_MIN_TAG);
 
-            Self::write_key_prefix(upper, CodecType::IndexMeta, prefix);
-            upper.push(BOUND_MAX_TAG);
+        Self::write_key_prefix(upper, CodecType::IndexMeta, prefix);
+        upper.push(BOUND_MAX_TAG);
 
-            f(lower.as_slice(), upper.as_slice())
-        })
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     /// Range bounds covering all statistics keys for a table.
     pub fn with_statistics_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper| {
-            Self::write_key_prefix(lower, CodecType::Statistics, prefix);
-            lower.push(BOUND_MIN_TAG);
+        let prefix = table_id.to_be_bytes();
+        let [lower, upper] = &mut self.buffers;
+        Self::write_key_prefix(lower, CodecType::Statistics, prefix);
+        lower.push(BOUND_MIN_TAG);
 
-            Self::write_key_prefix(upper, CodecType::Statistics, prefix);
-            upper.push(BOUND_MAX_TAG);
+        Self::write_key_prefix(upper, CodecType::Statistics, prefix);
+        upper.push(BOUND_MAX_TAG);
 
-            f(lower.as_slice(), upper.as_slice())
-        })
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     /// Range bounds covering all statistics keys for one index.
@@ -550,21 +551,21 @@ impl TableCodec {
         &mut self,
         table_id: TableId,
         index_id: IndexId,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(table_id, |lower, prefix, upper| {
-            Self::write_key_prefix(lower, CodecType::Statistics, prefix);
-            lower.push(BOUND_MIN_TAG);
-            lower.extend_from_slice(&index_id.to_le_bytes());
-            lower.push(INDEX_STATISTICS_TAG);
+        let prefix = table_id.to_be_bytes();
+        let [lower, upper] = &mut self.buffers;
+        Self::write_key_prefix(lower, CodecType::Statistics, prefix);
+        lower.push(BOUND_MIN_TAG);
+        lower.extend_from_slice(&index_id.to_le_bytes());
+        lower.push(INDEX_STATISTICS_TAG);
 
-            upper.clear();
-            upper.extend_from_slice(lower);
-            upper.push(BOUND_MAX_TAG);
+        upper.clear();
+        upper.extend_from_slice(lower);
+        upper.push(BOUND_MAX_TAG);
 
-            f(lower.as_slice(), upper.as_slice())
-        })
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     fn with_statistics<R, V: ReferenceSerialization>(
@@ -773,14 +774,14 @@ impl TableCodec {
     /// Range bounds covering all view definitions.
     pub fn with_view_bound<R>(
         &mut self,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        let (lower, upper) = self.slots_mut();
+        let [lower, upper] = &mut self.buffers;
         Self::write_global_bound_prefix(lower, VIEW_BYTES.as_slice(), BOUND_MIN_TAG);
         Self::write_global_bound_prefix(upper, VIEW_BYTES.as_slice(), BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice())
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     /// Key: `Root{BOUND_MIN_TAG}{TableName}`, for both tables and views.
@@ -806,14 +807,14 @@ impl TableCodec {
     /// Range bounds covering all root table metadata.
     pub fn with_root_table_bound<R>(
         &mut self,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        let (lower, upper) = self.slots_mut();
+        let [lower, upper] = &mut self.buffers;
         Self::write_global_bound_prefix(lower, ROOT_BYTES.as_slice(), BOUND_MIN_TAG);
         Self::write_global_bound_prefix(upper, ROOT_BYTES.as_slice(), BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice())
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
     }
 
     /// Key: `NextTableId`, the id the next table or view gets.
@@ -828,21 +829,31 @@ impl TableCodec {
         DataValue::memcomparable_decode(&mut Cursor::new(&bytes[TUPLE_KEY_PREFIX_LEN..]), pk_ty)
     }
 
+    /// Decodes a stored row. With a `scope` strings and binaries point into `bytes`, otherwise
+    /// they are copied.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be a row this crate encoded, since strings are not checked again as UTF-8.
+    /// With a `scope`, `bytes` must be a read of the transaction holding it.
     #[inline]
-    pub(crate) fn decode_tuple_into<I, S>(
+    pub(crate) unsafe fn decode_tuple_into<I, S>(
         tuple: &mut Tuple,
         deserializers: I,
         tuple_id: Option<TupleId>,
         bytes: &[u8],
         total_len: usize,
         pool: &mut BytesPool,
+        scope: Option<&MappedScope>,
     ) -> Result<(), DatabaseError>
     where
         I: IntoIterator<Item = S>,
         S: Borrow<TupleValueSerializableImpl>,
     {
         tuple.pk = tuple_id;
-        tuple.deserialize_from_into(deserializers, Self::strip_stamp(bytes)?, total_len, pool)
+        let bytes = Self::strip_stamp(bytes)?;
+        // SAFETY: the caller guarantees `bytes` is a read of `scope`'s transaction.
+        unsafe { tuple.deserialize_from_into(deserializers, bytes, total_len, pool, scope) }
     }
 
     fn encode_index_meta_value_into(
@@ -1225,14 +1236,18 @@ mod tests {
             .collect_vec();
 
         let mut tuple = Tuple::default();
-        TableCodec::decode_tuple_into(
-            &mut tuple,
-            &deserializers,
-            None,
-            &bytes,
-            2,
-            &mut crate::types::serialize::BytesPool::default(),
-        )?;
+        // SAFETY: without a scope every value is copied.
+        unsafe {
+            TableCodec::decode_tuple_into(
+                &mut tuple,
+                &deserializers,
+                None,
+                &bytes,
+                2,
+                &mut crate::types::serialize::BytesPool::default(),
+                None,
+            )?
+        };
         assert_eq!(
             tuple,
             Tuple::new(
@@ -1320,12 +1335,12 @@ mod tests {
             |key, value| Ok((key.to_vec(), value.to_vec())),
         )?;
         assert_ne!(column_key, index_key);
-        table_codec.with_index_statistics_bound(0, 0, |min, max| {
+        table_codec.with_index_statistics_bound(0, 0, |min, max, _| {
             assert!(index_key.as_slice() >= min && index_key.as_slice() <= max);
             assert!(column_key.as_slice() < min || column_key.as_slice() > max);
             Ok(())
         })?;
-        table_codec.with_statistics_bound(0, |min, max| {
+        table_codec.with_statistics_bound(0, |min, max, _| {
             assert!(index_key.as_slice() >= min && index_key.as_slice() <= max);
             assert!(column_key.as_slice() >= min && column_key.as_slice() <= max);
             Ok(())
@@ -1384,7 +1399,7 @@ mod tests {
         assert!(bucket0_key < bucket1_key);
 
         let (bucket0_min, bucket0_max) =
-            table_codec.with_index_statistics_bound(0, 0, |min, max| {
+            table_codec.with_index_statistics_bound(0, 0, |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })?;
         assert!(bucket0_key.as_slice() >= bucket0_min.as_slice());
@@ -1661,7 +1676,7 @@ mod tests {
         set.insert(op(0, 2));
 
         let (min, max) = table_codec
-            .with_columns_bound(1, |min, max| {
+            .with_columns_bound(1, |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
             .unwrap();
@@ -1719,7 +1734,7 @@ mod tests {
         set.insert(op(2, 2));
 
         let (min, max) = table_codec
-            .with_index_meta_bound(1, |min, max| {
+            .with_index_meta_bound(1, |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
             .unwrap();
@@ -1781,7 +1796,7 @@ mod tests {
         set.insert(op(DataValue::Int32(2), 2, table_catalog.id()));
 
         let (min, max) = table_codec
-            .with_index_bound(table_catalog.id(), 1, |min, max| {
+            .with_index_bound(table_catalog.id(), 1, |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
             .unwrap();
@@ -1834,7 +1849,7 @@ mod tests {
         set.insert(op(DataValue::Int32(2), 0, 2));
 
         let (min, max) = table_codec
-            .with_all_index_bound(1, |min, max| {
+            .with_all_index_bound(1, |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
             .unwrap();
@@ -1925,7 +1940,9 @@ mod tests {
         set.insert(op("T2"));
 
         let (min, max) = table_codec
-            .with_root_table_bound(|min, max| Ok::<_, DatabaseError>((min.to_vec(), max.to_vec())))
+            .with_root_table_bound(|min, max, _| {
+                Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
+            })
             .unwrap();
 
         let vec = set
@@ -1963,7 +1980,7 @@ mod tests {
         set.insert(op(2));
 
         let (min, max) = table_codec
-            .with_view_bound(|min, max| Ok::<_, DatabaseError>((min.to_vec(), max.to_vec())))
+            .with_view_bound(|min, max, _| Ok::<_, DatabaseError>((min.to_vec(), max.to_vec())))
             .unwrap();
 
         let vec = set

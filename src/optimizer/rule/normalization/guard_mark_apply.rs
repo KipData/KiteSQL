@@ -695,7 +695,7 @@ mod tests {
                 };
                 project
                     .exprs
-                    .push(if escaped == 1 { fixture.marker } else { upper });
+                    .push((None, if escaped == 1 { fixture.marker } else { upper }));
             }
             assert_eq!(
                 GuardMarkApply.apply(&mut fixture.plan, &mut arena, None)?,

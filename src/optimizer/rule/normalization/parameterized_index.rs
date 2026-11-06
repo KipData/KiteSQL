@@ -173,7 +173,7 @@ fn parameterize_right_subtree(
 ) -> Result<Option<ExprRef>, DatabaseError> {
     match (&mut plan.operator, plan.childrens.as_mut()) {
         (Operator::Project(project), Childrens::Only(child)) => {
-            let Some(mut expr) = project.exprs.iter().copied().find(|expr| {
+            let Some(mut expr) = project.exprs.iter().map(|(_, expr)| *expr).find(|expr| {
                 let column = expr.output_column_ref(arena);
                 arena.same_column(column, *right_column)
             }) else {
@@ -561,13 +561,10 @@ impl NormalizationRule for ParameterizeInnerJoin {
                         i - old_left_len
                     };
                     arena.alloc_expression(ScalarExpression::column_expr(column, position))
-                })
-                .collect();
+                });
+            let project = ProjectOperator::new(exprs);
             std::mem::swap(left, right);
-            let mut project = LogicalPlan::new(
-                Operator::Project(ProjectOperator::new(exprs)),
-                Childrens::None,
-            );
+            let mut project = LogicalPlan::new(Operator::Project(project), Childrens::None);
             project.physical_option = Some(PhysicalOption::new(
                 PlanImpl::Project,
                 SortOption::Follow,
@@ -1340,7 +1337,7 @@ mod inner_join_tests {
             project_op
                 .exprs
                 .iter()
-                .map(|expr| position(*expr, &arena))
+                .map(|(_, expr)| position(*expr, &arena))
                 .collect::<Vec<_>>(),
             vec![1, 2, 3, 0]
         );

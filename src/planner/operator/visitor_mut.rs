@@ -451,7 +451,7 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
         op: &'a mut ProjectOperator,
         _children: &mut ChildrenVisitMut<'a>,
     ) -> Result<(), DatabaseError> {
-        for expr in &mut op.exprs {
+        for (_, expr) in &mut op.exprs {
             ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
         }
         Ok(())

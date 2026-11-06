@@ -77,11 +77,11 @@ struct AppendedRightOutput {
 }
 
 struct ProjectionOutputBinder<'a> {
-    project_exprs: &'a [ExprRef],
+    project_exprs: &'a [(Option<usize>, ExprRef)],
 }
 
 impl<'a> ProjectionOutputBinder<'a> {
-    fn new(project_exprs: &'a [ExprRef]) -> Self {
+    fn new(project_exprs: &'a [(Option<usize>, ExprRef)]) -> Self {
         Self { project_exprs }
     }
 
@@ -92,14 +92,14 @@ impl<'a> ProjectionOutputBinder<'a> {
     ) -> Option<ScalarExpression> {
         self.project_exprs
             .iter()
-            .position(|candidate| {
+            .position(|(_, candidate)| {
                 candidate.eq_ignore_colref_pos(expr, arena)
                     || candidate
                         .unpack_alias(arena)
                         .eq_ignore_colref_pos(expr.unpack_alias(arena), arena)
             })
             .map(|position| {
-                let output_expr = self.project_exprs[position];
+                let output_expr = self.project_exprs[position].1;
                 ScalarExpression::column_expr(output_expr.output_column_ref(arena), position)
             })
     }
@@ -864,9 +864,13 @@ impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder
 
     /// Whether `exprs` only renames its input to an alias, as `bind_alias` builds for `FROM t AS x`
     /// (`temp == false`) or for a temp table (`temp == true`).
-    fn is_alias_projection(exprs: &[ExprRef], temp: bool, arena: &PlanArena) -> bool {
+    fn is_alias_projection(
+        exprs: &[(Option<usize>, ExprRef)],
+        temp: bool,
+        arena: &PlanArena,
+    ) -> bool {
         !exprs.is_empty()
-            && exprs.iter().all(|expr| {
+            && exprs.iter().all(|(_, expr)| {
                 matches!(
                     arena.expression(*expr),
                     ScalarExpression::Alias {
@@ -1660,9 +1664,10 @@ impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder
                     }
                 }
                 if referenced {
-                    op.exprs.push(
+                    op.exprs.push((
+                        None,
                         arena.alloc_expression(ScalarExpression::column_expr(*column, position)),
-                    );
+                    ));
                     appended_outputs.push(AppendedRightOutput {
                         column: *column,
                         child_position: position,
@@ -1864,7 +1869,7 @@ impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder
                 if !preserve_projection || Self::is_alias_projection(&op.exprs, true, arena) {
                     Ok((child, correlated_filters))
                 } else {
-                    for expr in &op.exprs {
+                    for (_, expr) in &op.exprs {
                         if Self::expr_has_correlated_refs(*expr, left_schema, arena)? {
                             return Err(DatabaseError::UnsupportedStmt(
                                 "correlated references in the SELECT list of an IN/ANY/ALL subquery are not supported"
@@ -2313,8 +2318,7 @@ mod tests {
             alias: AliasType::Name("v".to_string()),
         });
 
-        ProjectionOutputBinder::new(std::slice::from_ref(&project_output))
-            .visit(&mut expr, &mut arena)?;
+        ProjectionOutputBinder::new(&[(None, project_output)]).visit(&mut expr, &mut arena)?;
 
         let output_column = project_output.output_column_ref(&mut arena);
         let expected = arena.alloc_expression(ScalarExpression::column_expr(output_column, 0));
@@ -2408,7 +2412,7 @@ mod tests {
         let Operator::Project(project) = &plan.operator else {
             unreachable!()
         };
-        let selected = project.exprs[1].unpack_alias(&arena);
+        let selected = project.exprs[1].1.unpack_alias(&arena);
         assert!(
             matches!(arena.expression(selected), ScalarExpression::ColumnRef { column, position: 2 }
             if arena.same_column(*column, marker))

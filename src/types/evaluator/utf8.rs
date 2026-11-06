@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::types::evaluator::cast::{to_char, to_varbinary, to_varchar};
 use crate::types::evaluator::DataValue;
-use crate::types::value::Utf8Type;
+use crate::types::value::{Utf8Str, Utf8Type};
 use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
 #[cfg(feature = "decimal")]
@@ -39,13 +39,13 @@ macro_rules! utf8_binary {
     };
 }
 
-utf8_binary!(utf8_gt_binary_eval, |v1: &String, v2: &String| {
+utf8_binary!(utf8_gt_binary_eval, |v1: &Utf8Str, v2: &Utf8Str| {
     DataValue::Boolean(v1 > v2)
 });
-utf8_binary!(utf8_gt_eq_binary_eval, |v1: &String, v2: &String| {
+utf8_binary!(utf8_gt_eq_binary_eval, |v1: &Utf8Str, v2: &Utf8Str| {
     DataValue::Boolean(v1 >= v2)
 });
-utf8_binary!(utf8_lt_binary_eval, |v1: &String, v2: &String| {
+utf8_binary!(utf8_lt_binary_eval, |v1: &Utf8Str, v2: &Utf8Str| {
     DataValue::Boolean(v1 < v2)
 });
 
@@ -99,7 +99,7 @@ crate::define_cast_evaluator!(
 );
 crate::define_cast_evaluator!(
     utf8_to_varbinary_cast_eval { len: Option<u32> },
-    DataValue::Utf8 { value, .. } => |this| to_varbinary(value.into_bytes(), this.len)
+    DataValue::Utf8 { value, .. } => |this| to_varbinary(value.into_string().into_bytes(), this.len)
 );
 
 #[cfg(feature = "time")]
@@ -166,7 +166,7 @@ mod chrono_cast {
                 (3 | 6 | 9, false) => crate::types::value::TIME_STAMP_FMT_WITHOUT_ZONE,
                 _ => crate::types::value::TIME_STAMP_FMT_WITH_ZONE,
             };
-            let mut complete_value = value;
+            let mut complete_value = value.into_string();
             if this.zone && !complete_value.contains('+') {
                 complete_value.push_str("+00:00");
             }
@@ -208,13 +208,13 @@ pub use chrono_cast::*;
 crate::define_cast_evaluator!(utf8_to_decimal_cast_eval, DataValue::Utf8 { value, .. } => {
     Ok(DataValue::Decimal(Decimal::from_str(&value)?))
 });
-utf8_binary!(utf8_lt_eq_binary_eval, |v1: &String, v2: &String| {
+utf8_binary!(utf8_lt_eq_binary_eval, |v1: &Utf8Str, v2: &Utf8Str| {
     DataValue::Boolean(v1 <= v2)
 });
-utf8_binary!(utf8_eq_binary_eval, |v1: &String, v2: &String| {
+utf8_binary!(utf8_eq_binary_eval, |v1: &Utf8Str, v2: &Utf8Str| {
     DataValue::Boolean(v1 == v2)
 });
-utf8_binary!(utf8_not_eq_binary_eval, |v1: &String, v2: &String| {
+utf8_binary!(utf8_not_eq_binary_eval, |v1: &Utf8Str, v2: &Utf8Str| {
     DataValue::Boolean(v1 != v2)
 });
 pub fn utf8_string_concat_binary_eval(
@@ -223,7 +223,7 @@ pub fn utf8_string_concat_binary_eval(
 ) -> Result<DataValue, DatabaseError> {
     Ok(match (left, right) {
         (DataValue::Utf8 { mut value, .. }, DataValue::Utf8 { value: right, .. }) => {
-            value.push_str(right);
+            value.to_mut().push_str(right);
             DataValue::Utf8 {
                 value,
                 ty: Utf8Type::Variable(None),
@@ -363,7 +363,7 @@ mod test {
 
     fn utf8(value: &str) -> DataValue {
         DataValue::Utf8 {
-            value: value.to_string(),
+            value: value.to_string().into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         }
@@ -566,7 +566,7 @@ mod test {
         assert_eq!(
             utf8_to_char_cast_eval(2, CharLengthUnits::Characters, utf8("ab")).unwrap(),
             DataValue::Utf8 {
-                value: "ab".to_string(),
+                value: "ab".into(),
                 ty: Utf8Type::Fixed(2),
                 unit: CharLengthUnits::Characters,
             }
@@ -574,7 +574,7 @@ mod test {
         assert_eq!(
             utf8_to_varchar_cast_eval(Some(2), CharLengthUnits::Characters, utf8("ab")).unwrap(),
             DataValue::Utf8 {
-                value: "ab".to_string(),
+                value: "ab".into(),
                 ty: Utf8Type::Variable(Some(2)),
                 unit: CharLengthUnits::Characters,
             }

@@ -168,7 +168,7 @@ mod test {
         assert_eq!(
             decimal_to_char_cast_eval(4, CharLengthUnits::Characters, value.clone()).unwrap(),
             DataValue::Utf8 {
-                value: "12.5".to_string(),
+                value: "12.5".into(),
                 ty: Utf8Type::Fixed(4),
                 unit: CharLengthUnits::Characters,
             }
@@ -177,7 +177,7 @@ mod test {
             decimal_to_varchar_cast_eval(Some(4), CharLengthUnits::Characters, value.clone())
                 .unwrap(),
             DataValue::Utf8 {
-                value: "12.5".to_string(),
+                value: "12.5".into(),
                 ty: Utf8Type::Variable(Some(4)),
                 unit: CharLengthUnits::Characters,
             }

@@ -18,6 +18,7 @@ mod app {
     use kite_sql::errors::DatabaseError;
     use kite_sql::storage::Storage;
     use kite_sql::Model;
+    use std::borrow::Cow;
     use std::env;
     use std::fs;
     use std::io::ErrorKind;
@@ -41,25 +42,25 @@ mod app {
 
     #[derive(Default, Debug, PartialEq, Model)]
     #[model(table = "my_struct")]
-    pub struct MyStruct {
+    pub struct MyStruct<'a> {
         #[model(primary_key)]
         pub c1: i32,
-        pub c2: String,
+        pub c2: Cow<'a, str>,
     }
 
     fn run_with_database<S: Storage>(mut database: Database<S>) -> Result<(), DatabaseError> {
         database.create_table_if_not_exists::<MyStruct>()?;
         database.insert(&MyStruct {
             c1: 0,
-            c2: "zero".to_string(),
+            c2: "zero".into(),
         })?;
         database.insert(&MyStruct {
             c1: 1,
-            c2: "one".to_string(),
+            c2: "one".into(),
         })?;
         database.insert(&MyStruct {
             c1: 2,
-            c2: "two".to_string(),
+            c2: "two".into(),
         })?;
 
         database

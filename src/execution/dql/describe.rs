@@ -23,19 +23,19 @@ use crate::types::CharLengthUnits;
 use std::sync::LazyLock;
 
 static PRIMARY_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {
-    value: String::from("PRIMARY"),
+    value: "PRIMARY".into(),
     ty: Utf8Type::Variable(None),
     unit: CharLengthUnits::Characters,
 });
 
 static UNIQUE_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {
-    value: String::from("UNIQUE"),
+    value: "UNIQUE".into(),
     ty: Utf8Type::Variable(None),
     unit: CharLengthUnits::Characters,
 });
 
 static EMPTY_KEY_TYPE: LazyLock<DataValue> = LazyLock::new(|| DataValue::Utf8 {
-    value: String::from("EMPTY"),
+    value: "EMPTY".into(),
     ty: Utf8Type::Variable(None),
     unit: CharLengthUnits::Characters,
 });
@@ -130,12 +130,12 @@ fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog, defaul
     let datatype = column.datatype();
 
     values.push(DataValue::Utf8 {
-        value: column.name().to_string(),
+        value: column.name().to_string().into(),
         ty: Utf8Type::Variable(None),
         unit: CharLengthUnits::Characters,
     });
     values.push(DataValue::Utf8 {
-        value: datatype.to_string(),
+        value: datatype.to_string().into(),
         ty: Utf8Type::Variable(None),
         unit: CharLengthUnits::Characters,
     });
@@ -143,18 +143,19 @@ fn fill_describe_row(values: &mut Vec<DataValue>, column: &ColumnCatalog, defaul
         value: datatype
             .raw_len()
             .map(|len| len.to_string())
-            .unwrap_or_else(|| "variable".to_string()),
+            .unwrap_or_else(|| "variable".to_string())
+            .into(),
         ty: Utf8Type::Variable(None),
         unit: CharLengthUnits::Characters,
     });
     values.push(DataValue::Utf8 {
-        value: column.nullable().to_string(),
+        value: column.nullable().to_string().into(),
         ty: Utf8Type::Variable(None),
         unit: CharLengthUnits::Characters,
     });
     values.push(key_value(column));
     values.push(DataValue::Utf8 {
-        value: default,
+        value: default.into(),
         ty: Utf8Type::Variable(None),
         unit: CharLengthUnits::Characters,
     });

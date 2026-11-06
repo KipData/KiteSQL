@@ -95,7 +95,8 @@ pub(crate) fn sort_tuples<A: MetaArena>(
             let value = plan_arena
                 .expression(*expr)
                 .eval(plan_arena, Some(&row.tuple))?;
-            eval_values.push(value.into_owned());
+            // SAFETY: the keys are dropped when this sort returns.
+            eval_values.push(unsafe { DataValue::own_in_txn(value) });
         }
         row.outer_values = plan_arena.take_outer_values();
     }

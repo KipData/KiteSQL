@@ -33,7 +33,7 @@ impl<'a> TupleBuilder<'a> {
 
     pub fn build_result(message: String) -> Tuple {
         let values = vec![DataValue::Utf8 {
-            value: message,
+            value: message.into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         }];
@@ -45,7 +45,7 @@ impl<'a> TupleBuilder<'a> {
         tuple.pk = None;
         tuple.values.clear();
         tuple.values.push(DataValue::Utf8 {
-            value: message,
+            value: message.into(),
             ty: Utf8Type::Variable(None),
             unit: CharLengthUnits::Characters,
         });
@@ -62,7 +62,7 @@ impl<'a> TupleBuilder<'a> {
         for (i, value) in row.into_iter().enumerate() {
             tuple.values.push(
                 DataValue::Utf8 {
-                    value: value.to_string(),
+                    value: value.to_string().into(),
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 }

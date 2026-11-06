@@ -15,6 +15,7 @@
 mod orm;
 mod projection;
 mod reference_serialization;
+mod row;
 
 use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput};

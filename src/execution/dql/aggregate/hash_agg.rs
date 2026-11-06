@@ -102,12 +102,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
                 // Evaluate the key in place, and drop it again if its group exists.
                 let start = self.keys.len();
                 for expr in self.groupby_exprs {
-                    self.keys.push(
-                        plan_arena
-                            .expression(*expr)
-                            .eval(plan_arena, Some(tuple))?
-                            .into_owned(),
-                    );
+                    let key = plan_arena.expression(*expr).eval(plan_arena, Some(tuple))?;
+                    // SAFETY: the keys live until `reset` clears them, before the next execution.
+                    self.keys.push(unsafe { DataValue::own_in_txn(key) });
                 }
 
                 let keys = &self.keys;

@@ -21,6 +21,7 @@ use crate::planner::operator::index_probe_join::IndexProbeJoinOperator;
 use crate::planner::{ExecMetaArena, LogicalPlan, MetaArena};
 use crate::storage::StorageTransaction;
 use crate::types::index::RuntimeIndexProbe;
+use crate::types::value::DataValue;
 
 pub struct IndexProbeJoin<'a> {
     op: &'a IndexProbeJoinOperator,
@@ -64,8 +65,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
             let mut left = arena.take_tuple();
             let key = plan_arena
                 .expression(self.op.probe)
-                .eval(plan_arena, Some(&left))?
-                .into_owned();
+                .eval(plan_arena, Some(&left))?;
+            // SAFETY: the probe is popped by the right input during this execution, and the
+            // probe stack is cleared before the next one.
+            let key = unsafe { DataValue::own_in_txn(key) };
             if key.has_null() {
                 arena.release(left);
                 continue;

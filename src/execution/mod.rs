@@ -77,15 +77,19 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanArena, PlanKeeper};
-use crate::storage::table_codec::TableCodec;
-use crate::storage::{IndexIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter};
+use crate::storage::table_codec::{Bytes, TableCodec};
+use crate::storage::{
+    IndexIter, InnerIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter,
+};
 use crate::types::index::RuntimeIndexProbe;
 use crate::types::serialize::BytesPool;
 use crate::types::tuple::{ConcatPool, Input, Schema, Tuple, TupleId, TupleImpl};
 use crate::types::value::DataValue;
+use std::alloc::{dealloc, Layout};
 use std::borrow::Cow;
 use std::marker::PhantomData;
-use std::mem;
+use std::mem::{self, ManuallyDrop};
+use std::ptr::NonNull;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecStatus {
@@ -111,17 +115,38 @@ impl ExecResult {
 /// Resolves either an arena-backed expression or a direct scalar expression.
 pub(crate) trait RewriteExpression {
     fn expression<'a>(&'a self, arena: &'a dyn MetaArena) -> &'a ScalarExpression;
+
+    /// The position of the rewritten row this expression moves out instead of evaluating.
+    fn moved(&self) -> Option<usize>;
 }
 
 impl RewriteExpression for ExprRef {
     fn expression<'a>(&'a self, arena: &'a dyn MetaArena) -> &'a ScalarExpression {
         arena.expression(*self)
     }
+
+    fn moved(&self) -> Option<usize> {
+        None
+    }
 }
 
 impl RewriteExpression for ScalarExpression {
     fn expression<'a>(&'a self, _arena: &'a dyn MetaArena) -> &'a ScalarExpression {
         self
+    }
+
+    fn moved(&self) -> Option<usize> {
+        None
+    }
+}
+
+impl RewriteExpression for (Option<usize>, ExprRef) {
+    fn expression<'a>(&'a self, arena: &'a dyn MetaArena) -> &'a ScalarExpression {
+        arena.expression(self.1)
+    }
+
+    fn moved(&self) -> Option<usize> {
+        self.0
     }
 }
 
@@ -186,8 +211,11 @@ impl<'a> Executor<'a> {
     ) -> Result<(), DatabaseError> {
         self.buffer.reset();
         if mem::replace(&mut self.ran, true) {
+            self.buffer.restarting = true;
             let mut context = ExecContext::new(&mut self.buffer, arena);
-            self.root.reset(&mut context, plan_arena)?;
+            let result = self.root.reset(&mut context, plan_arena);
+            self.buffer.restarting = false;
+            result?;
         }
         Ok(())
     }
@@ -247,6 +275,9 @@ pub(crate) enum ExecNode<'a> {
 
 pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
     // Restores the state the node had right after it was built, resetting its inputs too.
+    // A parent may also reset a child to rescan it within one execution; only then may a node
+    // keep what it read (see `ExecContext::restarting`), as a new execution may run in another
+    // transaction.
     fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
@@ -574,6 +605,60 @@ pub(crate) struct ExecBuffer {
     result: ExecResult,
     table_codec: TableCodec,
     runtime_probe_stack: Vec<RuntimeIndexProbe>,
+    restarting: bool,
+    bound_buffers: [Bytes; 2],
+    spare_iters: Option<SpareIters>,
+}
+
+/// The emptied allocation of an execution's storage iterator slots, kept for the next execution.
+/// It is untyped because the slots borrow the transaction an execution reads.
+struct SpareIters {
+    ptr: NonNull<u8>,
+    capacity: usize,
+    slot: Layout,
+}
+
+unsafe impl Send for SpareIters {}
+unsafe impl Sync for SpareIters {}
+
+impl SpareIters {
+    fn new<E>(iters: Vec<E>) -> Option<Self> {
+        debug_assert!(iters.is_empty());
+        if iters.capacity() == 0 || size_of::<E>() == 0 {
+            return None;
+        }
+        let mut iters = ManuallyDrop::new(iters);
+        Some(SpareIters {
+            ptr: NonNull::new(iters.as_mut_ptr())?.cast(),
+            capacity: iters.capacity(),
+            slot: Layout::new::<E>(),
+        })
+    }
+
+    fn into_vec<E>(self) -> Option<Vec<E>> {
+        if self.slot != Layout::new::<E>() {
+            return None;
+        }
+        let spare = ManuallyDrop::new(self);
+        // SAFETY: a `Vec` of an element type with the layout of `E` allocated `ptr` for
+        // `capacity` elements, and none of them is initialized.
+        Some(unsafe { Vec::from_raw_parts(spare.ptr.as_ptr().cast(), 0, spare.capacity) })
+    }
+}
+
+impl Drop for SpareIters {
+    fn drop(&mut self) {
+        // SAFETY: the `Vec` that allocated `ptr` did so with this layout.
+        unsafe {
+            dealloc(
+                self.ptr.as_ptr(),
+                Layout::from_size_align_unchecked(
+                    self.slot.size() * self.capacity,
+                    self.slot.align(),
+                ),
+            )
+        }
+    }
 }
 
 pub(crate) struct ExecArena<'a, 't, T: StorageTransaction + 'a> {
@@ -593,7 +678,7 @@ pub(crate) struct ExecContext<'c, 'a, 't, T: StorageTransaction + 'a> {
 pub(crate) enum StorageIter<'t, T: StorageTransaction + 't> {
     Empty,
     Tuple(TupleIter<'t, T>),
-    Index(Box<IndexIter<'t, T>>),
+    Index(IndexIter<'t, T>),
     Table(TableIter<'t, T>),
     View(ViewIter<'t, T>),
 }
@@ -601,6 +686,16 @@ pub(crate) enum StorageIter<'t, T: StorageTransaction + 't> {
 impl<'t, T: StorageTransaction + 't> StorageIter<'t, T> {
     pub(crate) fn is_empty(&self) -> bool {
         matches!(self, StorageIter::Empty)
+    }
+
+    fn recycle(self, pool: &mut BytesPool) {
+        match self {
+            StorageIter::Tuple(iter) => iter.recycle(pool),
+            StorageIter::Index(iter) => iter.recycle(pool),
+            StorageIter::Table(iter) => iter.iter.recycle(pool),
+            StorageIter::View(iter) => iter.iter.recycle(pool),
+            StorageIter::Empty => (),
+        }
     }
 
     pub(crate) fn as_tuple(&mut self) -> &mut TupleIter<'t, T> {
@@ -635,6 +730,7 @@ impl<'t, T: StorageTransaction + 't> StorageIter<'t, T> {
 pub(crate) struct ExecArenaLocalState<'b, 'a, 't, T: StorageTransaction + 'a> {
     transaction: *mut T,
     pub(crate) table_codec: &'b mut TableCodec,
+    pub(crate) bound_buffers: &'b mut [Bytes; 2],
     pub(crate) result: &'b mut ExecResult,
     pub(crate) plan_arena: &'b (dyn MetaArena + 'a),
     pub(crate) iters: &'b mut [StorageIter<'t, T>],
@@ -692,6 +788,20 @@ impl ExecBuffer {
     pub(crate) fn result_mut(&mut self) -> &mut TupleImpl {
         &mut self.result.tuple
     }
+
+    pub(crate) fn iter_slots<'t, T: StorageTransaction + 't>(
+        &mut self,
+        len: usize,
+    ) -> Vec<StorageIter<'t, T>> {
+        let mut iters = self
+            .spare_iters
+            .take()
+            .and_then(SpareIters::into_vec)
+            .unwrap_or_default();
+        iters.reserve_exact(len);
+        iters.resize_with(len, || StorageIter::Empty);
+        iters
+    }
 }
 
 impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
@@ -706,13 +816,21 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
         }
     }
 
-    pub(crate) fn with_iters(mut self, iters: usize) -> Self {
-        self.iters.resize_with(iters, || StorageIter::Empty);
+    pub(crate) fn with_iters(mut self, iters: Vec<StorageIter<'t, T>>) -> Self {
+        self.iters = iters;
         self
     }
 
-    pub(crate) fn release_iters(&mut self) {
-        self.iters.fill_with(|| StorageIter::Empty);
+    pub(crate) fn release_iters(&mut self, buffer: Option<&mut ExecBuffer>) {
+        let Some(buffer) = buffer else {
+            self.iters.fill_with(|| StorageIter::Empty);
+            return;
+        };
+        let pool = buffer.table_codec.bytes_pool();
+        for iter in self.iters.drain(..) {
+            iter.recycle(pool);
+        }
+        buffer.spare_iters = SpareIters::new(mem::take(&mut self.iters));
     }
 
     pub(crate) fn take_ddl_apply(&mut self) -> Vec<DDLApply> {
@@ -751,6 +869,7 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
         ExecArenaLocalState {
             transaction: self.arena.transaction,
             table_codec: &mut self.buffer.table_codec,
+            bound_buffers: &mut self.buffer.bound_buffers,
             result: &mut self.buffer.result,
             plan_arena,
             iters: &mut self.arena.iters,
@@ -781,6 +900,11 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
     // Slots are allocated in build order, so a subtree built last owns the tail.
     pub(crate) fn truncate_iters(&mut self, len: usize) {
         self.arena.iters.truncate(len);
+    }
+
+    #[inline]
+    pub(crate) fn restarting(&self) -> bool {
+        self.buffer.restarting
     }
 
     #[inline]
@@ -840,6 +964,11 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
         let pool = self.buffer.table_codec.bytes_pool();
         result.spare_values.reserve(exprs.len());
         for expr in exprs {
+            if let (Some(position), None) = (expr.moved(), input) {
+                let value = mem::replace(&mut result.tuple[position], DataValue::Null);
+                result.spare_values.push(value);
+                continue;
+            }
             let expression = expr.expression(arena);
             let value = match input {
                 Some(input) => expression.eval(arena, Some(input)),
