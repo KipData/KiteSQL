@@ -36,7 +36,9 @@
 - Typed ORM with schema migration (`orm` feature), see [`src/orm/README.md`](src/orm/README.md)
 - WebAssembly and Python bindings
 
-👉 [More features](docs/features.md)
+👉 [More features](docs/features.md) · [Blog](https://kitesql.kould2333.org/)
+
+📝 [Zero-Copy SQL Computation on LMDB](https://kitesql.kould2333.org/blog/zero-copy-sql-on-lmdb.html) ([中文](https://kitesql.kould2333.org/blog/zero-copy-sql-on-lmdb.zh-CN.html)): how strings travel from the mmap'd file to your struct without a copy, benchmarked against SQLite.
 
 ## Example
 
