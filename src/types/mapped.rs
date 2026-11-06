@@ -32,6 +32,10 @@ pub struct MappedScope {
 }
 
 impl MappedScope {
+    /// # Safety
+    ///
+    /// The scope must belong to one transaction whose reads stay valid, unchanged and at the same
+    /// address until the scope is dropped, and it must be dropped before that transaction ends.
     pub unsafe fn new() -> Self {
         Self {
             #[cfg(debug_assertions)]
