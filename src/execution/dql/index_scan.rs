@@ -23,28 +23,16 @@ use crate::planner::operator::SortOption;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::{IndexScanView, StorageTransaction, TupleMapping};
 use crate::types::index::{IndexInfo, IndexLookup, RuntimeIndexProbe};
+use std::borrow::Cow;
 
 pub(crate) struct IndexScan<'a> {
     op: &'a TableScanOperator,
     info: &'a IndexInfo,
     lookup: &'a IndexLookup,
     iter: IterSlot,
-    ranges: ScanRanges<'a>,
+    /// Borrows the plan's static range, or owns one that parameters bind into.
+    ranges: Cow<'a, Range>,
     cover_mapping: Option<TupleMapping>,
-}
-
-pub(crate) enum ScanRanges<'a> {
-    Static(&'a Range),
-    Owned(Range),
-}
-
-impl ScanRanges<'_> {
-    pub(crate) fn range(&self) -> &Range {
-        match self {
-            ScanRanges::Static(range) => range,
-            ScanRanges::Owned(range) => range,
-        }
-    }
 }
 
 impl<'a> IndexScan<'a> {
@@ -70,7 +58,7 @@ impl<'a> IndexScan<'a> {
             info,
             lookup,
             iter,
-            ranges: ScanRanges::Owned(Range::Dummy),
+            ranges: Cow::Owned(Range::Dummy),
             cover_mapping,
         }
     }
@@ -81,11 +69,11 @@ impl<'a> IndexScan<'a> {
         lookup: &'a IndexLookup,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut (dyn MetaArena + 'a),
-        ranges: &mut ScanRanges<'a>,
+        ranges: &mut Cow<'a, Range>,
     ) -> Result<(), DatabaseError> {
         match lookup {
             IndexLookup::Static(template) if !template.has_parameter() => {
-                *ranges = ScanRanges::Static(template)
+                *ranges = Cow::Borrowed(template)
             }
             IndexLookup::Static(template) => {
                 let plan_arena = &*plan_arena;
@@ -95,19 +83,19 @@ impl<'a> IndexScan<'a> {
                     })
                 };
                 match ranges {
-                    ScanRanges::Owned(range) => bind(range)?,
-                    ScanRanges::Static(_) => {
+                    Cow::Owned(range) => bind(range)?,
+                    Cow::Borrowed(_) => {
                         let mut range = Range::Dummy;
                         bind(&mut range)?;
-                        *ranges = ScanRanges::Owned(range);
+                        *ranges = Cow::Owned(range);
                     }
                 }
             }
             IndexLookup::Probe => match (&mut *ranges, arena.pop_runtime_probe()) {
-                (ScanRanges::Owned(Range::Eq(value)), RuntimeIndexProbe::Eq(probe)) => {
+                (Cow::Owned(Range::Eq(value)), RuntimeIndexProbe::Eq(probe)) => {
                     *value = RangeValue::Value(probe)
                 }
-                (ranges, probe) => *ranges = ScanRanges::Owned(probe.into()),
+                (ranges, probe) => *ranges = Cow::Owned(probe.into()),
             },
         }
         if let (
@@ -119,12 +107,12 @@ impl<'a> IndexScan<'a> {
         {
             if let Some(specialized) = RangeDetacher::<IndexRangeColumn, _>::specialize_range(
                 info.meta,
-                ranges.range(),
+                ranges,
                 predicate,
                 *ignore_prefix_len,
                 plan_arena,
             )? {
-                *ranges = ScanRanges::Owned(specialized);
+                *ranges = Cow::Owned(specialized);
             }
         }
         Ok(())
@@ -190,7 +178,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
         }
 
         let view = IndexScanView {
-            range: self.ranges.range(),
+            range: &self.ranges,
             cover_mapping: self.cover_mapping.as_ref(),
         };
         let state = arena.local_state(plan_arena);

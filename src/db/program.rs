@@ -266,7 +266,7 @@ impl<'p, T: StorageTransaction + 'p> ResultIter for ProgramIter<'_, 'p, T> {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
-    use crate::execution::dql::index_scan::{IndexScan, ScanRanges};
+    use crate::execution::dql::index_scan::IndexScan;
     use crate::expression::range_detacher::{Range, RangeValue};
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::filter::FilterOperator;
@@ -277,6 +277,7 @@ mod tests {
     use crate::types::tuple::TupleLike;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
+    use std::borrow::Cow;
     use std::ops::Bound;
 
     #[test]
@@ -462,7 +463,7 @@ mod tests {
             let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
             let mut execution_arena =
                 crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
-            let mut ranges = ScanRanges::Owned(Range::Dummy);
+            let mut ranges = Cow::Owned(Range::Dummy);
             IndexScan::bind_ranges(
                 info,
                 info.lookup.as_ref().expect("lookup"),
@@ -480,7 +481,7 @@ mod tests {
                 } else {
                     original
                 };
-                assert_eq!(ranges.range(), want);
+                assert_eq!(&*ranges, want);
             }
             assert_eq!(
                 scan.physical_option.as_ref().unwrap().plan,
@@ -843,7 +844,7 @@ mod tests {
         let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
         let mut execution_arena =
             crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
-        let mut ranges = ScanRanges::Owned(Range::Dummy);
+        let mut ranges = Cow::Owned(Range::Dummy);
         IndexScan::bind_ranges(
             info,
             info.lookup.as_ref().expect("lookup"),
@@ -852,7 +853,7 @@ mod tests {
             &mut ranges,
         )?;
         assert_eq!(
-            ranges.range(),
+            &*ranges,
             &Range::Scope {
                 min: Bound::Included(
                     DataValue::Tuple(vec![DataValue::Int32(2), DataValue::Int32(2),]).into()
