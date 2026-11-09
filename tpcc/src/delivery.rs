@@ -141,11 +141,11 @@ impl TpccTest for DeliveryTest {
         &self,
         rng: &mut ThreadRng,
         tx: &mut T,
-        num_ware: usize,
-        _: &TpccArgs,
+        _: usize,
+        args: &TpccArgs,
         statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
-        let w_id = rng.gen_range(0..num_ware) + 1;
+        let w_id = args.home_ware;
         let o_carrier_id = rng.gen_range(1..10);
 
         let args = DeliveryArgs::new(w_id, o_carrier_id);

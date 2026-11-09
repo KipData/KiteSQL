@@ -96,11 +96,11 @@ impl TpccTest for SlevTest {
         &self,
         rng: &mut ThreadRng,
         tx: &mut T,
-        num_ware: usize,
-        _: &TpccArgs,
+        _: usize,
+        args: &TpccArgs,
         statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
-        let w_id = rng.gen_range(0..num_ware) + 1;
+        let w_id = args.home_ware;
         let d_id = rng.gen_range(1..=DIST_PER_WARE);
         let level = rng.gen_range(10..20);
 

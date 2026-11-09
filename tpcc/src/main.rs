@@ -94,6 +94,7 @@ pub(crate) trait TpccTest {
 
 struct TpccArgs {
     joins: bool,
+    home_ware: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -200,14 +201,20 @@ fn run_tpcc<B: BackendControl>(
     let pprof = PprofSession::start(args)?;
     let counters = thread::scope(|scope| {
         let threads = (1..args.threads)
-            .map(|_| {
+            .map(|thread_id| {
                 let worker = backend.worker()?;
                 Ok(scope.spawn(move || {
-                    measure(worker.borrow(), args, tpcc_start, ProgressBar::hidden())
+                    measure(
+                        worker.borrow(),
+                        args,
+                        thread_id,
+                        tpcc_start,
+                        ProgressBar::hidden(),
+                    )
                 }))
             })
             .collect::<Result<Vec<_>, TpccError>>()?;
-        let mut total = measure(backend, args, tpcc_start, ProgressBar::new_spinner())?;
+        let mut total = measure(backend, args, 0, tpcc_start, ProgressBar::new_spinner())?;
         for thread in threads {
             let (success, late, failure, rt_hist) = thread.join().expect("tpcc thread panicked")?;
             for i in 0..5 {
@@ -232,6 +239,7 @@ type Counters = ([usize; 5], [usize; 5], [usize; 5], RtHist);
 fn measure<B: BackendControl>(
     backend: &B,
     args: &Args,
+    thread_id: usize,
     tpcc_start: Instant,
     progress: ProgressBar,
 ) -> Result<Counters, TpccError> {
@@ -243,7 +251,10 @@ fn measure<B: BackendControl>(
     let mut success = [0usize; 5];
     let mut late = [0usize; 5];
     let mut failure = [0usize; 5];
-    let tpcc_args = TpccArgs { joins: args.joins };
+    let tpcc_args = TpccArgs {
+        joins: args.joins,
+        home_ware: thread_id % args.num_ware + 1,
+    };
 
     let duration = Duration::new(args.measure_time, 0);
     let mut round_count = 0;

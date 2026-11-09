@@ -327,8 +327,8 @@ impl TpccTest for NewOrdTest {
         let mut supware = vec![0; MAX_NUM_ITEMS];
         let mut qty = vec![0; MAX_NUM_ITEMS];
 
-        let w_id = rng.gen_range(0..num_ware) + 1;
-        let d_id = rng.gen_range(1..DIST_PER_WARE);
+        let w_id = args.home_ware;
+        let d_id = rng.gen_range(1..=DIST_PER_WARE);
         let c_id = nu_rand(rng, 1023, 1, CUST_PER_DIST);
         let ol_cnt = rng.gen_range(5..15);
         let rbk = rng.gen_range(1..100);
