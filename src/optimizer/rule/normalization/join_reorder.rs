@@ -716,7 +716,7 @@ impl NormalizationRule for GreedyJoinReorder {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};

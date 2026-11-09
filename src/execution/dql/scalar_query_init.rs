@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -43,7 +42,7 @@ pub struct ScalarQueryInit<'a> {
     init: ExecNode<'a>,
 }
 
-#[dual]
+#[maybe_async]
 impl<'a> ScalarQueryInit<'a> {
     async fn evaluate_init<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
@@ -106,7 +105,7 @@ impl<'a> ReadExecutor<'a> for ScalarQueryInit<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -177,7 +176,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a>
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -186,14 +185,13 @@ mod tests {
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, ExecMetaArena, PlanArena, TableArenaCell};
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::LogicalType;
 
     #[test]
     async fn scalar_init_shared_slot_caches_null_and_checks_cardinality(
     ) -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let tables = TableCache::default();
         let cache = &tables;

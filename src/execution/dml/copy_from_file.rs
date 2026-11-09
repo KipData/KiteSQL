@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::binder::copy::FileFormat;
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
@@ -41,7 +40,7 @@ impl<'a> WriteExecutor<'a> for CopyFromFile<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -114,7 +113,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::binder::copy::ExtSource;
@@ -135,7 +134,9 @@ mod tests {
         write!(file, "{csv}").expect("failed to write file");
 
         let tmp_dir = TempDir::new()?;
-        let mut db = DataBaseBuilder::path(tmp_dir.path()).build_in_memory()?;
+        let mut db = DataBaseBuilder::path(tmp_dir.path())
+            .build_in_memory()
+            .await?;
         db.ddl("create table test_copy (a int primary key, b float, c varchar(10))")
             .await?;
         db.load(CatalogKind::Table("test_copy".to_string())).await?;

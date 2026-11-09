@@ -25,7 +25,6 @@ use crate::db::{
     BindSource, ConsumeMut, Database, DatabaseIter, Executor, OwnedPtr, State, Transaction,
     TransactionIter,
 };
-use crate::dual::dual;
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -172,7 +171,7 @@ fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool
     ))
 }
 
-#[dual]
+#[maybe_async]
 impl<S: Storage> Database<S> {
     /// Parses SQL statements using this database's configured parser recursion limit.
     pub fn prepare_all<T: AsRef<str>>(&self, sql: T) -> Result<Vec<Statement>, DatabaseError> {
@@ -319,7 +318,7 @@ impl<S: Storage> Database<S> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'txn, S: Storage> Transaction<'txn, S> {
     /// Runs SQL inside the current transaction and returns the final result iterator.
     pub async fn run<'a, T: AsRef<str>>(
@@ -3388,7 +3387,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::binder::test::build_t1_table;
@@ -3414,8 +3413,8 @@ mod tests {
     }
 
     #[test]
-    fn prepare_rejects_non_positional_parameters() -> Result<(), DatabaseError> {
-        let db = DataBaseBuilder::path(".").build_in_memory()?;
+    async fn prepare_rejects_non_positional_parameters() -> Result<(), DatabaseError> {
+        let db = DataBaseBuilder::path(".").build_in_memory().await?;
         for placeholder in ["$0", "$01", "$name"] {
             assert!(matches!(
                 db.program_sql(
@@ -3429,8 +3428,8 @@ mod tests {
     }
 
     #[test]
-    fn test_prepare_and_command_type_classification() -> Result<(), DatabaseError> {
-        let database = DataBaseBuilder::path(".").build_in_memory()?;
+    async fn test_prepare_and_command_type_classification() -> Result<(), DatabaseError> {
+        let database = DataBaseBuilder::path(".").build_in_memory().await?;
         assert!(matches!(
             database.prepare_all(""),
             Err(DatabaseError::EmptyStatement)
@@ -3493,7 +3492,7 @@ mod tests {
 
     #[test]
     async fn test_database_entrypoints_reject_catalog_mutation() -> Result<(), DatabaseError> {
-        let mut database = DataBaseBuilder::path(".").build_in_memory()?;
+        let mut database = DataBaseBuilder::path(".").build_in_memory().await?;
         let params = &[] as &[(usize, LogicalType)];
 
         assert_unsupported(

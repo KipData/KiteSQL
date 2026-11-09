@@ -15,7 +15,6 @@
 //! Defines the nested loop join executor, it supports [`JoinType::Inner`], [`JoinType::LeftOuter`],
 //! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
-use crate::dual::dual;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 
@@ -147,7 +146,7 @@ impl<'a> ReadExecutor<'a> for NestedLoopJoin<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -347,7 +346,7 @@ impl NestedLoopJoin<'_> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -363,7 +362,6 @@ mod test {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
     use crate::types::evaluator::binary_create;
     use crate::types::LogicalType;
@@ -537,7 +535,7 @@ mod test {
 
     #[test]
     async fn nested_right_subtrees_reuse_slots() -> Result<(), DatabaseError> {
-        let storage = crate::storage::memory::MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -577,7 +575,7 @@ mod test {
 
     #[test]
     async fn test_nested_inner_join() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -630,7 +628,7 @@ mod test {
 
     #[test]
     async fn test_nested_left_out_join() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -712,7 +710,7 @@ mod test {
 
     #[test]
     async fn test_nested_cross_join_with_on() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -765,7 +763,7 @@ mod test {
 
     #[test]
     async fn test_nested_cross_join_without_filter() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -833,7 +831,7 @@ mod test {
 
     #[test]
     async fn test_nested_cross_join_without_on() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -876,7 +874,7 @@ mod test {
 
     #[test]
     async fn test_nested_right_out_join() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -953,7 +951,7 @@ mod test {
 
     #[test]
     async fn test_nested_full_join() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -1059,7 +1057,7 @@ mod test {
 
     #[test]
     async fn test_nested_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -1163,7 +1161,9 @@ mod test {
     async fn test_right_join_using_binds_visible_column_to_right_side() -> Result<(), DatabaseError>
     {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut db = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         let setup_sql = [
             "DROP TABLE IF EXISTS str1",

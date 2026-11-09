@@ -14,12 +14,7 @@
 
 #[cfg(feature = "kitesql-sync")]
 use crate::backend::dual::DualBackend;
-#[cfg(feature = "kitesql-sync")]
-use crate::backend::kitesql_lmdb::KiteSqlLmdbBackend;
-#[cfg(feature = "kitesql-sync")]
-use crate::backend::kitesql_rocksdb::{KiteSqlOptimisticRocksDbBackend, KiteSqlRocksDbBackend};
-#[cfg(feature = "slatedb-s3")]
-use crate::backend::kitesql_slatedb::KiteSqlSlateDbBackend;
+use crate::backend::kitesql::KiteSqlBackend;
 use crate::backend::sqlite::SqliteBackend;
 use crate::backend::{BackendControl, BackendTransaction, StatementSpec};
 use crate::delivery::DeliveryTest;
@@ -192,21 +187,20 @@ fn main() -> Result<(), TpccError> {
         #[cfg(feature = "kitesql-sync")]
         BackendKind::KitesqlRocksdb => {
             reset_db_path(Path::new(&args.path))?;
-            let mut backend =
-                KiteSqlRocksDbBackend::new(&args.path, args.rocksdb_stats, args.sync)?;
+            let mut backend = KiteSqlBackend::rocksdb(&args.path, args.rocksdb_stats, args.sync)?;
             run_tpcc(&mut backend, &args, &mut rng, &runtime)
         }
         #[cfg(feature = "kitesql-sync")]
         BackendKind::KitesqlOptimisticRocksdb => {
             reset_db_path(Path::new(&args.path))?;
             let mut backend =
-                KiteSqlOptimisticRocksDbBackend::new(&args.path, args.rocksdb_stats, args.sync)?;
+                KiteSqlBackend::optimistic_rocksdb(&args.path, args.rocksdb_stats, args.sync)?;
             run_tpcc(&mut backend, &args, &mut rng, &runtime)
         }
         #[cfg(feature = "kitesql-sync")]
         BackendKind::KitesqlLmdb => {
             reset_db_path(Path::new(&args.path))?;
-            let mut backend = KiteSqlLmdbBackend::new(&args.path, args.sync)?;
+            let mut backend = KiteSqlBackend::lmdb(&args.path, args.sync)?;
             run_tpcc(&mut backend, &args, &mut rng, &runtime)
         }
         #[cfg(feature = "slatedb-s3")]
@@ -226,10 +220,16 @@ fn main() -> Result<(), TpccError> {
             let path = format!("{}/{run}", args.path);
             println!("[SlateDB] s3://{}/{path}", config.bucket);
             let cache = slatedb_cache_options(&args)?;
-            let mut backend =
-                runtime.block_on(KiteSqlSlateDbBackend::new(&path, &config, args.sync, cache))?;
+            let storage = runtime
+                .block_on(kite_sql::storage::slatedb::SlateDbStorage::open_s3(
+                    path.as_str(),
+                    &config,
+                    cache,
+                ))?
+                .await_durable(args.sync);
+            let mut backend = KiteSqlBackend::with_storage(storage.clone())?;
             let result = run_tpcc(&mut backend, &args, &mut rng, &runtime);
-            runtime.block_on(backend.close())?;
+            runtime.block_on(storage.close())?;
             result
         }
         BackendKind::Sqlite => {

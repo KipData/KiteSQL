@@ -124,7 +124,7 @@ impl ReferenceSerialization for ColumnRelation {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 pub(crate) mod test {
     use crate::catalog::{
         ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary, TableName,
@@ -134,8 +134,7 @@ pub(crate) mod test {
     use crate::expression::ScalarExpression;
     use crate::planner::{MetaArena, PlanArena, TableArenaCell};
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
-    use crate::storage::memory::MemoryStorage;
-    use crate::storage::memory::MemoryTransaction;
+    use crate::storage::TestTransaction;
     use crate::storage::{Storage, StorageTransaction};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -143,7 +142,7 @@ pub(crate) mod test {
 
     #[test]
     async fn test_column_serialization() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -173,7 +172,7 @@ pub(crate) mod test {
             assert_eq!(
                 {
                     let mut context = ReferenceDecodeContext::new();
-                    ColumnRef::decode::<MemoryTransaction, Cursor<Vec<u8>>, _>(
+                    ColumnRef::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
                         &mut cursor,
                         Some(&mut context),
                         &mut plan_arena,
@@ -192,7 +191,7 @@ pub(crate) mod test {
             plan_arena = PlanArena::new(&table_arena);
             let mut context = ReferenceDecodeContext::new();
             assert_eq!(
-                ColumnRef::decode::<MemoryTransaction, Cursor<Vec<u8>>, _>(
+                ColumnRef::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
                     &mut cursor,
                     Some(&mut context),
                     &mut plan_arena,
@@ -216,7 +215,7 @@ pub(crate) mod test {
             not_ref_column.encode(&mut cursor, false, &plan_arena)?;
             cursor.seek(SeekFrom::Start(0))?;
 
-            let decoded = ColumnRef::decode::<MemoryTransaction, Cursor<Vec<u8>>, _>(
+            let decoded = ColumnRef::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
                 &mut cursor,
                 None,
                 &mut plan_arena,
@@ -251,7 +250,7 @@ pub(crate) mod test {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            ColumnSummary::decode::<MemoryTransaction, Cursor<Vec<u8>>, _>(
+            ColumnSummary::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
                 &mut cursor,
                 None,
                 &mut arena,
@@ -270,7 +269,7 @@ pub(crate) mod test {
         none_relation.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        let decode_relation = ColumnRelation::decode::<MemoryTransaction, Cursor<Vec<u8>>, _>(
+        let decode_relation = ColumnRelation::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
             &mut cursor,
             None,
             &mut arena,
@@ -284,7 +283,7 @@ pub(crate) mod test {
         table_relation.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        let decode_relation = ColumnRelation::decode::<MemoryTransaction, Cursor<Vec<u8>>, _>(
+        let decode_relation = ColumnRelation::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
             &mut cursor,
             None,
             &mut arena,
@@ -307,7 +306,7 @@ pub(crate) mod test {
         desc.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        let decode_desc = ColumnDesc::decode::<MemoryTransaction, Cursor<Vec<u8>>, _>(
+        let decode_desc = ColumnDesc::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
             &mut cursor,
             None,
             &mut arena,

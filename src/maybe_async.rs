@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! One source, two paths: an item written once as `async` and marked `#[dual]` is compiled as
+//! One source, two paths: an item written once as `async` and marked `#[maybe_async]` is compiled as
 //! the sync path by default and as the async path with the `async` feature, under the same
-//! names. See `kite_sql_serde_macros::dual` for the rules.
+//! names. See `kite_sql_serde_macros::maybe_async` for the rules.
 //!
 //! `MaybeSend` / `MaybeSync` / `MaybeStatic` hold for every type on the sync path and mean
 //! `Send` / `Sync` / `'static` on the async path.
@@ -47,28 +47,11 @@ mod bounds {
 
 pub use bounds::{MaybeSend, MaybeStatic, MaybeSync};
 
-pub(crate) use kite_sql_serde_macros::dual;
-
 #[cfg(all(test, feature = "async"))]
 pub(crate) fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct ThreadWaker(std::thread::Thread);
-
-    impl Wake for ThreadWaker {
-        fn wake(self: Arc<Self>) {
-            self.0.unpark();
-        }
-    }
-
-    let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
-    let mut cx = Context::from_waker(&waker);
-    let mut future = std::pin::pin!(future);
-    loop {
-        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
-            return output;
-        }
-        std::thread::park();
-    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to start a tokio runtime")
+        .block_on(future)
 }

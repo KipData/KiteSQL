@@ -14,6 +14,7 @@
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 pub mod lmdb;
+#[cfg(not(feature = "async"))]
 pub mod memory;
 #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
 pub mod rocksdb;
@@ -24,12 +25,11 @@ pub(crate) mod table_codec;
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableId, TableMeta, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
-use crate::dual::dual;
-use crate::dual::{MaybeSend, MaybeStatic, MaybeSync};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{Range, RangeValue};
 use crate::expression::TypeCast;
 use crate::iter_ext::Itertools;
+use crate::maybe_async::{MaybeSend, MaybeStatic, MaybeSync};
 use crate::optimizer::core::cm_sketch::{
     CountMinSketch, CountMinSketchPage, COUNT_MIN_SKETCH_STORAGE_PAGE_LEN,
 };
@@ -209,7 +209,7 @@ pub trait CheckpointableStorage: Storage {
 /// Optional bounds of the reader, of the form (offset, limit).
 pub(crate) type Bounds = (Option<usize>, Option<usize>);
 
-#[dual]
+#[maybe_async]
 pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
     type BorrowedBytes<'a>: AsRef<[u8]> + MaybeSend
     where
@@ -1426,7 +1426,7 @@ fn encode_bound_key(buffer: &mut Bytes, key: &[u8], is_upper: bool) {
     }
 }
 
-#[dual]
+#[maybe_async]
 #[inline]
 async fn encode_bound<'a>(
     table_codec: &mut TableCodec,
@@ -1453,7 +1453,7 @@ async fn encode_bound<'a>(
     }
 }
 
-#[dual]
+#[maybe_async]
 trait IndexImpl<T: StorageTransaction> {
     async fn index_lookup_into(
         &self,
@@ -1575,7 +1575,7 @@ struct IndexImplParams<'a, T: StorageTransaction> {
     reverse: bool,
 }
 
-#[dual]
+#[maybe_async]
 impl<T: StorageTransaction> IndexImplParams<'_, T> {
     #[inline]
     pub(crate) fn index_meta(&self) -> &IndexMeta {
@@ -1628,7 +1628,7 @@ pub enum RangeIter<'a, T: StorageTransaction + 'a> {
     Reverse(T::RevIterType<'a>),
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> RangeIter<'a, T> {
     async fn open(
         tx: &'a T,
@@ -1652,7 +1652,7 @@ impl<'a, T: StorageTransaction + 'a> RangeIter<'a, T> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> InnerIter for RangeIter<'a, T> {
     async fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
         match self {
@@ -1662,7 +1662,7 @@ impl<'a, T: StorageTransaction + 'a> InnerIter for RangeIter<'a, T> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<T: StorageTransaction> IndexImpl<T> for IndexImplEnum {
     async fn index_lookup_into(
         &self,
@@ -1778,7 +1778,7 @@ impl<T: StorageTransaction> IndexImpl<T> for IndexImplEnum {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
     async fn index_lookup_into(
         &self,
@@ -1864,7 +1864,7 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
     }
 }
 
-#[dual]
+#[maybe_async]
 #[inline(always)]
 async fn secondary_index_lookup<T: StorageTransaction>(
     table_codec: &mut TableCodec,
@@ -1883,7 +1883,7 @@ async fn secondary_index_lookup<T: StorageTransaction>(
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
     async fn index_lookup_into(
         &self,
@@ -1951,7 +1951,7 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
     async fn index_lookup_into(
         &self,
@@ -2004,7 +2004,7 @@ impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
     async fn index_lookup_into(
         &self,
@@ -2061,7 +2061,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
     async fn index_lookup_into(
         &self,
@@ -2136,7 +2136,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
     }
 }
 
-#[dual]
+#[maybe_async]
 #[inline(always)]
 async fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
     table_codec: &mut TableCodec,
@@ -2281,7 +2281,7 @@ pub struct TupleIter<'a, T: StorageTransaction + 'a> {
     mapped: Option<&'a MappedScope>,
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
     pub(crate) fn recycle(self, pool: &mut BytesPool) {
         self.iter.recycle(pool);
@@ -2306,7 +2306,7 @@ impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> Iter for TupleIter<'a, T> {
     async fn next_tuple_into(
         &mut self,
@@ -2397,7 +2397,7 @@ pub enum IndexIterState<'a, T: StorageTransaction + 'a> {
     Over,
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction> IndexIter<'a, T> {
     pub(crate) fn recycle(self, pool: &mut BytesPool) {
         if let IndexIterState::Range(iter) = self.state {
@@ -2557,7 +2557,7 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
     }
 }
 
-#[dual]
+#[maybe_async]
 pub trait InnerIter: MaybeSend {
     async fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError>;
 
@@ -2570,7 +2570,7 @@ pub trait InnerIter: MaybeSend {
     }
 }
 
-#[dual]
+#[maybe_async]
 pub trait Iter: MaybeSend {
     async fn next_tuple_into(
         &mut self,
@@ -2583,7 +2583,7 @@ pub struct TableIter<'a, T: StorageTransaction + 'a> {
     pub(crate) iter: T::IterType<'a>,
 }
 
-#[dual]
+#[maybe_async]
 impl<T: StorageTransaction> TableIter<'_, T> {
     pub async fn try_next(
         &mut self,
@@ -2604,7 +2604,7 @@ pub struct ViewIter<'a, T: StorageTransaction + 'a> {
     pub(crate) iter: T::IterType<'a>,
 }
 
-#[dual]
+#[maybe_async]
 impl<T: StorageTransaction> ViewIter<'_, T> {
     pub async fn try_next(
         &mut self,
@@ -2619,7 +2619,7 @@ impl<T: StorageTransaction> ViewIter<'_, T> {
 }
 
 // GRCOV_EXCL_START
-#[crate::dual::dual]
+#[maybe_async]
 #[cfg(test)]
 pub(crate) async fn check_range_rev_matches_range<T: StorageTransaction>(
     tx: &mut T,
@@ -2696,7 +2696,7 @@ pub(crate) async fn check_range_rev_matches_range<T: StorageTransaction>(
     Ok(())
 }
 
-#[crate::dual::dual]
+#[maybe_async]
 #[cfg(test)]
 pub(crate) async fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
     mut db: crate::db::Database<S>,
@@ -2730,7 +2730,49 @@ pub(crate) async fn check_explicit_transaction_does_not_rescan_own_writes<S: Sto
     Ok(())
 }
 
-#[crate::dual::dual]
+#[cfg(all(test, not(feature = "async")))]
+pub(crate) type TestStorage = crate::storage::memory::MemoryStorage;
+
+#[cfg(all(test, not(feature = "async")))]
+pub(crate) type TestTransaction = crate::storage::memory::MemoryTransaction;
+
+#[cfg(all(test, feature = "async"))]
+pub(crate) type TestStorage = crate::storage::slatedb::SlateDbStorage;
+
+#[cfg(all(test, feature = "async"))]
+pub(crate) type TestTransaction = crate::storage::slatedb::SlateDbTransaction;
+
+#[cfg(all(test, not(feature = "async")))]
+pub(crate) fn new_test_storage() -> TestStorage {
+    TestStorage::new()
+}
+
+#[cfg(all(test, feature = "async"))]
+pub(crate) async fn new_test_storage() -> TestStorage {
+    use ::slatedb::object_store::memory::InMemory;
+    use std::sync::Arc;
+
+    TestStorage::open(
+        "kitesql-test",
+        Arc::new(InMemory::new()),
+        Default::default(),
+    )
+    .await
+    .expect("failed to open SlateDB on an in-memory object store")
+    .await_durable(false)
+}
+
+// The async path's stand-in for `DataBaseBuilder::build_in_memory` in unit tests.
+#[cfg(all(test, feature = "async"))]
+impl crate::db::DataBaseBuilder {
+    pub(crate) async fn build_in_memory(
+        self,
+    ) -> Result<crate::db::Database<TestStorage>, DatabaseError> {
+        self.build_with_storage(new_test_storage().await)
+    }
+}
+
+#[maybe_async]
 #[cfg(test)]
 pub(crate) async fn check_remove_range<T: StorageTransaction>(
     tx: &mut T,
@@ -2813,7 +2855,7 @@ pub(crate) fn deserializers_for_test(
 }
 
 /// Reads one tuple with `next`, which is given a fresh codec and tuple.
-#[crate::dual::dual]
+#[maybe_async]
 #[cfg(test)]
 pub(crate) async fn next_tuple_for_test(
     mut next: impl AsyncFnMut(&mut TableCodec, &mut Tuple) -> Result<bool, DatabaseError>,
@@ -2824,7 +2866,7 @@ pub(crate) async fn next_tuple_for_test(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::catalog::view::View;
@@ -2835,9 +2877,9 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::planner::{PlanArena, TableArenaCell};
-    use crate::storage::memory::{MemoryStorage, MemoryTransaction};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::NameMapping;
+    use crate::storage::TestTransaction;
     use crate::storage::{
         project_deserializers_for_test, IndexIter, IndexScanView, InnerIter, Iter, Storage,
         StorageTransaction, TableCache, TupleDeserializers,
@@ -2889,7 +2931,7 @@ mod test {
 
     #[test]
     async fn test_table_create_drop() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -2905,7 +2947,7 @@ mod test {
         .await?;
         let plan_arena = PlanArena::new(&table_arena);
 
-        let fn_assert = |transaction: &mut MemoryTransaction,
+        let fn_assert = |transaction: &mut TestTransaction,
                          names: &NameMapping,
                          table_cache: &TableCache,
                          plan_arena: &PlanArena|
@@ -3007,7 +3049,7 @@ mod test {
     #[test]
     async fn test_tuple_append_delete() -> Result<(), DatabaseError> {
         let mut table_codec = TableCodec::default();
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -3158,7 +3200,7 @@ mod test {
     #[test]
     async fn test_add_index_meta() -> Result<(), DatabaseError> {
         let mut table_codec = TableCodec::default();
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -3208,7 +3250,7 @@ mod test {
         let table = table.transplant_to_table_arena(&plan_arena)?;
         names.insert_table(&mut table_cache, table);
 
-        let fn_assert = |transaction: &mut MemoryTransaction,
+        let fn_assert = |transaction: &mut TestTransaction,
                          names: &NameMapping,
                          table_cache: &TableCache|
          -> Result<(), DatabaseError> {
@@ -3306,12 +3348,12 @@ mod test {
     #[test]
     async fn test_index_insert_delete() -> Result<(), DatabaseError> {
         fn build_index_iter<'a>(
-            transaction: &'a MemoryTransaction,
+            transaction: &'a TestTransaction,
             names: &NameMapping,
             table_cache: &'a TableCache,
             plan_arena: &'a PlanArena<'a>,
             deserializers: &'a TupleDeserializers,
-        ) -> Result<IndexIter<'a, MemoryTransaction>, DatabaseError> {
+        ) -> Result<IndexIter<'a, TestTransaction>, DatabaseError> {
             let table_name: crate::catalog::TableName = "t1".to_string();
             let index_meta = names
                 .table(table_cache, &table_name)
@@ -3339,7 +3381,7 @@ mod test {
         };
 
         let mut table_codec = TableCodec::default();
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -3583,7 +3625,7 @@ mod test {
 
     #[test]
     async fn test_column_add_drop() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();

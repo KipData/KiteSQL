@@ -6,15 +6,14 @@ use crate::binder::{
 };
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog};
 use crate::db::{
-    BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, ResultRow, Transaction,
-    TransactionIter, TxnOrmIter, TxnResultIter, TxnValue,
+    AsyncIter, BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, ResultRow,
+    Transaction, TransactionIter, TxnOrmIter, TxnResultIter, TxnValue,
 };
-use crate::dual::dual;
-use crate::dual::MaybeSend;
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
 use crate::expression::window::WindowFunctionKind;
 use crate::expression::{self, AliasType, ScalarExpression, TypeCast};
+use crate::maybe_async::MaybeSend;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
@@ -1032,7 +1031,7 @@ where
     }
 }
 
-#[dual]
+#[maybe_async]
 async fn bind_orm_context<'a, E, F>(
     executor: E,
     read_only: bool,
@@ -2898,7 +2897,7 @@ pub trait OrmQueryResultExt: ResultIter + Sized {
 
 impl<I: ResultIter> OrmQueryResultExt for I {}
 
-#[dual]
+#[maybe_async]
 impl<I, T> ProjectValueIter<I, T>
 where
     I: ResultIter,
@@ -2918,11 +2917,20 @@ where
     pub async fn done(self) -> Result<(), DatabaseError> {
         self.inner.done().await
     }
+}
+
+#[maybe_async]
+impl<I, T> AsyncIter for ProjectValueIter<I, T>
+where
+    I: ResultIter + MaybeSend,
+    T: FromDataValue + MaybeSend,
+{
+    #[async_only]
+    type Item = Result<T, DatabaseError>;
 
     /// Reads the next row.
     #[async_only]
-    #[allow(clippy::should_implement_trait)]
-    pub async fn next(&mut self) -> Option<Result<T, DatabaseError>> {
+    async fn next(&mut self) -> Option<Self::Item> {
         self.inner
             .next_tuple(|_, tuple| extract_value_from_tuple::<T>(tuple))
             .await
@@ -2950,7 +2958,7 @@ pub struct ProjectTupleIter<I, T> {
     _marker: PhantomData<T>,
 }
 
-#[dual]
+#[maybe_async]
 impl<I, T> ProjectTupleIter<I, T>
 where
     I: ResultIter,
@@ -2970,11 +2978,20 @@ where
     pub async fn done(self) -> Result<(), DatabaseError> {
         self.inner.done().await
     }
+}
+
+#[maybe_async]
+impl<I, T> AsyncIter for ProjectTupleIter<I, T>
+where
+    I: ResultIter + MaybeSend,
+    T: FromQueryTuple + MaybeSend,
+{
+    #[async_only]
+    type Item = Result<T, DatabaseError>;
 
     /// Reads the next row.
     #[async_only]
-    #[allow(clippy::should_implement_trait)]
-    pub async fn next(&mut self) -> Option<Result<T, DatabaseError>> {
+    async fn next(&mut self) -> Option<Self::Item> {
         self.inner
             .next_tuple(|_, tuple| extract_projected_tuple::<T>(tuple))
             .await
@@ -2983,7 +3000,7 @@ where
     }
 }
 
-#[dual]
+#[maybe_async]
 #[sync_only]
 impl<I, T> Iterator for ProjectValueIter<I, T>
 where
@@ -3001,7 +3018,7 @@ where
     }
 }
 
-#[dual]
+#[maybe_async]
 #[sync_only]
 impl<I, T> Iterator for ProjectTupleIter<I, T>
 where
@@ -3431,7 +3448,7 @@ fn model_column_rename_compatible(
         && model_column_default(model) == catalog_column_default(column, arena))
 }
 
-#[dual]
+#[maybe_async]
 async fn extract_optional_model<I, M>(iter: I) -> Result<Option<M>, DatabaseError>
 where
     I: ResultIter,
@@ -3440,7 +3457,7 @@ where
     extract_optional_row(iter).await
 }
 
-#[dual]
+#[maybe_async]
 async fn extract_optional_row<I, T>(mut iter: I) -> Result<Option<T>, DatabaseError>
 where
     I: ResultIter,
@@ -3510,7 +3527,7 @@ fn extract_projected_tuple<T: FromQueryTuple>(
     T::from_query_tuple(tuple)
 }
 
-#[dual]
+#[maybe_async]
 async fn orm_analyze<E: BindSource, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
         .execute(false, |state, tx| {
@@ -3525,7 +3542,7 @@ async fn orm_analyze<E: BindSource, M: Model>(executor: E) -> Result<(), Databas
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn orm_insert<E: BindSource, M: Model>(executor: E, model: &M) -> Result<(), DatabaseError> {
     let params = model.params();
     executor
@@ -3541,7 +3558,7 @@ async fn orm_insert<E: BindSource, M: Model>(executor: E, model: &M) -> Result<(
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn orm_get<E: BindSource, M: Model>(
     executor: E,
     key: &M::PrimaryKey,
@@ -3550,7 +3567,7 @@ async fn orm_get<E: BindSource, M: Model>(
 }
 
 /// Binds the lookup of one `M` by primary key.
-#[dual]
+#[maybe_async]
 async fn bind_get<E: BindSource, M: Model>(
     executor: E,
     key: &M::PrimaryKey,
@@ -3575,7 +3592,7 @@ async fn bind_get<E: BindSource, M: Model>(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
 
@@ -3585,27 +3602,9 @@ mod tests {
         async fn try_collect(self) -> Result<Vec<T>, DatabaseError>;
     }
 
-    macro_rules! impl_try_collect {
-        ($iter:ident, $bound:ident) => {
-            impl<I: ResultIter, T: $bound> TryCollect<T> for $iter<I, T> {
-                async fn try_collect(mut self) -> Result<Vec<T>, DatabaseError> {
-                    let mut rows = Vec::new();
-                    while let Some(row) = self.next().await {
-                        rows.push(row?);
-                    }
-                    Ok(rows)
-                }
-            }
-        };
-    }
-    impl_try_collect!(OrmIter, FromQueryRow);
-    impl_try_collect!(ProjectValueIter, FromDataValue);
-    impl_try_collect!(ProjectTupleIter, FromQueryTuple);
-
-    impl<'txn, I, T> TryCollect<T> for TxnOrmIter<'txn, I, T>
+    impl<I, T> TryCollect<T> for I
     where
-        I: TxnResultIter<'txn>,
-        T: FromTxnRow<'txn>,
+        I: AsyncIter<Item = Result<T, DatabaseError>>,
     {
         // `next` is `Iterator::next` on the sync path only.
         #[allow(clippy::while_let_on_iterator)]
@@ -3617,6 +3616,7 @@ mod tests {
             Ok(rows)
         }
     }
+
     use crate::expression::BinaryOperator;
     use crate::types::tuple::{Schema, SchemaView, Tuple, TupleImpl};
     use std::sync::Arc;
@@ -3810,8 +3810,10 @@ mod tests {
     }
 
     async fn build_orm_unit_database(
-    ) -> Result<crate::db::Database<crate::storage::memory::MemoryStorage>, DatabaseError> {
-        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
+    ) -> Result<crate::db::Database<crate::storage::TestStorage>, DatabaseError> {
+        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test")
+            .build_in_memory()
+            .await?;
         database
             .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")
             .await?;
@@ -4030,7 +4032,9 @@ mod tests {
     #[test]
     async fn prepared_orm_query_reuses_plan_and_binds_each_execution() -> Result<(), DatabaseError>
     {
-        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
+        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test")
+            .build_in_memory()
+            .await?;
         database.create_table::<OrmUnitUser>().await?;
         for (id, name) in [(1, "Alice"), (2, "Bob"), (3, "Cara")] {
             database
@@ -4087,7 +4091,8 @@ mod tests {
     {
         let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test")
             .histogram_buckets(100)
-            .build_in_memory()?;
+            .build_in_memory()
+            .await?;
         database
             .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")
             .await?;
@@ -4810,10 +4815,12 @@ mod tests {
 
     #[async_only]
     #[test]
-    fn async_orm_futures_are_send() -> Result<(), DatabaseError> {
+    async fn async_orm_futures_are_send() -> Result<(), DatabaseError> {
         fn assert_send<F: std::future::Future + Send>(_: F) {}
 
-        let database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
+        let database = crate::db::DataBaseBuilder::path("./orm-unit-test")
+            .build_in_memory()
+            .await?;
         assert_send(database.insert(&OrmUnitUser::default()));
         assert_send(database.get::<OrmUnitUser>(&1));
         assert_send(database.bind(|ctx| ctx.mutate::<OrmUnitUser>()?.delete()));

@@ -210,7 +210,7 @@ impl RunsCursor for SpillRunsCursor<'_> {
 }
 
 #[cfg(test)]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
 

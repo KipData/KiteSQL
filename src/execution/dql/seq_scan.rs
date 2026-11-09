@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
@@ -40,7 +39,7 @@ impl<'a> ReadExecutor<'a> for SeqScan<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -113,12 +112,11 @@ pub(crate) fn scan_predicate_holds<A: MetaArena>(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::db::test::build_table;
     use crate::planner::{PlanArena, TableArenaCell};
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{Storage, TableCache, TupleDeserializers};
     use crate::types::tuple::Tuple;
@@ -127,7 +125,7 @@ mod tests {
 
     #[test]
     async fn reset_keeps_seq_iterator_and_restores_offset_limit() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let mut tx = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut tables = TableCache::default();

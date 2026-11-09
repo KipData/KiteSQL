@@ -28,8 +28,7 @@
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "slatedb-s3", feature = "orm"))]
 mod app {
-    use kite_sql::db::{CatalogKind, DataBaseBuilder, Database};
-    use kite_sql::errors::DatabaseError;
+    use kite_sql::db::{AsyncIter, CatalogKind, DataBaseBuilder};
     use kite_sql::storage::slatedb::{S3Config, SlateDbStorage};
     use kite_sql::Model;
     use std::borrow::Cow;
@@ -54,33 +53,50 @@ mod app {
         })
     }
 
-    async fn write(mut database: Database<SlateDbStorage>) -> Result<(), DatabaseError> {
-        database.drop_table_if_exists::<MyStruct>().await?;
-        database.create_table_if_not_exists::<MyStruct>().await?;
-        for (c1, c2) in [(0, "zero"), (1, "one"), (2, "two")] {
-            database.insert(&MyStruct { c1, c2: c2.into() }).await?;
-        }
-        database
-            .bind(|ctx| {
-                ctx.mutate::<MyStruct>()?
-                    .filter(|e| e.column(MyStruct::c1())?.eq(1))?
-                    .update(|u| u.set_value(MyStruct::c2(), "ONE"))
-            })
-            .await?
-            .done()
-            .await?;
-        database
-            .bind(|ctx| {
-                ctx.mutate::<MyStruct>()?
-                    .filter(|e| e.column(MyStruct::c1())?.eq(2))?
-                    .delete()
-            })
-            .await?
-            .done()
-            .await
-    }
+    pub async fn run() -> Result<(), Box<dyn Error>> {
+        let config = config()?;
+        let path = env::var("KITESQL_S3_PATH").unwrap_or_else(|_| "kitesql/async_s3".to_string());
+        println!("opening {path} with {config:?}");
 
-    async fn read(database: &Database<SlateDbStorage>) -> Result<(), DatabaseError> {
+        let storage = SlateDbStorage::open_s3(path.as_str(), &config, Default::default()).await?;
+        let mut database = DataBaseBuilder::path(".").build_with_storage(storage.clone())?;
+        // The database and its futures are `Send`, so the work can run on any worker thread.
+        tokio::spawn(async move {
+            database.drop_table_if_exists::<MyStruct>().await?;
+            database.create_table_if_not_exists::<MyStruct>().await?;
+            for (c1, c2) in [(0, "zero"), (1, "one"), (2, "two")] {
+                database.insert(&MyStruct { c1, c2: c2.into() }).await?;
+            }
+            database
+                .bind(|ctx| {
+                    ctx.mutate::<MyStruct>()?
+                        .filter(|e| e.column(MyStruct::c1())?.eq(1))?
+                        .update(|u| u.set_value(MyStruct::c2(), "ONE"))
+                })
+                .await?
+                .done()
+                .await?;
+            database
+                .bind(|ctx| {
+                    ctx.mutate::<MyStruct>()?
+                        .filter(|e| e.column(MyStruct::c1())?.eq(2))?
+                        .delete()
+                })
+                .await?
+                .done()
+                .await
+        })
+        .await
+        .expect("example task panicked")?;
+        // Flushes what is still in memory to S3 and releases the database.
+        storage.close().await?;
+
+        // A new process, or another machine, can open the same data from the bucket.
+        let storage = SlateDbStorage::open_s3(path.as_str(), &config, Default::default()).await?;
+        let mut database = DataBaseBuilder::path(".").build_with_storage(storage.clone())?;
+        database
+            .load(CatalogKind::Table("my_struct".to_string()))
+            .await?;
         let mut count = 0;
         let mut rows = database.fetch::<MyStruct>().await?;
         while let Some(row) = rows.next().await {
@@ -89,34 +105,8 @@ mod app {
         }
         rows.done().await?;
         println!("row count = {count}");
-        Ok(())
-    }
-
-    pub async fn run() -> Result<(), Box<dyn Error>> {
-        let config = config()?;
-        let path = env::var("KITESQL_S3_PATH").unwrap_or_else(|_| "kitesql/async_s3".to_string());
-        println!("opening {path} with {config:?}");
-
-        let storage = SlateDbStorage::open_s3(path.as_str(), &config, Default::default()).await?;
-        let slatedb = storage.db().clone();
-        let database = DataBaseBuilder::path(".").build_with_storage(storage)?;
-        // The database and its futures are `Send`, so the work can run on any worker thread.
-        tokio::spawn(write(database))
-            .await
-            .expect("example task panicked")?;
-        // Flushes what is still in memory to S3 and releases the database.
-        slatedb.close().await?;
-
-        // A new process, or another machine, can open the same data from the bucket.
-        let storage = SlateDbStorage::open_s3(path.as_str(), &config, Default::default()).await?;
-        let slatedb = storage.db().clone();
-        let mut database = DataBaseBuilder::path(".").build_with_storage(storage)?;
-        database
-            .load(CatalogKind::Table("my_struct".to_string()))
-            .await?;
-        read(&database).await?;
         drop(database);
-        slatedb.close().await?;
+        storage.close().await?;
         Ok(())
     }
 }

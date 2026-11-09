@@ -2196,7 +2196,7 @@ impl fmt::Debug for DataValue {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use crate::errors::DatabaseError;
     use crate::storage::table_codec::{BumpBytes, NOTNULL_TAG, NULL_TAG};

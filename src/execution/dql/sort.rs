@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ArenaBound, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -187,7 +186,7 @@ impl<'a> ReadExecutor<'a> for Sort<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -231,7 +230,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
@@ -256,10 +255,9 @@ mod test {
         use crate::planner::{
             Childrens, ExecMetaArena, LogicalPlan, MetaArena, PlanArena, TableArenaCell,
         };
-        use crate::storage::memory::MemoryStorage;
         use crate::storage::{Storage, TableCache};
 
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let tables = TableCache::default();
         let cache = &tables;

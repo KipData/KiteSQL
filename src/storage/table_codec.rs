@@ -15,7 +15,6 @@
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRelation, TableId, TableMeta, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::optimizer::core::cm_sketch::{CountMinSketchMeta, CountMinSketchPage};
 use crate::optimizer::core::histogram::Bucket;
@@ -138,7 +137,7 @@ impl IndexStatisticsCodecType {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl TableCodec {
     #[inline]
     pub(crate) fn bytes_pool(&mut self) -> &mut BytesPool {
@@ -1124,7 +1123,7 @@ impl TableCodec {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use crate::binder::test::build_t1_table;
     use crate::catalog::view::View;
@@ -1138,8 +1137,8 @@ mod tests {
     };
     use crate::optimizer::core::statistics_meta::IndexStatistics;
     use crate::planner::{PlanArena, TableArenaCell};
-    use crate::storage::memory::MemoryTransaction;
     use crate::storage::table_codec::{Bytes, TableCodec};
+    use crate::storage::TestTransaction;
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef, Utf8Type};
@@ -1312,7 +1311,7 @@ mod tests {
             .unwrap();
 
         let table_meta =
-            TableCodec::decode_root_table::<MemoryTransaction>(&bytes, table_arena.borrow_mut())
+            TableCodec::decode_root_table::<TestTransaction>(&bytes, table_arena.borrow_mut())
                 .unwrap();
 
         assert_eq!(table_meta, meta);
@@ -1350,7 +1349,7 @@ mod tests {
                 Ok::<_, DatabaseError>(value.to_vec())
             })?;
         let decoded_root =
-            TableCodec::decode_index_statistics::<MemoryTransaction>(&root_bytes, &mut plan_arena)?;
+            TableCodec::decode_index_statistics::<TestTransaction>(&root_bytes, &mut plan_arena)?;
         assert_eq!(decoded_root.index_id(), root.index_id());
         let index_key = table_codec
             .with_index_statistics(0, 0, None, &plan_arena, |key, _| Ok(key.to_vec()))?;
@@ -1385,7 +1384,7 @@ mod tests {
             })
             .await?;
         let decoded =
-            TableCodec::decode_column_statistics::<MemoryTransaction>(&bytes, &mut plan_arena)?;
+            TableCodec::decode_column_statistics::<TestTransaction>(&bytes, &mut plan_arena)?;
         assert_eq!(decoded, column_meta);
         assert_eq!(decoded.distinct_values_len(), 2);
         assert_eq!(decoded.null_count(), 1);
@@ -1407,9 +1406,10 @@ mod tests {
             &plan_arena,
             |_, value| Ok::<_, DatabaseError>(value.to_vec()),
         )?;
-        let decoded_sketch_meta = TableCodec::decode_index_statistics_sketch_meta::<
-            MemoryTransaction,
-        >(&sketch_meta_bytes, &mut plan_arena)?;
+        let decoded_sketch_meta = TableCodec::decode_index_statistics_sketch_meta::<TestTransaction>(
+            &sketch_meta_bytes,
+            &mut plan_arena,
+        )?;
         assert_eq!(decoded_sketch_meta.width(), sketch_meta.width());
         assert_eq!(decoded_sketch_meta.k_num(), sketch_meta.k_num());
 
@@ -1422,9 +1422,10 @@ mod tests {
             &plan_arena,
             |_, value| Ok::<_, DatabaseError>(value.to_vec()),
         )?;
-        let decoded_sketch_page = TableCodec::decode_index_statistics_sketch_page::<
-            MemoryTransaction,
-        >(&sketch_page_bytes, &mut plan_arena)?;
+        let decoded_sketch_page = TableCodec::decode_index_statistics_sketch_page::<TestTransaction>(
+            &sketch_page_bytes,
+            &mut plan_arena,
+        )?;
         assert_eq!(decoded_sketch_page.counters(), first_sketch_page.counters());
 
         let bucket0_key =
@@ -1453,7 +1454,7 @@ mod tests {
             &plan_arena,
             |_, value| Ok::<_, DatabaseError>(value.to_vec()),
         )?;
-        let decoded_bucket = TableCodec::decode_index_statistics_bucket::<MemoryTransaction>(
+        let decoded_bucket = TableCodec::decode_index_statistics_bucket::<TestTransaction>(
             &bucket_bytes,
             &mut plan_arena,
         )?;
@@ -1481,7 +1482,7 @@ mod tests {
             &plan_arena,
             |_, value| Ok::<_, DatabaseError>(value.to_vec()),
         )?;
-        let decoded_top_n = TableCodec::decode_index_statistics_top_n::<MemoryTransaction>(
+        let decoded_top_n = TableCodec::decode_index_statistics_top_n::<TestTransaction>(
             &top_n_bytes,
             &mut plan_arena,
         )?;
@@ -1510,7 +1511,7 @@ mod tests {
             })?;
 
         assert_eq!(
-            TableCodec::decode_index_meta::<MemoryTransaction>(&bytes, &mut plan_arena)?,
+            TableCodec::decode_index_meta::<TestTransaction>(&bytes, &mut plan_arena)?,
             index_meta
         );
 
@@ -1555,7 +1556,7 @@ mod tests {
             .unwrap();
         let mut cursor = Cursor::new(bytes);
         let decode_col =
-            TableCodec::decode_column::<MemoryTransaction, _>(&mut cursor, &mut plan_arena)?;
+            TableCodec::decode_column::<TestTransaction, _>(&mut cursor, &mut plan_arena)?;
 
         assert_eq!(decode_col, expected_col);
 
@@ -1619,7 +1620,7 @@ mod tests {
             println!("{:#?}", view.plan);
             let mut decode_arena = PlanArena::new(&table_state.table_arena);
             let decoded = table_codec.with_view_value(0, &view, &plan_arena, |_, value| {
-                TableCodec::decode_view::<MemoryTransaction>(
+                TableCodec::decode_view::<TestTransaction>(
                     value,
                     &scala_functions,
                     &table_functions,
@@ -1640,7 +1641,7 @@ mod tests {
                 build_view("view_filter", "select * from t1 where c1 > 1")?;
             let mut decode_arena = PlanArena::new(&table_state.table_arena);
             let decoded = table_codec.with_view_value(0, &view, &plan_arena, |_, value| {
-                TableCodec::decode_view::<MemoryTransaction>(
+                TableCodec::decode_view::<TestTransaction>(
                     value,
                     &scala_functions,
                     &table_functions,
@@ -1661,7 +1662,7 @@ mod tests {
                 build_view("view_join", "select * from t1 left join t2 on c1 = c3")?;
             let mut decode_arena = PlanArena::new(&table_state.table_arena);
             let decoded = table_codec.with_view_value(0, &view, &plan_arena, |_, value| {
-                TableCodec::decode_view::<MemoryTransaction>(
+                TableCodec::decode_view::<TestTransaction>(
                     value,
                     &scala_functions,
                     &table_functions,

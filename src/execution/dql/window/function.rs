@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::MaybeSend;
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{create_accumulator, Accumulator};
 use crate::expression::agg::AggKind;
 use crate::expression::window::WindowFunctionKind;
+use crate::maybe_async::MaybeSend;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::tuple::TupleImpl;

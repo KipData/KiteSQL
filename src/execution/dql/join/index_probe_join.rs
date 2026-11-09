@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::predicates_matched;
 use crate::execution::{
@@ -48,7 +47,7 @@ impl<'a> ReadExecutor<'a> for IndexProbeJoin<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -95,7 +94,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
@@ -105,7 +104,7 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, PlanArena, TableArenaCell};
-    use crate::storage::memory::MemoryStorage;
+    use crate::storage::TestStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
@@ -157,9 +156,9 @@ mod tests {
         }))
     }
 
-    fn build_test_storage() -> Result<(TableCache, TempDir, MemoryStorage), DatabaseError> {
+    async fn build_test_storage() -> Result<(TableCache, TempDir, TestStorage), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         Ok((TableCache::default(), temp_dir, storage))
     }
 
@@ -201,7 +200,7 @@ mod tests {
             plan_arena.alloc_expression(ScalarExpression::column_expr(right_schema[1], 3));
         let probe = plan_arena.alloc_expression(ScalarExpression::column_expr(left_column, 0));
         let op = IndexProbeJoinOperator::new(probe, vec![equality, residual]);
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let cache = &table_cache;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
@@ -253,7 +252,7 @@ mod tests {
         let predicate = plan_arena.alloc_expression(ScalarExpression::column_expr(right_column, 1));
         let probe = plan_arena.alloc_expression(ScalarExpression::column_expr(left_column, 0));
         let op = IndexProbeJoinOperator::new(probe, vec![predicate]);
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let mut executor = execute_input::<_, IndexProbeJoin>(
             (&op, &left, &right),

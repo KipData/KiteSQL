@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::catalog::TableId;
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
@@ -78,7 +77,7 @@ impl<'a> WriteExecutor<'a> for Analyze<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -184,7 +183,7 @@ struct State {
     histogram_buckets: Option<usize>,
 }
 
-#[dual]
+#[maybe_async]
 impl<'a> Analyze<'a> {
     #[allow(clippy::too_many_arguments)]
     async fn persist_statistics<U: StorageTransaction>(
@@ -250,7 +249,7 @@ impl fmt::Display for AnalyzeOperator {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use crate::db::{CatalogKind, DataBaseBuilder, Database};
     use crate::errors::DatabaseError;
@@ -260,7 +259,6 @@ mod test {
     use crate::optimizer::core::cm_sketch::COUNT_MIN_SKETCH_STORAGE_PAGE_LEN;
     use crate::optimizer::core::histogram::{HistogramMetaBuilder, DEFAULT_HLL_PRECISION};
     use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{InnerIter, Storage, StorageTransaction};
     use crate::types::value::DataValue;
@@ -299,7 +297,7 @@ mod test {
             (DataBaseBuilder::path("."), default),
             (DataBaseBuilder::path(".").hll_precision(4), coarse),
         ] {
-            let mut kite_sql = builder.build_in_memory()?;
+            let mut kite_sql = builder.build_in_memory().await?;
             kite_sql
                 .ddl("create table t1 (id int primary key, a int)")
                 .await?;
@@ -344,7 +342,7 @@ mod test {
                 256,
             ),
         ] {
-            let mut kite_sql = builder.build_in_memory()?;
+            let mut kite_sql = builder.build_in_memory().await?;
             kite_sql.ddl("create table t1 (a int primary key)").await?;
             // ANALYZE needs at least DEFAULT_NUM_OF_BUCKETS rows.
             let values = (0..DEFAULT_NUM_OF_BUCKETS)
@@ -387,7 +385,7 @@ mod test {
     async fn test_column_and_index_statistics_roundtrip() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let buckets = 10;
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(buckets)
             .build_with_storage(storage.clone())?;
@@ -590,7 +588,9 @@ mod test {
 
     async fn test_meta_loader_uses_cache() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         create_table(&mut kite_sql, "create table t1 (a int primary key, b int)").await?;
         create_index(&mut kite_sql, "create index b_index on t1 (b)").await?;
@@ -660,7 +660,9 @@ mod test {
 
     async fn test_meta_loader_negative_cache() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         create_table(&mut kite_sql, "create table t1 (a int primary key, b int)").await?;
         create_index(&mut kite_sql, "create index b_index on t1 (b)").await?;
@@ -685,7 +687,9 @@ mod test {
 
     async fn test_clean_expired_index() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         create_table(&mut kite_sql, "create table t1 (a int primary key, b int)").await?;
         create_index(&mut kite_sql, "create index b_index on t1 (b)").await?;

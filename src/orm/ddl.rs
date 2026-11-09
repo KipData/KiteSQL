@@ -1,5 +1,4 @@
 use super::*;
-use crate::dual::dual;
 
 enum OrmDefaultChange {
     NoChange,
@@ -7,7 +6,7 @@ enum OrmDefaultChange {
     Drop,
 }
 
-#[dual]
+#[maybe_async]
 impl<S: Storage> Database<S> {
     fn table_catalog(&self, table_name: &str) -> Result<Option<TableCatalog>, DatabaseError> {
         let transaction = self.storage.transaction()?;
@@ -434,7 +433,7 @@ impl<S: Storage> Database<S> {
     }
 }
 
-#[dual]
+#[maybe_async]
 async fn execute_create_table<S: Storage, M: Model>(
     database: &mut Database<S>,
     if_not_exists: bool,
@@ -450,7 +449,7 @@ async fn execute_create_table<S: Storage, M: Model>(
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn execute_create_index<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
@@ -485,7 +484,7 @@ async fn execute_create_index<S: Storage>(
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn execute_create_view<S: Storage, F>(
     database: &mut Database<S>,
     view_name: &str,
@@ -522,7 +521,7 @@ where
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn execute_drop_view<S: Storage>(
     database: &mut Database<S>,
     view_name: &str,
@@ -536,7 +535,7 @@ async fn execute_drop_view<S: Storage>(
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn execute_change_column<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
@@ -567,7 +566,7 @@ async fn execute_change_column<S: Storage>(
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn execute_drop_column<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
@@ -581,7 +580,7 @@ async fn execute_drop_column<S: Storage>(
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn execute_add_column<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
@@ -595,7 +594,7 @@ async fn execute_add_column<S: Storage>(
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn execute_drop_index<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
@@ -610,7 +609,7 @@ async fn execute_drop_index<S: Storage>(
         .await
 }
 
-#[dual]
+#[maybe_async]
 async fn execute_drop_table<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,

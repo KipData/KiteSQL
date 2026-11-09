@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::predicates_matched;
 use crate::execution::runs::{Runs, RunsBuilder, RunsCursor};
@@ -59,7 +58,7 @@ enum RightInput {
     Materialized(MaterializedKeys),
 }
 
-#[dual]
+#[maybe_async]
 impl RightInput {
     fn new(materialize: bool) -> Self {
         if materialize {
@@ -120,7 +119,7 @@ impl<'a> ReadExecutor<'a> for MarkApply<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -169,7 +168,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a> MarkApply<'a> {
     fn runtime_probe_for(&self, param_value: Option<DataValue>) -> Option<RuntimeIndexProbe> {
         self.op.parameterized_probe()?;
@@ -452,7 +451,7 @@ impl<'a> MarkApply<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
@@ -462,7 +461,7 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, LogicalPlan};
-    use crate::storage::memory::MemoryStorage;
+    use crate::storage::TestStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::evaluator::{binary_create, cast_create};
     use crate::types::index::RuntimeIndexProbe;
@@ -505,11 +504,11 @@ mod tests {
         build_values_with_schema(arena, vec![(name, LogicalType::Integer)], rows)
     }
 
-    fn build_test_storage() -> Result<(TableCache, TempDir, MemoryStorage), DatabaseError> {
+    async fn build_test_storage() -> Result<(TableCache, TempDir, TestStorage), DatabaseError> {
         let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
 
         Ok((table_cache, temp_dir, storage))
     }
@@ -566,7 +565,7 @@ mod tests {
         let op =
             MarkApplyOperator::new_exists(build_marker_column(&mut plan_arena), vec![predicate]);
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let context = &table_cache;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
@@ -621,7 +620,7 @@ mod tests {
         let op =
             MarkApplyOperator::new_exists(build_marker_column(&mut plan_arena), vec![predicate]);
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (&op, &left, &right),
@@ -690,7 +689,7 @@ mod tests {
             plan_arena.alloc_expression(ScalarExpression::column_expr(left_value_column, 0));
         op.set_parameterized_probe(Some(probe));
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
         let mut exec_arena = crate::execution::ExecArena::new(&table_cache, &transaction);
@@ -746,7 +745,7 @@ mod tests {
             plan_arena.alloc_expression(ScalarExpression::column_expr(left_value_column, 0));
         op.set_parameterized_probe(Some(probe));
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
         let mut exec_arena = crate::execution::ExecArena::new(&table_cache, &transaction);
@@ -801,7 +800,7 @@ mod tests {
             plan_arena.alloc_expression(ScalarExpression::column_expr(left_value_column, 0)),
         ));
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
         let mut exec_arena = crate::execution::ExecArena::new(&table_cache, &transaction);
@@ -854,7 +853,7 @@ mod tests {
 
         let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
@@ -887,7 +886,7 @@ mod tests {
     #[test]
     async fn guard_false_skips_failing_rhs_but_true_and_null_evaluate_it(
     ) -> Result<(), DatabaseError> {
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let cache = &table_cache;
         for kind in [
@@ -983,7 +982,7 @@ mod tests {
 
     #[test]
     async fn guard_skips_preserve_materialized_rhs() -> Result<(), DatabaseError> {
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let cache = &table_cache;
         let cases = [
@@ -1072,7 +1071,7 @@ mod tests {
     #[test]
     async fn quantified_apply_materializes_once_and_reuses_keys_after_short_circuit(
     ) -> Result<(), DatabaseError> {
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let cache = &table_cache;
         // Exercise both a single segment and the default 1024-row spill boundary.
@@ -1241,7 +1240,7 @@ mod tests {
         let mut op =
             MarkApplyOperator::new_quantified(MarkApplyQuantifier::Any, marker, vec![predicate]);
         op.materialize = true;
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (&op, &left, &right),
@@ -1300,7 +1299,7 @@ mod tests {
 
         let predicate = build_equality_predicate(&mut plan_arena, left_column, 0, right_column, 1)?;
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (
@@ -1369,7 +1368,7 @@ mod tests {
             ty: LogicalType::Boolean,
         });
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, MarkApply>(
             (

@@ -98,7 +98,7 @@ mod tests {
     #[cfg(all(not(feature = "rocksdb"), feature = "lmdb"))]
     use crate::storage::lmdb::LmdbTransaction as TestTransaction;
     #[cfg(feature = "rocksdb")]
-    use crate::storage::memory::MemoryTransaction as TestTransaction;
+    use crate::storage::TestTransaction;
     use crate::types::value::DataValue;
 
     #[test]

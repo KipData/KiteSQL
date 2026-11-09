@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
 use crate::expression::function::table::{TableFunction, TableFunctionIter};
@@ -47,7 +46,7 @@ impl<'a> ReadExecutor<'a> for FunctionScan<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,

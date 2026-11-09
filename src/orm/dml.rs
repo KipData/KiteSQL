@@ -1,8 +1,7 @@
 use super::*;
-use crate::dual::dual;
 use std::borrow::Borrow;
 
-#[dual]
+#[maybe_async]
 impl<S: Storage> Database<S> {
     /// Refreshes optimizer statistics for the model table.
     ///
@@ -73,7 +72,7 @@ impl<S: Storage> Database<S> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, S: Storage> Transaction<'a, S> {
     /// Refreshes optimizer statistics for the model table inside the current transaction.
     pub async fn analyze<M: Model>(&mut self) -> Result<(), DatabaseError> {

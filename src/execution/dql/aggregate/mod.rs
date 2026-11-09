@@ -23,7 +23,6 @@ pub mod stream_distinct;
 mod sum;
 mod total;
 
-use crate::dual::MaybeSend;
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::avg::AvgAccumulator;
 use crate::execution::dql::aggregate::count::{CountAccumulator, DistinctCountAccumulator};
@@ -33,6 +32,7 @@ use crate::execution::dql::aggregate::sum::{DistinctSumAccumulator, SumAccumulat
 use crate::execution::dql::aggregate::total::TotalAccumulator;
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
+use crate::maybe_async::MaybeSend;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::tuple::{Tuple, TupleLike};

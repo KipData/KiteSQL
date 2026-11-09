@@ -16,8 +16,6 @@ mod program;
 #[cfg(feature = "parser")]
 pub use crate::binder::Statement;
 use crate::binder::{Binder, BinderContext};
-use crate::dual::dual;
-use crate::dual::MaybeSend;
 use crate::errors::DatabaseError;
 pub use crate::execution::Executor;
 use crate::execution::{DDLApply, ExecArena, ExecBuffer, TxnPtr};
@@ -36,6 +34,7 @@ use crate::function::lower::Lower;
 use crate::function::numbers::Numbers;
 use crate::function::octet_length::OctetLength;
 use crate::function::upper::Upper;
+use crate::maybe_async::MaybeSend;
 use crate::optimizer::core::hll;
 use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::heuristic::batch::HepBatchStrategy;
@@ -48,6 +47,7 @@ use crate::planner::operator::Operator;
 use crate::planner::{ExecMetaArena, LogicalPlan, MetaArena, PlanArena, TableArenaCell};
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
+#[cfg(not(feature = "async"))]
 use crate::storage::memory::MemoryStorage;
 #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
 use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage, StorageConfig};
@@ -114,7 +114,7 @@ pub enum CatalogKind {
     TableFunction(Arc<dyn TableFunctionImpl>),
 }
 
-#[dual]
+#[maybe_async]
 pub(crate) trait BindSource {
     type Iter: ResultIter;
     type Transaction: StorageTransaction;
@@ -354,6 +354,7 @@ impl DataBaseBuilder {
     /// Builds an in-memory database.
     ///
     /// This is convenient for tests, examples and temporary workloads.
+    #[cfg(not(feature = "async"))]
     pub fn build_in_memory(self) -> Result<Database<MemoryStorage>, DatabaseError> {
         let storage = MemoryStorage::new();
 
@@ -649,7 +650,7 @@ fn statement_stamp<T: StorageTransaction>(
     }
 }
 
-#[dual]
+#[maybe_async]
 async fn start_execution<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
     table_cache: &'p TableCache,
     transaction: &'a mut T,
@@ -666,7 +667,7 @@ where
     Ok((plan_arena, (executor, arena)))
 }
 
-#[dual]
+#[maybe_async]
 async fn start_execution_inner<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
     table_cache: &'p TableCache,
     transaction: &'a mut T,
@@ -827,7 +828,7 @@ impl<S: Storage> State<S> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<S: Storage> State<S> {
     pub(crate) async fn execute<'a, 'p, 'txn, A: MetaArena + 'p>(
         &'p self,
@@ -975,7 +976,7 @@ impl DDLApply {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<S: Storage> Database<S> {
     pub(crate) async fn execute_mut<A, F>(
         &mut self,
@@ -1189,7 +1190,7 @@ impl<S: Storage> Database<S> {
     }
 }
 
-#[dual]
+#[maybe_async]
 pub trait ConsumeMut<S: Storage> {
     type Output;
 
@@ -1199,7 +1200,7 @@ pub trait ConsumeMut<S: Storage> {
     ) -> Result<Self::Output, DatabaseError>;
 }
 
-#[dual]
+#[maybe_async]
 impl<S: Storage> ConsumeMut<S> for () {
     type Output = ();
 
@@ -1211,7 +1212,7 @@ impl<S: Storage> ConsumeMut<S> for () {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, S: Storage> BindSource for &'a Database<S> {
     type Iter = DatabaseIter<'a, S>;
     type Transaction = S::TransactionType<'a>;
@@ -1386,7 +1387,7 @@ impl<'txn> TxnValue<'txn> {
 
 /// A result iterator that borrows its transaction for `'txn`, such as [`TransactionIter`], so its
 /// rows lend values for as long.
-#[dual]
+#[maybe_async]
 pub trait TxnResultIter<'txn>: ResultIter {
     /// Like [`ResultIter::next_tuple`], but the row lends values for `'txn`. The iterators' own
     /// `next_tuple` does the same; this is for code generic over them.
@@ -1406,7 +1407,7 @@ pub trait TxnResultIter<'txn>: ResultIter {
 }
 
 /// Common interface for result iterators returned by database execution APIs.
-#[dual]
+#[maybe_async]
 pub trait ResultIter {
     /// Borrows the output schema for the current result set.
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R;
@@ -1435,6 +1436,21 @@ pub trait ResultIter {
     }
 }
 
+#[maybe_async]
+#[cfg(feature = "orm")]
+#[sync_only]
+pub trait AsyncIter: Iterator {}
+
+#[maybe_async]
+#[cfg(feature = "orm")]
+#[async_only]
+pub trait AsyncIter {
+    type Item;
+
+    /// Reads the next item, or `None` once the rows run out.
+    async fn next(&mut self) -> Option<Self::Item>;
+}
+
 #[cfg(feature = "orm")]
 /// Typed adapter over a [`ResultIter`] that yields ORM models instead of raw tuples.
 pub struct OrmIter<I, T> {
@@ -1442,7 +1458,7 @@ pub struct OrmIter<I, T> {
     _marker: PhantomData<T>,
 }
 
-#[dual]
+#[maybe_async]
 #[cfg(feature = "orm")]
 impl<I, T> OrmIter<I, T>
 where
@@ -1465,11 +1481,21 @@ where
     pub async fn done(self) -> Result<(), DatabaseError> {
         self.inner.done().await
     }
+}
+
+#[maybe_async]
+#[cfg(feature = "orm")]
+impl<I, T> AsyncIter for OrmIter<I, T>
+where
+    I: ResultIter + MaybeSend,
+    T: FromQueryRow + MaybeSend,
+{
+    #[async_only]
+    type Item = Result<T, DatabaseError>;
 
     /// Reads the next model.
     #[async_only]
-    #[allow(clippy::should_implement_trait)]
-    pub async fn next(&mut self) -> Option<Result<T, DatabaseError>> {
+    async fn next(&mut self) -> Option<Self::Item> {
         self.inner
             .next_tuple(|schema, tuple| T::from_query_row(schema, tuple))
             .await
@@ -1478,7 +1504,7 @@ where
     }
 }
 
-#[dual]
+#[maybe_async]
 #[cfg(feature = "orm")]
 #[sync_only]
 impl<I, T> Iterator for OrmIter<I, T>
@@ -1502,7 +1528,7 @@ pub struct TxnOrmIter<'txn, I, T> {
     _marker: PhantomData<(&'txn (), T)>,
 }
 
-#[dual]
+#[maybe_async]
 #[cfg(feature = "orm")]
 impl<'txn, I, T> TxnOrmIter<'txn, I, T>
 where
@@ -1519,11 +1545,21 @@ where
     pub async fn done(self) -> Result<(), DatabaseError> {
         self.inner.done().await
     }
+}
+
+#[maybe_async]
+#[cfg(feature = "orm")]
+impl<'txn, I, T> AsyncIter for TxnOrmIter<'txn, I, T>
+where
+    I: TxnResultIter<'txn> + MaybeSend,
+    T: FromTxnRow<'txn> + MaybeSend,
+{
+    #[async_only]
+    type Item = Result<T, DatabaseError>;
 
     /// Reads the next model.
     #[async_only]
-    #[allow(clippy::should_implement_trait)]
-    pub async fn next(&mut self) -> Option<Result<T, DatabaseError>> {
+    async fn next(&mut self) -> Option<Self::Item> {
         // Boxed as `dyn Future + Send` here, where `I: TxnResultIter<'txn>` holds: inside the
         // future of `next` the compiler loses that bound when it checks `Send`.
         let row: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send + '_>> = Box::pin(
@@ -1536,7 +1572,7 @@ where
     }
 }
 
-#[dual]
+#[maybe_async]
 #[cfg(feature = "orm")]
 #[sync_only]
 impl<'txn, I, T> Iterator for TxnOrmIter<'txn, I, T>
@@ -1561,7 +1597,7 @@ pub struct DatabaseIter<'a, S: Storage + 'a> {
     pub(crate) transaction: Option<OwnedPtr<S::TransactionType<'a>>>,
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, S: Storage> DatabaseIter<'a, S> {
     fn inner(&self) -> &TransactionIter<'a, 'a, S::TransactionType<'a>> {
         let inner = self.inner.as_ref().expect("iterator still running");
@@ -1602,7 +1638,7 @@ impl<'a, S: Storage> DatabaseIter<'a, S> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         DatabaseIter::schema(self, f)
@@ -1627,7 +1663,7 @@ pub struct Transaction<'a, S: Storage + 'a> {
     read_only: bool,
 }
 
-#[dual]
+#[maybe_async]
 impl<'txn, S: Storage> Transaction<'txn, S> {
     /// Commits the current transaction.
     pub async fn commit(self) -> Result<(), DatabaseError> {
@@ -1637,7 +1673,7 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, 'txn, S: Storage> BindSource for &'a mut Transaction<'txn, S> {
     type Iter = TransactionIter<'a, 'a, S::TransactionType<'txn>>;
     type Transaction = S::TransactionType<'txn>;
@@ -1692,7 +1728,7 @@ impl<T: StorageTransaction> TransactionGuard<'_, '_, T> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
     /// Pulls the next row of `executor`, finishing the execution once the rows run out
     /// or the execution fails.
@@ -1745,7 +1781,7 @@ pub struct TransactionIter<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p
     plan_arena: ExecMetaArena<A>,
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TransactionIter<'a, 'p, T, A> {
     pub(crate) fn new(
         plan_arena: ExecMetaArena<A>,
@@ -1785,7 +1821,7 @@ impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TransactionIter<'a, 
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> TransactionIter<'a, 'a, T, PlanArena<'a>> {
     async fn done_with_ddl_apply(
         mut self,
@@ -1802,7 +1838,7 @@ impl<'a, T: StorageTransaction + 'a> TransactionIter<'a, 'a, T, PlanArena<'a>> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'p, T: StorageTransaction + 'p, A: MetaArena + 'p> ResultIter
     for TransactionIter<'_, 'p, T, A>
 {
@@ -1822,7 +1858,7 @@ impl<'p, T: StorageTransaction + 'p, A: MetaArena + 'p> ResultIter
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TxnResultIter<'a>
     for TransactionIter<'a, 'p, T, A>
 {
@@ -1836,7 +1872,7 @@ impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TxnResultIter<'a>
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 pub(crate) mod test {
     use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -1851,7 +1887,6 @@ pub(crate) mod test {
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, TableArenaCell};
-    use crate::storage::memory::MemoryStorage;
     #[cfg(feature = "rocksdb")]
     use crate::storage::TransactionIsolationLevel;
     use crate::storage::{
@@ -1963,7 +1998,7 @@ pub(crate) mod test {
             let Childrens::Only(input) = plan.childrens.as_ref() else {
                 unreachable!()
             };
-            let storage = MemoryStorage::new();
+            let storage = crate::storage::new_test_storage().await;
             let transaction = storage.transaction()?;
             let table_cache = TableCache::default();
             let context = &table_cache;
@@ -2024,7 +2059,7 @@ pub(crate) mod test {
         let Childrens::Only(input) = plan.childrens.as_ref() else {
             unreachable!()
         };
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = TableCache::default();
         let context = &table_cache;
@@ -2044,7 +2079,8 @@ pub(crate) mod test {
 
     #[test]
     fn database_handles_are_send_sync() {
-        assert_send_sync::<super::Database<MemoryStorage>>();
+        #[cfg(feature = "async")]
+        assert_send_sync::<super::Database<crate::storage::TestStorage>>();
         #[cfg(feature = "rocksdb")]
         assert_send_sync::<super::Database<crate::storage::rocksdb::RocksStorage>>();
         #[cfg(feature = "lmdb")]
@@ -2053,7 +2089,7 @@ pub(crate) mod test {
 
     #[test]
     async fn scalar_query_view_references_survive_catalog_reload() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         {
             let mut db = DataBaseBuilder::path(".").build_with_storage(storage.clone())?;
             db.ddl("create view scalar_a as select (select 11) as v")
@@ -2187,7 +2223,9 @@ pub(crate) mod test {
     #[test]
     async fn test_run_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut database = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut database = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
         database
             .ddl("create table t1(c1 int primary key, c2 boolean, c3 int)")
             .await?;
@@ -2208,7 +2246,9 @@ pub(crate) mod test {
     #[test]
     async fn test_udf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
         let mut iter = kite_sql.run("select current_date()").await?;
 
         iter.schema(|schema| {
@@ -2233,7 +2273,9 @@ pub(crate) mod test {
     #[test]
     async fn test_udtf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
         let mut iter = kite_sql.run(
             "SELECT * FROM (select * from table(numbers(10)) a ORDER BY number LIMIT 5) OFFSET 3",
         ).await?;
@@ -2258,7 +2300,9 @@ pub(crate) mod test {
     #[test]
     async fn test_join_on_alias_right_key_is_localized() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         kite_sql
             .ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")
@@ -2346,7 +2390,9 @@ pub(crate) mod test {
     #[test]
     async fn test_join_on_with_right_filter_keeps_localized_key() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         kite_sql
             .ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")
@@ -2454,7 +2500,9 @@ pub(crate) mod test {
     async fn test_join_on_with_right_filter_keeps_localized_key_with_data(
     ) -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         kite_sql
             .ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")
@@ -2550,7 +2598,8 @@ pub(crate) mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(2)
-            .build_in_memory()?;
+            .build_in_memory()
+            .await?;
 
         kite_sql
             .ddl("create table t1 (a int primary key, b int)")
@@ -2648,7 +2697,9 @@ pub(crate) mod test {
     #[test]
     async fn test_run_multi_statement() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         kite_sql
             .ddl("create table t_multi (a int primary key, b int)")
@@ -2674,7 +2725,9 @@ pub(crate) mod test {
     #[test]
     async fn test_run_multi_statement_disallow_ddl() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         let err = match kite_sql
             .run("create table t_multi_ddl (a int primary key); select 1")
@@ -2696,7 +2749,9 @@ pub(crate) mod test {
     #[test]
     async fn test_bind_error_with_span() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         kite_sql
             .ddl("create table t_bind_span(id int primary key)")
@@ -2732,7 +2787,9 @@ pub(crate) mod test {
     #[test]
     async fn test_bind_function_error_with_span() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         kite_sql
             .ddl("create table t_bind_fn_span(id int primary key)")
@@ -2813,7 +2870,9 @@ pub(crate) mod test {
     #[test]
     async fn test_transaction_run_multi_statement() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
 
         kite_sql
             .ddl("create table t_multi_tx (a int primary key, b int)")
@@ -2990,11 +3049,12 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_invalid_histogram_buckets() {
+    async fn test_invalid_histogram_buckets() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let result = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(0)
-            .build_in_memory();
+            .build_in_memory()
+            .await;
 
         assert!(matches!(
             result,
@@ -3003,11 +3063,12 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_invalid_statistics_relative_error() {
+    async fn test_invalid_statistics_relative_error() {
         for relative_error in [0.0, 1.0, -0.5, f64::NAN] {
             let result = DataBaseBuilder::path(".")
                 .statistics_relative_error(relative_error)
-                .build_in_memory();
+                .build_in_memory()
+                .await;
             assert!(matches!(
                 result,
                 Err(DatabaseError::InvalidValue(message))
@@ -3017,11 +3078,12 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_invalid_hll_precision() {
+    async fn test_invalid_hll_precision() {
         for precision in [3, 27] {
             let result = DataBaseBuilder::path(".")
                 .hll_precision(precision)
-                .build_in_memory();
+                .build_in_memory()
+                .await;
             assert!(matches!(
                 result,
                 Err(DatabaseError::InvalidValue(message))
@@ -3034,13 +3096,14 @@ pub(crate) mod test {
     async fn parser_recursion_limit_applies_to_sql_frontends() -> Result<(), DatabaseError> {
         let expression = format!("{}7{}", "(".repeat(8), ")".repeat(8));
         let sql = format!("select {expression}");
-        let default = DataBaseBuilder::path(".").build_in_memory()?;
+        let default = DataBaseBuilder::path(".").build_in_memory().await?;
         assert_eq!(read_single_i32(default.run(&sql).await?).await?, 7);
         assert_eq!(default.prepare_all(&sql)?.len(), 1);
 
         let mut db = DataBaseBuilder::path(".")
             .parser_recursion_limit(256)
-            .build_in_memory()?;
+            .build_in_memory()
+            .await?;
         assert_eq!(db.prepare_all(&sql)?.len(), 1);
         assert_eq!(read_single_i32(db.run(&sql).await?).await?, 7);
         db.ddl(format!("create view deep_view as {sql}")).await?;
@@ -3090,7 +3153,8 @@ pub(crate) mod test {
 
         let low = DataBaseBuilder::path(".")
             .parser_recursion_limit(4)
-            .build_in_memory()?;
+            .build_in_memory()
+            .await?;
         assert!(low.run("select 1").await.is_ok());
         assert!(low
             .prepare_all(&sql)
@@ -3105,7 +3169,7 @@ pub(crate) mod test {
             .to_string()
             .contains("recursion limit exceeded"));
         assert!(matches!(
-            DataBaseBuilder::path(".").parser_recursion_limit(0).build_in_memory(),
+            DataBaseBuilder::path(".").parser_recursion_limit(0).build_in_memory().await,
             Err(DatabaseError::InvalidValue(message)) if message == "parser recursion limit must be >= 1"
         ));
         Ok(())

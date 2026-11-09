@@ -1638,7 +1638,7 @@ impl fmt::Display for Range {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
-#[crate::dual::dual]
+#[maybe_async]
 pub(crate) mod test_support {
     use super::*;
 
@@ -1673,7 +1673,7 @@ pub(crate) mod test_support {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::uninlined_format_args)]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};

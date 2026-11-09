@@ -417,12 +417,12 @@ fn read_char_length_units<R: Read>(reader: &mut R) -> Result<CharLengthUnits, Da
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 pub(crate) mod test {
     use super::{TAG_BINARY, TAG_BOOLEAN, TAG_INT64, TAG_TIME64, TAG_TUPLE, TAG_UTF8};
     use crate::errors::DatabaseError;
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::memory::MemoryTransaction;
+    use crate::storage::TestTransaction;
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::CharLengthUnits;
     use ordered_float::OrderedFloat;
@@ -489,7 +489,7 @@ pub(crate) mod test {
 
         for source in sources {
             let decoded =
-                DataValue::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena)?;
+                DataValue::decode::<TestTransaction, _, _>(&mut cursor, None, &mut arena)?;
             assert_eq!(source, decoded);
         }
 
@@ -556,7 +556,7 @@ pub(crate) mod test {
         for (index, value) in values.into_iter().enumerate() {
             let mut bytes = Vec::new();
             value.encode(&mut bytes, false, &arena)?;
-            let decoded = Utf8Type::decode::<MemoryTransaction, _, _>(
+            let decoded = Utf8Type::decode::<TestTransaction, _, _>(
                 &mut Cursor::new(bytes),
                 None,
                 &mut arena,
@@ -570,7 +570,7 @@ pub(crate) mod test {
         }
 
         let result =
-            Utf8Type::decode::<MemoryTransaction, _, _>(&mut Cursor::new([2]), None, &mut arena);
+            Utf8Type::decode::<TestTransaction, _, _>(&mut Cursor::new([2]), None, &mut arena);
         let Err(err) = result else {
             panic!("invalid tag should fail")
         };

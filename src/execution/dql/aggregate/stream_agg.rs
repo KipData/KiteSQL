@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
     aggregate_arg, prepare_accumulators, update_accumulators, write_aggregate_output, Accumulator,
@@ -71,7 +70,7 @@ impl<'a> ReadExecutor<'a> for StreamAggExecutor<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -152,7 +151,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::StreamAggExecutor;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -165,7 +164,6 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -215,7 +213,7 @@ mod tests {
             force_spill: false,
         };
         let table_cache = crate::storage::TableCache::default();
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
 
         let rows = try_collect(execute_input::<_, StreamAggExecutor>(
@@ -260,7 +258,7 @@ mod tests {
             force_spill: false,
         };
         let table_cache = crate::storage::TableCache::default();
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
 
         let rows = try_collect(execute_input::<_, StreamAggExecutor>(

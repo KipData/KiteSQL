@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `#[dual]` compiles one async source as the sync path (by default) or the async path (with
+//! `#[maybe_async]` compiles one async source as the sync path (by default) or the async path (with
 //! the crate's `async` feature), in place and under the same names. It emits both versions of
 //! the item, each under its `cfg`, so only one ever exists in a build.
 //!
@@ -24,7 +24,7 @@
 //! - **async**: the code as written, except that `async fn` in trait definitions becomes
 //!   `fn .. -> impl Future<Output = R> + Send`, so generic code can prove its futures are `Send`,
 //!   and an `async fn` marked `#[test]` becomes a plain test running its body on
-//!   `crate::dual::block_on`, so one test source covers both paths.
+//!   `crate::maybe_async::block_on`, so one test source covers both paths.
 //!
 //! `#[sync_only]` / `#[async_only]` keep an impl item, trait item or nested item in one path
 //! only. `#[keep_async_fn]` on a trait keeps its `async fn`s as written on the async path; use it
@@ -133,14 +133,14 @@ impl VisitMut for Transform {
 
     fn visit_item_fn_mut(&mut self, item: &mut syn::ItemFn) {
         visit_mut::visit_item_fn_mut(self, item);
-        // An async test runs to completion on `crate::dual::block_on`.
+        // An async test runs to completion on `crate::maybe_async::block_on`.
         if self.variant == Variant::Async
             && item.sig.asyncness.is_some()
             && item.attrs.iter().any(|attr| attr.path().is_ident("test"))
         {
             item.sig.asyncness = None;
             let block = &item.block;
-            *item.block = syn::parse_quote!({ crate::dual::block_on(async move #block) });
+            *item.block = syn::parse_quote!({ crate::maybe_async::block_on(async move #block) });
         }
     }
 
@@ -245,8 +245,8 @@ fn desugar_trait_async_fn(f: &mut syn::TraitItemFn) {
             .push(syn::parse_quote!(#[allow(unreachable_code, clippy::let_and_return)]));
         f.default = Some(syn::parse_quote! {{
             async move {
-                let __dual_path_output: #output = #block;
-                __dual_path_output
+                let __maybe_async_output: #output = #block;
+                __maybe_async_output
             }
         }});
     }
@@ -272,7 +272,8 @@ fn item_attrs(item: &mut Item) -> Option<&mut Vec<Attribute>> {
 
 pub(crate) fn handle(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {
-        return syn::Error::new_spanned(attr, "`#[dual]` takes no arguments").to_compile_error();
+        return syn::Error::new_spanned(attr, "`#[maybe_async]` takes no arguments")
+            .to_compile_error();
     }
     let item: Item = match syn::parse2(item) {
         Ok(item) => item,

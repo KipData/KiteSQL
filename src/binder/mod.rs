@@ -799,13 +799,13 @@ pub(crate) fn is_valid_identifier(s: &str) -> bool {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 pub mod test {
     use crate::binder::{is_valid_identifier, Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableCatalog};
     use crate::errors::DatabaseError;
     use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
-    use crate::storage::memory::MemoryStorage;
+    use crate::storage::TestStorage;
     use crate::storage::{table_codec::TableCodec, Storage, StorageTransaction};
     use crate::types::ColumnId;
     use crate::types::LogicalType::Integer;
@@ -854,7 +854,7 @@ pub mod test {
         }
     }
 
-    pub(crate) async fn build_t1_table() -> Result<TableState<MemoryStorage>, DatabaseError> {
+    pub(crate) async fn build_t1_table() -> Result<TableState<TestStorage>, DatabaseError> {
         let table_arena = TableArenaCell::default();
         let storage = build_test_catalog(&table_arena).await?;
         let table = {
@@ -871,8 +871,8 @@ pub mod test {
 
     pub(crate) async fn build_test_catalog(
         table_arena: &TableArenaCell,
-    ) -> Result<MemoryStorage, DatabaseError> {
-        let storage = MemoryStorage::new();
+    ) -> Result<TestStorage, DatabaseError> {
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut table_codec = TableCodec::default();
 

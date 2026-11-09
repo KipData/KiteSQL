@@ -129,7 +129,7 @@ pub fn boolean_not_eq_binary_eval(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use super::*;
     use crate::types::value::Utf8Type;

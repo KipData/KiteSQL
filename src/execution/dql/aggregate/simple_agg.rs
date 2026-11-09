@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
     prepare_accumulators, update_accumulators, write_aggregate_output, Accumulator,
@@ -50,7 +49,7 @@ impl<'a> ReadExecutor<'a> for SimpleAggExecutor<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,

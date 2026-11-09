@@ -1,7 +1,6 @@
 use super::*;
-use crate::dual::dual;
 
-#[dual]
+#[maybe_async]
 impl<S: Storage> Database<S> {
     /// Prepares an ORM-built plan once into a program for repeated execution with
     /// positional parameters. Use `e.param(id)` inside expression closures, then pass
@@ -195,7 +194,7 @@ impl<S: Storage> Database<S> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, S: Storage> Transaction<'a, S> {
     /// Prepares an ORM-built plan into a program, against this transaction's view.
     pub fn program<F>(

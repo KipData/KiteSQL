@@ -915,7 +915,7 @@ impl NormalizationRule for SkipResidualFilterColumns {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;
@@ -1201,7 +1201,8 @@ mod tests {
 
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
-            .build_in_memory()?;
+            .build_in_memory()
+            .await?;
         db.ddl("create table skip_t(id int primary key, a int, b int, c int)")
             .await?;
         db.ddl("create index skip_ab on skip_t(a, b)").await?;

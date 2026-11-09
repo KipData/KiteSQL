@@ -453,7 +453,7 @@ fn create_spill_file() -> Result<(File, PathBuf), DatabaseError> {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::types::tuple::Tuple;

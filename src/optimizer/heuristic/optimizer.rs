@@ -686,7 +686,7 @@ impl ImplementationRuleIndex {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use crate::binder::{Binder, BinderContext};
     use crate::db::DataBaseBuilder;
@@ -827,7 +827,9 @@ mod tests {
     #[test]
     async fn test_find_best_selects_cheapest_scan() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut database = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut database = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
         database
             .ddl("create table t1 (c1 int primary key, c2 int)")
             .await?;

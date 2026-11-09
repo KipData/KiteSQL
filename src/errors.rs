@@ -554,7 +554,7 @@ fn build_sql_highlight(sql: &str, span: &SqlErrorSpan) -> Option<String> {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::expression::{BinaryOperator, UnaryOperator};

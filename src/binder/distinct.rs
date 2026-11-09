@@ -126,7 +126,7 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for DistinctOutputBinder<'_> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::DistinctOutputBinder;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};

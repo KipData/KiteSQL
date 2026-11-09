@@ -1088,7 +1088,7 @@ impl fmt::Display for UnaryOperator {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::test::build_table;
@@ -1109,8 +1109,7 @@ mod test {
     use crate::planner::operator::sort::SortField;
     use crate::planner::{ExprRef, MetaArena, PlanArena, TableArenaCell};
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
-    use crate::storage::memory::MemoryStorage;
-    use crate::storage::memory::MemoryTransaction;
+    use crate::storage::TestTransaction;
     use crate::storage::{Storage, StorageTransaction};
     use crate::types::evaluator::{binary_create, cast_create, unary_create};
     use crate::types::value::{DataValue, Utf8Type};
@@ -1124,7 +1123,7 @@ mod test {
         fn fn_assert(
             cursor: &mut Cursor<Vec<u8>>,
             expr: ScalarExpression,
-            drive: Option<&mut ReferenceDecodeContext<'_, MemoryTransaction>>,
+            drive: Option<&mut ReferenceDecodeContext<'_, TestTransaction>>,
             arena: &mut (dyn MetaArena + '_),
         ) -> Result<(), DatabaseError> {
             let expr = arena.alloc_expression(expr);
@@ -1141,7 +1140,7 @@ mod test {
             Ok(())
         }
 
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();

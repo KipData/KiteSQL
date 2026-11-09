@@ -50,9 +50,9 @@ COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --igno
 test:
 	$(CARGO) test --all --features spill
 
-## Run the same unit tests through the async path (`async` feature, memory storage).
+## Run the same unit tests through the async path (`async` feature, SlateDB on an in-memory object store).
 test-async:
-	$(CARGO) test -p kite_sql --lib --no-default-features --features $(ASYNC_FEATURES)
+	$(CARGO) test -p kite_sql --lib --no-default-features --features $(ASYNC_FEATURES),slatedb
 
 ## Run the SlateDB storage unit tests (async path, in-memory object store, S3 config).
 test-slatedb:
@@ -141,7 +141,7 @@ fmt:
 ## path: `async` cannot be combined with the sync storages.
 clippy:
 	$(CARGO) clippy --all-targets --features $(SYNC_FEATURES) -- -D warnings
-	$(CARGO) clippy --all-targets --no-default-features --features $(ASYNC_FEATURES) -- -D warnings
+	$(CARGO) clippy --no-default-features --features $(ASYNC_FEATURES) -- -D warnings
 	$(CARGO) clippy --all-targets --no-default-features --features $(ASYNC_FEATURES),slatedb-s3 -- -D warnings
 	$(CARGO) clippy -p sqllogictest-test --all-targets --no-default-features --features async -- -D warnings
 

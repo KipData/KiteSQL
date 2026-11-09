@@ -2177,7 +2177,7 @@ impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::{InputPositionBinder, ProjectionOutputBinder};
     use crate::binder::test::build_t1_table;

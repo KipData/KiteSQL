@@ -28,7 +28,6 @@ use self::ddl::change_column::ChangeColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;
 use self::dql::mark_apply::MarkApply;
 use self::dql::scalar_query_init::ScalarQueryInit;
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::ddl::create_index::CreateIndex;
 use crate::execution::ddl::create_table::CreateTable;
@@ -166,7 +165,7 @@ pub struct Executor<'a> {
     keeper: PlanKeeper<'a>,
 }
 
-#[dual]
+#[maybe_async]
 impl<'a> Executor<'a> {
     pub(crate) fn new(plan: LogicalPlan, plan_arena: &(dyn MetaArena + 'a)) -> Self {
         let schema = plan.read_schema().clone();
@@ -277,7 +276,7 @@ pub(crate) enum ExecNode<'a> {
 
 // Nodes are only driven through `ExecNode::next_tuple` / `reset`, which on the async path box
 // each future as `dyn Future + Send`; that is where `Send` is checked, against the concrete node.
-#[dual]
+#[maybe_async]
 #[keep_async_fn]
 pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
     // Restores the state the node had right after it was built, resetting its inputs too.
@@ -297,7 +296,7 @@ pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
     ) -> Result<(), DatabaseError>;
 }
 
-#[dual]
+#[maybe_async]
 impl<'a> ExecNode<'a> {
     #[sync_only]
     #[inline]
@@ -1341,7 +1340,7 @@ pub(crate) fn build_write<'a, B: ExecBuilder>(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test_utils {
     use super::*;
 
@@ -1435,11 +1434,10 @@ mod test_utils {
 pub(crate) use test_utils::{execute_input, execute_input_mut, try_collect};
 
 #[cfg(test)]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use super::*;
     use crate::planner::TableArenaCell;
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
 
     #[test]
@@ -1452,7 +1450,7 @@ mod test {
     }
 
     #[test]
-    fn rewrite_projects_joined_row() -> Result<(), DatabaseError> {
+    async fn rewrite_projects_joined_row() -> Result<(), DatabaseError> {
         use crate::catalog::{ColumnCatalog, ColumnDesc};
         use crate::types::LogicalType;
 
@@ -1469,7 +1467,7 @@ mod test {
         let ints = |values: [i32; 2]| Tuple::new(None, values.map(DataValue::Int32).to_vec());
 
         let tables = TableCache::default();
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let mut exec_buffer = ExecBuffer::default();
         let mut exec_arena = ExecArena::new(&tables, &transaction);

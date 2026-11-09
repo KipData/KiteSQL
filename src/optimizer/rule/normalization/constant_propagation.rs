@@ -356,7 +356,7 @@ impl NormalizationRule for PropagateJoinConstants {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::{eq_operands, for_each_conjunct, table_column};
     use super::{PropagateFilterConstants, PropagateJoinConstants};

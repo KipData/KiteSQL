@@ -59,8 +59,6 @@ pub struct SlateDbStorage {
     cache: Option<Arc<dyn DbCache>>,
 }
 
-/// The block cache of a database [`SlateDbStorage::open`] opens. The default keeps
-/// SlateDB's: data blocks in 512MiB of memory, and the blocks compactions write left out.
 #[derive(Clone, Debug, Default)]
 pub struct SlateDbCacheOptions {
     /// The memory for data blocks; 512MiB when unset.
@@ -73,7 +71,6 @@ pub struct SlateDbCacheOptions {
     pub cache_compaction_output: bool,
 }
 
-/// The disk tier of the block cache.
 #[derive(Clone, Debug)]
 pub struct SlateDbDiskCache {
     /// The directory of the cache files.
@@ -83,11 +80,6 @@ pub struct SlateDbDiskCache {
     pub capacity_bytes: usize,
 }
 
-/// How a scan reads the SSTs it covers from object storage.
-///
-/// The defaults suit object storage, where each request costs tens of milliseconds. SlateDB's own
-/// defaults fetch one block (4KiB) per request, one request at a time, and keep nothing in the
-/// block cache, so a full scan costs one request per block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SlateDbScanOptions {
     /// The bytes a scan fetches from an SST in one request, at least one block. 256KiB by
@@ -111,8 +103,6 @@ impl Default for SlateDbScanOptions {
 }
 
 impl SlateDbStorage {
-    /// Wraps an open SlateDB database. Commits wait until the write is durable in object
-    /// storage; see [`await_durable`](Self::await_durable).
     pub fn new(db: Arc<Db>) -> Self {
         Self {
             db,
@@ -150,9 +140,6 @@ impl SlateDbStorage {
         Ok(())
     }
 
-    /// Opens the SlateDB database at `path` in `object_store`, creating it if it does not exist,
-    /// with the block cache `cache` describes. Close it with [`close`](Self::close), which closes
-    /// the cache too.
     pub async fn open(
         path: impl Into<Path>,
         object_store: Arc<dyn ObjectStore>,
@@ -286,7 +273,6 @@ impl S3Config {
     }
 }
 
-// Leaves the credentials out of logs.
 #[cfg(feature = "slatedb-s3")]
 impl std::fmt::Debug for S3Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -575,6 +561,25 @@ mod tests {
         storage.close().await?;
         assert!(dir.path().join("cache").read_dir()?.next().is_some());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn remove_range() -> Result<(), DatabaseError> {
+        let mut transaction = open().await?.await_durable(false).transaction()?;
+        crate::storage::check_remove_range(&mut transaction).await
+    }
+
+    #[tokio::test]
+    async fn range_rev_matches_range() -> Result<(), DatabaseError> {
+        let mut transaction = open().await?.await_durable(false).transaction()?;
+        crate::storage::check_range_rev_matches_range(&mut transaction).await
+    }
+
+    #[tokio::test]
+    async fn explicit_transaction_does_not_rescan_own_writes() -> Result<(), DatabaseError> {
+        let storage = open().await?.await_durable(false);
+        let db = crate::db::DataBaseBuilder::path(".").build_with_storage(storage)?;
+        crate::storage::check_explicit_transaction_does_not_rescan_own_writes(db).await
     }
 
     #[tokio::test]

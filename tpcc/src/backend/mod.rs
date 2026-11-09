@@ -15,17 +15,11 @@ use std::borrow::Borrow;
 
 #[cfg(feature = "kitesql-sync")]
 pub mod dual;
-#[cfg(feature = "kitesql-sync")]
-pub mod kitesql_lmdb;
-#[cfg(feature = "kitesql-sync")]
-pub mod kitesql_rocksdb;
-#[cfg(feature = "slatedb-s3")]
-pub mod kitesql_slatedb;
+pub mod kitesql;
 pub mod sqlite;
 
 use crate::TpccError;
-use kite_sql::binder::{command_type, CommandType};
-use kite_sql::db::{Param, Program, Statement};
+use kite_sql::db::{Param, Program};
 use kite_sql::types::tuple::TupleImpl;
 use kite_sql::types::LogicalType;
 
@@ -127,43 +121,5 @@ pub trait PreparedStatement {
 impl PreparedStatement for KiteSqlPreparedStatement<'_> {
     fn spec(&self) -> &StatementSpec {
         &self.spec
-    }
-}
-
-pub(crate) enum KiteSqlBatch {
-    Ddl,
-    Analyze(Vec<String>),
-    Statements,
-}
-
-impl KiteSqlBatch {
-    pub(crate) fn classify(statements: &[Statement]) -> Result<Self, TpccError> {
-        let all_ddl = statements.iter().try_fold(true, |all_ddl, statement| {
-            Ok::<_, kite_sql::errors::DatabaseError>(
-                all_ddl && matches!(command_type(statement)?, CommandType::DDL),
-            )
-        })?;
-        if all_ddl {
-            return Ok(Self::Ddl);
-        }
-        if !statements
-            .iter()
-            .all(|statement| matches!(statement, Statement::Analyze(_)))
-        {
-            return Ok(Self::Statements);
-        }
-        let mut tables = Vec::with_capacity(statements.len());
-        for statement in statements {
-            let Statement::Analyze(analyze) = statement else {
-                unreachable!("checked above")
-            };
-            let table_name = analyze.table_name.as_ref().ok_or_else(|| {
-                kite_sql::errors::DatabaseError::UnsupportedStmt(
-                    "ANALYZE requires table name".to_string(),
-                )
-            })?;
-            tables.push(table_name.to_string());
-        }
-        Ok(Self::Analyze(tables))
     }
 }

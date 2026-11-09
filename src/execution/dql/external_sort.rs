@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::compare_sort_keys;
 use crate::execution::spill::{SegmentOffset, SegmentReader, SortRow, SpillReader, SpillVec};
@@ -67,7 +66,7 @@ impl<'a> ReadExecutor<'a> for ExternalSort<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -290,7 +289,7 @@ fn merge_pass<'on_flush>(
 
 // GRCOV_EXCL_START
 #[cfg(test)]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use super::{finish_sort, sort_segment, Run, MERGE_FAN_IN};
     use crate::catalog::{ColumnCatalog, ColumnDesc};

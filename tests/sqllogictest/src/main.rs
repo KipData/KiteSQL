@@ -14,7 +14,7 @@
 
 use clap::Parser;
 use kite_sql::db::DataBaseBuilder;
-use sqllogictest::{AsyncDB, MakeConnection, Runner};
+use sqllogictest::Runner;
 use sqllogictest_test::SQLBase;
 use std::fs::File;
 use std::io;
@@ -40,65 +40,32 @@ fn main() {
     println!("KiteSQL Test Start!\n");
     init_20000_row_csv().expect("failed to init csv");
     init_distinct_rows_csv().expect("failed to init distinct csv");
+    let mut file_num = 0;
     let start = Instant::now();
 
     #[cfg(not(feature = "async"))]
-    let file_num = {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        run_files(
-            Runner::new(|| {
-                let db = DataBaseBuilder::path(temp_dir.path()).build_lmdb();
-                std::future::ready(db.map(|db| SQLBase { db }))
-            }),
-            &args.path,
-        )
-    };
-    // The async path, over SlateDB on an in-memory object store. SlateDB runs its background work
-    // on tokio, so the tests run inside a tokio runtime.
+    let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    #[cfg(not(feature = "async"))]
+    let mut tester = Runner::new(|| {
+        let db = DataBaseBuilder::path(temp_dir.path()).build_lmdb();
+        std::future::ready(db.map(|db| SQLBase { db }))
+    });
+    // The async path runs on SlateDB over an in-memory object store, whose background work needs
+    // a tokio runtime.
     #[cfg(feature = "async")]
-    let file_num = {
-        use kite_sql::storage::slatedb::SlateDbStorage;
-        use slatedb::object_store::memory::InMemory;
-        use std::sync::Arc;
-        use std::time::Duration;
-
-        let runtime = tokio::runtime::Runtime::new().expect("failed to start tokio");
-        let _runtime = runtime.enter();
-        let settings = slatedb::Settings {
-            flush_interval: Some(Duration::from_millis(1)),
-            ..Default::default()
-        };
-        let db = runtime
-            .block_on(
-                slatedb::Db::builder("kitesql-slt", Arc::new(InMemory::new()))
-                    .with_settings(settings)
-                    .build(),
-            )
-            .expect("failed to open slatedb");
-        let storage = SlateDbStorage::new(Arc::new(db));
-        run_files(
-            Runner::new(move || {
-                let db = DataBaseBuilder::path(".").build_with_storage(storage.clone());
-                std::future::ready(db.map(|db| SQLBase { db }))
-            }),
-            &args.path,
-        )
+    let runtime = tokio::runtime::Runtime::new().expect("failed to start tokio");
+    #[cfg(feature = "async")]
+    let _runtime = runtime.enter();
+    #[cfg(feature = "async")]
+    let mut tester = {
+        let storage = open_slatedb(&runtime);
+        Runner::new(move || {
+            let db = DataBaseBuilder::path(".").build_with_storage(storage.clone());
+            std::future::ready(db.map(|db| SQLBase { db }))
+        })
     };
-    println!("Passed all tests for a total of {} files!!!", file_num + 1);
-    println!("|- Total time spent: {:?}", start.elapsed());
-    if cfg!(debug_assertions) {
-        println!("|- Debug mode");
-    } else {
-        println!("|- Release mode");
-    }
-}
 
-fn run_files<D: AsyncDB, M: MakeConnection<Conn = D>>(
-    mut tester: Runner<D, M>,
-    path: &str,
-) -> usize {
-    let mut file_num = 0;
-    for slt_file in glob::glob(path).expect("failed to find slt files") {
+    for slt_file in glob::glob(&args.path).expect("failed to find slt files") {
         let filepath = slt_file.expect("failed to read slt file");
         println!(
             "-> Now the test file is: {}, num: {}",
@@ -112,7 +79,33 @@ fn run_files<D: AsyncDB, M: MakeConnection<Conn = D>>(
         println!("-> Pass!\n");
         file_num += 1;
     }
-    file_num
+    println!("Passed all tests for a total of {} files!!!", file_num + 1);
+    println!("|- Total time spent: {:?}", start.elapsed());
+    if cfg!(debug_assertions) {
+        println!("|- Debug mode");
+    } else {
+        println!("|- Release mode");
+    }
+}
+
+#[cfg(feature = "async")]
+fn open_slatedb(runtime: &tokio::runtime::Runtime) -> kite_sql::storage::slatedb::SlateDbStorage {
+    use slatedb::object_store::memory::InMemory;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let settings = slatedb::Settings {
+        flush_interval: Some(Duration::from_millis(1)),
+        ..Default::default()
+    };
+    let db = runtime
+        .block_on(
+            slatedb::Db::builder("kitesql-slt", Arc::new(InMemory::new()))
+                .with_settings(settings)
+                .build(),
+        )
+        .expect("failed to open slatedb");
+    kite_sql::storage::slatedb::SlateDbStorage::new(Arc::new(db))
 }
 
 fn init_20000_row_csv() -> io::Result<()> {

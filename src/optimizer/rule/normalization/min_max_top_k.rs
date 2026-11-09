@@ -84,7 +84,7 @@ impl NormalizationRule for MinMaxToTopK {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::MinMaxToTopK;
     use crate::binder::test::build_t1_table;

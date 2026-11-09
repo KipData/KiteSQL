@@ -24,7 +24,6 @@ pub(crate) mod drop_view;
 pub(crate) mod truncate;
 
 use crate::catalog::TableId;
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{InnerIter, StorageTransaction};
@@ -35,7 +34,7 @@ use std::collections::Bound;
 
 const REWRITE_BATCH_SIZE: usize = 1024;
 
-#[dual]
+#[maybe_async]
 #[allow(clippy::too_many_arguments)]
 async fn read_tuple_batch<T: StorageTransaction>(
     transaction: &T,
@@ -103,7 +102,7 @@ async fn read_tuple_batch<T: StorageTransaction>(
         .await
 }
 
-#[dual]
+#[maybe_async]
 pub(crate) async fn visit_table_in_batches<T, F>(
     transaction: &T,
     table_codec: &mut TableCodec,
@@ -150,7 +149,7 @@ where
     Ok(())
 }
 
-#[dual]
+#[maybe_async]
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn rewrite_table_in_batches<T, F, G>(
     transaction: &mut T,

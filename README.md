@@ -32,7 +32,9 @@
 **KiteSQL** is a lightweight embedded relational database written in Rust, inspired by **MyRocks** and **SQLite**. It runs inside your application with no external service: execute SQL directly, or use typed ORM models, migrations, and builder-style queries.
 
 - Most of the SQL 2016 syntax
-- All metadata and data stored in KV storage (RocksDB, LMDB, or in-memory)
+- All metadata and data stored in KV storage: RocksDB, LMDB, in-memory, or [SlateDB](https://slatedb.io) on S3
+- **Zero-copy reads**: on LMDB, strings go from the mmap'd file into your structs as `Cow::Borrowed`, without a copy ([how](https://kitesql.kould2333.org/blog/zero-copy-sql-on-lmdb.html))
+- **Async API on object storage**: the same engine as async, on SlateDB over Amazon S3 or an S3-compatible store such as MinIO or R2, see [Async API on S3](docs/features.md#async-api-on-s3-features--slatedb-s3)
 - Typed ORM with schema migration (`orm` feature), see [`src/orm/README.md`](src/orm/README.md)
 - WebAssembly and Python bindings
 
@@ -87,7 +89,7 @@ fn main() -> Result<(), DatabaseError> {
 }
 ```
 
-More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction.rs), [program](examples/program.rs).
+More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction.rs), [program](examples/program.rs), [borrowed_parse](examples/borrowed_parse.rs) (zero-copy reads against SQLite).
 
 ## Storage Backends
 | Builder | Storage |
@@ -96,6 +98,7 @@ More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction
 | `build_lmdb()` | LMDB (feature `lmdb`), stronger for read-heavy workloads |
 | `build_in_memory()` | In-memory, for tests and temporary data |
 | `build_optimistic()` | RocksDB with optimistic transactions |
+| `build_with_storage(SlateDbStorage::open_s3(..))` | SlateDB on S3 (feature `slatedb-s3`, async API), see [Async API on S3](docs/features.md#async-api-on-s3-features--slatedb-s3) |
 
 Feature flags, checkpoints, and transaction isolation: [docs/features.md](docs/features.md).
 

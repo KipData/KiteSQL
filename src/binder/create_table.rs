@@ -61,19 +61,18 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::binder::BinderContext;
     use crate::catalog::ColumnDesc;
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
 
     #[test]
-    fn test_create_bind() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+    async fn test_create_bind() -> Result<(), DatabaseError> {
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let names = crate::storage::NameMapping::default();
         let table_cache = crate::storage::TableCache::default();

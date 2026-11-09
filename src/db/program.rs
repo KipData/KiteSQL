@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use super::*;
-use crate::dual::dual;
 // GRCOV_EXCL_START
 #[cfg(test)]
 use crate::planner::operator::{PhysicalOption, PlanImpl, RowCountOption, SortOption};
@@ -66,7 +65,7 @@ pub struct Program<'p> {
     pub(crate) arena: ExecMetaArena<ParamArena<'p>>,
 }
 
-#[dual]
+#[maybe_async]
 impl<'p> Program<'p> {
     /// Runs the program with `params` in `transaction`. The returned iterator borrows the
     /// program until the execution ends.
@@ -209,7 +208,7 @@ pub struct ProgramIter<'a, 'p, T: StorageTransaction + 'p> {
     program: &'a mut Program<'p>,
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, 'p, T: StorageTransaction + 'p> ProgramIter<'a, 'p, T> {
     #[inline]
     pub fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
@@ -239,7 +238,7 @@ impl<T: StorageTransaction> Drop for ProgramIter<'_, '_, T> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, 'p, T: StorageTransaction + 'p> TxnResultIter<'a> for ProgramIter<'a, 'p, T> {
     async fn next_txn_tuple<R: MaybeSend>(
         &mut self,
@@ -249,7 +248,7 @@ impl<'a, 'p, T: StorageTransaction + 'p> TxnResultIter<'a> for ProgramIter<'a, '
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'p, T: StorageTransaction + 'p> ResultIter for ProgramIter<'_, 'p, T> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         ProgramIter::schema(self, f)
@@ -269,7 +268,7 @@ impl<'p, T: StorageTransaction + 'p> ResultIter for ProgramIter<'_, 'p, T> {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -289,7 +288,7 @@ mod tests {
 
     #[test]
     async fn prepare_caches_scalar_output_schema() -> Result<(), DatabaseError> {
-        let db = DataBaseBuilder::path(".").build_in_memory()?;
+        let db = DataBaseBuilder::path(".").build_in_memory().await?;
         let mut plan = db.program_sql(
             "select (($1 * 3 + 7) % 97) + ($1 / 2)",
             &[(1, LogicalType::Bigint)],
@@ -326,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn specialize_selected_index_and_preserve_plan_metadata() -> Result<(), DatabaseError> {
+    async fn specialize_selected_index_and_preserve_plan_metadata() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut arena = PlanArena::new(&table_arena);
         let mut column = ColumnCatalog::new(
@@ -360,7 +359,7 @@ mod tests {
         };
         let tables = TableCache::default();
         let context = &tables;
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         for (lookup, has_residual, parameter, should_change) in [
             (
@@ -529,7 +528,8 @@ mod tests {
 
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
-            .build_in_memory()?;
+            .build_in_memory()
+            .await?;
         db.ddl("create table parameter_order(id int primary key)")
             .await?;
         db.run("insert into parameter_order values(1),(2),(3),(4)")
@@ -654,7 +654,7 @@ mod tests {
 
     #[test]
     async fn repeated_execution_and_null_do_not_stale_parameters() -> Result<(), DatabaseError> {
-        let db = DataBaseBuilder::path(".").build_in_memory()?;
+        let db = DataBaseBuilder::path(".").build_in_memory().await?;
         let mut plan = db.program_sql(
             "values ($1 + $2), ($2)",
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
@@ -721,7 +721,8 @@ mod tests {
     async fn null_parameters_empty_index_ranges() -> Result<(), DatabaseError> {
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
-            .build_in_memory()?;
+            .build_in_memory()
+            .await?;
         db.ddl("create table t(w int, k int, primary key(w,k))")
             .await?;
         db.run("insert into t values(1,1),(1,2),(2,1),(2,2),(2,4)")
@@ -770,7 +771,8 @@ mod tests {
     async fn composite_index_ranges_bind_for_each_execution() -> Result<(), DatabaseError> {
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
-            .build_in_memory()?;
+            .build_in_memory()
+            .await?;
         db.ddl("create table t(w int, k int, primary key(w,k))")
             .await?;
         db.run("insert into t values(1,1),(1,2),(1,3),(2,1),(2,2),(2,4)")
@@ -877,7 +879,7 @@ mod tests {
         assert!(!has_filter(plan.executor.plan()));
         let tables = TableCache::default();
         let context = &tables;
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
         let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
@@ -935,7 +937,7 @@ mod tests {
 
     #[test]
     async fn rerun_rebuilds_materialized_subquery() -> Result<(), DatabaseError> {
-        let mut db = DataBaseBuilder::path(".").build_in_memory()?;
+        let mut db = DataBaseBuilder::path(".").build_in_memory().await?;
         db.ddl("create table t1 (c1 int primary key, name varchar)")
             .await?;
         db.ddl("create table t2 (c1 int primary key, name varchar)")

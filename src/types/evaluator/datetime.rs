@@ -98,7 +98,7 @@ crate::define_cast_evaluator!(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use super::*;
     use crate::errors::DatabaseError;

@@ -15,10 +15,10 @@
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, SourceId, TableCatalog, TableId, TableName};
 use crate::db::Param;
-use crate::dual::{MaybeSend, MaybeSync};
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::ScalarExpression;
+use crate::maybe_async::{MaybeSend, MaybeSync};
 use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
 use crate::planner::operator::visitor_mut::{
     walk_mut_operator, ChildrenVisitMut, OperatorExprVisitorMut, OperatorVisitorMut,
@@ -1376,7 +1376,7 @@ impl MetaArena for ParamArena<'_> {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};

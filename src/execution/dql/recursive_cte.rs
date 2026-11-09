@@ -16,7 +16,6 @@ use crate::planner::PlanArena;
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 #[cfg(feature = "spill")]
 use crate::execution::spill::{SpillReader, SpillVec};
@@ -221,7 +220,7 @@ pub struct RecursiveCte<'a> {
     phase: RecursivePhase,
 }
 
-#[dual]
+#[maybe_async]
 impl<'a> RecursiveCte<'a> {
     fn new(anchor_input: ExecNode<'a>, recursive_plan: &'a LogicalPlan) -> Self {
         Self {
@@ -264,7 +263,7 @@ impl<'a> ReadExecutor<'a> for RecursiveCte<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -340,7 +339,7 @@ impl<'a> ReadExecutor<'a> for RecursiveScan {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -365,7 +364,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -379,7 +378,6 @@ mod tests {
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::Childrens;
     use crate::planner::LogicalPlan;
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
@@ -504,7 +502,7 @@ mod tests {
             Childrens::Only(Box::new(filter)),
         );
 
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = TableCache::default();
         let tuples = try_collect(execute_input::<_, RecursiveCte<'_>>(

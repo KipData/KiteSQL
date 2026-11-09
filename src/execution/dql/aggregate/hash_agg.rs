@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
     push_accumulators, update_accumulators, write_aggregate_output, Accumulator,
@@ -74,7 +73,7 @@ impl<'a> ReadExecutor<'a> for HashAggExecutor<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -161,7 +160,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
@@ -179,7 +178,6 @@ mod test {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -188,7 +186,7 @@ mod test {
     async fn test_hash_agg() -> Result<(), DatabaseError> {
         let table_cache = crate::storage::TableCache::default();
 
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
         let table_arena = crate::planner::TableArenaCell::default();

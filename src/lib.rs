@@ -101,6 +101,9 @@
 //! ```
 #![allow(unused_doc_comments)]
 extern crate core;
+// Puts `#[maybe_async]` in scope everywhere in the crate, test modules included.
+#[macro_use]
+extern crate kite_sql_serde_macros;
 
 #[cfg(all(feature = "spill", feature = "wasm", not(clippy)))]
 compile_error!("features `spill` and `wasm` are mutually exclusive");
@@ -117,7 +120,6 @@ compile_error!("feature `spill` is not supported on wasm32 targets");
 pub mod binder;
 pub mod catalog;
 pub mod db;
-mod dual;
 pub mod errors;
 pub mod execution;
 pub mod expression;
@@ -125,6 +127,7 @@ mod function;
 pub(crate) mod iter_ext;
 #[cfg(feature = "macros")]
 pub mod macros;
+mod maybe_async;
 mod optimizer;
 #[cfg(feature = "orm")]
 pub mod orm;

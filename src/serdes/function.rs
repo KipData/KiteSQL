@@ -95,13 +95,13 @@ impl ReferenceSerialization for ArcTableFunctionImpl {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::db::{ScalaFunctions, TableFunctions};
     use crate::planner::TableArena;
     use crate::serdes::ReferenceDecodeContext;
-    use crate::storage::memory::MemoryTransaction;
+    use crate::storage::TestTransaction;
     use crate::types::LogicalType;
     use std::io::Cursor;
 
@@ -122,7 +122,7 @@ mod tests {
         let bytes = encoded_summary("missing_scalar");
         let mut arena = TableArena::default();
 
-        let err = ArcScalarFunctionImpl::decode::<MemoryTransaction, _, _>(
+        let err = ArcScalarFunctionImpl::decode::<TestTransaction, _, _>(
             &mut Cursor::new(&bytes),
             None,
             &mut arena,
@@ -135,7 +135,7 @@ mod tests {
         let scalars = ScalaFunctions::default();
         let table_functions = TableFunctions::default();
         let mut context = ReferenceDecodeContext::with_functions(&scalars, &table_functions);
-        let err = ArcScalarFunctionImpl::decode::<MemoryTransaction, _, _>(
+        let err = ArcScalarFunctionImpl::decode::<TestTransaction, _, _>(
             &mut Cursor::new(&bytes),
             Some(&mut context),
             &mut arena,
@@ -149,7 +149,7 @@ mod tests {
         let bytes = encoded_summary("missing_table");
         let mut arena = TableArena::default();
 
-        let err = ArcTableFunctionImpl::decode::<MemoryTransaction, _, _>(
+        let err = ArcTableFunctionImpl::decode::<TestTransaction, _, _>(
             &mut Cursor::new(&bytes),
             None,
             &mut arena,
@@ -162,7 +162,7 @@ mod tests {
         let scalars = ScalaFunctions::default();
         let table_functions = TableFunctions::default();
         let mut context = ReferenceDecodeContext::with_functions(&scalars, &table_functions);
-        let err = ArcTableFunctionImpl::decode::<MemoryTransaction, _, _>(
+        let err = ArcTableFunctionImpl::decode::<TestTransaction, _, _>(
             &mut Cursor::new(&bytes),
             Some(&mut context),
             &mut arena,

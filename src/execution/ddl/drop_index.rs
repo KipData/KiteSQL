@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::drop_index::DropIndexOperator;
@@ -35,7 +34,7 @@ impl<'a> WriteExecutor<'a> for DropIndex<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,

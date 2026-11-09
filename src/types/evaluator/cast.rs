@@ -1225,12 +1225,12 @@ impl CastEvaluatorRef {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use super::*;
     use crate::errors::DatabaseError;
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::memory::MemoryTransaction;
+    use crate::storage::TestTransaction;
     use crate::types::evaluator::CastEvaluatorRef;
     use crate::types::value::{DataValue, Utf8Type};
     use crate::types::{CharLengthUnits, LogicalType};
@@ -1386,7 +1386,7 @@ mod test {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            CastEvaluatorRef::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena)?,
+            CastEvaluatorRef::decode::<TestTransaction, _, _>(&mut cursor, None, &mut arena)?,
             evaluator
         );
 

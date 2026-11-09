@@ -17,7 +17,7 @@ use kite_sql::errors::DatabaseError;
 use kite_sql::planner::PlanArena;
 use kite_sql::storage::Storage;
 use kite_sql::types::value::DataValue;
-use kite_sql_serde_macros::dual;
+use kite_sql_serde_macros::maybe_async;
 use sqllogictest::{DBOutput, DefaultColumnType};
 use std::time::Instant;
 
@@ -58,7 +58,7 @@ impl<S: Storage> sqllogictest::AsyncDB for SQLBase<S> {
 
 /// Runs every statement in `sql` and returns the output of the last one, rendering each value of
 /// column `i` with `format(i, value)`.
-#[dual]
+#[maybe_async]
 pub async fn run_sql<S: Storage>(
     db: &mut Database<S>,
     sql: &str,
@@ -69,7 +69,7 @@ pub async fn run_sql<S: Storage>(
 
 struct Render<F>(F);
 
-#[dual]
+#[maybe_async]
 impl<S: Storage, F: FnMut(usize, &DataValue) -> String + Send> ConsumeMut<S> for Render<F> {
     type Output = DBOutput<DefaultColumnType>;
 

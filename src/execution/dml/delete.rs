@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::catalog::TableId;
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
@@ -50,7 +49,7 @@ impl<'a> WriteExecutor<'a> for Delete<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,

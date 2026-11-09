@@ -22,7 +22,7 @@ crate::define_integer_cast_evaluators!(Int32, Int32, i32, LogicalType::Integer);
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use super::*;
     use crate::types::value::Utf8Type;

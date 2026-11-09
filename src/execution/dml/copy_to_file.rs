@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::binder::copy::FileFormat;
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -80,7 +79,7 @@ impl CopyToFile<'_> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -120,7 +119,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::binder::copy::ExtSource;
@@ -149,7 +148,9 @@ mod tests {
         };
 
         let temp_dir = TempDir::new().unwrap();
-        let mut db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut db = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
         db.ddl("create table t1 (a int primary key, b float, c varchar(10))")
             .await?;
         db.load(CatalogKind::Table("t1".to_string())).await?;

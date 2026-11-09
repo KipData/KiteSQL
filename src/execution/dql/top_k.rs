@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
@@ -145,7 +144,7 @@ impl<'a> ReadExecutor<'a> for TopK<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -207,7 +206,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::mutable_key_type)]
-#[crate::dual::dual]
+#[maybe_async]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;

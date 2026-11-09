@@ -175,7 +175,7 @@ impl RunsCursor for &[DataValue] {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use super::*;
 

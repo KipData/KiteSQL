@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -48,7 +47,7 @@ impl<'a> ReadExecutor<'a> for StreamDistinctExecutor<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
@@ -91,7 +90,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecu
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
-#[crate::dual::dual]
+#[maybe_async]
 mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
@@ -107,18 +106,18 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::memory::MemoryStorage;
+    use crate::storage::TestStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use tempfile::TempDir;
 
     #[allow(clippy::type_complexity)]
-    fn build_test_storage() -> Result<(TableCache, TempDir, MemoryStorage), DatabaseError> {
+    async fn build_test_storage() -> Result<(TableCache, TempDir, TestStorage), DatabaseError> {
         let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
 
         Ok((table_cache, temp_dir, storage))
     }
@@ -174,7 +173,7 @@ mod tests {
             unreachable!()
         };
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.iter().next().unwrap()),
@@ -233,7 +232,7 @@ mod tests {
             unreachable!()
         };
 
-        let (table_cache, _temp_dir, storage) = build_test_storage()?;
+        let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let tuples = try_collect(execute_input::<_, StreamDistinctExecutor>(
             (agg, plan.childrens.iter().next().unwrap()),

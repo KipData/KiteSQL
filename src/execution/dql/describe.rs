@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use crate::catalog::{ColumnCatalog, ColumnRef, TableId};
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
 use crate::planner::operator::describe::DescribeOperator;
@@ -70,7 +69,7 @@ impl<'a> ReadExecutor<'a> for Describe {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Describe {
     async fn reset<A: MetaArena + 'a>(
         &mut self,

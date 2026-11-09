@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use super::rewrite_table_in_batches;
-use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
@@ -37,7 +36,7 @@ impl<'a> WriteExecutor<'a> for DropColumn<'a> {
     }
 }
 
-#[dual]
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
     async fn reset<A: MetaArena + 'a>(
         &mut self,
