@@ -16,14 +16,36 @@ Common options:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `--backend` | `kitesql-lmdb` | `kitesql-lmdb`, `kitesql-rocksdb`, `kitesql-optimistic-rocksdb`, `sqlite`, or `dual` |
+| `--backend` | `kitesql-lmdb` | `kitesql-lmdb`, `kitesql-rocksdb`, `kitesql-optimistic-rocksdb`, `sqlite`, or `dual`; `kitesql-slatedb-s3` or `sqlite` in the [SlateDB build](#slatedb-on-s3) |
 | `--path` | `kite_sql_tpcc` | Database path |
-| `--threads` | `1` | Concurrent terminals, each on its own connection |
+| `--threads` | `1` | Threads that run the terminals |
+| `--terminals` | `--threads` | Concurrent terminals; terminal `i` has home warehouse `i % num_ware + 1`. More terminals than threads needs an async storage (SlateDB) |
 | `--num-ware` | `1` | Number of warehouses |
 | `--measure-time` | `720` | Measured seconds after loading |
-| `--max-retry` | `5` | Retries per failed transaction |
-| `--sync` | off | Fsync on commit (SQLite: `synchronous = FULL` instead of `OFF`) |
+| `--max-retry` | `5` | Retries per transaction; conflicts are counted apart from failures and retried after a random backoff |
+| `--sync` | off | Wait for each commit to be durable: fsync for LMDB and RocksDB, `synchronous = FULL` instead of `OFF` for SQLite, the write to S3 for SlateDB |
 | `--rocksdb-stats` | off | Print RocksDB statistics |
+
+## SlateDB on S3
+KiteSQL on SlateDB runs on the async path, which excludes the sync storages, so it is a separate build:
+
+```shell
+AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+cargo run -p tpcc --release --no-default-features --features slatedb-s3 -- \
+    --s3-bucket <bucket> [--s3-endpoint http://127.0.0.1:9000 --s3-allow-http]
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--s3-bucket` | required | Bucket; credentials and region come from `AWS_*` or the default AWS chain |
+| `--s3-endpoint` | AWS | Endpoint of an S3-compatible store |
+| `--s3-allow-http` | off | Allow a plain `http://` endpoint |
+| `--path` | `kite_sql_tpcc` | Key prefix; each run writes under a new `<path>/<millis>` |
+| `--slatedb-memory-cache-mb` | `4096` | Memory of the block cache |
+| `--slatedb-disk-cache` | `kite_sql_tpcc_cache` | Local disk tier of the block cache, cleared before each run |
+| `--slatedb-disk-cache-mb` | `65536` | Its capacity; the files grow as they fill. `0` turns it off |
+
+Blocks written by compactions also go into the cache. Without a cache that holds the data, every miss costs an S3 request in the transaction, and TpmC drops by orders of magnitude.
 
 ## Stable Performance Runner
 Use the Python runner for local performance comparisons:
@@ -34,7 +56,7 @@ Use the Python runner for local performance comparisons:
 
 It runs `kitesql-lmdb`, `kitesql-rocksdb`, and `sqlite` (select a subset with `--variants`), pins TPCC to one CPU, and waits before each variant until the machine has enough consecutive stable samples.
 
-TPCC runs as a single worker, so its speed depends on the core it lands on. On hybrid CPUs (P-cores and E-cores) an unpinned run can differ by 30-60% depending on scheduler placement. The runner therefore pins every variant, including its background threads, to the strongest core by default: the one with the highest `cpuinfo_max_freq`, lowest id on ties, skipping the physical core of `cpu0`. On hybrid CPUs this is a P-core, and on CPUs with Turbo Boost Max 3.0 it is one of the favored P-cores. Use `--cpu <n>` to choose one or `--no-cpu-pin` to disable pinning. The chosen CPU is recorded in `summary.md`.
+By default TPCC runs as a single worker, so its speed depends on the core it lands on. On hybrid CPUs (P-cores and E-cores) an unpinned run can differ by 30-60% depending on scheduler placement. The runner therefore pins every variant, including its background threads, to the strongest core by default: the one with the highest `cpuinfo_max_freq`, lowest id on ties, skipping the physical core of `cpu0`. On hybrid CPUs this is a P-core, and on CPUs with Turbo Boost Max 3.0 it is one of the favored P-cores. Use `--cpu <n>` to choose one or `--no-cpu-pin` to disable pinning. The chosen CPU is recorded in `summary.md`.
 
 The runner waits until:
 
@@ -65,21 +87,32 @@ The benchmark stores `history.h_date` as `timestamp(6)`, so high-throughput `Pay
 - i9-13900HX
 - 32.0 GB
 - KIOXIA-EXCERIA PLUS G3 SSD
-- Tips: TPC-C currently runs as a single worker.
 
 ## 720s comparison
-Local 720-second comparison on the machine above:
+Local 720-second comparison on the machine above. Latencies are p90 in µs.
+
+1 thread, 1 warehouse:
 
 | Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 225720 | 240 | 44 | 25 | 326 | 179 |
-| KiteSQL RocksDB | 48746 | 343 | 78 | 140 | 14351 | 587 |
-| SQLite | 192110 | 270 | 40 | 33 | 342 | 231 |
+| KiteSQL LMDB | 254023 | 211 | 38 | 25 | 293 | 175 |
+| KiteSQL RocksDB | 47488 | 372 | 85 | 415 | 15471 | 389 |
+| KiteSQL SlateDB (S3) | 12016 | 677 | 240 | 399 | 74047 | 1638 |
+| SQLite | 214001 | 251 | 37 | 32 | 338 | 227 |
 
-- Run date: `2026-11-05`. Latency is measured in microseconds and includes commit.
-- Every row is pinned to `cpu8`, the highest-frequency P-core on this machine (5.4 GHz).
-- All rows use `--num-ware 1`, `--max-retry 5`, and TPCC's default 720-second measure time.
-- All rows run without `--sync`, so commits are not fsynced; SQLite uses WAL with `synchronous = OFF`.
+4 threads, 4 warehouses:
+
+| Backend | TpmC | New-Order p90 (µs) | Payment p90 (µs) | Order-Status p90 (µs) | Delivery p90 (µs) | Stock-Level p90 (µs) | Conflicts |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| KiteSQL LMDB | 240584 | 930 | 780 | 29 | 890 | 207 | 0 |
+| KiteSQL RocksDB | 212936 | 505 | 109 | 285 | 8991 | 400 | 529 |
+| KiteSQL SlateDB (S3) | 19010 | 1749 | 1816 | 2481 | 66495 | 2523 | 51 |
+| SQLite | 205896 | 254 | 41 | 45 | 336 | 380 | 0 |
+
+- Run date: `2026-11-09`. Latency is measured in microseconds and includes commit and retries.
+- The 1-thread rows are pinned to `cpu8`, the highest-frequency P-core on this machine (5.4 GHz), background threads included. The 4-thread rows are pinned to `cpu8,10,2,4`, four distinct physical P-cores. These runs used `taskset` directly, since the stable runner covers neither threads nor SlateDB.
+- The 4-thread rows give each terminal its own home warehouse, so they scale data with threads.
+- All rows use `--max-retry 5` and run without `--sync`, so commits are not fsynced and SlateDB does not wait for S3; SQLite uses WAL with `synchronous = OFF`.
 
 The runner writes `summary.md` and per-variant logs to `tpcc/results/<timestamp>/`.
 

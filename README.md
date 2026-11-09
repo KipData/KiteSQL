@@ -133,13 +133,25 @@ print(list(db.run("select * from demo")))
 ## TPC-C
 `make tpcc` runs the benchmark (`--backend kitesql-lmdb|kitesql-rocksdb|sqlite`); `make tpcc-dual` cross-checks every statement against SQLite.
 
-720-second single-thread run on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), every backend pinned to the same P-core and run without fsync on commit. Latencies are p90 in µs, including commit.
+720-second runs on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), without fsync on commit. Latencies are p90 in µs, including commit. SlateDB runs on a local S3 server ([s3s-fs](https://github.com/Nugine/s3s)) with its block cache in memory and on local disk.
+
+1 thread, 1 warehouse, every backend pinned to the same P-core:
 
 | Backend | TpmC | New-Order | Payment | Order-Status | Delivery | Stock-Level |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 225720 | 240 | 44 | 25 | 326 | 179 |
-| KiteSQL RocksDB | 48746 | 343 | 78 | 140 | 14351 | 587 |
-| SQLite (WAL, `synchronous=OFF`) | 192110 | 270 | 40 | 33 | 342 | 231 |
+| KiteSQL LMDB | 254023 | 211 | 38 | 25 | 293 | 175 |
+| KiteSQL RocksDB | 47488 | 372 | 85 | 415 | 15471 | 389 |
+| KiteSQL SlateDB (S3) | 12016 | 677 | 240 | 399 | 74047 | 1638 |
+| SQLite (WAL, `synchronous=OFF`) | 214001 | 251 | 37 | 32 | 338 | 227 |
+
+4 threads, 4 warehouses (one home warehouse per terminal), pinned to four P-cores:
+
+| Backend | TpmC | New-Order | Payment | Order-Status | Delivery | Stock-Level |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| KiteSQL LMDB | 240584 | 930 | 780 | 29 | 890 | 207 |
+| KiteSQL RocksDB | 212936 | 505 | 109 | 285 | 8991 | 400 |
+| KiteSQL SlateDB (S3) | 19010 | 1749 | 1816 | 2481 | 66495 | 2523 |
+| SQLite (WAL, `synchronous=OFF`) | 205896 | 254 | 41 | 45 | 336 | 380 |
 
 👉 [Details and how to reproduce](tpcc/README.md)
 
