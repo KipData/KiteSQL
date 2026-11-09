@@ -1,13 +1,15 @@
 use super::*;
+use crate::dual::dual;
 use std::borrow::Borrow;
 
+#[dual]
 impl<S: Storage> Database<S> {
     /// Refreshes optimizer statistics for the model table.
     ///
     /// This runs `ANALYZE TABLE` for the backing table so the optimizer can use
     /// up-to-date statistics.
-    pub fn analyze_model<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        self.analyze(M::table_name())
+    pub async fn analyze_model<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        self.analyze(M::table_name()).await
     }
 
     /// Inserts a model into its backing table.
@@ -30,8 +32,8 @@ impl<S: Storage> Database<S> {
     /// database.create_table::<User>().unwrap();
     /// database.insert(&User { id: 1, name: "Alice".to_string() }).unwrap();
     /// ```
-    pub fn insert<M: Model>(&self, model: &M) -> Result<(), DatabaseError> {
-        orm_insert::<_, M>(self, model)
+    pub async fn insert<M: Model>(&self, model: &M) -> Result<(), DatabaseError> {
+        orm_insert::<_, M>(self, model).await
     }
 
     /// Inserts multiple models into their backing table.
@@ -58,39 +60,40 @@ impl<S: Storage> Database<S> {
     ///     .unwrap();
     /// assert_eq!(database.fetch::<User>().unwrap().count(), 2);
     /// ```
-    pub fn insert_many<M, I, B>(&self, models: I) -> Result<(), DatabaseError>
+    pub async fn insert_many<M, I, B>(&self, models: I) -> Result<(), DatabaseError>
     where
         M: Model,
         I: IntoIterator<Item = B>,
         B: Borrow<M>,
     {
         for model in models {
-            orm_insert::<_, M>(self, model.borrow())?;
+            orm_insert::<_, M>(self, model.borrow()).await?;
         }
         Ok(())
     }
 }
 
+#[dual]
 impl<'a, S: Storage> Transaction<'a, S> {
     /// Refreshes optimizer statistics for the model table inside the current transaction.
-    pub fn analyze<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        orm_analyze::<_, M>(self)
+    pub async fn analyze<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        orm_analyze::<_, M>(self).await
     }
 
     /// Inserts a model inside the current transaction.
-    pub fn insert<M: Model>(&mut self, model: &M) -> Result<(), DatabaseError> {
-        orm_insert::<_, M>(self, model)
+    pub async fn insert<M: Model>(&mut self, model: &M) -> Result<(), DatabaseError> {
+        orm_insert::<_, M>(self, model).await
     }
 
     /// Inserts multiple models inside the current transaction.
-    pub fn insert_many<M, I, B>(&mut self, models: I) -> Result<(), DatabaseError>
+    pub async fn insert_many<M, I, B>(&mut self, models: I) -> Result<(), DatabaseError>
     where
         M: Model,
         I: IntoIterator<Item = B>,
         B: Borrow<M>,
     {
         for model in models {
-            orm_insert::<_, M>(&mut *self, model.borrow())?;
+            orm_insert::<_, M>(&mut *self, model.borrow()).await?;
         }
         Ok(())
     }

@@ -15,6 +15,7 @@
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRelation, TableId, TableMeta, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::optimizer::core::cm_sketch::{CountMinSketchMeta, CountMinSketchPage};
 use crate::optimizer::core::histogram::Bucket;
@@ -55,9 +56,16 @@ static NEXT_TABLE_ID_BYTES: LazyLock<Vec<u8>> = LazyLock::new(|| b"NextTableId".
 
 pub type Bytes = Vec<u8>;
 pub type BumpBytes<'bump> = bumpalo::collections::Vec<'bump, u8>;
+#[cfg(not(feature = "async"))]
 type TupleValueWriter<'a> = (
     usize,
     &'a mut dyn FnMut(&mut Bytes) -> Result<(), DatabaseError>,
+);
+// The writer is held by the futures of `with_tuple*`, so it must be `Send` on the async path.
+#[cfg(feature = "async")]
+type TupleValueWriter<'a> = (
+    usize,
+    &'a mut (dyn FnMut(&mut Bytes) -> Result<(), DatabaseError> + Send),
 );
 
 #[derive(Default)]
@@ -130,6 +138,7 @@ impl IndexStatisticsCodecType {
     }
 }
 
+#[dual]
 impl TableCodec {
     #[inline]
     pub(crate) fn bytes_pool(&mut self) -> &mut BytesPool {
@@ -144,9 +153,13 @@ impl TableCodec {
         self.stamp
     }
 
-    pub(crate) fn with_stamp<R>(&mut self, stamp: u64, f: impl FnOnce(&mut Self) -> R) -> R {
+    pub(crate) async fn with_stamp<R>(
+        &mut self,
+        stamp: u64,
+        f: impl AsyncFnOnce(&mut Self) -> R,
+    ) -> R {
         let prev = std::mem::replace(&mut self.stamp, stamp);
-        let result = f(self);
+        let result = f(self).await;
         self.stamp = prev;
         result
     }
@@ -274,26 +287,27 @@ impl TableCodec {
     }
 
     /// Key: `{TableName}{TUPLE_TAG}{BOUND_MIN_TAG}{RowID}`.
-    pub fn with_tuple<R>(
+    pub async fn with_tuple<R>(
         &mut self,
         table_id: TableId,
         tuple_id: &TupleId,
         tuple_value: Option<TupleValueWriter<'_>>,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         Self::check_primary_key(tuple_id, 0)?;
-        self.with_tuple_unchecked(table_id, tuple_id, tuple_value, |key, value, _| {
-            f(key, value)
+        self.with_tuple_unchecked(table_id, tuple_id, tuple_value, async |key, value, _| {
+            f(key, value).await
         })
+        .await
     }
 
     #[inline]
-    pub(crate) fn with_tuple_unchecked<R>(
+    pub(crate) async fn with_tuple_unchecked<R>(
         &mut self,
         table_id: TableId,
         tuple_id: &TupleId,
         tuple_value: Option<TupleValueWriter<'_>>,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let prefix = table_id.to_be_bytes();
@@ -309,15 +323,15 @@ impl TableCodec {
             value.extend_from_slice(&self.stamp.to_le_bytes());
         }
 
-        f(lower.as_slice(), value.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), value.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Range bounds covering all tuple keys for a table. The bytes pool is
     /// handed over too, since the codec stays borrowed while `f` runs.
-    pub(crate) fn with_tuple_bound<R>(
+    pub(crate) async fn with_tuple_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let prefix = table_id.to_be_bytes();
@@ -328,7 +342,7 @@ impl TableCodec {
         Self::write_key_prefix(upper, CodecType::Tuple, prefix);
         upper.push(BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Key: `{TableName}{INDEX_META_TAG}{BOUND_MIN_TAG}{IndexID}`.
@@ -355,10 +369,10 @@ impl TableCodec {
     }
 
     /// Range bounds covering all index metadata for a table.
-    pub fn with_index_meta_bound<R>(
+    pub async fn with_index_meta_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let prefix = table_id.to_be_bytes();
@@ -369,15 +383,15 @@ impl TableCodec {
         Self::write_key_prefix(upper, CodecType::IndexMeta, prefix);
         upper.push(BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Range bounds covering a single secondary index.
-    pub fn with_index_bound<R>(
+    pub async fn with_index_bound<R>(
         &mut self,
         table_id: TableId,
         index_id: IndexId,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let prefix = table_id.to_be_bytes();
@@ -392,14 +406,14 @@ impl TableCodec {
         upper.extend_from_slice(&index_id.to_le_bytes());
         upper.push(BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Range bounds covering all secondary indexes for a table.
-    pub fn with_all_index_bound<R>(
+    pub async fn with_all_index_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let prefix = table_id.to_be_bytes();
@@ -410,7 +424,7 @@ impl TableCodec {
         Self::write_key_prefix(upper, CodecType::Index, prefix);
         upper.push(BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Non-unique index key:
@@ -418,16 +432,18 @@ impl TableCodec {
     ///
     /// Unique index key:
     /// `{TableName}{INDEX_TAG}{BOUND_MIN_TAG}{IndexID}{BOUND_MIN_TAG}{DataValue}`
-    pub fn with_index<R, V: TupleLike + ?Sized>(
+    pub async fn with_index<R, V: TupleLike + ?Sized>(
         &mut self,
         table_id: TableId,
         index: &Index<'_, V>,
         tuple_id: Option<&TupleId>,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let stamp = self.stamp;
-        self.with_table_buffers(table_id, |lower, prefix, value| {
+        {
+            let prefix = table_id.to_be_bytes();
+            let (lower, value) = self.slots_mut();
             let values_len = (0..index.values.len())
                 .map(|i| index.values.value_at(i).memcomparable_len_hint())
                 .sum::<usize>();
@@ -459,8 +475,8 @@ impl TableCodec {
                 value.extend_from_slice(&stamp.to_le_bytes());
             }
 
-            f(lower.as_slice(), value.as_slice())
-        })
+            f(lower.as_slice(), value.as_slice()).await
+        }
     }
 
     /// Key: `{TableName}{COLUMN_TAG}{BOUND_MIN_TAG}{ColumnId}`.
@@ -493,10 +509,10 @@ impl TableCodec {
     }
 
     /// Range bounds covering all column metadata for a table.
-    pub fn with_columns_bound<R>(
+    pub async fn with_columns_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let prefix = table_id.to_be_bytes();
@@ -507,14 +523,14 @@ impl TableCodec {
         Self::write_key_prefix(upper, CodecType::Column, prefix);
         upper.push(BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Range bounds spanning a table's `Column` and `IndexMeta` metadata.
-    pub fn with_table_bound<R>(
+    pub async fn with_table_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let prefix = table_id.to_be_bytes();
@@ -525,14 +541,14 @@ impl TableCodec {
         Self::write_key_prefix(upper, CodecType::IndexMeta, prefix);
         upper.push(BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Range bounds covering all statistics keys for a table.
-    pub fn with_statistics_bound<R>(
+    pub async fn with_statistics_bound<R>(
         &mut self,
         table_id: TableId,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let prefix = table_id.to_be_bytes();
@@ -543,15 +559,15 @@ impl TableCodec {
         Self::write_key_prefix(upper, CodecType::Statistics, prefix);
         upper.push(BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Range bounds covering all statistics keys for one index.
-    pub fn with_index_statistics_bound<R>(
+    pub async fn with_index_statistics_bound<R>(
         &mut self,
         table_id: TableId,
         index_id: IndexId,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let prefix = table_id.to_be_bytes();
@@ -565,7 +581,7 @@ impl TableCodec {
         upper.extend_from_slice(lower);
         upper.push(BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     fn with_statistics<R, V: ReferenceSerialization>(
@@ -577,35 +593,49 @@ impl TableCodec {
         arena: &(impl MetaArena + ?Sized),
         f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
-        self.clear_buffers();
-        self.with_table_buffers(table_id, |key, prefix, value| {
-            Self::write_key_prefix(key, CodecType::Statistics, prefix);
-            key.push(BOUND_MIN_TAG);
-            key.extend_from_slice(id);
-            key.extend_from_slice(suffix);
-            if let Some(statistics) = statistics {
-                statistics.encode(value, true, arena)?;
-            }
-            f(key.as_slice(), value.as_slice())
-        })
+        self.encode_statistics(table_id, id, suffix, statistics, arena)?;
+        let (key, value) = self.slots_mut();
+        f(key.as_slice(), value.as_slice())
     }
 
-    pub fn with_column_statistics<R>(
+    fn encode_statistics<V: ReferenceSerialization>(
+        &mut self,
+        table_id: TableId,
+        id: &[u8],
+        suffix: &[u8],
+        statistics: Option<&V>,
+        arena: &(impl MetaArena + ?Sized),
+    ) -> Result<(), DatabaseError> {
+        self.clear_buffers();
+        let prefix = table_id.to_be_bytes();
+        let (key, value) = self.slots_mut();
+        Self::write_key_prefix(key, CodecType::Statistics, prefix);
+        key.push(BOUND_MIN_TAG);
+        key.extend_from_slice(id);
+        key.extend_from_slice(suffix);
+        if let Some(statistics) = statistics {
+            statistics.encode(value, true, arena)?;
+        }
+        Ok(())
+    }
+
+    pub async fn with_column_statistics<R>(
         &mut self,
         table_id: TableId,
         column_id: ColumnId,
         meta: Option<&HistogramMeta>,
         arena: &(impl MetaArena + ?Sized),
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
-        self.with_statistics(
+        self.encode_statistics(
             table_id,
             &column_id.to_le_bytes(),
             &[COLUMN_STATISTICS_TAG],
             meta,
             arena,
-            f,
-        )
+        )?;
+        let (key, value) = self.slots_mut();
+        f(key.as_slice(), value.as_slice()).await
     }
 
     pub fn decode_column_statistics<T: StorageTransaction>(
@@ -743,16 +773,18 @@ impl TableCodec {
     }
 
     /// Key: `View{BOUND_MIN_TAG}{ViewID}`.
-    pub fn with_view<R>(
+    pub async fn with_view<R>(
         &mut self,
         view_id: TableId,
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
-        self.with_table_buffers(view_id, |lower, prefix, value| {
+        {
+            let prefix = view_id.to_be_bytes();
+            let (lower, value) = self.slots_mut();
             Self::write_key_prefix(lower, CodecType::View, prefix);
-            f(lower.as_slice(), value.as_slice())
-        })
+            f(lower.as_slice(), value.as_slice()).await
+        }
     }
 
     /// Key: `View{BOUND_MIN_TAG}{ViewID}` with encoded view payload.
@@ -772,25 +804,25 @@ impl TableCodec {
     }
 
     /// Range bounds covering all view definitions.
-    pub fn with_view_bound<R>(
+    pub async fn with_view_bound<R>(
         &mut self,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let [lower, upper] = &mut self.buffers;
         Self::write_global_bound_prefix(lower, VIEW_BYTES.as_slice(), BOUND_MIN_TAG);
         Self::write_global_bound_prefix(upper, VIEW_BYTES.as_slice(), BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Key: `Root{BOUND_MIN_TAG}{TableName}`, for both tables and views.
-    pub fn with_root_table<R>(
+    pub async fn with_root_table<R>(
         &mut self,
         table_name: &str,
         meta: Option<&TableMeta>,
         arena: &(impl MetaArena + ?Sized),
-        f: impl FnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let (lower, value) = self.slots_mut();
@@ -801,28 +833,28 @@ impl TableCodec {
             Self::encode_root_table_value_into(meta, value, arena)?;
         }
 
-        f(lower.as_slice(), value.as_slice())
+        f(lower.as_slice(), value.as_slice()).await
     }
 
     /// Range bounds covering all root table metadata.
-    pub fn with_root_table_bound<R>(
+    pub async fn with_root_table_bound<R>(
         &mut self,
-        f: impl FnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8], &[u8], &mut BytesPool) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
         self.clear_buffers();
         let [lower, upper] = &mut self.buffers;
         Self::write_global_bound_prefix(lower, ROOT_BYTES.as_slice(), BOUND_MIN_TAG);
         Self::write_global_bound_prefix(upper, ROOT_BYTES.as_slice(), BOUND_MAX_TAG);
 
-        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool)
+        f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
     /// Key: `NextTableId`, the id the next table or view gets.
-    pub fn with_next_table_id<R>(
+    pub async fn with_next_table_id<R>(
         &mut self,
-        f: impl FnOnce(&[u8]) -> Result<R, DatabaseError>,
+        f: impl AsyncFnOnce(&[u8]) -> Result<R, DatabaseError>,
     ) -> Result<R, DatabaseError> {
-        f(NEXT_TABLE_ID_BYTES.as_slice())
+        f(NEXT_TABLE_ID_BYTES.as_slice()).await
     }
 
     pub fn decode_tuple_key(bytes: &[u8], pk_ty: &LogicalType) -> Result<TupleId, DatabaseError> {
@@ -1092,6 +1124,7 @@ impl TableCodec {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use crate::binder::test::build_t1_table;
     use crate::catalog::view::View;
@@ -1105,7 +1138,7 @@ mod tests {
     };
     use crate::optimizer::core::statistics_meta::IndexStatistics;
     use crate::planner::{PlanArena, TableArenaCell};
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::memory::MemoryTransaction;
     use crate::storage::table_codec::{Bytes, TableCodec};
     use crate::types::index::{Index, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
@@ -1135,8 +1168,8 @@ mod tests {
     }
 
     #[test]
-    fn covered_key_decode_uses_skip_configuration_and_output_mapping() -> Result<(), DatabaseError>
-    {
+    async fn covered_key_decode_uses_skip_configuration_and_output_mapping(
+    ) -> Result<(), DatabaseError> {
         let varchar = LogicalType::Varchar(None, CharLengthUnits::Characters);
         let char_type = LogicalType::Char(16, CharLengthUnits::Octets);
         let values = vec![
@@ -1156,10 +1189,11 @@ mod tests {
         ];
         let index = Index::new(7, values.as_slice(), IndexType::Normal);
         let mut codec = TableCodec::default();
-        let (key, value) =
-            codec.with_index(0, &index, Some(&DataValue::Int32(1)), |key, value| {
+        let (key, value) = codec
+            .with_index(0, &index, Some(&DataValue::Int32(1)), async |key, value| {
                 Ok((key.to_vec(), value.to_vec()))
-            })?;
+            })
+            .await?;
         let index_ty = LogicalType::Tuple(vec![
             LogicalType::Integer,
             varchar.clone(),
@@ -1210,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_codec_tuple() -> Result<(), DatabaseError> {
+    async fn test_table_codec_tuple() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let table_catalog = build_table_codec(&table_arena);
         let plan_arena = PlanArena::new(&table_arena);
@@ -1224,12 +1258,14 @@ mod tests {
             LogicalType::Decimal(None, None).serializable(),
         ];
         let mut write_value = |value: &mut Bytes| expected.serialize_to(&serializers, value);
-        let bytes = TableCodec::default().with_tuple(
-            0,
-            &DataValue::Int32(0),
-            Some((expected.serialized_len_hint(), &mut write_value)),
-            |_, value| Ok(value.to_vec()),
-        )?;
+        let bytes = TableCodec::default()
+            .with_tuple(
+                0,
+                &DataValue::Int32(0),
+                Some((expected.serialized_len_hint(), &mut write_value)),
+                async |_, value| Ok(value.to_vec()),
+            )
+            .await?;
         let deserializers = table_catalog
             .columns()
             .map(|column| plan_arena.column(*column).datatype().serializable())
@@ -1260,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn test_root_catalog() {
+    async fn test_root_catalog() {
         let mut table_codec = TableCodec::default();
         let table_arena = TableArenaCell::default();
         let table_catalog = build_table_codec(&table_arena);
@@ -1270,19 +1306,20 @@ mod tests {
                 table_catalog.name.as_ref(),
                 Some(&meta),
                 table_arena.borrow(),
-                |_, value| Ok::<_, DatabaseError>(value.to_vec()),
+                async |_, value| Ok::<_, DatabaseError>(value.to_vec()),
             )
+            .await
             .unwrap();
 
         let table_meta =
-            TableCodec::decode_root_table::<RocksTransaction>(&bytes, table_arena.borrow_mut())
+            TableCodec::decode_root_table::<MemoryTransaction>(&bytes, table_arena.borrow_mut())
                 .unwrap();
 
         assert_eq!(table_meta, meta);
     }
 
     #[test]
-    fn test_table_codec_column_and_index_statistics() -> Result<(), DatabaseError> {
+    async fn test_table_codec_column_and_index_statistics() -> Result<(), DatabaseError> {
         let mut table_codec = TableCodec::default();
         let table_arena = TableArenaCell::default();
         let mut plan_arena = PlanArena::new(&table_arena);
@@ -1313,7 +1350,7 @@ mod tests {
                 Ok::<_, DatabaseError>(value.to_vec())
             })?;
         let decoded_root =
-            TableCodec::decode_index_statistics::<RocksTransaction>(&root_bytes, &mut plan_arena)?;
+            TableCodec::decode_index_statistics::<MemoryTransaction>(&root_bytes, &mut plan_arena)?;
         assert_eq!(decoded_root.index_id(), root.index_id());
         let index_key = table_codec
             .with_index_statistics(0, 0, None, &plan_arena, |key, _| Ok(key.to_vec()))?;
@@ -1327,26 +1364,28 @@ mod tests {
             builder.append(&value);
         }
         let column_meta = builder.build();
-        let (column_key, bytes) = table_codec.with_column_statistics(
-            0,
-            0,
-            Some(&column_meta),
-            &plan_arena,
-            |key, value| Ok((key.to_vec(), value.to_vec())),
-        )?;
+        let (column_key, bytes) = table_codec
+            .with_column_statistics(0, 0, Some(&column_meta), &plan_arena, async |key, value| {
+                Ok((key.to_vec(), value.to_vec()))
+            })
+            .await?;
         assert_ne!(column_key, index_key);
-        table_codec.with_index_statistics_bound(0, 0, |min, max, _| {
-            assert!(index_key.as_slice() >= min && index_key.as_slice() <= max);
-            assert!(column_key.as_slice() < min || column_key.as_slice() > max);
-            Ok(())
-        })?;
-        table_codec.with_statistics_bound(0, |min, max, _| {
-            assert!(index_key.as_slice() >= min && index_key.as_slice() <= max);
-            assert!(column_key.as_slice() >= min && column_key.as_slice() <= max);
-            Ok(())
-        })?;
+        table_codec
+            .with_index_statistics_bound(0, 0, async |min, max, _| {
+                assert!(index_key.as_slice() >= min && index_key.as_slice() <= max);
+                assert!(column_key.as_slice() < min || column_key.as_slice() > max);
+                Ok(())
+            })
+            .await?;
+        table_codec
+            .with_statistics_bound(0, async |min, max, _| {
+                assert!(index_key.as_slice() >= min && index_key.as_slice() <= max);
+                assert!(column_key.as_slice() >= min && column_key.as_slice() <= max);
+                Ok(())
+            })
+            .await?;
         let decoded =
-            TableCodec::decode_column_statistics::<RocksTransaction>(&bytes, &mut plan_arena)?;
+            TableCodec::decode_column_statistics::<MemoryTransaction>(&bytes, &mut plan_arena)?;
         assert_eq!(decoded, column_meta);
         assert_eq!(decoded.distinct_values_len(), 2);
         assert_eq!(decoded.null_count(), 1);
@@ -1369,7 +1408,7 @@ mod tests {
             |_, value| Ok::<_, DatabaseError>(value.to_vec()),
         )?;
         let decoded_sketch_meta = TableCodec::decode_index_statistics_sketch_meta::<
-            RocksTransaction,
+            MemoryTransaction,
         >(&sketch_meta_bytes, &mut plan_arena)?;
         assert_eq!(decoded_sketch_meta.width(), sketch_meta.width());
         assert_eq!(decoded_sketch_meta.k_num(), sketch_meta.k_num());
@@ -1384,7 +1423,7 @@ mod tests {
             |_, value| Ok::<_, DatabaseError>(value.to_vec()),
         )?;
         let decoded_sketch_page = TableCodec::decode_index_statistics_sketch_page::<
-            RocksTransaction,
+            MemoryTransaction,
         >(&sketch_page_bytes, &mut plan_arena)?;
         assert_eq!(decoded_sketch_page.counters(), first_sketch_page.counters());
 
@@ -1398,10 +1437,11 @@ mod tests {
             })?;
         assert!(bucket0_key < bucket1_key);
 
-        let (bucket0_min, bucket0_max) =
-            table_codec.with_index_statistics_bound(0, 0, |min, max, _| {
+        let (bucket0_min, bucket0_max) = table_codec
+            .with_index_statistics_bound(0, 0, async |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
-            })?;
+            })
+            .await?;
         assert!(bucket0_key.as_slice() >= bucket0_min.as_slice());
         assert!(bucket1_key.as_slice() <= bucket0_max.as_slice());
 
@@ -1413,7 +1453,7 @@ mod tests {
             &plan_arena,
             |_, value| Ok::<_, DatabaseError>(value.to_vec()),
         )?;
-        let decoded_bucket = TableCodec::decode_index_statistics_bucket::<RocksTransaction>(
+        let decoded_bucket = TableCodec::decode_index_statistics_bucket::<MemoryTransaction>(
             &bucket_bytes,
             &mut plan_arena,
         )?;
@@ -1441,7 +1481,7 @@ mod tests {
             &plan_arena,
             |_, value| Ok::<_, DatabaseError>(value.to_vec()),
         )?;
-        let decoded_top_n = TableCodec::decode_index_statistics_top_n::<RocksTransaction>(
+        let decoded_top_n = TableCodec::decode_index_statistics_top_n::<MemoryTransaction>(
             &top_n_bytes,
             &mut plan_arena,
         )?;
@@ -1470,7 +1510,7 @@ mod tests {
             })?;
 
         assert_eq!(
-            TableCodec::decode_index_meta::<RocksTransaction>(&bytes, &mut plan_arena)?,
+            TableCodec::decode_index_meta::<MemoryTransaction>(&bytes, &mut plan_arena)?,
             index_meta
         );
 
@@ -1478,11 +1518,14 @@ mod tests {
     }
 
     #[test]
-    fn test_table_codec_index() -> Result<(), DatabaseError> {
+    async fn test_table_codec_index() -> Result<(), DatabaseError> {
         let tuple_id = DataValue::Int32(0);
         let index = Index::new(0, &[][..], IndexType::Unique);
         let bytes = TableCodec::default()
-            .with_index(0, &index, Some(&tuple_id), |_, value| Ok(value.to_vec()))?;
+            .with_index(0, &index, Some(&tuple_id), async |_, value| {
+                Ok(value.to_vec())
+            })
+            .await?;
 
         assert_eq!(TableCodec::decode_index(&bytes)?, tuple_id);
 
@@ -1512,7 +1555,7 @@ mod tests {
             .unwrap();
         let mut cursor = Cursor::new(bytes);
         let decode_col =
-            TableCodec::decode_column::<RocksTransaction, _>(&mut cursor, &mut plan_arena)?;
+            TableCodec::decode_column::<MemoryTransaction, _>(&mut cursor, &mut plan_arena)?;
 
         assert_eq!(decode_col, expected_col);
 
@@ -1520,7 +1563,7 @@ mod tests {
     }
 
     #[test]
-    fn test_table_codec_view() -> Result<(), DatabaseError> {
+    async fn test_table_codec_view() -> Result<(), DatabaseError> {
         fn normalize_explain(explain: String) -> String {
             let mut normalized = String::with_capacity(explain.len());
             let bytes = explain.as_bytes();
@@ -1550,7 +1593,7 @@ mod tests {
         }
 
         let mut table_codec = TableCodec::default();
-        let table_state = build_t1_table()?;
+        let table_state = build_t1_table().await?;
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let build_view = |name: &str, sql: &str| -> Result<(View, PlanArena<'_>), DatabaseError> {
@@ -1576,7 +1619,7 @@ mod tests {
             println!("{:#?}", view.plan);
             let mut decode_arena = PlanArena::new(&table_state.table_arena);
             let decoded = table_codec.with_view_value(0, &view, &plan_arena, |_, value| {
-                TableCodec::decode_view::<RocksTransaction>(
+                TableCodec::decode_view::<MemoryTransaction>(
                     value,
                     &scala_functions,
                     &table_functions,
@@ -1597,7 +1640,7 @@ mod tests {
                 build_view("view_filter", "select * from t1 where c1 > 1")?;
             let mut decode_arena = PlanArena::new(&table_state.table_arena);
             let decoded = table_codec.with_view_value(0, &view, &plan_arena, |_, value| {
-                TableCodec::decode_view::<RocksTransaction>(
+                TableCodec::decode_view::<MemoryTransaction>(
                     value,
                     &scala_functions,
                     &table_functions,
@@ -1618,7 +1661,7 @@ mod tests {
                 build_view("view_join", "select * from t1 left join t2 on c1 = c3")?;
             let mut decode_arena = PlanArena::new(&table_state.table_arena);
             let decoded = table_codec.with_view_value(0, &view, &plan_arena, |_, value| {
-                TableCodec::decode_view::<RocksTransaction>(
+                TableCodec::decode_view::<MemoryTransaction>(
                     value,
                     &scala_functions,
                     &table_functions,
@@ -1638,7 +1681,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::mutable_key_type)]
-    fn test_table_codec_column_bound() {
+    async fn test_table_codec_column_bound() {
         let mut table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
         let op = |col_id: usize, table_id: TableId| {
@@ -1676,9 +1719,10 @@ mod tests {
         set.insert(op(0, 2));
 
         let (min, max) = table_codec
-            .with_columns_bound(1, |min, max, _| {
+            .with_columns_bound(1, async |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
+            .await
             .unwrap();
 
         let vec = set
@@ -1697,7 +1741,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::mutable_key_type)]
-    fn test_table_codec_index_meta_bound() {
+    async fn test_table_codec_index_meta_bound() {
         let mut table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
         let op = |index_id: usize, table_id: TableId| {
@@ -1734,9 +1778,10 @@ mod tests {
         set.insert(op(2, 2));
 
         let (min, max) = table_codec
-            .with_index_meta_bound(1, |min, max, _| {
+            .with_index_meta_bound(1, async |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
+            .await
             .unwrap();
 
         let vec = set
@@ -1755,7 +1800,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::mutable_key_type)]
-    fn test_table_codec_index_bound() {
+    async fn test_table_codec_index_bound() {
         let mut table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
         let column = ColumnCatalog::new(
@@ -1767,7 +1812,7 @@ mod tests {
         let table_catalog =
             TableCatalog::new(0, "T0".to_string(), vec![column], table_arena.borrow_mut()).unwrap();
 
-        let op = |value: DataValue, index_id: usize, table_id: TableId| {
+        let op = async |value: DataValue, index_id: usize, table_id: TableId| {
             let mut table_codec = TableCodec::default();
             let value = Arc::new(value);
             let index = Index::new(
@@ -1777,28 +1822,30 @@ mod tests {
             );
 
             table_codec
-                .with_index(table_id, &index, None, |key, _| {
+                .with_index(table_id, &index, None, async |key, _| {
                     Ok::<_, DatabaseError>(key.to_vec())
                 })
+                .await
                 .unwrap()
         };
 
-        set.insert(op(DataValue::Int32(0), 0, table_catalog.id()));
-        set.insert(op(DataValue::Int32(1), 0, table_catalog.id()));
-        set.insert(op(DataValue::Int32(2), 0, table_catalog.id()));
+        set.insert(op(DataValue::Int32(0), 0, table_catalog.id()).await);
+        set.insert(op(DataValue::Int32(1), 0, table_catalog.id()).await);
+        set.insert(op(DataValue::Int32(2), 0, table_catalog.id()).await);
 
-        set.insert(op(DataValue::Int32(0), 1, table_catalog.id()));
-        set.insert(op(DataValue::Int32(1), 1, table_catalog.id()));
-        set.insert(op(DataValue::Int32(2), 1, table_catalog.id()));
+        set.insert(op(DataValue::Int32(0), 1, table_catalog.id()).await);
+        set.insert(op(DataValue::Int32(1), 1, table_catalog.id()).await);
+        set.insert(op(DataValue::Int32(2), 1, table_catalog.id()).await);
 
-        set.insert(op(DataValue::Int32(0), 2, table_catalog.id()));
-        set.insert(op(DataValue::Int32(1), 2, table_catalog.id()));
-        set.insert(op(DataValue::Int32(2), 2, table_catalog.id()));
+        set.insert(op(DataValue::Int32(0), 2, table_catalog.id()).await);
+        set.insert(op(DataValue::Int32(1), 2, table_catalog.id()).await);
+        set.insert(op(DataValue::Int32(2), 2, table_catalog.id()).await);
 
         let (min, max) = table_codec
-            .with_index_bound(table_catalog.id(), 1, |min, max, _| {
+            .with_index_bound(table_catalog.id(), 1, async |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
+            .await
             .unwrap();
 
         let vec = set
@@ -1810,17 +1857,26 @@ mod tests {
 
         assert_eq!(vec.len(), 3);
 
-        assert_eq!(vec[0], &op(DataValue::Int32(0), 1, table_catalog.id()));
-        assert_eq!(vec[1], &op(DataValue::Int32(1), 1, table_catalog.id()));
-        assert_eq!(vec[2], &op(DataValue::Int32(2), 1, table_catalog.id()));
+        assert_eq!(
+            vec[0],
+            &op(DataValue::Int32(0), 1, table_catalog.id()).await
+        );
+        assert_eq!(
+            vec[1],
+            &op(DataValue::Int32(1), 1, table_catalog.id()).await
+        );
+        assert_eq!(
+            vec[2],
+            &op(DataValue::Int32(2), 1, table_catalog.id()).await
+        );
     }
 
     #[test]
     #[allow(clippy::mutable_key_type)]
-    fn test_table_codec_index_all_bound() {
+    async fn test_table_codec_index_all_bound() {
         let mut table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
-        let op = |value: DataValue, index_id: usize, table_id: TableId| {
+        let op = async |value: DataValue, index_id: usize, table_id: TableId| {
             let mut table_codec = TableCodec::default();
             let value = Arc::new(value);
             let index = Index::new(
@@ -1830,28 +1886,30 @@ mod tests {
             );
 
             table_codec
-                .with_index(table_id, &index, None, |key, _| {
+                .with_index(table_id, &index, None, async |key, _| {
                     Ok::<_, DatabaseError>(key.to_vec())
                 })
+                .await
                 .unwrap()
         };
 
-        set.insert(op(DataValue::Int32(0), 0, 0));
-        set.insert(op(DataValue::Int32(1), 0, 0));
-        set.insert(op(DataValue::Int32(2), 0, 0));
+        set.insert(op(DataValue::Int32(0), 0, 0).await);
+        set.insert(op(DataValue::Int32(1), 0, 0).await);
+        set.insert(op(DataValue::Int32(2), 0, 0).await);
 
-        set.insert(op(DataValue::Int32(0), 0, 1));
-        set.insert(op(DataValue::Int32(1), 0, 1));
-        set.insert(op(DataValue::Int32(2), 0, 1));
+        set.insert(op(DataValue::Int32(0), 0, 1).await);
+        set.insert(op(DataValue::Int32(1), 0, 1).await);
+        set.insert(op(DataValue::Int32(2), 0, 1).await);
 
-        set.insert(op(DataValue::Int32(0), 0, 2));
-        set.insert(op(DataValue::Int32(1), 0, 2));
-        set.insert(op(DataValue::Int32(2), 0, 2));
+        set.insert(op(DataValue::Int32(0), 0, 2).await);
+        set.insert(op(DataValue::Int32(1), 0, 2).await);
+        set.insert(op(DataValue::Int32(2), 0, 2).await);
 
         let (min, max) = table_codec
-            .with_all_index_bound(1, |min, max, _| {
+            .with_all_index_bound(1, async |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
+            .await
             .unwrap();
 
         let vec = set
@@ -1863,41 +1921,43 @@ mod tests {
 
         assert_eq!(vec.len(), 3);
 
-        assert_eq!(vec[0], &op(DataValue::Int32(0), 0, 1));
-        assert_eq!(vec[1], &op(DataValue::Int32(1), 0, 1));
-        assert_eq!(vec[2], &op(DataValue::Int32(2), 0, 1));
+        assert_eq!(vec[0], &op(DataValue::Int32(0), 0, 1).await);
+        assert_eq!(vec[1], &op(DataValue::Int32(1), 0, 1).await);
+        assert_eq!(vec[2], &op(DataValue::Int32(2), 0, 1).await);
     }
 
     #[test]
     #[allow(clippy::mutable_key_type)]
-    fn test_table_codec_tuple_bound() {
+    async fn test_table_codec_tuple_bound() {
         let mut table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
-        let op = |tuple_id: DataValue, table_id: TableId| {
+        let op = async |tuple_id: DataValue, table_id: TableId| {
             let mut table_codec = TableCodec::default();
             table_codec
-                .with_tuple(table_id, &Arc::new(tuple_id), None, |key, _| {
+                .with_tuple(table_id, &Arc::new(tuple_id), None, async |key, _| {
                     Ok::<_, DatabaseError>(key.to_vec())
                 })
+                .await
                 .unwrap()
         };
 
-        set.insert(op(DataValue::Int32(0), 0));
-        set.insert(op(DataValue::Int32(1), 0));
-        set.insert(op(DataValue::Int32(2), 0));
+        set.insert(op(DataValue::Int32(0), 0).await);
+        set.insert(op(DataValue::Int32(1), 0).await);
+        set.insert(op(DataValue::Int32(2), 0).await);
 
-        set.insert(op(DataValue::Int32(0), 1));
-        set.insert(op(DataValue::Int32(1), 1));
-        set.insert(op(DataValue::Int32(2), 1));
+        set.insert(op(DataValue::Int32(0), 1).await);
+        set.insert(op(DataValue::Int32(1), 1).await);
+        set.insert(op(DataValue::Int32(2), 1).await);
 
-        set.insert(op(DataValue::Int32(0), 2));
-        set.insert(op(DataValue::Int32(1), 2));
-        set.insert(op(DataValue::Int32(2), 2));
+        set.insert(op(DataValue::Int32(0), 2).await);
+        set.insert(op(DataValue::Int32(1), 2).await);
+        set.insert(op(DataValue::Int32(2), 2).await);
 
         let (min, max) = table_codec
-            .with_tuple_bound(1, |min, max, _| {
+            .with_tuple_bound(1, async |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
+            .await
             .unwrap();
 
         let vec = set
@@ -1909,24 +1969,25 @@ mod tests {
 
         assert_eq!(vec.len(), 3);
 
-        assert_eq!(vec[0], &op(DataValue::Int32(0), 1));
-        assert_eq!(vec[1], &op(DataValue::Int32(1), 1));
-        assert_eq!(vec[2], &op(DataValue::Int32(2), 1));
+        assert_eq!(vec[0], &op(DataValue::Int32(0), 1).await);
+        assert_eq!(vec[1], &op(DataValue::Int32(1), 1).await);
+        assert_eq!(vec[2], &op(DataValue::Int32(2), 1).await);
     }
 
     #[test]
     #[allow(clippy::mutable_key_type)]
-    fn test_root_codec_name_bound() {
+    async fn test_root_codec_name_bound() {
         let mut table_codec = TableCodec::default();
         let mut set: BTreeSet<Bytes> = BTreeSet::new();
-        let op = |table_name: &str| {
+        let op = async |table_name: &str| {
             let mut table_codec = TableCodec::default();
             let table_arena = TableArenaCell::default();
             let plan_arena = PlanArena::new(&table_arena);
             table_codec
-                .with_root_table(table_name, None, &plan_arena, |key, _| {
+                .with_root_table(table_name, None, &plan_arena, async |key, _| {
                     Ok::<_, DatabaseError>(key.to_vec())
                 })
+                .await
                 .unwrap()
         };
 
@@ -1935,14 +1996,15 @@ mod tests {
 
         set.insert(value_0);
         set.insert(value_1);
-        set.insert(op("T0"));
-        set.insert(op("T1"));
-        set.insert(op("T2"));
+        set.insert(op("T0").await);
+        set.insert(op("T1").await);
+        set.insert(op("T2").await);
 
         let (min, max) = table_codec
-            .with_root_table_bound(|min, max, _| {
+            .with_root_table_bound(async |min, max, _| {
                 Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
             })
+            .await
             .unwrap();
 
         let vec = set
@@ -1952,20 +2014,21 @@ mod tests {
             ))
             .collect_vec();
 
-        assert_eq!(vec[0], &op("T0"));
-        assert_eq!(vec[1], &op("T1"));
-        assert_eq!(vec[2], &op("T2"));
+        assert_eq!(vec[0], &op("T0").await);
+        assert_eq!(vec[1], &op("T1").await);
+        assert_eq!(vec[2], &op("T2").await);
     }
 
     #[test]
     #[allow(clippy::mutable_key_type)]
-    fn test_view_codec_name_bound() {
+    async fn test_view_codec_name_bound() {
         let mut table_codec = TableCodec::default();
         let mut set = BTreeSet::new();
-        let op = |view_id: TableId| {
+        let op = async |view_id: TableId| {
             let mut table_codec = TableCodec::default();
             table_codec
-                .with_view(view_id, |key, _| Ok::<_, DatabaseError>(key.to_vec()))
+                .with_view(view_id, async |key, _| Ok::<_, DatabaseError>(key.to_vec()))
+                .await
                 .unwrap()
         };
 
@@ -1975,12 +2038,15 @@ mod tests {
         set.insert(value_0);
         set.insert(value_1);
 
-        set.insert(op(0));
-        set.insert(op(1));
-        set.insert(op(2));
+        set.insert(op(0).await);
+        set.insert(op(1).await);
+        set.insert(op(2).await);
 
         let (min, max) = table_codec
-            .with_view_bound(|min, max, _| Ok::<_, DatabaseError>((min.to_vec(), max.to_vec())))
+            .with_view_bound(async |min, max, _| {
+                Ok::<_, DatabaseError>((min.to_vec(), max.to_vec()))
+            })
+            .await
             .unwrap();
 
         let vec = set
@@ -1990,9 +2056,9 @@ mod tests {
             ))
             .collect_vec();
 
-        assert_eq!(vec[0], &op(0));
-        assert_eq!(vec[1], &op(1));
-        assert_eq!(vec[2], &op(2));
+        assert_eq!(vec[0], &op(0).await);
+        assert_eq!(vec[1], &op(1).await);
+        assert_eq!(vec[2], &op(2).await);
     }
 }
 // GRCOV_EXCL_STOP

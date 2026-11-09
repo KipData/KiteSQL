@@ -104,12 +104,20 @@ extern crate core;
 
 #[cfg(all(feature = "spill", feature = "wasm", not(clippy)))]
 compile_error!("features `spill` and `wasm` are mutually exclusive");
+#[cfg(all(feature = "async", any(feature = "rocksdb", feature = "lmdb")))]
+compile_error!("feature `async` is mutually exclusive with the sync storages `rocksdb` and `lmdb`");
+#[cfg(all(
+    feature = "async",
+    any(feature = "python", feature = "shell", feature = "wasm")
+))]
+compile_error!("features `python`, `shell` and `wasm` use the sync API and exclude `async`");
 #[cfg(all(feature = "spill", target_arch = "wasm32"))]
 compile_error!("feature `spill` is not supported on wasm32 targets");
 
 pub mod binder;
 pub mod catalog;
 pub mod db;
+mod dual;
 pub mod errors;
 pub mod execution;
 pub mod expression;

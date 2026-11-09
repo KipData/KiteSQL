@@ -416,6 +416,7 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for AggregateOutputBinder<'_> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::AggregateOutputBinder;
     use crate::binder::test::build_t1_table;
@@ -524,8 +525,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_having_orderby_rejects_missing_group_expr() -> Result<(), DatabaseError> {
-        let tables = build_t1_table()?;
+    async fn test_validate_having_orderby_rejects_missing_group_expr() -> Result<(), DatabaseError>
+    {
+        let tables = build_t1_table().await?;
         let scala_functions = Default::default();
         let table_functions = Default::default();
         let transaction = tables.storage.transaction()?;

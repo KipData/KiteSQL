@@ -15,6 +15,7 @@
 //! Defines the nested loop join executor, it supports [`JoinType::Inner`], [`JoinType::LeftOuter`],
 //! [`JoinType::RightOuter`], [`JoinType::Cross`], [`JoinType::Full`].
 
+use crate::dual::dual;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 
@@ -146,18 +147,19 @@ impl<'a> ReadExecutor<'a> for NestedLoopJoin<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = NestedLoopJoinState::PullLeft { right_bitmap: None };
-        self.left_input.reset(arena, plan_arena)?;
-        self.right_input.reset(arena, plan_arena)
+        self.left_input.reset(arena, plan_arena).await?;
+        self.right_input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -167,9 +169,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> 
         loop {
             match state {
                 NestedLoopJoinState::PullLeft { right_bitmap } => {
-                    if !self.left_input.next_tuple(arena, plan_arena)? {
+                    if !self.left_input.next_tuple(arena, plan_arena).await? {
                         if matches!(self.ty, JoinType::Full) {
-                            self.right_input.reset(arena, plan_arena)?;
+                            self.right_input.reset(arena, plan_arena).await?;
                             state = NestedLoopJoinState::EmitRightUnmatched {
                                 right_bitmap,
                                 right_emit_index: 0,
@@ -181,7 +183,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> 
                         return Ok(());
                     }
                     let left_tuple = arena.take_tuple();
-                    self.right_input.reset(arena, plan_arena)?;
+                    self.right_input.reset(arena, plan_arena).await?;
 
                     state = NestedLoopJoinState::ScanRight {
                         active_left: ActiveLeftState {
@@ -197,7 +199,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> 
                     mut active_left,
                     mut right_bitmap,
                 } => {
-                    while self.right_input.next_tuple(arena, plan_arena)? {
+                    while self.right_input.next_tuple(arena, plan_arena).await? {
                         let right_tuple = arena.result_tuple();
                         let idx = active_left.right_index;
                         active_left.right_index += 1;
@@ -285,7 +287,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for NestedLoopJoin<'a> 
                     right_bitmap,
                     mut right_emit_index,
                 } => {
-                    while self.right_input.next_tuple(arena, plan_arena)? {
+                    while self.right_input.next_tuple(arena, plan_arena).await? {
                         let idx = right_emit_index;
                         right_emit_index += 1;
 
@@ -345,6 +347,7 @@ impl NestedLoopJoin<'_> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -360,7 +363,7 @@ mod test {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
     use crate::types::evaluator::binary_create;
     use crate::types::LogicalType;
@@ -533,7 +536,7 @@ mod test {
     }
 
     #[test]
-    fn nested_right_subtrees_reuse_slots() -> Result<(), DatabaseError> {
+    async fn nested_right_subtrees_reuse_slots() -> Result<(), DatabaseError> {
         let storage = crate::storage::memory::MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
@@ -563,19 +566,18 @@ mod test {
         let mut root = build_read(&mut arena, &plan_arena, &plan);
         let mut rows = 0;
         let mut plan_arena = ExecMetaArena::new(plan_arena);
-        while root.next_tuple(&mut arena, &mut plan_arena)? {
+        while root.next_tuple(&mut arena, &mut plan_arena).await? {
             rows += 1;
             assert_eq!(arena.result_tuple().len(), 9);
         }
         assert_eq!(rows, 64);
-        assert!(!root.next_tuple(&mut arena, &mut plan_arena)?);
+        assert!(!root.next_tuple(&mut arena, &mut plan_arena).await?);
         Ok(())
     }
 
     #[test]
-    fn test_nested_inner_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_nested_inner_join() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -609,7 +611,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         let mut expected_set = HashSet::with_capacity(1);
         expected_set.insert(build_integers(vec![
@@ -627,9 +629,8 @@ mod test {
     }
 
     #[test]
-    fn test_nested_left_out_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_nested_left_out_join() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -663,7 +664,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         assert_eq!(
             tuples[0],
@@ -710,9 +711,8 @@ mod test {
     }
 
     #[test]
-    fn test_nested_cross_join_with_on() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_nested_cross_join_with_on() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -746,7 +746,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         let mut expected_set = HashSet::with_capacity(1);
         expected_set.insert(build_integers(vec![
@@ -764,9 +764,8 @@ mod test {
     }
 
     #[test]
-    fn test_nested_cross_join_without_filter() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_nested_cross_join_without_filter() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -800,7 +799,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         let mut expected_set = HashSet::with_capacity(3);
         expected_set.insert(build_integers(vec![
@@ -833,9 +832,8 @@ mod test {
     }
 
     #[test]
-    fn test_nested_cross_join_without_on() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_nested_cross_join_without_on() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -869,7 +867,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         assert_eq!(tuples.len(), 16);
 
@@ -877,9 +875,8 @@ mod test {
     }
 
     #[test]
-    fn test_nested_right_out_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_nested_right_out_join() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -913,7 +910,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         let mut expected_set = HashSet::with_capacity(4);
         expected_set.insert(build_integers(vec![
@@ -955,9 +952,8 @@ mod test {
     }
 
     #[test]
-    fn test_nested_full_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_nested_full_join() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -991,7 +987,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         assert_eq!(
             tuples[0],
@@ -1062,9 +1058,8 @@ mod test {
     }
 
     #[test]
-    fn test_nested_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_nested_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -1149,7 +1144,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         assert_eq!(tuples.len(), 1);
         assert_eq!(
@@ -1165,7 +1160,8 @@ mod test {
     }
 
     #[test]
-    fn test_right_join_using_binds_visible_column_to_right_side() -> Result<(), DatabaseError> {
+    async fn test_right_join_using_binds_visible_column_to_right_side() -> Result<(), DatabaseError>
+    {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
@@ -1180,28 +1176,30 @@ mod test {
 
         for sql in setup_sql {
             if sql.starts_with("DROP ") || sql.starts_with("CREATE ") {
-                db.ddl(sql)?;
+                db.ddl(sql).await?;
                 if sql.starts_with("CREATE TABLE str1") {
-                    db.load(CatalogKind::Table("str1".to_string()))?;
+                    db.load(CatalogKind::Table("str1".to_string())).await?;
                 } else if sql.starts_with("CREATE TABLE str2") {
-                    db.load(CatalogKind::Table("str2".to_string()))?;
+                    db.load(CatalogKind::Table("str2".to_string())).await?;
                 }
             } else {
-                db.run(sql)?.done()?;
+                db.run(sql).await?.done().await?;
             }
         }
 
-        let mut iter = db.run(
-            "SELECT s, str1.s, str2.s \
+        let mut iter = db
+            .run(
+                "SELECT s, str1.s, str2.s \
              FROM str1 RIGHT OUTER JOIN str2 USING(s) \
              ORDER BY str2.s",
-        )?;
+            )
+            .await?;
         let mut actual = Vec::new();
 
-        while let Some(row) = iter.next_tuple(|_, tuple| tuple_to_strings(tuple))? {
+        while let Some(row) = iter.next_tuple(|_, tuple| tuple_to_strings(tuple)).await? {
             actual.push(row);
         }
-        iter.done()?;
+        iter.done().await?;
 
         assert_eq!(
             actual,

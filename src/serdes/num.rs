@@ -102,10 +102,11 @@ impl ReferenceSerialization for usize {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::memory::MemoryTransaction;
     use std::io::{Cursor, Seek, SeekFrom};
 
     #[test]
@@ -141,27 +142,27 @@ pub(crate) mod test {
         cursor.seek(SeekFrom::Start(0))?;
 
         let decoded_0 =
-            u8::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            u8::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_1 =
-            u16::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            u16::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_2 =
-            u32::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            u32::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_3 =
-            u64::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            u64::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_4 =
-            i8::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            i8::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_5 =
-            i16::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            i16::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_6 =
-            i32::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            i32::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_7 =
-            i64::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            i64::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_8 =
-            f32::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            f32::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_9 =
-            f64::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            f64::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
         let decoded_10 =
-            usize::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
+            usize::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena).unwrap();
 
         assert_eq!(source_0, decoded_0);
         assert_eq!(source_1, decoded_1);

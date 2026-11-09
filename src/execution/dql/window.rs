@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -227,8 +228,9 @@ impl<'a> Window<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -236,10 +238,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
         self.state.clear();
         self.input_exhausted = false;
         self.reset_functions()?;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -259,7 +261,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
 
             let (tuple, boundary) = if let Some((tuple, boundary)) = self.state.pending.take() {
                 (tuple, Some(boundary))
-            } else if self.input.next_tuple(arena, plan_arena)? {
+            } else if self.input.next_tuple(arena, plan_arena).await? {
                 (arena.take_tuple(), None)
             } else {
                 self.eval_functions(plan_arena)?;
@@ -275,6 +277,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Window<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::catalog::ColumnRef;

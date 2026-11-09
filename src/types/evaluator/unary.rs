@@ -94,12 +94,13 @@ macro_rules! numeric_unary_evaluator_definition {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test {
     use super::*;
     use crate::errors::DatabaseError;
     use crate::expression::UnaryOperator;
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::memory::MemoryTransaction;
     use crate::types::evaluator::UnaryEvaluatorRef;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -252,7 +253,7 @@ mod test {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            UnaryEvaluatorRef::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena)?,
+            UnaryEvaluatorRef::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena)?,
             evaluator
         );
 

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::rewrite_table_in_batches;
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
@@ -36,8 +37,9 @@ impl<'a> WriteExecutor<'a> for DropColumn<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -45,7 +47,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -89,6 +91,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                 new_serializers.remove(column_index);
 
                 let mut state = arena.local_state(plan_arena);
+
                 let (transaction, table_codec) = state.transaction_codec_mut();
                 rewrite_table_in_batches(
                     transaction,
@@ -101,17 +104,15 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                         let _ = tuple.remove(column_index);
                         Ok(())
                     },
-                    |_, _, _| Ok(()),
-                )?;
+                    async |_, _, _| Ok(()),
+                )
+                .await?;
             }
             {
                 let (transaction, table_codec) = arena.transaction_codec_mut();
-                let table = transaction.drop_column(
-                    table_codec,
-                    plan_arena,
-                    table_catalog.name(),
-                    column_name,
-                )?;
+                let table = transaction
+                    .drop_column(table_codec, plan_arena, table_catalog.name(), column_name)
+                    .await?;
                 arena.push_ddl_apply(DDLApply::upsert_table(table, true));
             }
 

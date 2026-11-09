@@ -1,4 +1,5 @@
 use super::*;
+use crate::dual::dual;
 
 enum OrmDefaultChange {
     NoChange,
@@ -6,6 +7,7 @@ enum OrmDefaultChange {
     Drop,
 }
 
+#[dual]
 impl<S: Storage> Database<S> {
     fn table_catalog(&self, table_name: &str) -> Result<Option<TableCatalog>, DatabaseError> {
         let transaction = self.storage.transaction()?;
@@ -37,11 +39,11 @@ impl<S: Storage> Database<S> {
     /// let database = DataBaseBuilder::path(".").build_in_memory().unwrap();
     /// database.create_table::<User>().unwrap();
     /// ```
-    pub fn create_table<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        execute_create_table::<_, M>(self, false)?;
+    pub async fn create_table<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        execute_create_table::<_, M>(self, false).await?;
 
         for index in M::indexes() {
-            execute_create_index(self, M::table_name(), index, false)?;
+            execute_create_index(self, M::table_name(), index, false).await?;
         }
 
         Ok(())
@@ -52,11 +54,11 @@ impl<S: Storage> Database<S> {
     /// This is useful for examples, tests and bootstrap flows where rerunning
     /// schema initialization should stay idempotent. Secondary indexes declared
     /// with `#[model(index)]` are created with `IF NOT EXISTS` as well.
-    pub fn create_table_if_not_exists<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        execute_create_table::<_, M>(self, true)?;
+    pub async fn create_table_if_not_exists<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        execute_create_table::<_, M>(self, true).await?;
 
         for index in M::indexes() {
-            execute_create_index(self, M::table_name(), index, true)?;
+            execute_create_index(self, M::table_name(), index, true).await?;
         }
 
         Ok(())
@@ -82,12 +84,12 @@ impl<S: Storage> Database<S> {
     /// database.truncate::<User>().unwrap();
     /// assert_eq!(database.fetch::<User>().unwrap().count(), 0);
     /// ```
-    pub fn truncate<M: Model>(&self) -> Result<(), DatabaseError> {
-        self.bind(|ctx| ctx.truncate::<M>())?.done()
+    pub async fn truncate<M: Model>(&self) -> Result<(), DatabaseError> {
+        self.bind(|ctx| ctx.truncate::<M>()).await?.done().await
     }
 
     /// Creates a view from a binder-backed ORM plan builder.
-    pub fn create_view<F>(&mut self, view_name: &str, build: F) -> Result<(), DatabaseError>
+    pub async fn create_view<F>(&mut self, view_name: &str, build: F) -> Result<(), DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
             &'ctx mut OrmContext<
@@ -100,11 +102,11 @@ impl<S: Storage> Database<S> {
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        execute_create_view(self, view_name, build, false)
+        execute_create_view(self, view_name, build, false).await
     }
 
     /// Creates or replaces a view from a binder-backed ORM plan builder.
-    pub fn create_or_replace_view<F>(
+    pub async fn create_or_replace_view<F>(
         &mut self,
         view_name: &str,
         build: F,
@@ -121,17 +123,17 @@ impl<S: Storage> Database<S> {
             >,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        execute_create_view(self, view_name, build, true)
+        execute_create_view(self, view_name, build, true).await
     }
 
     /// Drops a view by name.
-    pub fn drop_view(&mut self, view_name: &str) -> Result<(), DatabaseError> {
-        execute_drop_view(self, view_name, false)
+    pub async fn drop_view(&mut self, view_name: &str) -> Result<(), DatabaseError> {
+        execute_drop_view(self, view_name, false).await
     }
 
     /// Drops a view by name if it exists.
-    pub fn drop_view_if_exists(&mut self, view_name: &str) -> Result<(), DatabaseError> {
-        execute_drop_view(self, view_name, true)
+    pub async fn drop_view_if_exists(&mut self, view_name: &str) -> Result<(), DatabaseError> {
+        execute_drop_view(self, view_name, true).await
     }
 
     /// Migrates an existing table to match the current model definition.
@@ -145,7 +147,7 @@ impl<S: Storage> Database<S> {
     /// to type, nullability and default expressions for non-primary-key columns
     /// when the underlying DDL supports them. Primary-key changes and unique
     /// constraint changes still return an error so you can handle them manually.
-    pub fn migrate<M: Model>(&mut self) -> Result<(), DatabaseError> {
+    pub async fn migrate<M: Model>(&mut self) -> Result<(), DatabaseError> {
         let fields = M::fields();
         if fields.is_empty() {
             return Err(DatabaseError::UnsupportedStmt(
@@ -155,7 +157,7 @@ impl<S: Storage> Database<S> {
         }
 
         let Some(table) = self.table_catalog(M::table_name())? else {
-            return self.create_table::<M>();
+            return self.create_table::<M>().await;
         };
         let (table_primary_key, current_columns) = {
             let table_arena = self.state.table_arena().borrow();
@@ -234,7 +236,8 @@ impl<S: Storage> Database<S> {
                     field.data_type.clone(),
                     OrmDefaultChange::NoChange,
                     NotNullChange::NoChange,
-                )?;
+                )
+                .await?;
             }
 
             let arena = PlanArena::new(self.state.table_arena());
@@ -250,7 +253,8 @@ impl<S: Storage> Database<S> {
                         None => OrmDefaultChange::Drop,
                     },
                     NotNullChange::NoChange,
-                )?;
+                )
+                .await?;
             }
 
             if field.nullable != current_column.nullable() {
@@ -266,7 +270,8 @@ impl<S: Storage> Database<S> {
                     } else {
                         NotNullChange::Set
                     },
-                )?;
+                )
+                .await?;
             }
         }
 
@@ -335,7 +340,8 @@ impl<S: Storage> Database<S> {
                 current_column.datatype().clone(),
                 OrmDefaultChange::NoChange,
                 NotNullChange::NoChange,
-            )?;
+            )
+            .await?;
         }
 
         for column in current_columns.values() {
@@ -352,7 +358,7 @@ impl<S: Storage> Database<S> {
                 )));
             }
 
-            execute_drop_column(self, M::table_name(), column.name())?;
+            execute_drop_column(self, M::table_name(), column.name()).await?;
         }
 
         for field in fields {
@@ -369,11 +375,11 @@ impl<S: Storage> Database<S> {
                 )));
             }
 
-            execute_add_column(self, M::table_name(), field)?;
+            execute_add_column(self, M::table_name(), field).await?;
         }
 
         for index in M::indexes() {
-            execute_create_index(self, M::table_name(), index, true)?;
+            execute_create_index(self, M::table_name(), index, true).await?;
         }
 
         Ok(())
@@ -383,16 +389,16 @@ impl<S: Storage> Database<S> {
     ///
     /// Primary-key indexes are managed by the table definition itself and
     /// cannot be dropped independently.
-    pub fn drop_index<M: Model>(&mut self, index_name: &str) -> Result<(), DatabaseError> {
-        execute_drop_index(self, M::table_name(), index_name, false)
+    pub async fn drop_index<M: Model>(&mut self, index_name: &str) -> Result<(), DatabaseError> {
+        execute_drop_index(self, M::table_name(), index_name, false).await
     }
 
     /// Drops a non-primary-key model index by name if it exists.
-    pub fn drop_index_if_exists<M: Model>(
+    pub async fn drop_index_if_exists<M: Model>(
         &mut self,
         index_name: &str,
     ) -> Result<(), DatabaseError> {
-        execute_drop_index(self, M::table_name(), index_name, true)
+        execute_drop_index(self, M::table_name(), index_name, true).await
     }
 
     /// Drops the model table.
@@ -415,33 +421,37 @@ impl<S: Storage> Database<S> {
     /// database.create_table::<User>().unwrap();
     /// database.drop_table::<User>().unwrap();
     /// ```
-    pub fn drop_table<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        execute_drop_table(self, M::table_name(), false)
+    pub async fn drop_table<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        execute_drop_table(self, M::table_name(), false).await
     }
 
     /// Drops the model table if it exists.
     ///
     /// This variant is convenient for cleanup code that should succeed even if
     /// the table was already removed.
-    pub fn drop_table_if_exists<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        execute_drop_table(self, M::table_name(), true)
+    pub async fn drop_table_if_exists<M: Model>(&mut self) -> Result<(), DatabaseError> {
+        execute_drop_table(self, M::table_name(), true).await
     }
 }
 
-fn execute_create_table<S: Storage, M: Model>(
+#[dual]
+async fn execute_create_table<S: Storage, M: Model>(
     database: &mut Database<S>,
     if_not_exists: bool,
 ) -> Result<(), DatabaseError> {
-    database.execute_mut("ORM CREATE TABLE", &[], move |binder, arena| {
-        let columns = M::fields()
-            .iter()
-            .map(|field| field.to_column_catalog(arena))
-            .collect::<Result<Vec<_>, _>>()?;
-        binder.bind_create_table(M::table_name().into(), columns, if_not_exists)
-    })
+    database
+        .execute_mut("ORM CREATE TABLE", &[], move |binder, arena| {
+            let columns = M::fields()
+                .iter()
+                .map(|field| field.to_column_catalog(arena))
+                .collect::<Result<Vec<_>, _>>()?;
+            binder.bind_create_table(M::table_name().into(), columns, if_not_exists)
+        })
+        .await
 }
 
-fn execute_create_index<S: Storage>(
+#[dual]
+async fn execute_create_index<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
     index: &(&'static str, &'static [&'static str], bool),
@@ -450,30 +460,33 @@ fn execute_create_index<S: Storage>(
     let (index_name, index_columns, unique) = *index;
     let index_name = index_name.to_string();
     let column_names = index_columns.to_vec();
-    database.execute_mut("ORM CREATE INDEX", &[], move |binder, arena| {
-        let mut input = binder.bind_create_index_source(table_name, arena)?;
-        let schema = input.output_schema(arena).clone();
-        let mut columns = Vec::with_capacity(column_names.len());
-        for column_name in column_names {
-            let column = schema
-                .iter()
-                .copied()
-                .find(|column| arena.column(*column).name() == column_name)
-                .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
-            columns.push(column);
-        }
-        binder.bind_create_index(
-            table_name,
-            index_name,
-            columns,
-            if_not_exists,
-            unique,
-            input,
-        )
-    })
+    database
+        .execute_mut("ORM CREATE INDEX", &[], move |binder, arena| {
+            let mut input = binder.bind_create_index_source(table_name, arena)?;
+            let schema = input.output_schema(arena).clone();
+            let mut columns = Vec::with_capacity(column_names.len());
+            for column_name in column_names {
+                let column = schema
+                    .iter()
+                    .copied()
+                    .find(|column| arena.column(*column).name() == column_name)
+                    .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
+                columns.push(column);
+            }
+            binder.bind_create_index(
+                table_name,
+                index_name,
+                columns,
+                if_not_exists,
+                unique,
+                input,
+            )
+        })
+        .await
 }
 
-fn execute_create_view<S: Storage, F>(
+#[dual]
+async fn execute_create_view<S: Storage, F>(
     database: &mut Database<S>,
     view_name: &str,
     build: F,
@@ -493,32 +506,38 @@ where
 {
     static EMPTY_ORM_PARAMS: &[(usize, LogicalType)] = &[];
     let view_name = view_name.to_string();
-    database.execute_mut("ORM CREATE VIEW", EMPTY_ORM_PARAMS, move |binder, arena| {
-        let mut context = OrmContext { binder, arena };
-        let plan = build(&mut context)?;
-        binder.bind_create_view(
-            view_name.as_str().into(),
-            or_replace,
-            plan,
-            vec![],
-            vec![],
-            arena,
-        )
-    })
+    database
+        .execute_mut("ORM CREATE VIEW", EMPTY_ORM_PARAMS, move |binder, arena| {
+            let mut context = OrmContext { binder, arena };
+            let plan = build(&mut context)?;
+            binder.bind_create_view(
+                view_name.as_str().into(),
+                or_replace,
+                plan,
+                vec![],
+                vec![],
+                arena,
+            )
+        })
+        .await
 }
 
-fn execute_drop_view<S: Storage>(
+#[dual]
+async fn execute_drop_view<S: Storage>(
     database: &mut Database<S>,
     view_name: &str,
     if_exists: bool,
 ) -> Result<(), DatabaseError> {
     let view_name = view_name.to_string();
-    database.execute_mut("ORM DROP VIEW", &[], move |binder, _| {
-        binder.bind_drop_view(view_name.as_str().into(), if_exists)
-    })
+    database
+        .execute_mut("ORM DROP VIEW", &[], move |binder, _| {
+            binder.bind_drop_view(view_name.as_str().into(), if_exists)
+        })
+        .await
 }
 
-fn execute_change_column<S: Storage>(
+#[dual]
+async fn execute_change_column<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
     old_column_name: &str,
@@ -529,63 +548,77 @@ fn execute_change_column<S: Storage>(
 ) -> Result<(), DatabaseError> {
     let old_column_name = old_column_name.to_string();
     let new_column_name = new_column_name.to_string();
-    database.execute_mut("ORM CHANGE COLUMN", &[], move |binder, arena| {
-        let default_change = match default_change {
-            OrmDefaultChange::Set(expr) => DefaultChange::Set(arena.alloc_expression(expr)),
-            OrmDefaultChange::Drop => DefaultChange::Drop,
-            OrmDefaultChange::NoChange => DefaultChange::NoChange,
-        };
-        binder.bind_change_column(
-            table_name,
-            old_column_name,
-            new_column_name,
-            data_type,
-            default_change,
-            not_null_change,
-        )
-    })
+    database
+        .execute_mut("ORM CHANGE COLUMN", &[], move |binder, arena| {
+            let default_change = match default_change {
+                OrmDefaultChange::Set(expr) => DefaultChange::Set(arena.alloc_expression(expr)),
+                OrmDefaultChange::Drop => DefaultChange::Drop,
+                OrmDefaultChange::NoChange => DefaultChange::NoChange,
+            };
+            binder.bind_change_column(
+                table_name,
+                old_column_name,
+                new_column_name,
+                data_type,
+                default_change,
+                not_null_change,
+            )
+        })
+        .await
 }
 
-fn execute_drop_column<S: Storage>(
+#[dual]
+async fn execute_drop_column<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
     column_name: &str,
 ) -> Result<(), DatabaseError> {
     let column_name = column_name.to_string();
-    database.execute_mut("ORM DROP COLUMN", &[], move |binder, _| {
-        binder.bind_drop_column(table_name, column_name, false)
-    })
+    database
+        .execute_mut("ORM DROP COLUMN", &[], move |binder, _| {
+            binder.bind_drop_column(table_name, column_name, false)
+        })
+        .await
 }
 
-fn execute_add_column<S: Storage>(
+#[dual]
+async fn execute_add_column<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
     field: &OrmField,
 ) -> Result<(), DatabaseError> {
     let field = field.clone();
-    database.execute_mut("ORM ADD COLUMN", &[], move |binder, arena| {
-        binder.bind_add_column(table_name, field.to_column_catalog(arena)?, false)
-    })
+    database
+        .execute_mut("ORM ADD COLUMN", &[], move |binder, arena| {
+            binder.bind_add_column(table_name, field.to_column_catalog(arena)?, false)
+        })
+        .await
 }
 
-fn execute_drop_index<S: Storage>(
+#[dual]
+async fn execute_drop_index<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
     index_name: &str,
     if_exists: bool,
 ) -> Result<(), DatabaseError> {
     let index_name = index_name.to_string();
-    database.execute_mut("ORM DROP INDEX", &[], move |binder, _| {
-        binder.bind_drop_index(table_name.into(), index_name, if_exists)
-    })
+    database
+        .execute_mut("ORM DROP INDEX", &[], move |binder, _| {
+            binder.bind_drop_index(table_name.into(), index_name, if_exists)
+        })
+        .await
 }
 
-fn execute_drop_table<S: Storage>(
+#[dual]
+async fn execute_drop_table<S: Storage>(
     database: &mut Database<S>,
     table_name: &'static str,
     if_exists: bool,
 ) -> Result<(), DatabaseError> {
-    database.execute_mut("ORM DROP TABLE", &[], move |binder, _| {
-        binder.bind_drop_table(table_name.into(), if_exists)
-    })
+    database
+        .execute_mut("ORM DROP TABLE", &[], move |binder, _| {
+            binder.bind_drop_table(table_name.into(), if_exists)
+        })
+        .await
 }

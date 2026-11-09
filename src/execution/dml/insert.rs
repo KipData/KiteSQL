@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::catalog::table::DmlTable;
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor,
@@ -60,17 +61,18 @@ impl<'a> WriteExecutor<'a> for Insert<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.done = false;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -91,7 +93,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
         }
         let mut inserted_count = 0;
 
-        while input.next_tuple(arena, plan_arena)? {
+        while input.next_tuple(arena, plan_arena).await? {
             tuple.clear();
             arena.result_mut().drain_values(|value| tuple.push(value));
             for (i, column) in table.columns.iter().enumerate() {
@@ -114,17 +116,21 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let index = Index::new(index_meta.id, values, index_meta.ty);
-                transaction.add_index(table_codec, table.table_id, index, tuple_id)?;
+                transaction
+                    .add_index(table_codec, table.table_id, index, tuple_id)
+                    .await?;
             }
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.append_tuple(
-                table_codec,
-                table.table_id,
-                &*tuple,
-                &table.serializers,
-                *is_overwrite,
-            )?;
+            transaction
+                .append_tuple(
+                    table_codec,
+                    table.table_id,
+                    &*tuple,
+                    &table.serializers,
+                    *is_overwrite,
+                )
+                .await?;
             inserted_count += 1;
         }
         arena.produce(TupleBuilder::build_result(inserted_count.to_string()).into());

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::MaybeSend;
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{create_accumulator, Accumulator};
 use crate::expression::agg::AggKind;
@@ -23,7 +24,7 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use std::ops::Range;
 
-pub(super) trait WindowFunction {
+pub(super) trait WindowFunction: MaybeSend {
     fn reset(&mut self) -> Result<(), DatabaseError> {
         Ok(())
     }

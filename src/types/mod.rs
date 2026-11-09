@@ -505,10 +505,11 @@ impl std::fmt::Display for LogicalType {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::memory::MemoryTransaction;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
     #[cfg(feature = "time")]
@@ -994,7 +995,7 @@ pub(crate) mod test {
 
             cursor.seek(SeekFrom::Start(0))?;
             assert_eq!(
-                LogicalType::decode::<RocksTransaction, _, _>(cursor, None, &mut arena,)?,
+                LogicalType::decode::<MemoryTransaction, _, _>(cursor, None, &mut arena,)?,
                 logical_type
             );
             cursor.seek(SeekFrom::Start(0))?;

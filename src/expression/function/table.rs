@@ -59,12 +59,15 @@ impl Hash for TableFunction {
         self.summary().hash(state);
     }
 }
+
+pub type TableFunctionIter = Box<dyn Iterator<Item = Result<Tuple, DatabaseError>> + Send>;
+
 pub trait TableFunctionImpl: Debug + Send + Sync {
     fn eval(
         &self,
         args: &[ExprRef],
         arena: &(dyn MetaArena + '_),
-    ) -> Result<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>, DatabaseError>;
+    ) -> Result<TableFunctionIter, DatabaseError>;
 
     fn summary(&self) -> &FunctionSummary;
 

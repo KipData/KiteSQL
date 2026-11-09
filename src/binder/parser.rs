@@ -22,8 +22,10 @@ use super::{is_valid_identifier, Binder, CteBinding, QueryBindStep, SetOperatorK
 use crate::binder::copy::{ExtSource, FileFormat};
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
 use crate::db::{
-    BindSource, Database, DatabaseIter, Executor, State, Transaction, TransactionIter,
+    BindSource, ConsumeMut, Database, DatabaseIter, Executor, OwnedPtr, State, Transaction,
+    TransactionIter,
 };
+use crate::dual::dual;
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -170,13 +172,14 @@ fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool
     ))
 }
 
+#[dual]
 impl<S: Storage> Database<S> {
     /// Parses SQL statements using this database's configured parser recursion limit.
     pub fn prepare_all<T: AsRef<str>>(&self, sql: T) -> Result<Vec<Statement>, DatabaseError> {
         self.state.prepare_all(sql)
     }
 
-    pub fn ddl<T: AsRef<str>>(&mut self, sql: T) -> Result<(), DatabaseError> {
+    pub async fn ddl<T: AsRef<str>>(&mut self, sql: T) -> Result<(), DatabaseError> {
         let sql = sql.as_ref();
         let statements = self
             .state
@@ -191,45 +194,47 @@ impl<S: Storage> Database<S> {
                 .with_sql_context(sql));
             }
         }
-        self.run_mut_statements(sql, statements, |_| Ok(()))
+        self.run_mut_statements(sql, statements, ()).await
     }
 
     /// Executes SQL with catalog mutations allowed, lending the last statement's results
     /// to `consume`. On success, unread rows are drained before committing and publishing
     /// catalog updates. A callback or execution error rolls the current statement back.
     /// Earlier statements are completed and committed in order before the callback runs.
-    pub fn run_mut<C, R>(&mut self, sql: impl AsRef<str>, consume: C) -> Result<R, DatabaseError>
+    pub async fn run_mut<C>(
+        &mut self,
+        sql: impl AsRef<str>,
+        consume: C,
+    ) -> Result<C::Output, DatabaseError>
     where
-        C: for<'a> FnOnce(
-            &mut TransactionIter<'a, 'a, S::TransactionType<'a>, PlanArena<'a>>,
-        ) -> Result<R, DatabaseError>,
+        C: ConsumeMut<S>,
     {
         let sql = sql.as_ref();
         let statements = self
             .state
             .prepare_all(sql)
             .map_err(|err| err.with_sql_context(sql))?;
-        self.run_mut_statements(sql, statements, consume)
+        self.run_mut_statements(sql, statements, consume).await
     }
 
-    fn run_mut_statements<C, R>(
+    async fn run_mut_statements<C>(
         &mut self,
         sql: &str,
         mut statements: Vec<Statement>,
         consume: C,
-    ) -> Result<R, DatabaseError>
+    ) -> Result<C::Output, DatabaseError>
     where
-        C: for<'a> FnOnce(
-            &mut TransactionIter<'a, 'a, S::TransactionType<'a>, PlanArena<'a>>,
-        ) -> Result<R, DatabaseError>,
+        C: ConsumeMut<S>,
     {
         let last = statements
             .pop()
             .ok_or_else(|| DatabaseError::EmptyStatement.with_sql_context(sql))?;
         for statement in statements {
-            self.execute_mut(sql, &[], |binder, arena| binder.bind(&statement, arena))?;
+            self.execute_mut(sql, &[], |binder, arena| binder.bind(&statement, arena))
+                .await?;
         }
         self.execute_mut_with(sql, &[], |binder, arena| binder.bind(&last, arena), consume)
+            .await
     }
 
     /// Runs one or more SQL statements and returns an iterator for the final result set.
@@ -248,7 +253,7 @@ impl<S: Storage> Database<S> {
     /// iter.schema(|schema| assert_eq!(schema.len(), 1));
     /// iter.done().unwrap();
     /// ```
-    pub fn run<T: AsRef<str>>(&self, sql: T) -> Result<DatabaseIter<'_, S>, DatabaseError> {
+    pub async fn run<T: AsRef<str>>(&self, sql: T) -> Result<DatabaseIter<'_, S>, DatabaseError> {
         let sql = sql.as_ref();
         let statements = self
             .state
@@ -276,47 +281,48 @@ impl<S: Storage> Database<S> {
                 Ok::<_, DatabaseError>(read_only && statement_is_read_only(stmt)?)
             })
             .map_err(|err| err.with_sql_context(sql))?;
-        let transaction = Box::into_raw(Box::new(
+        let transaction = OwnedPtr::new(
             self.storage
                 .transaction_with_isolation(self.transaction_isolation, read_only)?,
-        ));
+        );
         let mut statements = statements.into_iter().peekable();
 
         while let Some(statement) = statements.next() {
-            let (plan_arena, executor) = match (|| {
-                let tx = unsafe { &mut *transaction };
+            let (plan_arena, executor) = match async {
+                let tx = unsafe { &mut *transaction.get() };
                 let (plan, arena) = self
                     .state
                     .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))?;
                 let executor = Executor::new(plan, &arena);
-                self.state.execute(tx, executor, arena)
-            })() {
+                self.state.execute(tx, executor, arena).await
+            }
+            .await
+            {
                 Ok(result) => result,
-                Err(err) => {
-                    unsafe { drop(Box::from_raw(transaction)) };
-                    return Err(err.with_sql_context(sql));
-                }
+                Err(err) => return Err(err.with_sql_context(sql)),
             };
 
             if statements.peek().is_some() {
-                if let Err(err) = TransactionIter::new(plan_arena, executor).done() {
-                    unsafe { drop(Box::from_raw(transaction)) };
+                if let Err(err) = TransactionIter::new(plan_arena, executor).done().await {
                     return Err(err.with_sql_context(sql));
                 }
             } else {
-                let inner = Box::into_raw(Box::new(TransactionIter::new(plan_arena, executor)));
-                return Ok(DatabaseIter { transaction, inner });
+                let inner = Some(OwnedPtr::new(TransactionIter::new(plan_arena, executor)));
+                return Ok(DatabaseIter {
+                    transaction: Some(transaction),
+                    inner,
+                });
             }
         }
 
-        unsafe { drop(Box::from_raw(transaction)) };
         Err(DatabaseError::EmptyStatement.with_sql_context(sql))
     }
 }
 
+#[dual]
 impl<'txn, S: Storage> Transaction<'txn, S> {
     /// Runs SQL inside the current transaction and returns the final result iterator.
-    pub fn run<'a, T: AsRef<str>>(
+    pub async fn run<'a, T: AsRef<str>>(
         &'a mut self,
         sql: T,
     ) -> Result<TransactionIter<'a, 'a, S::TransactionType<'txn>>, DatabaseError> {
@@ -343,8 +349,10 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
                     .build_plan(&[], tx, |binder, arena| binder.bind(&statement, arena))
                     .map(Executor::from_plan)
             })
+            .await
             .map_err(|err| err.with_sql_context(sql))?
             .done()
+            .await
             .map_err(|err| err.with_sql_context(sql))?;
         }
 
@@ -353,6 +361,7 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
                 .build_plan(&[], tx, |binder, arena| binder.bind(&last_statement, arena))
                 .map(Executor::from_plan)
         })
+        .await
         .map_err(|err| err.with_sql_context(sql))
     }
 }
@@ -3379,6 +3388,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::binder::test::build_t1_table;
@@ -3482,7 +3492,7 @@ mod tests {
     }
 
     #[test]
-    fn test_database_entrypoints_reject_catalog_mutation() -> Result<(), DatabaseError> {
+    async fn test_database_entrypoints_reject_catalog_mutation() -> Result<(), DatabaseError> {
         let mut database = DataBaseBuilder::path(".").build_in_memory()?;
         let params = &[] as &[(usize, LogicalType)];
 
@@ -3491,17 +3501,20 @@ mod tests {
             "DDL and ANALYZE",
         );
         assert_unsupported(
-            expect_err(database.run("create table t (id int primary key)")),
+            expect_err(database.run("create table t (id int primary key)").await),
             "DDL and ANALYZE",
         );
-        assert_unsupported(expect_err(database.ddl("select 1")), "`Database::ddl`");
+        assert_unsupported(
+            expect_err(database.ddl("select 1").await),
+            "`Database::ddl`",
+        );
 
         let transaction = database.new_transaction(false)?;
         assert_unsupported(
             expect_err(transaction.program_sql("analyze table t", params)),
             "DDL and ANALYZE",
         );
-        transaction.commit()?;
+        transaction.commit().await?;
 
         Ok(())
     }
@@ -3537,8 +3550,8 @@ mod tests {
     }
 
     #[test]
-    fn test_alter_table_parser_errors() -> Result<(), DatabaseError> {
-        let tables = build_t1_table()?;
+    async fn test_alter_table_parser_errors() -> Result<(), DatabaseError> {
+        let tables = build_t1_table().await?;
 
         assert_unsupported(
             tables
@@ -3653,8 +3666,9 @@ mod tests {
     }
 
     #[test]
-    fn test_limit_parser_rejects_negative_and_non_constant_values() -> Result<(), DatabaseError> {
-        let tables = build_t1_table()?;
+    async fn test_limit_parser_rejects_negative_and_non_constant_values(
+    ) -> Result<(), DatabaseError> {
+        let tables = build_t1_table().await?;
 
         assert!(matches!(
             tables.plan("select * from t1 limit -1").unwrap_err(),
@@ -3673,8 +3687,8 @@ mod tests {
     }
 
     #[test]
-    fn test_bind_non_recursive_ctes() -> Result<(), DatabaseError> {
-        let tables = build_t1_table()?;
+    async fn test_bind_non_recursive_ctes() -> Result<(), DatabaseError> {
+        let tables = build_t1_table().await?;
         let mut arena = PlanArena::new(&tables.table_arena);
         let mut plan = tables.plan_with_arena(
             "with first(a) as (select c1 from t1), \
@@ -3703,8 +3717,8 @@ mod tests {
     }
 
     #[test]
-    fn force_nest_loop_join_marks_join_operator() -> Result<(), DatabaseError> {
-        let tables = build_t1_table()?;
+    async fn force_nest_loop_join_marks_join_operator() -> Result<(), DatabaseError> {
+        let tables = build_t1_table().await?;
         let plan =
             tables.plan("select /*+ FORCE_NEST_LOOP_JOIN */ c1, c3 from t1 join t2 on c1 = c3")?;
         let join = plan
@@ -3722,8 +3736,8 @@ mod tests {
 
     #[cfg(feature = "spill")]
     #[test]
-    fn optimizer_hints_can_be_combined() -> Result<(), DatabaseError> {
-        let tables = build_t1_table()?;
+    async fn optimizer_hints_can_be_combined() -> Result<(), DatabaseError> {
+        let tables = build_t1_table().await?;
         let plan = tables.plan(
             "select /*+ FORCE_AGG_SPILL, FORCE_NEST_LOOP_JOIN */ c1, count(c3) \
              from t1 join t2 on c1 = c3 group by c1",

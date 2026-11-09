@@ -63,6 +63,7 @@ impl BitSet {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[crate::dual::dual]
 mod tests {
     use super::BitSet;
 

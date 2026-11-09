@@ -70,7 +70,7 @@ pub(crate) enum FlushMode {
 }
 
 type OnFlush<'on_flush, T> =
-    Box<dyn FnMut(FlushMode, &mut Vec<T>) -> Result<(), DatabaseError> + 'on_flush>;
+    Box<dyn FnMut(FlushMode, &mut Vec<T>) -> Result<(), DatabaseError> + Send + 'on_flush>;
 
 enum ReadState<T: SpillCodec> {
     Memory(std::vec::IntoIter<T>),
@@ -111,7 +111,7 @@ impl<'on_flush, T: SpillCodec> SpillVec<'on_flush, T> {
 
     pub(crate) fn on_flush<F>(mut self, on_flush: F) -> Self
     where
-        F: FnMut(FlushMode, &mut Vec<T>) -> Result<(), DatabaseError> + 'on_flush,
+        F: FnMut(FlushMode, &mut Vec<T>) -> Result<(), DatabaseError> + Send + 'on_flush,
     {
         if let Ok(state) = &mut self.writer {
             state.on_flush = Some(Box::new(on_flush));
@@ -453,6 +453,7 @@ fn create_spill_file() -> Result<(File, PathBuf), DatabaseError> {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::types::tuple::Tuple;

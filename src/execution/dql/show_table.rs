@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
@@ -38,8 +39,9 @@ impl<'a> ReadExecutor<'a> for ShowTables {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowTables {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -48,7 +50,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowTables {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -56,12 +58,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowTables {
         if arena.iter_mut(self.metas).is_empty() {
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec();
-            let metas = transaction.tables(table_codec)?;
+            let metas = transaction.tables(table_codec).await?;
             state.iters[self.metas] = StorageIter::Table(metas);
         }
 
         let metas = arena.iter_mut(self.metas).as_table();
-        let Some(table) = metas.try_next(plan_arena)? else {
+        let Some(table) = metas.try_next(plan_arena).await? else {
             arena.finish();
             return Ok(());
         };

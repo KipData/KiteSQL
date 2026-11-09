@@ -16,9 +16,11 @@ mod program;
 #[cfg(feature = "parser")]
 pub use crate::binder::Statement;
 use crate::binder::{Binder, BinderContext};
+use crate::dual::dual;
+use crate::dual::MaybeSend;
 use crate::errors::DatabaseError;
 pub use crate::execution::Executor;
-use crate::execution::{DDLApply, ExecArena, ExecBuffer};
+use crate::execution::{DDLApply, ExecArena, ExecBuffer, TxnPtr};
 use crate::expression::function::scala::ScalarFunctionImpl;
 use crate::expression::function::table::{
     ArcTableFunctionImpl, TableFunctionCatalog, TableFunctionImpl,
@@ -69,6 +71,37 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Metadata arena, and the executor with the arena it runs in.
+pub(crate) struct OwnedPtr<T>(*mut T);
+
+// SAFETY: `OwnedPtr` owns its value like `Box<T>`.
+unsafe impl<T: Send> Send for OwnedPtr<T> {}
+// SAFETY: as for `Send`.
+unsafe impl<T: Sync> Sync for OwnedPtr<T> {}
+
+impl<T> OwnedPtr<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self(Box::into_raw(Box::new(value)))
+    }
+
+    pub(crate) fn get(&self) -> *mut T {
+        self.0
+    }
+
+    /// # Safety
+    /// No reference obtained through [`get`](Self::get) may still be in use.
+    pub(crate) unsafe fn into_inner(self) -> T {
+        let this = std::mem::ManuallyDrop::new(self);
+        *Box::from_raw(this.0)
+    }
+}
+
+impl<T> Drop for OwnedPtr<T> {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` comes from `Box::into_raw` and is freed only here or in `into_inner`.
+        drop(unsafe { Box::from_raw(self.0) });
+    }
+}
+
 pub(crate) type Execution<'a, 'p, A, T> = (ExecMetaArena<A>, (Executor<'p>, ExecArena<'p, 'a, T>));
 
 pub(crate) type ScalaFunctions = HashMap<FunctionSummary, Arc<dyn ScalarFunctionImpl>>;
@@ -81,7 +114,8 @@ pub enum CatalogKind {
     TableFunction(Arc<dyn TableFunctionImpl>),
 }
 
-pub(crate) trait BindSource<'a> {
+#[dual]
+pub(crate) trait BindSource {
     type Iter: ResultIter;
     type Transaction: StorageTransaction;
 
@@ -89,12 +123,13 @@ pub(crate) trait BindSource<'a> {
 
     /// `read_only` lets a fresh transaction use the storage's read path; executors
     /// that already hold a transaction ignore it.
-    fn execute<F>(self, read_only: bool, build: F) -> Result<Self::Iter, DatabaseError>
+    async fn execute<F>(self, read_only: bool, build: F) -> Result<Self::Iter, DatabaseError>
     where
-        F: FnOnce(
-            &'a State<Self::Storage>,
-            &Self::Transaction,
-        ) -> Result<(Executor<'a>, PlanArena<'a>), DatabaseError>;
+        F: for<'s> FnOnce(
+                &'s State<Self::Storage>,
+                &Self::Transaction,
+            ) -> Result<(Executor<'s>, PlanArena<'s>), DatabaseError>
+            + MaybeSend;
 
     #[cfg(feature = "orm")]
     fn explain<A, F>(self, params: A, build: F) -> Result<String, DatabaseError>
@@ -614,29 +649,38 @@ fn statement_stamp<T: StorageTransaction>(
     }
 }
 
-fn start_execution<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
+#[dual]
+async fn start_execution<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
     table_cache: &'p TableCache,
     transaction: &'a mut T,
     mut executor: Executor<'p>,
     plan_arena: A,
-) -> Result<Execution<'a, 'p, A, T>, DatabaseError> {
+) -> Result<Execution<'a, 'p, A, T>, DatabaseError>
+where
+    'p: 'a,
+{
     let mut plan_arena = ExecMetaArena::new(plan_arena);
-    let arena = start_execution_inner(table_cache, transaction, &mut executor, &mut plan_arena)?;
+    let arena =
+        start_execution_inner(table_cache, transaction, &mut executor, &mut plan_arena).await?;
 
     Ok((plan_arena, (executor, arena)))
 }
 
-fn start_execution_inner<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
+#[dual]
+async fn start_execution_inner<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
     table_cache: &'p TableCache,
     transaction: &'a mut T,
     executor: &mut Executor<'p>,
     plan_arena: &mut ExecMetaArena<A>,
-) -> Result<ExecArena<'p, 'a, T>, DatabaseError> {
+) -> Result<ExecArena<'p, 'a, T>, DatabaseError>
+where
+    'p: 'a,
+{
     let stamp = statement_stamp(transaction, executor.plan())?;
     let iters = executor.buffer.iter_slots(executor.iters());
     let mut arena = ExecArena::new(table_cache, transaction).with_iters(iters);
     executor.buffer.set_statement_stamp(stamp);
-    executor.start(&mut arena, plan_arena)?;
+    executor.start(&mut arena, plan_arena).await?;
 
     Ok(arena)
 }
@@ -781,8 +825,11 @@ impl<S: Storage> State<S> {
 
         Ok((plan, arena))
     }
+}
 
-    pub(crate) fn execute<'a, 'p, 'txn, A: MetaArena + 'p>(
+#[dual]
+impl<S: Storage> State<S> {
+    pub(crate) async fn execute<'a, 'p, 'txn, A: MetaArena + 'p>(
         &'p self,
         transaction: &'a mut S::TransactionType<'txn>,
         executor: Executor<'p>,
@@ -793,10 +840,10 @@ impl<S: Storage> State<S> {
         'txn: 'p,
         'p: 'a,
     {
-        start_execution(self.table_cache(), transaction, executor, plan_arena)
+        start_execution(self.table_cache(), transaction, executor, plan_arena).await
     }
 
-    pub(crate) fn execute_mut<'a, 'txn, A, F>(
+    pub(crate) async fn execute_mut<'a, 'txn, A, F>(
         &'a mut self,
         transaction: &'a mut S::TransactionType<'txn>,
         params: A,
@@ -856,7 +903,7 @@ impl<S: Storage> State<S> {
 
         plan.populate_output_schema_recursive(&mut plan_arena);
         let executor = Executor::new(plan, &plan_arena);
-        start_execution(table_cache, transaction, executor, plan_arena)
+        start_execution(table_cache, transaction, executor, plan_arena).await
     }
 }
 
@@ -928,8 +975,9 @@ impl DDLApply {
     }
 }
 
+#[dual]
 impl<S: Storage> Database<S> {
-    pub(crate) fn execute_mut<A, F>(
+    pub(crate) async fn execute_mut<A, F>(
         &mut self,
         context: &str,
         params: A,
@@ -942,76 +990,74 @@ impl<S: Storage> Database<S> {
             &mut PlanArena<'a>,
         ) -> Result<LogicalPlan, DatabaseError>,
     {
-        self.execute_mut_with(context, params, build, |_| Ok(()))
+        self.execute_mut_with(context, params, build, ()).await
     }
 
-    pub(crate) fn execute_mut_with<A, F, C, R>(
+    pub(crate) async fn execute_mut_with<A, F, C>(
         &mut self,
         context: &str,
         params: A,
         build: F,
         consume: C,
-    ) -> Result<R, DatabaseError>
+    ) -> Result<C::Output, DatabaseError>
     where
         A: AsRef<[(usize, LogicalType)]>,
         F: for<'a, 'txn, 'bind> FnOnce(
             &mut Binder<'bind, '_, S::TransactionType<'txn>, A>,
             &mut PlanArena<'a>,
         ) -> Result<LogicalPlan, DatabaseError>,
-        C: for<'a> FnOnce(
-            &mut TransactionIter<'a, 'a, S::TransactionType<'a>, PlanArena<'a>>,
-        ) -> Result<R, DatabaseError>,
+        C: ConsumeMut<S>,
     {
-        let transaction = Box::into_raw(Box::new(
+        let transaction = OwnedPtr::new(
             self.storage
                 .transaction_with_isolation(self.transaction_isolation, false)?,
-        ));
-        let state = std::ptr::from_mut(&mut self.state);
-        let (plan_arena, executor) =
-            match unsafe { (&mut *state).execute_mut(&mut *transaction, params, build) } {
-                Ok(result) => result,
-                Err(err) => {
-                    unsafe { drop(Box::from_raw(transaction)) };
-                    return Err(err.with_sql_context(context));
-                }
-            };
-        let (result, mut plan_arena, apply) = match (|| {
-            let mut iter = TransactionIter::new(plan_arena, executor);
-            let result = consume(&mut iter)?;
-            let (arena, apply) = iter.done_with_ddl_apply()?;
-            Ok::<_, DatabaseError>((result, arena, apply))
-        })() {
+        );
+        let state = TxnPtr::new(std::ptr::from_mut(&mut self.state));
+        let (plan_arena, executor) = match unsafe {
+            (&mut *state.get())
+                .execute_mut(&mut *transaction.get(), params, build)
+                .await
+        } {
             Ok(result) => result,
-            Err(err) => {
-                unsafe { drop(Box::from_raw(transaction)) };
-                return Err(err.with_sql_context(context));
-            }
+            Err(err) => return Err(err.with_sql_context(context)),
+        };
+        let (result, mut plan_arena, apply) = match async {
+            let mut iter = TransactionIter::new(plan_arena, executor);
+            let result = consume.consume(&mut iter).await?;
+            let (arena, apply) = iter.done_with_ddl_apply().await?;
+            Ok::<_, DatabaseError>((result, arena, apply))
+        }
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => return Err(err.with_sql_context(context)),
         };
 
-        if let Err(err) = unsafe { Box::from_raw(transaction).commit() } {
+        if let Err(err) = unsafe { transaction.into_inner() }.commit().await {
             return Err(err.with_sql_context(context));
         }
 
         let mut catalog_changed = false;
         for apply in apply {
-            catalog_changed |= unsafe { apply.apply_to(&mut *state, &mut plan_arena) }
+            catalog_changed |= unsafe { apply.apply_to(&mut *state.get(), &mut plan_arena) }
                 .map_err(|err| err.with_sql_context(context))?;
         }
         if catalog_changed {
-            unsafe { (&mut *state).recycle_table_arena() }?;
+            unsafe { (&mut *state.get()).recycle_table_arena() }?;
         }
         Ok(result)
     }
 
-    pub fn analyze(&mut self, table_name: impl AsRef<str>) -> Result<(), DatabaseError> {
+    pub async fn analyze(&mut self, table_name: impl AsRef<str>) -> Result<(), DatabaseError> {
         let context = "ANALYZE";
         let table_name = table_name.as_ref();
         self.execute_mut(context, &[], move |binder, arena| {
             binder.bind_analyze(table_name, arena)
         })
+        .await
     }
 
-    pub fn load(&mut self, kind: CatalogKind) -> Result<(), DatabaseError> {
+    pub async fn load(&mut self, kind: CatalogKind) -> Result<(), DatabaseError> {
         match kind {
             CatalogKind::ScalarFunction(function) => {
                 self.state.load_scalar_function(function);
@@ -1029,18 +1075,22 @@ impl<S: Storage> Database<S> {
                 )?;
                 let mut table_codec = TableCodec::default();
                 let table = transaction
-                    .load_table(&mut table_codec, self.state.table_arena.borrow_mut(), &name)?
+                    .load_table(&mut table_codec, self.state.table_arena.borrow_mut(), &name)
+                    .await?
                     .ok_or(DatabaseError::TableNotFound)?;
                 let mut indexes = Vec::new();
                 let mut columns = Vec::new();
                 for index in table.indexes() {
                     let index_id = self.state.table_arena.borrow().index(*index).id;
-                    if let Some(meta) = transaction.index_statistics(
-                        &mut table_codec,
-                        table.id(),
-                        index_id,
-                        self.state.table_arena.borrow_mut(),
-                    )? {
+                    if let Some(meta) = transaction
+                        .index_statistics(
+                            &mut table_codec,
+                            table.id(),
+                            index_id,
+                            self.state.table_arena.borrow_mut(),
+                        )
+                        .await?
+                    {
                         indexes.push((index_id, meta));
                     }
                 }
@@ -1052,12 +1102,15 @@ impl<S: Storage> Database<S> {
                             .id()
                             .ok_or_else(|| DatabaseError::invalid_column(column.name()))?
                     };
-                    if let Some(meta) = transaction.column_statistics(
-                        &mut table_codec,
-                        table.id(),
-                        column_id,
-                        self.state.table_arena.borrow_mut(),
-                    )? {
+                    if let Some(meta) = transaction
+                        .column_statistics(
+                            &mut table_codec,
+                            table.id(),
+                            column_id,
+                            self.state.table_arena.borrow_mut(),
+                        )
+                        .await?
+                    {
                         columns.push((column_id, meta));
                     }
                 }
@@ -1088,7 +1141,8 @@ impl<S: Storage> Database<S> {
                         &self.state.scala_functions,
                         &self.state.table_functions,
                         name.clone(),
-                    )?
+                    )
+                    .await?
                     .ok_or(DatabaseError::ViewNotFound)?;
                 self.state
                     .table_arena
@@ -1135,37 +1189,55 @@ impl<S: Storage> Database<S> {
     }
 }
 
-impl<'a, S: Storage> BindSource<'a> for &'a Database<S> {
+#[dual]
+pub trait ConsumeMut<S: Storage> {
+    type Output;
+
+    async fn consume<'a>(
+        self,
+        iter: &mut TransactionIter<'a, 'a, S::TransactionType<'a>, PlanArena<'a>>,
+    ) -> Result<Self::Output, DatabaseError>;
+}
+
+#[dual]
+impl<S: Storage> ConsumeMut<S> for () {
+    type Output = ();
+
+    async fn consume<'a>(
+        self,
+        _: &mut TransactionIter<'a, 'a, S::TransactionType<'a>, PlanArena<'a>>,
+    ) -> Result<(), DatabaseError> {
+        Ok(())
+    }
+}
+
+#[dual]
+impl<'a, S: Storage> BindSource for &'a Database<S> {
     type Iter = DatabaseIter<'a, S>;
     type Transaction = S::TransactionType<'a>;
 
     type Storage = S;
 
-    fn execute<F>(self, read_only: bool, build: F) -> Result<Self::Iter, DatabaseError>
+    async fn execute<F>(self, read_only: bool, build: F) -> Result<Self::Iter, DatabaseError>
     where
-        F: FnOnce(
-            &'a State<S>,
-            &Self::Transaction,
-        ) -> Result<(Executor<'a>, PlanArena<'a>), DatabaseError>,
+        F: for<'s> FnOnce(
+                &'s State<S>,
+                &Self::Transaction,
+            ) -> Result<(Executor<'s>, PlanArena<'s>), DatabaseError>
+            + MaybeSend,
     {
-        let transaction = Box::into_raw(Box::new(
+        let transaction = OwnedPtr::new(
             self.storage
                 .transaction_with_isolation(self.transaction_isolation, read_only)?,
-        ));
-        let result = (|| {
-            let transaction = unsafe { &mut *transaction };
-            let (executor, arena) = build(&self.state, transaction)?;
-            self.state.execute(transaction, executor, arena)
-        })();
-        let (arena, executor) = match result {
-            Ok(result) => result,
-            Err(error) => {
-                unsafe { drop(Box::from_raw(transaction)) };
-                return Err(error);
-            }
-        };
-        let inner = Box::into_raw(Box::new(TransactionIter::new(arena, executor)));
-        Ok(DatabaseIter { transaction, inner })
+        );
+        // SAFETY: the transaction stays boxed, and so in place, until the iterator is gone.
+        let tx = unsafe { &mut *transaction.get() };
+        let (executor, arena) = build(&self.state, tx)?;
+        let (arena, executor) = self.state.execute(tx, executor, arena).await?;
+        Ok(DatabaseIter {
+            inner: Some(OwnedPtr::new(TransactionIter::new(arena, executor))),
+            transaction: Some(transaction),
+        })
     }
 
     #[cfg(feature = "orm")]
@@ -1314,12 +1386,13 @@ impl<'txn> TxnValue<'txn> {
 
 /// A result iterator that borrows its transaction for `'txn`, such as [`TransactionIter`], so its
 /// rows lend values for as long.
+#[dual]
 pub trait TxnResultIter<'txn>: ResultIter {
     /// Like [`ResultIter::next_tuple`], but the row lends values for `'txn`. The iterators' own
     /// `next_tuple` does the same; this is for code generic over them.
-    fn next_txn_tuple<R>(
+    async fn next_txn_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'txn>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'txn>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError>;
 
     #[cfg(feature = "orm")]
@@ -1333,18 +1406,19 @@ pub trait TxnResultIter<'txn>: ResultIter {
 }
 
 /// Common interface for result iterators returned by database execution APIs.
+#[dual]
 pub trait ResultIter {
     /// Borrows the output schema for the current result set.
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R;
 
     /// Advances to the next row and runs `f` while the executor row slot is borrowed.
-    fn next_tuple<R>(
+    async fn next_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError>;
 
     /// Finishes consuming the iterator and flushes any remaining work.
-    fn done(self) -> Result<(), DatabaseError>;
+    async fn done(self) -> Result<(), DatabaseError>;
 
     #[cfg(feature = "orm")]
     /// Converts this iterator into a typed ORM iterator.
@@ -1368,6 +1442,7 @@ pub struct OrmIter<I, T> {
     _marker: PhantomData<T>,
 }
 
+#[dual]
 #[cfg(feature = "orm")]
 impl<I, T> OrmIter<I, T>
 where
@@ -1387,12 +1462,25 @@ where
     }
 
     /// Finishes the underlying raw iterator.
-    pub fn done(self) -> Result<(), DatabaseError> {
-        self.inner.done()
+    pub async fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done().await
+    }
+
+    /// Reads the next model.
+    #[async_only]
+    #[allow(clippy::should_implement_trait)]
+    pub async fn next(&mut self) -> Option<Result<T, DatabaseError>> {
+        self.inner
+            .next_tuple(|schema, tuple| T::from_query_row(schema, tuple))
+            .await
+            .transpose()
+            .map(|row| row.and_then(std::convert::identity))
     }
 }
 
+#[dual]
 #[cfg(feature = "orm")]
+#[sync_only]
 impl<I, T> Iterator for OrmIter<I, T>
 where
     I: ResultIter,
@@ -1414,6 +1502,7 @@ pub struct TxnOrmIter<'txn, I, T> {
     _marker: PhantomData<(&'txn (), T)>,
 }
 
+#[dual]
 #[cfg(feature = "orm")]
 impl<'txn, I, T> TxnOrmIter<'txn, I, T>
 where
@@ -1427,12 +1516,29 @@ where
         }
     }
 
-    pub fn done(self) -> Result<(), DatabaseError> {
-        self.inner.done()
+    pub async fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done().await
+    }
+
+    /// Reads the next model.
+    #[async_only]
+    #[allow(clippy::should_implement_trait)]
+    pub async fn next(&mut self) -> Option<Result<T, DatabaseError>> {
+        // Boxed as `dyn Future + Send` here, where `I: TxnResultIter<'txn>` holds: inside the
+        // future of `next` the compiler loses that bound when it checks `Send`.
+        let row: std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send + '_>> = Box::pin(
+            self.inner
+                .next_txn_tuple(|schema, row| T::from_txn_row(schema, row)),
+        );
+        row.await
+            .transpose()
+            .map(|row| row.and_then(std::convert::identity))
     }
 }
 
+#[dual]
 #[cfg(feature = "orm")]
+#[sync_only]
 impl<'txn, I, T> Iterator for TxnOrmIter<'txn, I, T>
 where
     I: TxnResultIter<'txn>,
@@ -1450,61 +1556,67 @@ where
 
 /// Raw result iterator returned by database execution APIs.
 pub struct DatabaseIter<'a, S: Storage + 'a> {
-    pub(crate) transaction: *mut S::TransactionType<'a>,
-    pub(crate) inner: *mut TransactionIter<'a, 'a, S::TransactionType<'a>>,
+    // Dropped before `transaction`, which it borrows; `done` takes both out.
+    pub(crate) inner: Option<OwnedPtr<TransactionIter<'a, 'a, S::TransactionType<'a>>>>,
+    pub(crate) transaction: Option<OwnedPtr<S::TransactionType<'a>>>,
 }
 
-impl<S: Storage> Drop for DatabaseIter<'_, S> {
-    fn drop(&mut self) {
-        if !self.inner.is_null() {
-            unsafe { drop(Box::from_raw(self.inner)) }
-        }
-        if !self.transaction.is_null() {
-            unsafe { drop(Box::from_raw(self.transaction)) }
-        }
-    }
-}
-
+#[dual]
 impl<'a, S: Storage> DatabaseIter<'a, S> {
+    fn inner(&self) -> &TransactionIter<'a, 'a, S::TransactionType<'a>> {
+        let inner = self.inner.as_ref().expect("iterator still running");
+        // SAFETY: `inner` is owned by `self`, and shared here as `self` is.
+        unsafe { &*inner.get() }
+    }
+
+    fn inner_mut(&mut self) -> &mut TransactionIter<'a, 'a, S::TransactionType<'a>> {
+        let inner = self.inner.as_ref().expect("iterator still running");
+        // SAFETY: `inner` is owned by `self`, which is borrowed mutably.
+        unsafe { &mut *inner.get() }
+    }
+
     #[inline]
     pub fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
-        unsafe { (*self.inner).schema(f) }
+        self.inner().schema(f)
     }
 
     #[inline]
-    pub fn next_tuple<R>(
+    pub async fn next_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError> {
-        unsafe { (*self.inner).next_tuple(f) }
+        self.inner_mut().next_tuple(f).await
     }
 
     #[inline]
-    pub fn done(mut self) -> Result<(), DatabaseError> {
-        unsafe {
-            Box::from_raw(mem::replace(&mut self.inner, std::ptr::null_mut())).done()?;
+    pub async fn done(mut self) -> Result<(), DatabaseError> {
+        if let Some(inner) = self.inner.take() {
+            // SAFETY: taken out of `self`, so this is the only owner left.
+            unsafe { inner.into_inner() }.done().await?;
         }
-        unsafe {
-            Box::from_raw(mem::replace(&mut self.transaction, std::ptr::null_mut())).commit()?;
+        if let Some(transaction) = self.transaction.take() {
+            // SAFETY: the iterator that borrowed the transaction is gone.
+            unsafe { transaction.into_inner() }.commit().await?;
         }
         Ok(())
     }
 }
 
+#[dual]
 impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         DatabaseIter::schema(self, f)
     }
 
-    fn next_tuple<R>(
+    async fn next_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError> {
-        DatabaseIter::next_tuple(self, f)
+        DatabaseIter::next_tuple(self, f).await
     }
 
-    fn done(self) -> Result<(), DatabaseError> {
-        DatabaseIter::done(self)
+    async fn done(self) -> Result<(), DatabaseError> {
+        DatabaseIter::done(self).await
     }
 }
 
@@ -1515,27 +1627,30 @@ pub struct Transaction<'a, S: Storage + 'a> {
     read_only: bool,
 }
 
+#[dual]
 impl<'txn, S: Storage> Transaction<'txn, S> {
     /// Commits the current transaction.
-    pub fn commit(self) -> Result<(), DatabaseError> {
-        self.inner.commit()?;
+    pub async fn commit(self) -> Result<(), DatabaseError> {
+        self.inner.commit().await?;
 
         Ok(())
     }
 }
 
-impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut Transaction<'txn, S> {
+#[dual]
+impl<'a, 'txn, S: Storage> BindSource for &'a mut Transaction<'txn, S> {
     type Iter = TransactionIter<'a, 'a, S::TransactionType<'txn>>;
     type Transaction = S::TransactionType<'txn>;
 
     type Storage = S;
 
-    fn execute<F>(self, _read_only: bool, build: F) -> Result<Self::Iter, DatabaseError>
+    async fn execute<F>(self, _read_only: bool, build: F) -> Result<Self::Iter, DatabaseError>
     where
-        F: FnOnce(
-            &'a State<S>,
-            &Self::Transaction,
-        ) -> Result<(Executor<'a>, PlanArena<'a>), DatabaseError>,
+        F: for<'s> FnOnce(
+                &'s State<S>,
+                &Self::Transaction,
+            ) -> Result<(Executor<'s>, PlanArena<'s>), DatabaseError>
+            + MaybeSend,
     {
         let (executor, arena) = build(self.state, &self.inner)?;
         if self.read_only && !executor.plan().operator.command_type().is_read_only() {
@@ -1543,7 +1658,7 @@ impl<'a, 'txn, S: Storage> BindSource<'a> for &'a mut Transaction<'txn, S> {
                 "cannot write in a read-only transaction".into(),
             ));
         }
-        let (arena, executor) = self.state.execute(&mut self.inner, executor, arena)?;
+        let (arena, executor) = self.state.execute(&mut self.inner, executor, arena).await?;
         Ok(TransactionIter::new(arena, executor))
     }
 
@@ -1577,13 +1692,14 @@ impl<T: StorageTransaction> TransactionGuard<'_, '_, T> {
     }
 }
 
+#[dual]
 impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
     /// Pulls the next row of `executor`, finishing the execution once the rows run out
     /// or the execution fails.
     ///
     /// The row lends values for `'txn`, which the caller must not let outlive the transaction.
     #[inline]
-    fn next_tuple<'txn, A: MetaArena + 'p, R>(
+    async fn next_tuple<'txn, A: MetaArena + 'p, R>(
         &mut self,
         executor: &mut Executor<'p>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -1592,7 +1708,7 @@ impl<'p, T: StorageTransaction + 'p> TransactionGuard<'_, 'p, T> {
         if !self.active {
             return Ok(None);
         }
-        match executor.next_tuple(&mut self.arena, plan_arena) {
+        match executor.next_tuple(&mut self.arena, plan_arena).await {
             Ok(true) => {
                 let schema = SchemaView::new(&executor.schema, plan_arena);
                 Ok(Some(f(
@@ -1629,6 +1745,7 @@ pub struct TransactionIter<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p
     plan_arena: ExecMetaArena<A>,
 }
 
+#[dual]
 impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TransactionIter<'a, 'p, T, A> {
     pub(crate) fn new(
         plan_arena: ExecMetaArena<A>,
@@ -1652,24 +1769,28 @@ impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TransactionIter<'a, 
     /// Advances to the next row and runs `f` on it. The iterator borrows its transaction for
     /// `'a`, so the row lends values for as long (see [`ResultRow::take_txn_value`]).
     #[inline]
-    pub fn next_tuple<R>(
+    pub async fn next_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError> {
         self.guard
             .next_tuple(&mut self.executor, &mut self.plan_arena, f)
+            .await
     }
 
     #[inline]
-    pub fn done(mut self) -> Result<(), DatabaseError> {
-        while self.next_tuple(|_, _| ())?.is_some() {}
+    pub async fn done(mut self) -> Result<(), DatabaseError> {
+        while self.next_tuple(|_, _| ()).await?.is_some() {}
         Ok(())
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> TransactionIter<'a, 'a, T, PlanArena<'a>> {
-    fn done_with_ddl_apply(mut self) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
-        while self.next_tuple(|_, _| ())?.is_some() {}
+    async fn done_with_ddl_apply(
+        mut self,
+    ) -> Result<(PlanArena<'a>, Vec<DDLApply>), DatabaseError> {
+        while self.next_tuple(|_, _| ()).await?.is_some() {}
         let Self {
             mut guard,
             plan_arena,
@@ -1681,6 +1802,7 @@ impl<'a, T: StorageTransaction + 'a> TransactionIter<'a, 'a, T, PlanArena<'a>> {
     }
 }
 
+#[dual]
 impl<'p, T: StorageTransaction + 'p, A: MetaArena + 'p> ResultIter
     for TransactionIter<'_, 'p, T, A>
 {
@@ -1688,31 +1810,33 @@ impl<'p, T: StorageTransaction + 'p, A: MetaArena + 'p> ResultIter
         TransactionIter::schema(self, f)
     }
 
-    fn next_tuple<R>(
+    async fn next_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError> {
-        TransactionIter::next_tuple(self, f)
+        TransactionIter::next_tuple(self, f).await
     }
 
-    fn done(self) -> Result<(), DatabaseError> {
-        TransactionIter::done(self)
+    async fn done(self) -> Result<(), DatabaseError> {
+        TransactionIter::done(self).await
     }
 }
 
+#[dual]
 impl<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p> TxnResultIter<'a>
     for TransactionIter<'a, 'p, T, A>
 {
-    fn next_txn_tuple<R>(
+    async fn next_txn_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError> {
-        TransactionIter::next_tuple(self, f)
+        TransactionIter::next_tuple(self, f).await
     }
 }
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 pub(crate) mod test {
     use crate::binder::{Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -1728,14 +1852,17 @@ pub(crate) mod test {
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena, TableArenaCell};
     use crate::storage::memory::MemoryStorage;
+    #[cfg(feature = "rocksdb")]
+    use crate::storage::TransactionIsolationLevel;
     use crate::storage::{
         table_codec::TableCodec, NameMapping, StatisticsMetaCache, Storage, StorageTransaction,
-        TableCache, TransactionIsolationLevel,
+        TableCache,
     };
     use crate::types::tuple::{Tuple, TupleImpl};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use chrono::{Datelike, Local};
+    #[cfg(feature = "rocksdb")]
     use std::io::ErrorKind;
     #[cfg(feature = "unsafe_txdb_checkpoint")]
     use std::sync::atomic::AtomicUsize;
@@ -1788,7 +1915,8 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn late_project_collapse_preserves_oriented_columns_and_aliases() -> Result<(), DatabaseError> {
+    async fn late_project_collapse_preserves_oriented_columns_and_aliases(
+    ) -> Result<(), DatabaseError> {
         for alias in [false, true] {
             let tables = TableArenaCell::default();
             let mut arena = PlanArena::new(&tables);
@@ -1843,7 +1971,7 @@ pub(crate) mod test {
                 execute_input::<_, Projection>((project, input), context, arena, &transaction);
             for value in [1, 2, 3, 4] {
                 assert_eq!(
-                    executor.next_tuple()?.cloned().unwrap(),
+                    executor.next_tuple().await?.cloned().unwrap(),
                     vec![
                         DataValue::Int32(value),
                         DataValue::Int32(value),
@@ -1851,13 +1979,13 @@ pub(crate) mod test {
                     ]
                 );
             }
-            assert!(executor.next_tuple()?.is_none());
+            assert!(executor.next_tuple().await?.is_none());
         }
         Ok(())
     }
 
     #[test]
-    fn late_project_collapse_inlines_computed_output() -> Result<(), DatabaseError> {
+    async fn late_project_collapse_inlines_computed_output() -> Result<(), DatabaseError> {
         let tables = TableArenaCell::default();
         let mut arena = PlanArena::new(&tables);
         let (left, large) = literal_input("large", &[1, 2, 3, 4], 0, &mut arena)?;
@@ -1904,11 +2032,11 @@ pub(crate) mod test {
             execute_input::<_, Projection>((project, input), context, arena, &transaction);
         for value in [11, 12, 13, 14] {
             assert_eq!(
-                executor.next_tuple()?.cloned().unwrap(),
+                executor.next_tuple().await?.cloned().unwrap(),
                 vec![DataValue::Int32(value), DataValue::Int32(99)]
             );
         }
-        assert!(executor.next_tuple()?.is_none());
+        assert!(executor.next_tuple().await?.is_none());
         Ok(())
     }
 
@@ -1916,6 +2044,7 @@ pub(crate) mod test {
 
     #[test]
     fn database_handles_are_send_sync() {
+        assert_send_sync::<super::Database<MemoryStorage>>();
         #[cfg(feature = "rocksdb")]
         assert_send_sync::<super::Database<crate::storage::rocksdb::RocksStorage>>();
         #[cfg(feature = "lmdb")]
@@ -1923,25 +2052,28 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn scalar_query_view_references_survive_catalog_reload() -> Result<(), DatabaseError> {
+    async fn scalar_query_view_references_survive_catalog_reload() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         {
             let mut db = DataBaseBuilder::path(".").build_with_storage(storage.clone())?;
-            db.ddl("create view scalar_a as select (select 11) as v")?;
-            db.ddl("create view scalar_b as select (select 22) as v")?;
-            db.ddl("create view scalar_nested as select (select (select 33)) as v")?;
+            db.ddl("create view scalar_a as select (select 11) as v")
+                .await?;
+            db.ddl("create view scalar_b as select (select 22) as v")
+                .await?;
+            db.ddl("create view scalar_nested as select (select (select 33)) as v")
+                .await?;
         }
 
         let mut db = DataBaseBuilder::path(".").build_with_storage(storage)?;
         // Loading in a different order must preserve the saved initialization references.
         for name in ["scalar_b", "scalar_a", "scalar_nested"] {
-            db.load(CatalogKind::View(name.into()))?;
+            db.load(CatalogKind::View(name.into())).await?;
         }
         let sql = "select a.v, b.v, c.v, (select 44) from scalar_a a \
                    cross join scalar_b b cross join scalar_nested c";
-        let mut iter = db.run(sql)?;
+        let mut iter = db.run(sql).await?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            iter.next_tuple(|_, row| row.clone()).await?.unwrap(),
             vec![
                 DataValue::Int32(11),
                 DataValue::Int32(22),
@@ -1949,25 +2081,28 @@ pub(crate) mod test {
                 DataValue::Int32(44),
             ]
         );
-        assert!(iter.next_tuple(|_, _| ())?.is_none());
-        iter.done()?;
+        assert!(iter.next_tuple(|_, _| ()).await?.is_none());
+        iter.done().await?;
 
         // New definitions must not reuse references registered by the loaded views.
-        db.ddl("create view scalar_new as select (select 55) as v")?;
-        let mut iter = db.run("select a.v, b.v from scalar_a a cross join scalar_new b")?;
+        db.ddl("create view scalar_new as select (select 55) as v")
+            .await?;
+        let mut iter = db
+            .run("select a.v, b.v from scalar_a a cross join scalar_new b")
+            .await?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            iter.next_tuple(|_, row| row.clone()).await?.unwrap(),
             vec![DataValue::Int32(11), DataValue::Int32(55)]
         );
-        iter.done()?;
+        iter.done().await?;
         Ok(())
     }
 
-    pub(crate) fn build_table<T: StorageTransaction>(
+    pub(crate) async fn build_table<T: StorageTransaction>(
         names: &mut NameMapping,
         table_cache: &mut TableCache,
         transaction: &mut T,
-        plan_arena: &mut PlanArena,
+        plan_arena: &mut PlanArena<'_>,
     ) -> Result<(), DatabaseError> {
         let columns = vec![
             ColumnCatalog::new(
@@ -1987,13 +2122,16 @@ pub(crate) mod test {
             ),
         ];
         let mut table_codec = TableCodec::default();
-        if let Some(table) = transaction.create_table(
-            &mut table_codec,
-            plan_arena,
-            "t1".to_string(),
-            columns,
-            false,
-        )? {
+        if let Some(table) = transaction
+            .create_table(
+                &mut table_codec,
+                plan_arena,
+                "t1".to_string(),
+                columns,
+                false,
+            )
+            .await?
+        {
             let table = table.transplant_to_table_arena(plan_arena)?;
             names.insert_table(table_cache, table);
         }
@@ -2001,26 +2139,31 @@ pub(crate) mod test {
         Ok(())
     }
 
-    fn next_tuple_owned<I: ResultIter>(iter: &mut I) -> Result<Option<TupleImpl>, DatabaseError> {
-        iter.next_tuple(|_, tuple| tuple.clone())
+    async fn next_tuple_owned<I: ResultIter>(
+        iter: &mut I,
+    ) -> Result<Option<TupleImpl>, DatabaseError> {
+        iter.next_tuple(|_, tuple| tuple.clone()).await
     }
 
-    fn next_values<I: ResultIter>(iter: &mut I) -> Result<Option<TupleImpl>, DatabaseError> {
-        iter.next_tuple(|_, tuple| tuple.clone())
+    async fn next_values<I: ResultIter>(iter: &mut I) -> Result<Option<TupleImpl>, DatabaseError> {
+        iter.next_tuple(|_, tuple| tuple.clone()).await
     }
 
-    fn read_single_i32<I>(mut iter: I) -> Result<i32, DatabaseError>
+    async fn read_single_i32<I>(mut iter: I) -> Result<i32, DatabaseError>
     where
         I: ResultIter,
     {
-        let value = match iter.next_tuple(|_, tuple| match (tuple.len(), tuple.get(0)) {
-            (1, Some(DataValue::Int32(value))) => *value,
-            _ => panic!("expected a single Int32 column, got {tuple:?}"),
-        })? {
+        let value = match iter
+            .next_tuple(|_, tuple| match (tuple.len(), tuple.get(0)) {
+                (1, Some(DataValue::Int32(value))) => *value,
+                _ => panic!("expected a single Int32 column, got {tuple:?}"),
+            })
+            .await?
+        {
             Some(value) => value,
             None => panic!("expected one result row"),
         };
-        iter.done()?;
+        iter.done().await?;
         Ok(value)
     }
 
@@ -2042,28 +2185,31 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_run_sql() -> Result<(), DatabaseError> {
+    async fn test_run_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-        database.ddl("create table t1(c1 int primary key, c2 boolean, c3 int)")?;
+        let mut database = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        database
+            .ddl("create table t1(c1 int primary key, c2 boolean, c3 int)")
+            .await?;
 
-        let mut iter = database.run("select * from t1")?;
+        let mut iter = database.run("select * from t1").await?;
         while iter
             .next_tuple(|_, tuple| {
                 println!("{tuple:#?}");
-            })?
+            })
+            .await?
             .is_some()
         {}
-        iter.done()?;
+        iter.done().await?;
         Ok(())
     }
 
     /// use [CurrentDate](crate::function::current_date::CurrentDate) on this case
     #[test]
-    fn test_udf() -> Result<(), DatabaseError> {
+    async fn test_udf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-        let mut iter = kite_sql.run("select current_date()")?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        let mut iter = kite_sql.run("select current_date()").await?;
 
         iter.schema(|schema| {
             assert_eq!(schema.len(), 1);
@@ -2072,25 +2218,25 @@ pub(crate) mod test {
             assert_eq!(column.datatype(), &LogicalType::Date);
         });
         assert_eq!(
-            next_tuple_owned(&mut iter)?.unwrap(),
+            next_tuple_owned(&mut iter).await?.unwrap(),
             Tuple::new(
                 None,
                 vec![DataValue::Date32(Local::now().num_days_from_ce())]
             )
         );
-        assert!(iter.next_tuple(|_, _| ())?.is_none());
+        assert!(iter.next_tuple(|_, _| ()).await?.is_none());
 
         Ok(())
     }
 
     /// use [Numbers](crate::function::numbers::Numbers) on this case
     #[test]
-    fn test_udtf() -> Result<(), DatabaseError> {
+    async fn test_udtf() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
         let mut iter = kite_sql.run(
             "SELECT * FROM (select * from table(numbers(10)) a ORDER BY number LIMIT 5) OFFSET 3",
-        )?;
+        ).await?;
 
         iter.schema(|schema| {
             assert_eq!(schema.len(), 1);
@@ -2099,23 +2245,27 @@ pub(crate) mod test {
             assert_eq!(column.datatype(), &LogicalType::Integer);
         });
         assert_eq!(
-            next_tuple_owned(&mut iter)?.unwrap(),
+            next_tuple_owned(&mut iter).await?.unwrap(),
             Tuple::new(None, vec![DataValue::Int32(3)])
         );
         assert_eq!(
-            next_tuple_owned(&mut iter)?.unwrap(),
+            next_tuple_owned(&mut iter).await?.unwrap(),
             Tuple::new(None, vec![DataValue::Int32(4)])
         );
         Ok(())
     }
 
     #[test]
-    fn test_join_on_alias_right_key_is_localized() -> Result<(), DatabaseError> {
+    async fn test_join_on_alias_right_key_is_localized() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
-        kite_sql.ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?;
-        kite_sql.ddl("CREATE TABLE empty (e_id INT PRIMARY KEY, x INT)")?;
+        kite_sql
+            .ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")
+            .await?;
+        kite_sql
+            .ddl("CREATE TABLE empty (e_id INT PRIMARY KEY, x INT)")
+            .await?;
 
         let stmt = kite_sql.state.parse_statement(
             "SELECT * FROM onecolumn AS a(aid, x) JOIN empty AS b(bid, y) ON a.x = b.y",
@@ -2194,12 +2344,16 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_join_on_with_right_filter_keeps_localized_key() -> Result<(), DatabaseError> {
+    async fn test_join_on_with_right_filter_keeps_localized_key() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
-        kite_sql.ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?;
-        kite_sql.ddl("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")?;
+        kite_sql
+            .ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")
+            .await?;
+        kite_sql
+            .ddl("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")
+            .await?;
 
         let stmt = kite_sql.state.parse_statement(
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
@@ -2297,20 +2451,27 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_join_on_with_right_filter_keeps_localized_key_with_data() -> Result<(), DatabaseError> {
+    async fn test_join_on_with_right_filter_keeps_localized_key_with_data(
+    ) -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
-        kite_sql.ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")?;
-        kite_sql.ddl("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")?;
         kite_sql
-            .run("INSERT INTO onecolumn(id, x) VALUES (0, 44), (1, NULL), (2, 42)")?
-            .done()?;
+            .ddl("CREATE TABLE onecolumn (id INT PRIMARY KEY, x INT NULL)")
+            .await?;
+        kite_sql
+            .ddl("CREATE TABLE twocolumn (t_id INT PRIMARY KEY, x INT NULL, y INT NULL)")
+            .await?;
+        kite_sql
+            .run("INSERT INTO onecolumn(id, x) VALUES (0, 44), (1, NULL), (2, 42)")
+            .await?
+            .done()
+            .await?;
         kite_sql
             .run(
                 "INSERT INTO twocolumn(t_id, x, y) VALUES (0,44,51), (1,NULL,52), (2,42,53), (3,45,45)",
-            )?
-            .done()?;
+            ).await?
+            .done().await?;
 
         let stmt = kite_sql.state.parse_statement(
             "SELECT o.x, t.y FROM onecolumn o INNER JOIN twocolumn t ON (o.x=t.x AND t.y=53)",
@@ -2385,17 +2546,31 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_prepare_statment() -> Result<(), DatabaseError> {
+    async fn test_prepare_statment() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut kite_sql = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(2)
-            .build_rocksdb()?;
+            .build_in_memory()?;
 
-        kite_sql.ddl("create table t1 (a int primary key, b int)")?;
-        kite_sql.run("insert into t1 values(0, 0)")?.done()?;
-        kite_sql.run("insert into t1 values(1, 1)")?.done()?;
-        kite_sql.run("insert into t1 values(2, 2)")?.done()?;
-        kite_sql.analyze("t1")?;
+        kite_sql
+            .ddl("create table t1 (a int primary key, b int)")
+            .await?;
+        kite_sql
+            .run("insert into t1 values(0, 0)")
+            .await?
+            .done()
+            .await?;
+        kite_sql
+            .run("insert into t1 values(1, 1)")
+            .await?
+            .done()
+            .await?;
+        kite_sql
+            .run("insert into t1 values(2, 2)")
+            .await?
+            .done()
+            .await?;
+        kite_sql.analyze("t1").await?;
         let mut tx = kite_sql.new_transaction(false)?;
 
         // Filter
@@ -2405,9 +2580,11 @@ pub(crate) mod test {
                 &[(1, LogicalType::Integer)],
             )?;
 
-            let mut iter = statement.execute(&mut tx, &[(1, DataValue::Int32(0).into())])?;
+            let mut iter = statement
+                .execute(&mut tx, &[(1, DataValue::Int32(0).into())])
+                .await?;
 
-            let row = next_tuple_owned(&mut iter)?.unwrap();
+            let row = next_tuple_owned(&mut iter).await?.unwrap();
             let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
@@ -2425,16 +2602,18 @@ pub(crate) mod test {
                 ],
             )?;
 
-            let mut iter = statement.execute(
-                &mut tx,
-                &[
-                    (1, DataValue::Int32(0).into()),
-                    (2, DataValue::Int32(0).into()),
-                    (3, DataValue::Int32(1).into()),
-                    (4, DataValue::Int32(0).into()),
-                ],
-            )?;
-            let row = next_tuple_owned(&mut iter)?.unwrap();
+            let mut iter = statement
+                .execute(
+                    &mut tx,
+                    &[
+                        (1, DataValue::Int32(0).into()),
+                        (2, DataValue::Int32(0).into()),
+                        (3, DataValue::Int32(1).into()),
+                        (4, DataValue::Int32(0).into()),
+                    ],
+                )
+                .await?;
+            let row = next_tuple_owned(&mut iter).await?.unwrap();
             let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
@@ -2444,16 +2623,18 @@ pub(crate) mod test {
         {
             let mut statement = kite_sql.program_sql("explain select *, $1 from (select * from t1 where b > $2) as l left join (select * from t1 where a > $3) on l.a > $4", &[(1, LogicalType::Integer), (2, LogicalType::Integer), (3, LogicalType::Integer), (4, LogicalType::Integer)])?;
 
-            let mut iter = statement.execute(
-                &mut tx,
-                &[
-                    (1, DataValue::Int32(9).into()),
-                    (2, DataValue::Int32(0).into()),
-                    (3, DataValue::Int32(1).into()),
-                    (4, DataValue::Int32(0).into()),
-                ],
-            )?;
-            let row = next_tuple_owned(&mut iter)?.unwrap();
+            let mut iter = statement
+                .execute(
+                    &mut tx,
+                    &[
+                        (1, DataValue::Int32(9).into()),
+                        (2, DataValue::Int32(0).into()),
+                        (3, DataValue::Int32(1).into()),
+                        (4, DataValue::Int32(0).into()),
+                    ],
+                )
+                .await?;
+            let row = next_tuple_owned(&mut iter).await?.unwrap();
             let plan = row[0].utf8().unwrap();
             assert_eq!(
                 plan,
@@ -2465,35 +2646,40 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_run_multi_statement() -> Result<(), DatabaseError> {
+    async fn test_run_multi_statement() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
-        kite_sql.ddl("create table t_multi (a int primary key, b int)")?;
+        kite_sql
+            .ddl("create table t_multi (a int primary key, b int)")
+            .await?;
 
         let mut iter = kite_sql.run(
             "insert into t_multi values(0, 0); insert into t_multi values(1, 1); select * from t_multi order by a",
-        )?;
+        ).await?;
         assert_eq!(
-            next_values(&mut iter)?.unwrap(),
+            next_values(&mut iter).await?.unwrap(),
             vec![DataValue::Int32(0), DataValue::Int32(0)]
         );
         assert_eq!(
-            next_values(&mut iter)?.unwrap(),
+            next_values(&mut iter).await?.unwrap(),
             vec![DataValue::Int32(1), DataValue::Int32(1)]
         );
-        assert!(iter.next_tuple(|_, _| ())?.is_none());
-        iter.done()?;
+        assert!(iter.next_tuple(|_, _| ()).await?.is_none());
+        iter.done().await?;
 
         Ok(())
     }
 
     #[test]
-    fn test_run_multi_statement_disallow_ddl() -> Result<(), DatabaseError> {
+    async fn test_run_multi_statement_disallow_ddl() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
-        let err = match kite_sql.run("create table t_multi_ddl (a int primary key); select 1") {
+        let err = match kite_sql
+            .run("create table t_multi_ddl (a int primary key); select 1")
+            .await
+        {
             Ok(_) => panic!("multi-statement execution with DDL should be rejected"),
             Err(err) => err,
         };
@@ -2508,13 +2694,18 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_bind_error_with_span() -> Result<(), DatabaseError> {
+    async fn test_bind_error_with_span() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
-        kite_sql.ddl("create table t_bind_span(id int primary key)")?;
+        kite_sql
+            .ddl("create table t_bind_span(id int primary key)")
+            .await?;
 
-        let err = match kite_sql.run("select id, missing_col from t_bind_span") {
+        let err = match kite_sql
+            .run("select id, missing_col from t_bind_span")
+            .await
+        {
             Ok(_) => panic!("expected bind error"),
             Err(err) => err,
         };
@@ -2539,13 +2730,18 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_bind_function_error_with_span() -> Result<(), DatabaseError> {
+    async fn test_bind_function_error_with_span() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
-        kite_sql.ddl("create table t_bind_fn_span(id int primary key)")?;
+        kite_sql
+            .ddl("create table t_bind_fn_span(id int primary key)")
+            .await?;
 
-        let err = match kite_sql.run("select missing_fn(id) from t_bind_fn_span") {
+        let err = match kite_sql
+            .run("select missing_fn(id) from t_bind_fn_span")
+            .await
+        {
             Ok(_) => panic!("expected function bind error"),
             Err(err) => err,
         };
@@ -2568,6 +2764,7 @@ pub(crate) mod test {
         Ok(())
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn test_transaction_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -2614,38 +2811,41 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn test_transaction_run_multi_statement() -> Result<(), DatabaseError> {
+    async fn test_transaction_run_multi_statement() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
+        let mut kite_sql = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
 
-        kite_sql.ddl("create table t_multi_tx (a int primary key, b int)")?;
+        kite_sql
+            .ddl("create table t_multi_tx (a int primary key, b int)")
+            .await?;
 
         let mut tx = kite_sql.new_transaction(false)?;
         let mut iter = tx.run(
             "insert into t_multi_tx values(0, 0); insert into t_multi_tx values(1, 1); select * from t_multi_tx order by a",
-        )?;
+        ).await?;
         assert_eq!(
-            next_values(&mut iter)?.unwrap(),
+            next_values(&mut iter).await?.unwrap(),
             vec![DataValue::Int32(0), DataValue::Int32(0)]
         );
         assert_eq!(
-            next_values(&mut iter)?.unwrap(),
+            next_values(&mut iter).await?.unwrap(),
             vec![DataValue::Int32(1), DataValue::Int32(1)]
         );
-        assert!(iter.next_tuple(|_, _| ())?.is_none());
-        iter.done()?;
-        tx.commit()?;
+        assert!(iter.next_tuple(|_, _| ()).await?.is_none());
+        iter.done().await?;
+        tx.commit().await?;
 
-        let mut check_iter = kite_sql.run("select count(*) from t_multi_tx")?;
+        let mut check_iter = kite_sql.run("select count(*) from t_multi_tx").await?;
         assert_eq!(
-            next_values(&mut check_iter)?.unwrap(),
+            next_values(&mut check_iter).await?.unwrap(),
             vec![DataValue::Int32(2)]
         );
-        check_iter.done()?;
+        check_iter.done().await?;
 
         Ok(())
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn test_autocommit_read_drops_iterator_before_transaction() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -2665,6 +2865,7 @@ pub(crate) mod test {
         Ok(())
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn test_exhausted_database_iter_releases_mdl_guard() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -2692,6 +2893,7 @@ pub(crate) mod test {
         Ok(())
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn test_rocksdb_defaults_to_repeatable_read() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -2705,6 +2907,7 @@ pub(crate) mod test {
         Ok(())
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn test_repeatable_read_keeps_transaction_snapshot() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -2735,6 +2938,7 @@ pub(crate) mod test {
         Ok(())
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn test_optimistic_transaction_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -2790,7 +2994,7 @@ pub(crate) mod test {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let result = DataBaseBuilder::path(temp_dir.path())
             .histogram_buckets(0)
-            .build_rocksdb();
+            .build_in_memory();
 
         assert!(matches!(
             result,
@@ -2827,54 +3031,67 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn parser_recursion_limit_applies_to_sql_frontends() -> Result<(), DatabaseError> {
+    async fn parser_recursion_limit_applies_to_sql_frontends() -> Result<(), DatabaseError> {
         let expression = format!("{}7{}", "(".repeat(8), ")".repeat(8));
         let sql = format!("select {expression}");
         let default = DataBaseBuilder::path(".").build_in_memory()?;
-        assert_eq!(read_single_i32(default.run(&sql)?)?, 7);
+        assert_eq!(read_single_i32(default.run(&sql).await?).await?, 7);
         assert_eq!(default.prepare_all(&sql)?.len(), 1);
 
         let mut db = DataBaseBuilder::path(".")
             .parser_recursion_limit(256)
             .build_in_memory()?;
         assert_eq!(db.prepare_all(&sql)?.len(), 1);
-        assert_eq!(read_single_i32(db.run(&sql)?)?, 7);
-        db.ddl(format!("create view deep_view as {sql}"))?;
-        assert_eq!(read_single_i32(db.run("select * from deep_view")?)?, 7);
-        db.run_mut(&sql, |iter| {
-            assert_eq!(
-                iter.next_tuple(|_, row| row.clone())?.unwrap(),
-                vec![DataValue::Int32(7)]
-            );
-            Ok(())
-        })?;
+        assert_eq!(read_single_i32(db.run(&sql).await?).await?, 7);
+        db.ddl(format!("create view deep_view as {sql}")).await?;
+        assert_eq!(
+            read_single_i32(db.run("select * from deep_view").await?).await?,
+            7
+        );
+        struct FirstRow;
+        impl<S: Storage> crate::db::ConsumeMut<S> for FirstRow {
+            type Output = TupleImpl;
+
+            async fn consume<'a>(
+                self,
+                iter: &mut crate::db::TransactionIter<
+                    'a,
+                    'a,
+                    S::TransactionType<'a>,
+                    PlanArena<'a>,
+                >,
+            ) -> Result<TupleImpl, DatabaseError> {
+                Ok(iter.next_tuple(|_, row| row.clone()).await?.unwrap())
+            }
+        }
+        assert_eq!(db.run_mut(&sql, FirstRow).await?, vec![DataValue::Int32(7)]);
         let mut tx = db.new_transaction(false)?;
         let mut program = db.program_sql(&sql, &[])?;
-        let mut iter = program.execute(&mut tx, [])?;
+        let mut iter = program.execute(&mut tx, []).await?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            iter.next_tuple(|_, row| row.clone()).await?.unwrap(),
             vec![DataValue::Int32(7)]
         );
-        iter.done()?;
-        let mut iter = tx.run(&sql)?;
+        iter.done().await?;
+        let mut iter = tx.run(&sql).await?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            iter.next_tuple(|_, row| row.clone()).await?.unwrap(),
             vec![DataValue::Int32(7)]
         );
-        iter.done()?;
+        iter.done().await?;
         let mut program = tx.program_sql(&sql, &[])?;
-        let mut iter = program.execute(&mut tx, [])?;
+        let mut iter = program.execute(&mut tx, []).await?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            iter.next_tuple(|_, row| row.clone()).await?.unwrap(),
             vec![DataValue::Int32(7)]
         );
-        iter.done()?;
-        tx.commit()?;
+        iter.done().await?;
+        tx.commit().await?;
 
         let low = DataBaseBuilder::path(".")
             .parser_recursion_limit(4)
             .build_in_memory()?;
-        assert!(low.run("select 1").is_ok());
+        assert!(low.run("select 1").await.is_ok());
         assert!(low
             .prepare_all(&sql)
             .unwrap_err()
@@ -2882,6 +3099,7 @@ pub(crate) mod test {
             .contains("recursion limit exceeded"));
         assert!(low
             .run(&sql)
+            .await
             .err()
             .unwrap()
             .to_string()
@@ -2926,6 +3144,7 @@ pub(crate) mod test {
         Ok(())
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn optimistic_checkpoint_restores_rows_indexes_and_scalar_views() -> Result<(), DatabaseError> {
         let directory = TempDir::new()?;
@@ -2994,6 +3213,7 @@ pub(crate) mod test {
         Ok(())
     }
 
+    #[cfg(feature = "rocksdb")]
     #[test]
     fn test_checkpoint_rejects_non_empty_target_dir() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -3015,6 +3235,7 @@ pub(crate) mod test {
         Ok(())
     }
 
+    #[cfg(feature = "rocksdb")]
     #[cfg(not(feature = "unsafe_txdb_checkpoint"))]
     #[test]
     fn test_checkpoint_requires_unsafe_feature() -> Result<(), DatabaseError> {

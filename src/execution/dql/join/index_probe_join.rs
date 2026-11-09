@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::predicates_matched;
 use crate::execution::{
@@ -47,21 +48,22 @@ impl<'a> ReadExecutor<'a> for IndexProbeJoin<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        self.left_input.reset(arena, plan_arena)
+        self.left_input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        while self.left_input.next_tuple(arena, plan_arena)? {
+        while self.left_input.next_tuple(arena, plan_arena).await? {
             let mut left = arena.take_tuple();
             let key = plan_arena
                 .expression(self.op.probe)
@@ -74,8 +76,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
                 continue;
             }
             arena.push_runtime_probe(RuntimeIndexProbe::Eq(key));
-            self.right_input.reset(arena, plan_arena)?;
-            if self.right_input.next_tuple(arena, plan_arena)?
+            self.right_input.reset(arena, plan_arena).await?;
+            if self.right_input.next_tuple(arena, plan_arena).await?
                 && predicates_matched(&self.op.predicates, &left, arena.result_tuple(), plan_arena)?
             {
                 let mut right = arena.take_tuple();
@@ -93,6 +95,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
@@ -102,7 +105,7 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, PlanArena, TableArenaCell};
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::memory::MemoryStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
@@ -154,16 +157,17 @@ mod tests {
         }))
     }
 
-    fn build_test_storage() -> Result<(TableCache, TempDir, RocksStorage), DatabaseError> {
+    fn build_test_storage() -> Result<(TableCache, TempDir, MemoryStorage), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+        let storage = MemoryStorage::new();
         Ok((TableCache::default(), temp_dir, storage))
     }
 
     // Values ignores runtime probes, so it stands in for the unique lookup and the pushed
     // probes stay on the stack for inspection.
     #[test]
-    fn index_probe_join_moves_single_match_and_reuses_right_slots() -> Result<(), DatabaseError> {
+    async fn index_probe_join_moves_single_match_and_reuses_right_slots(
+    ) -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut plan_arena = PlanArena::new(&table_arena);
         let mut left = build_values(
@@ -210,7 +214,7 @@ mod tests {
         );
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         for payload in ["first", "again"] {
-            assert!(root.next_tuple(&mut arena, &mut plan_arena)?);
+            assert!(root.next_tuple(&mut arena, &mut plan_arena).await?);
             assert_eq!(
                 arena.take_tuple(),
                 vec![
@@ -221,7 +225,7 @@ mod tests {
                 ]
             );
         }
-        assert!(!root.next_tuple(&mut arena, &mut plan_arena)?);
+        assert!(!root.next_tuple(&mut arena, &mut plan_arena).await?);
         // The NULL key is skipped without probing.
         assert_eq!(
             arena.buffer.runtime_probe_stack,
@@ -231,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn index_probe_join_skips_a_rejected_unique_match() -> Result<(), DatabaseError> {
+    async fn index_probe_join_skips_a_rejected_unique_match() -> Result<(), DatabaseError> {
         let table_arena = TableArenaCell::default();
         let mut plan_arena = PlanArena::new(&table_arena);
         let mut left = build_values(
@@ -257,7 +261,7 @@ mod tests {
             plan_arena,
             &transaction,
         );
-        assert!(executor.next_tuple()?.is_none());
+        assert!(executor.next_tuple().await?.is_none());
         Ok(())
     }
 }

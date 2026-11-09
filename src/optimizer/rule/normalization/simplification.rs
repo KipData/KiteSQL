@@ -115,6 +115,7 @@ impl NormalizationRule for SimplifyFilter {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test {
     use crate::binder::test::build_t1_table;
 
@@ -147,8 +148,8 @@ mod test {
     }
 
     #[test]
-    fn test_constant_calculation_omitted() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_constant_calculation_omitted() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         // (2 + (-1)) < -(c1 + 1)
         let plan = table_state.plan_with_arena(
@@ -206,8 +207,8 @@ mod test {
     }
 
     #[test]
-    fn test_constant_cast_elimination() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_constant_cast_elimination() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select cast(1 as int), cast(2 as int) + 1 from t1 where cast(3 as int) = 3",
@@ -279,8 +280,8 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_single_column() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_single_column() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         // c1 + 1 < -1 => c1 < -2
         let plan_1 =
@@ -357,8 +358,8 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_boolean_wrapped_range_comparison() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_boolean_wrapped_range_comparison() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let expected = Some(Range::Scope {
             min: Bound::Unbounded,
@@ -381,8 +382,8 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_repeating_column() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_repeating_column() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan =
             table_state.plan_with_arena("select * from t1 where -(c1 + 1) > c2", &mut arena)?;
@@ -435,8 +436,9 @@ mod test {
     }
 
     #[test]
-    fn test_non_comparison_does_not_apply_pending_rearrangement() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_non_comparison_does_not_apply_pending_rearrangement() -> Result<(), DatabaseError>
+    {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan =
             table_state.plan_with_arena("select * from t1 where (c1 + 1) % 2 = 0", &mut arena)?;
@@ -502,8 +504,8 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_multiple_column() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_multiple_column() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         // c1 + 1 < -1 => c1 < -2
         let plan_1 = table_state.plan_with_arena(
@@ -603,8 +605,8 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_multiple_column_in_or() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_multiple_column_in_or() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         // c1 > c2 or c1 > 1
         let plan_1 =
@@ -619,8 +621,9 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_multiple_dispersed_same_column_in_or() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_multiple_dispersed_same_column_in_or() -> Result<(), DatabaseError>
+    {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan_1 = table_state.plan_with_arena(
             "select * from t1 where c1 = 4 and c1 > c2 or c1 > 1",
@@ -636,8 +639,8 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_column_is_null() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_column_is_null() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan_1 =
             table_state.plan_with_arena("select * from t1 where c1 is null", &mut arena)?;
@@ -651,8 +654,8 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_column_is_not_null() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_column_is_not_null() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan_1 =
             table_state.plan_with_arena("select * from t1 where c1 is not null", &mut arena)?;
@@ -669,8 +672,8 @@ mod test {
     }
 
     #[test]
-    fn constant_in_expansion_uses_original_list_length() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn constant_in_expansion_uses_original_list_length() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         for (list, kept) in [
             ("1,2,3,4,5", false),
             ("1,2,3,4,5,6", true),
@@ -699,8 +702,8 @@ mod test {
     }
 
     #[test]
-    fn unsafe_large_in_keeps_pairwise_expansion() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn unsafe_large_in_keeps_pairwise_expansion() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         for predicate in [
             "c1 in (1,2,3,4,5,2147483648)",
             "c1 in (1,2,3,4,5,c1)",
@@ -727,8 +730,8 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_column_in() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_column_in() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan_1 =
             table_state.plan_with_arena("select * from t1 where c1 in (1, 2, 3)", &mut arena)?;
@@ -746,8 +749,8 @@ mod test {
     }
 
     #[test]
-    fn test_simplify_filter_column_not_in() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_simplify_filter_column_not_in() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan_1 = table_state
             .plan_with_arena("select * from t1 where c1 not in (1, 2, 3)", &mut arena)?;

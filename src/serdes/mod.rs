@@ -117,12 +117,13 @@ impl<'a, T: StorageTransaction> ReferenceDecodeContext<'a, T> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::planner::TableArena;
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::memory::MemoryTransaction;
     use crate::types::value::DataValue;
     use std::collections::{BTreeMap, Bound};
     use std::fmt::Debug;
@@ -140,7 +141,7 @@ mod tests {
         source.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        S::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena)
+        S::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena)
     }
 
     #[test]

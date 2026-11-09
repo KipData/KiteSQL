@@ -848,6 +848,7 @@ impl HistogramMeta {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::{ComputedValue, Range, RangeValue};

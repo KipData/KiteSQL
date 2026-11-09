@@ -11,7 +11,7 @@ repository  = "https://github.com/KipData/KiteSQL"
 darling = "0.20"
 proc-macro2 = "1"
 quote = "1"
-syn = "2"
+syn = { version = "2", features = ["full", "visit-mut"] }
 
 [lib]
 path = "src/lib.rs"

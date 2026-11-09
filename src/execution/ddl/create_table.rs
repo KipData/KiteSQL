@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::planner::operator::create_table::CreateTableOperator;
@@ -34,8 +35,9 @@ impl<'a> WriteExecutor<'a> for CreateTable<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateTable<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -43,7 +45,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateTable<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -55,13 +57,15 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateTable<'a> {
         } = self.op;
 
         let (transaction, table_codec) = arena.transaction_codec_mut();
-        let table = transaction.create_table(
-            table_codec,
-            plan_arena,
-            table_name.clone(),
-            columns.clone(),
-            *if_not_exists,
-        )?;
+        let table = transaction
+            .create_table(
+                table_codec,
+                plan_arena,
+                table_name.clone(),
+                columns.clone(),
+                *if_not_exists,
+            )
+            .await?;
         if let Some(table) = table {
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
         }

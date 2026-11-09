@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::aggregate::{
     prepare_accumulators, update_accumulators, write_aggregate_output, Accumulator,
@@ -49,17 +50,18 @@ impl<'a> ReadExecutor<'a> for SimpleAggExecutor<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.returned = false;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -70,7 +72,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SimpleAggExecutor<'
         }
 
         prepare_accumulators(&mut self.accs, self.agg_calls, plan_arena)?;
-        while self.input.next_tuple(arena, plan_arena)? {
+        while self.input.next_tuple(arena, plan_arena).await? {
             let tuple = arena.result_tuple();
             update_accumulators(&mut self.accs, self.agg_calls, tuple, plan_arena)?;
         }

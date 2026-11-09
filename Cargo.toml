@@ -38,6 +38,10 @@ pprof   = ["pprof/criterion", "pprof/flamegraph"]
 python  = ["parser", "dep:pyo3"]
 shell   = ["parser", "dep:comfy-table", "dep:rustyline"]
 spill   = []
+# Compiles the storage traits, the executor and the database API as async, for storages whose
+# reads are asynchronous. Excludes the sync storages (`rocksdb`, `lmdb`) and `python`, `shell`
+# and `wasm`; pick it in the final application, not in a library.
+async   = []
 wasm    = [
     "dep:js-sys",
     "dep:wasm-bindgen",
@@ -59,6 +63,10 @@ required-features = ["lmdb", "orm", "parser"]
 [[example]]
 name              = "borrowed_parse"
 required-features = ["lmdb", "orm", "parser"]
+
+[[example]]
+name              = "async_hello_world"
+required-features = ["async", "orm"]
 
 [dependencies]
 bumpalo               = { version = "3", default-features = false, features = ["collections"] }
@@ -82,6 +90,7 @@ pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
 criterion             = { version = "0.5", features = ["html_reports"] }
 indicatif             = { version = "0.17" }
 tempfile              = { version = "3.10" }
+tokio                 = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Benchmark
 sqlite                = { version = "0.34" }
 serde                 = { version = "1", features = ["derive"] }

@@ -3049,7 +3049,7 @@ mod test {
             .map(|i| Ok(Tuple::new(None, vec![
                     DataValue::Int32(i),
                     DataValue::Int32(i),
-                ])))) as Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>)
+                ])))) as Box<dyn Iterator<Item = Result<Tuple, DatabaseError>> + Send>)
     }));
 
     #[test]

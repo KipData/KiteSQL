@@ -112,6 +112,7 @@ crate::define_float_cast_evaluators!(Float32, Float32, f32, LogicalType::Float, 
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test {
     use super::*;
     use crate::types::value::Utf8Type;

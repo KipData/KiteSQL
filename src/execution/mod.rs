@@ -28,6 +28,7 @@ use self::ddl::change_column::ChangeColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;
 use self::dql::mark_apply::MarkApply;
 use self::dql::scalar_query_init::ScalarQueryInit;
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::ddl::create_index::CreateIndex;
 use crate::execution::ddl::create_table::CreateTable;
@@ -165,6 +166,7 @@ pub struct Executor<'a> {
     keeper: PlanKeeper<'a>,
 }
 
+#[dual]
 impl<'a> Executor<'a> {
     pub(crate) fn new(plan: LogicalPlan, plan_arena: &(dyn MetaArena + 'a)) -> Self {
         let schema = plan.read_schema().clone();
@@ -195,16 +197,16 @@ impl<'a> Executor<'a> {
         self.iters
     }
 
-    pub(crate) fn next_tuple<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    pub(crate) async fn next_tuple<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<bool, DatabaseError> {
         let mut context = ExecContext::new(&mut self.buffer, arena);
-        self.root.next_tuple(&mut context, plan_arena)
+        self.root.next_tuple(&mut context, plan_arena).await
     }
 
-    pub(crate) fn start<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    pub(crate) async fn start<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecArena<'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -213,7 +215,7 @@ impl<'a> Executor<'a> {
         if mem::replace(&mut self.ran, true) {
             self.buffer.restarting = true;
             let mut context = ExecContext::new(&mut self.buffer, arena);
-            let result = self.root.reset(&mut context, plan_arena);
+            let result = self.root.reset(&mut context, plan_arena).await;
             self.buffer.restarting = false;
             result?;
         }
@@ -273,174 +275,224 @@ pub(crate) enum ExecNode<'a> {
     Window(Box<Window<'a>>),
 }
 
+// Nodes are only driven through `ExecNode::next_tuple` / `reset`, which on the async path box
+// each future as `dyn Future + Send`; that is where `Send` is checked, against the concrete node.
+#[dual]
+#[keep_async_fn]
 pub(crate) trait ExecutorNode<'a, T: StorageTransaction + 'a>: Sized {
     // Restores the state the node had right after it was built, resetting its inputs too.
     // A parent may also reset a child to rescan it within one execution; only then may a node
     // keep what it read (see `ExecContext::restarting`), as a new execution may run in another
     // transaction.
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError>;
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError>;
 }
 
+#[dual]
 impl<'a> ExecNode<'a> {
+    #[sync_only]
+    #[inline]
     pub(crate) fn reset<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<(), DatabaseError> {
+        self.reset_inner(arena, plan_arena)
+    }
+
+    #[sync_only]
+    #[inline]
+    pub(crate) fn next_tuple<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+        &mut self,
+        arena: &mut ExecContext<'_, 'a, '_, T>,
+        plan_arena: &mut ExecMetaArena<A>,
+    ) -> Result<bool, DatabaseError> {
+        self.next_tuple_inner(arena, plan_arena)
+    }
+
+    // The async versions box the node's future: the tree is recursive, so its futures need a
+    // concrete, sized type. That is also where `Send` is checked, against the concrete node.
+    #[async_only]
+    pub(crate) fn reset<'s, T: StorageTransaction + 'a, A: MetaArena + 'a>(
+        &'s mut self,
+        arena: &'s mut ExecContext<'_, 'a, '_, T>,
+        plan_arena: &'s mut ExecMetaArena<A>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), DatabaseError>> + Send + 's>>
+    {
+        Box::pin(self.reset_inner(arena, plan_arena))
+    }
+
+    #[async_only]
+    pub(crate) fn next_tuple<'s, T: StorageTransaction + 'a, A: MetaArena + 'a>(
+        &'s mut self,
+        arena: &'s mut ExecContext<'_, 'a, '_, T>,
+        plan_arena: &'s mut ExecMetaArena<A>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, DatabaseError>> + Send + 's>>
+    {
+        Box::pin(self.next_tuple_inner(arena, plan_arena))
+    }
+
+    async fn reset_inner<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         match self {
             ExecNode::AddColumn(exec) => {
-                <AddColumn as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <AddColumn as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Analyze(exec) => {
-                <Analyze as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Analyze as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::ChangeColumn(exec) => {
-                <ChangeColumn as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <ChangeColumn as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             #[cfg(feature = "copy")]
             ExecNode::CopyFromFile(exec) => {
-                <CopyFromFile as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <CopyFromFile as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             #[cfg(feature = "copy")]
             ExecNode::CopyToFile(exec) => {
-                <CopyToFile as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <CopyToFile as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::CreateIndex(exec) => {
-                <CreateIndex as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <CreateIndex as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::CreateTable(exec) => {
-                <CreateTable as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <CreateTable as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::CreateView(exec) => {
-                <CreateView as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <CreateView as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Delete(exec) => {
-                <Delete as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Delete as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Describe(exec) => {
-                <Describe as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Describe as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::DropColumn(exec) => {
-                <DropColumn as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <DropColumn as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::DropIndex(exec) => {
-                <DropIndex as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <DropIndex as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::DropTable(exec) => {
-                <DropTable as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <DropTable as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::DropView(exec) => {
-                <DropView as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <DropView as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
-            ExecNode::Dummy(exec) => <Dummy as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena),
+            ExecNode::Dummy(exec) => {
+                <Dummy as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
+            }
             ExecNode::Explain(exec) => {
-                <Explain<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Explain<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             #[cfg(feature = "spill")]
             ExecNode::ExternalSort(exec) => {
-                <ExternalSort<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <ExternalSort<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Filter(exec) => {
-                <Filter<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Filter<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::FunctionScan(exec) => {
-                <FunctionScan<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <FunctionScan<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::HashAgg(exec) => {
-                <HashAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <HashAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::HashJoin(exec) => {
-                <HashJoin<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <HashJoin<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::IndexScan(exec) => {
-                <IndexScan<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <IndexScan<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Insert(exec) => {
-                <Insert as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Insert as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Limit(exec) => {
-                <Limit<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Limit<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::MarkApply(exec) => {
-                <MarkApply<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <MarkApply<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::IndexProbeJoin(exec) => {
-                <IndexProbeJoin<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <IndexProbeJoin<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::NestedLoopJoin(exec) => {
-                <NestedLoopJoin<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <NestedLoopJoin<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Projection(exec) => {
-                <Projection<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Projection<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::RecursiveCte(exec) => {
-                <RecursiveCte<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <RecursiveCte<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::RecursiveScan(exec) => {
-                <RecursiveScan as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <RecursiveScan as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::ScalarQueryInit(exec) => {
-                <ScalarQueryInit<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <ScalarQueryInit<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::ScalarSubquery(exec) => {
-                <ScalarSubquery<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <ScalarSubquery<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::SetMembership(exec) => {
-                <SetMembership<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <SetMembership<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::SeqScan(exec) => {
-                <SeqScan<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <SeqScan<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::ShowTables(exec) => {
-                <ShowTables as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <ShowTables as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::ShowViews(exec) => {
-                <ShowViews as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <ShowViews as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::SimpleAgg(exec) => {
-                <SimpleAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <SimpleAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Sort(exec) => {
-                <Sort<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Sort<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::StreamAgg(exec) => {
-                <StreamAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <StreamAggExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::StreamDistinct(exec) => {
                 <StreamDistinctExecutor<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                    .await
             }
             ExecNode::TopK(exec) => {
-                <TopK<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <TopK<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Truncate(exec) => {
-                <Truncate as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Truncate as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Union(exec) => {
-                <Union<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Union<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Update(exec) => {
-                <Update<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Update<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Values(exec) => {
-                <Values<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Values<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
             ExecNode::Window(exec) => {
-                <Window<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena)
+                <Window<'a> as ExecutorNode<'a, T>>::reset(exec, arena, plan_arena).await
             }
         }
     }
 
-    pub(crate) fn next_tuple<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    async fn next_tuple_inner<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -448,147 +500,156 @@ impl<'a> ExecNode<'a> {
         arena.buffer.result.status = None;
         match self {
             ExecNode::AddColumn(exec) => {
-                <AddColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <AddColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Analyze(exec) => {
-                <Analyze as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Analyze as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::ChangeColumn(exec) => {
-                <ChangeColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <ChangeColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             #[cfg(feature = "copy")]
             ExecNode::CopyFromFile(exec) => {
-                <CopyFromFile as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <CopyFromFile as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             #[cfg(feature = "copy")]
             ExecNode::CopyToFile(exec) => {
-                <CopyToFile as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <CopyToFile as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::CreateIndex(exec) => {
-                <CreateIndex as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <CreateIndex as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::CreateTable(exec) => {
-                <CreateTable as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <CreateTable as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::CreateView(exec) => {
-                <CreateView as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <CreateView as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Delete(exec) => {
-                <Delete as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Delete as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Describe(exec) => {
-                <Describe as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Describe as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::DropColumn(exec) => {
-                <DropColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <DropColumn as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::DropIndex(exec) => {
-                <DropIndex as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <DropIndex as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::DropTable(exec) => {
-                <DropTable as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <DropTable as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::DropView(exec) => {
-                <DropView as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <DropView as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Dummy(exec) => {
-                <Dummy as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Dummy as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Explain(exec) => {
-                <Explain<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Explain<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             #[cfg(feature = "spill")]
             ExecNode::ExternalSort(exec) => {
-                <ExternalSort<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <ExternalSort<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Filter(exec) => {
-                <Filter<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Filter<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::FunctionScan(exec) => {
-                <FunctionScan<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <FunctionScan<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::HashAgg(exec) => {
                 <HashAggExecutor<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                    .await
             }
             ExecNode::HashJoin(exec) => {
-                <HashJoin<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <HashJoin<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::IndexScan(exec) => {
-                <IndexScan<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <IndexScan<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Insert(exec) => {
-                <Insert as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Insert as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Limit(exec) => {
-                <Limit<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Limit<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::MarkApply(exec) => {
-                <MarkApply<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <MarkApply<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::IndexProbeJoin(exec) => {
                 <IndexProbeJoin<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                    .await
             }
             ExecNode::NestedLoopJoin(exec) => {
                 <NestedLoopJoin<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                    .await
             }
             ExecNode::Projection(exec) => {
-                <Projection<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Projection<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::RecursiveCte(exec) => {
-                <RecursiveCte<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <RecursiveCte<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::RecursiveScan(exec) => {
-                <RecursiveScan as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <RecursiveScan as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::ScalarQueryInit(exec) => {
                 <ScalarQueryInit<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                    .await
             }
             ExecNode::ScalarSubquery(exec) => {
                 <ScalarSubquery<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                    .await
             }
             ExecNode::SetMembership(exec) => {
                 <SetMembership<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                    .await
             }
             ExecNode::SeqScan(exec) => {
-                <SeqScan<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <SeqScan<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::ShowTables(exec) => {
-                <ShowTables as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <ShowTables as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::ShowViews(exec) => {
-                <ShowViews as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <ShowViews as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::SimpleAgg(exec) => {
                 <SimpleAggExecutor<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                    .await
             }
             ExecNode::Sort(exec) => {
-                <Sort<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Sort<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::StreamAgg(exec) => {
                 <StreamAggExecutor<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                    .await
             }
             ExecNode::StreamDistinct(exec) => {
                 <StreamDistinctExecutor<'a> as ExecutorNode<'a, T>>::next_tuple(
                     exec, arena, plan_arena,
                 )
+                .await
             }
             ExecNode::TopK(exec) => {
-                <TopK<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <TopK<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Truncate(exec) => {
-                <Truncate as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Truncate as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Union(exec) => {
-                <Union<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Union<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Update(exec) => {
-                <Update<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Update<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Values(exec) => {
-                <Values<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Values<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
             ExecNode::Window(exec) => {
-                <Window<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena)
+                <Window<'a> as ExecutorNode<'a, T>>::next_tuple(exec, arena, plan_arena).await
             }
         }?;
         match arena.buffer.result.status.unwrap_or(ExecStatus::End) {
@@ -663,7 +724,7 @@ impl Drop for SpareIters {
 
 pub(crate) struct ExecArena<'a, 't, T: StorageTransaction + 'a> {
     table_cache: &'a TableCache,
-    transaction: *mut T,
+    transaction: TxnPtr<T>,
     ddl_apply: Vec<DDLApply>,
     recursive_input: Option<RecursiveInput>,
     iters: Vec<StorageIter<'t, T>>,
@@ -728,7 +789,7 @@ impl<'t, T: StorageTransaction + 't> StorageIter<'t, T> {
 }
 
 pub(crate) struct ExecArenaLocalState<'b, 'a, 't, T: StorageTransaction + 'a> {
-    transaction: *mut T,
+    transaction: TxnPtr<T>,
     pub(crate) table_codec: &'b mut TableCodec,
     pub(crate) bound_buffers: &'b mut [Bytes; 2],
     pub(crate) result: &'b mut ExecResult,
@@ -739,25 +800,25 @@ pub(crate) struct ExecArenaLocalState<'b, 'a, 't, T: StorageTransaction + 'a> {
 
 impl<'b, 'a, 't, T: StorageTransaction + 'a> ExecArenaLocalState<'b, 'a, 't, T> {
     pub(crate) fn transaction(&self) -> &'t T {
-        unsafe { &*self.transaction }
+        unsafe { &*self.transaction.0 }
     }
 
     pub(crate) fn transaction_codec_mut(&mut self) -> (&mut T, &mut TableCodec) {
-        unsafe { (&mut *self.transaction, &mut *self.table_codec) }
+        unsafe { (&mut *self.transaction.0, &mut *self.table_codec) }
     }
 
     pub(crate) fn tuple_transaction_codec_mut(&mut self) -> (&TupleImpl, &mut T, &mut TableCodec) {
         unsafe {
             (
                 &self.result.tuple,
-                &mut *self.transaction,
+                &mut *self.transaction.0,
                 &mut *self.table_codec,
             )
         }
     }
 
     pub(crate) fn transaction_codec(&mut self) -> (&'t T, &mut TableCodec) {
-        unsafe { (&*self.transaction, &mut *self.table_codec) }
+        unsafe { (&*self.transaction.0, &mut *self.table_codec) }
     }
 
     pub(crate) fn write_transaction_codec_ddl_apply_mut(
@@ -765,7 +826,7 @@ impl<'b, 'a, 't, T: StorageTransaction + 'a> ExecArenaLocalState<'b, 'a, 't, T> 
     ) -> (&mut T, &mut TableCodec, &mut Vec<DDLApply>) {
         unsafe {
             (
-                &mut *self.transaction,
+                &mut *self.transaction.0,
                 &mut *self.table_codec,
                 self.ddl_apply,
             )
@@ -808,7 +869,7 @@ impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
     pub(crate) fn new(table_cache: &'a TableCache, transaction: &'t T) -> Self {
         Self {
             table_cache,
-            transaction: transaction as *const T as *mut T,
+            transaction: TxnPtr(transaction as *const T as *mut T),
             ddl_apply: Vec::new(),
             recursive_input: None,
             iters: Vec::new(),
@@ -857,7 +918,7 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
 
     pub(crate) fn transaction_codec_mut(&mut self) -> (&mut T, &mut TableCodec) {
         (
-            unsafe { &mut *self.arena.transaction },
+            unsafe { &mut *self.arena.transaction.0 },
             &mut self.buffer.table_codec,
         )
     }
@@ -1028,6 +1089,56 @@ impl ExecBuilder for IterCounter {
         unreachable!("recursive steps are built while their CTE runs")
     }
 }
+
+/// A value that points into a bump arena owned by the same node, such as a `bumpalo::Vec`.
+/// The node owns both and only reaches the value through `&mut self`, so the arena never has
+/// another user to race with when the node moves to another thread.
+pub(crate) struct ArenaBound<T>(pub(crate) T);
+
+// SAFETY: see above. What is not `Send` here is only the pointer into the owned arena.
+unsafe impl<T> Send for ArenaBound<T> {}
+
+impl<T> std::ops::Deref for ArenaBound<T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for ArenaBound<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
+/// The transaction an [`ExecArena`] lends to its nodes, both shared (iterators borrow it for
+/// `'t`) and exclusive (writes). It stands for those references, so it may cross threads exactly
+/// when they may: `&T` needs `T: Sync` and `&mut T` needs `T: Send`.
+pub(crate) struct TxnPtr<T>(*mut T);
+
+impl<T> Clone for TxnPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for TxnPtr<T> {}
+
+impl<T> TxnPtr<T> {
+    pub(crate) fn new(ptr: *mut T) -> Self {
+        Self(ptr)
+    }
+
+    pub(crate) fn get(self) -> *mut T {
+        self.0
+    }
+}
+
+// SAFETY: see above; the pointer is only dereferenced as `&T` / `&mut T`.
+unsafe impl<T: Send + Sync> Send for TxnPtr<T> {}
+// SAFETY: as for `Send`.
+unsafe impl<T: Send + Sync> Sync for TxnPtr<T> {}
 
 impl<'a, T: StorageTransaction + 'a> ExecBuilder for ExecContext<'_, 'a, '_, T> {
     fn alloc_iter(&mut self) -> IterSlot {
@@ -1230,6 +1341,7 @@ pub(crate) fn build_write<'a, B: ExecBuilder>(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test_utils {
     use super::*;
 
@@ -1241,9 +1353,13 @@ mod test_utils {
     }
 
     impl<T: StorageTransaction> TestExecutor<'_, T> {
-        pub(crate) fn next_tuple(&mut self) -> Result<Option<&mut TupleImpl>, DatabaseError> {
+        pub(crate) async fn next_tuple(&mut self) -> Result<Option<&mut TupleImpl>, DatabaseError> {
             let mut context = ExecContext::new(&mut self.buffer, &mut self.arena);
-            if !self.root.next_tuple(&mut context, &mut self.plan_arena)? {
+            if !self
+                .root
+                .next_tuple(&mut context, &mut self.plan_arena)
+                .await?
+            {
                 return Ok(None);
             }
             Ok(Some(self.buffer.result_mut()))
@@ -1301,13 +1417,13 @@ mod test_utils {
         }
     }
 
-    pub fn try_collect<T: StorageTransaction>(
+    pub async fn try_collect<T: StorageTransaction>(
         executor: TestExecutor<'_, T>,
     ) -> Result<Vec<TupleImpl>, DatabaseError> {
         let mut executor = executor;
         let mut tuples = Vec::new();
 
-        while let Some(tuple) = executor.next_tuple()? {
+        while let Some(tuple) = executor.next_tuple().await? {
             tuples.push(std::mem::take(tuple));
         }
         Ok(tuples)
@@ -1319,6 +1435,7 @@ mod test_utils {
 pub(crate) use test_utils::{execute_input, execute_input_mut, try_collect};
 
 #[cfg(test)]
+#[crate::dual::dual]
 mod test {
     use super::*;
     use crate::planner::TableArenaCell;

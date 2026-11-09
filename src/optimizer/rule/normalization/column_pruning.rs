@@ -915,6 +915,7 @@ impl NormalizationRule for SkipResidualFilterColumns {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;
@@ -993,8 +994,8 @@ mod tests {
     }
 
     #[test]
-    fn test_column_pruning_project_single_side() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_column_pruning_project_single_side() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let arena = PlanArena::new(&table_state.table_arena);
         let mut arena = arena;
         let best_plan = optimize_column_pruning(&table_state, &mut arena, "select c1 from t1")?;
@@ -1009,8 +1010,8 @@ mod tests {
     }
 
     #[test]
-    fn test_column_pruning_filter_single_side() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_column_pruning_filter_single_side() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let arena = PlanArena::new(&table_state.table_arena);
         let mut arena = arena;
         let best_plan =
@@ -1026,8 +1027,8 @@ mod tests {
     }
 
     #[test]
-    fn test_column_pruning_aggregate_single_side() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_column_pruning_aggregate_single_side() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let arena = PlanArena::new(&table_state.table_arena);
         let mut arena = arena;
         let best_plan =
@@ -1043,8 +1044,8 @@ mod tests {
     }
 
     #[test]
-    fn test_column_pruning_sort_single_side() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_column_pruning_sort_single_side() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let arena = PlanArena::new(&table_state.table_arena);
         let mut arena = arena;
         let best_plan =
@@ -1060,8 +1061,8 @@ mod tests {
     }
 
     #[test]
-    fn test_column_pruning_limit_single_side() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_column_pruning_limit_single_side() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let arena = PlanArena::new(&table_state.table_arena);
         let mut arena = arena;
         let best_plan =
@@ -1077,8 +1078,8 @@ mod tests {
     }
 
     #[test]
-    fn test_column_pruning() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_column_pruning() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state
             .plan_with_arena("select c1, c3 from t1 left join t2 on c1 = c3", &mut arena)?;
@@ -1128,8 +1129,9 @@ mod tests {
     }
 
     #[test]
-    fn test_column_pruning_keeps_join_filter_columns_on_both_sides() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_column_pruning_keeps_join_filter_columns_on_both_sides(
+    ) -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let best_plan = optimize_column_pruning(
             &table_state,
@@ -1144,8 +1146,8 @@ mod tests {
     }
 
     #[test]
-    fn test_column_pruning_keeps_mark_apply_predicate_columns() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_column_pruning_keeps_mark_apply_predicate_columns() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let best_plan = optimize_column_pruning(
             &table_state,
@@ -1164,8 +1166,8 @@ mod tests {
     }
 
     #[test]
-    fn test_column_pruning_preserves_union_input_mapping() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_column_pruning_preserves_union_input_mapping() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let best_plan = optimize_column_pruning(
             &table_state,
@@ -1184,7 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_residual_filter_columns_in_index_reads() -> Result<(), DatabaseError> {
+    async fn skip_residual_filter_columns_in_index_reads() -> Result<(), DatabaseError> {
         use crate::db::DataBaseBuilder;
         use crate::planner::operator::{PhysicalOption, PlanImpl};
         use crate::types::serialize::TupleValueSerializableImpl;
@@ -1200,16 +1202,21 @@ mod tests {
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
             .build_in_memory()?;
-        db.ddl("create table skip_t(id int primary key, a int, b int, c int)")?;
-        db.ddl("create index skip_ab on skip_t(a, b)")?;
-        db.run("insert into skip_t values(1, 1, 10, 100), (2, 1, 20, 200), (3, 2, 30, 300)")?
-            .done()?;
+        db.ddl("create table skip_t(id int primary key, a int, b int, c int)")
+            .await?;
+        db.ddl("create index skip_ab on skip_t(a, b)").await?;
+        db.run("insert into skip_t values(1, 1, 10, 100), (2, 1, 20, 200), (3, 2, 30, 300)")
+            .await?
+            .done()
+            .await?;
         // Rows of other `a`s, so that `a = 1` is selective enough for the index.
         for id in 4..64 {
-            db.run(format!("insert into skip_t values({id}, {id}, 0, 0)"))?
-                .done()?;
+            db.run(format!("insert into skip_t values({id}, {id}, 0, 0)"))
+                .await?
+                .done()
+                .await?;
         }
-        db.analyze("skip_t")?;
+        db.analyze("skip_t").await?;
         let mut tx = db.new_transaction(false)?;
 
         for (sql, mapping, expected) in [
@@ -1246,13 +1253,14 @@ mod tests {
             assert!(info.covered, "{sql}");
             assert_eq!(info.cover_mapping, mapping, "{sql}");
 
-            let mut iter = program.execute(&mut tx, [])?;
+            let mut iter = program.execute(&mut tx, []).await?;
             let mut rows = Vec::new();
             while iter
-                .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
+                .next_tuple(|_, row| rows.push(row.value_at(0).clone()))
+                .await?
                 .is_some()
             {}
-            iter.done()?;
+            iter.done().await?;
             let expected: Vec<_> = expected.into_iter().map(DataValue::Int32).collect();
             assert_eq!(rows, expected, "{sql}");
         }
@@ -1283,27 +1291,34 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(skipped, vec![true, false]);
-        let mut iter = program.execute(&mut tx, [])?;
+        let mut iter = program.execute(&mut tx, []).await?;
         let mut rows = Vec::new();
         while iter
-            .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
+            .next_tuple(|_, row| rows.push(row.value_at(0).clone()))
+            .await?
             .is_some()
         {}
-        iter.done()?;
+        iter.done().await?;
         assert_eq!(rows, vec![DataValue::Int32(200)]);
 
         // An update writes back the whole row it scans, so its scan stays pinned.
         drop(tx);
-        db.run("update skip_t set b = b + 1 where a = 1")?.done()?;
-        let mut iter = db.run("select id, a, b from skip_t where id <= 3 order by id")?;
+        db.run("update skip_t set b = b + 1 where a = 1")
+            .await?
+            .done()
+            .await?;
+        let mut iter = db
+            .run("select id, a, b from skip_t where id <= 3 order by id")
+            .await?;
         let mut rows = Vec::new();
         while iter
             .next_tuple(|_, row| {
                 rows.push((0..3).map(|i| row.value_at(i).clone()).collect::<Vec<_>>())
-            })?
+            })
+            .await?
             .is_some()
         {}
-        iter.done()?;
+        iter.done().await?;
         let expected: Vec<Vec<_>> = [[1, 1, 11], [2, 1, 21], [3, 2, 30]]
             .into_iter()
             .map(|row| row.into_iter().map(DataValue::Int32).collect())

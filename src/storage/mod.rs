@@ -22,6 +22,8 @@ pub(crate) mod table_codec;
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog, TableId, TableMeta, TableName};
 use crate::db::{ScalaFunctions, TableFunctions};
+use crate::dual::dual;
+use crate::dual::{MaybeSend, MaybeStatic, MaybeSync};
 use crate::errors::DatabaseError;
 use crate::expression::range_detacher::{Range, RangeValue};
 use crate::expression::TypeCast;
@@ -157,7 +159,7 @@ impl Display for EmptyStorageMetrics {
     }
 }
 
-pub trait Storage: Clone {
+pub trait Storage: Clone + MaybeSend + MaybeSync {
     type Metrics: Display;
 
     type TransactionType<'a>: StorageTransaction
@@ -205,8 +207,9 @@ pub trait CheckpointableStorage: Storage {
 /// Optional bounds of the reader, of the form (offset, limit).
 pub(crate) type Bounds = (Option<usize>, Option<usize>);
 
-pub trait StorageTransaction: Sized {
-    type BorrowedBytes<'a>: AsRef<[u8]>
+#[dual]
+pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
+    type BorrowedBytes<'a>: AsRef<[u8]> + MaybeSend
     where
         Self: 'a;
 
@@ -218,7 +221,7 @@ pub trait StorageTransaction: Sized {
     where
         Self: 'a;
 
-    type PointCursor<'a>
+    type PointCursor<'a>: MaybeSend + MaybeSync
     where
         Self: 'a;
 
@@ -233,7 +236,7 @@ pub trait StorageTransaction: Sized {
     }
 
     /// The bounds is applied to the whole data batches, not per batch.
-    fn read<'a>(
+    async fn read<'a>(
         &'a self,
         table_codec: &mut TableCodec,
         deserializers: &'a TupleDeserializers,
@@ -242,17 +245,21 @@ pub trait StorageTransaction: Sized {
     ) -> Result<TupleIter<'a, Self>, DatabaseError> {
         let offset = bounds.0.unwrap_or(0);
 
-        table_codec.with_tuple_bound(table_id, |min, max, pool| {
-            let iter = self.range(Bound::Included(min), Bound::Included(max), pool)?;
+        table_codec
+            .with_tuple_bound(table_id, async |min, max, pool| {
+                let iter = self
+                    .range(Bound::Included(min), Bound::Included(max), pool)
+                    .await?;
 
-            Ok(TupleIter {
-                table_id,
-                bounds: IterBounds::new(offset, bounds.1),
-                deserializers,
-                iter,
-                mapped: self.mapped_scope(),
+                Ok(TupleIter {
+                    table_id,
+                    bounds: IterBounds::new(offset, bounds.1),
+                    deserializers,
+                    iter,
+                    mapped: self.mapped_scope(),
+                })
             })
-        })
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -287,7 +294,7 @@ pub trait StorageTransaction: Sized {
         })
     }
 
-    fn add_index_meta(
+    async fn add_index_meta(
         &mut self,
         table_codec: &mut TableCodec,
         plan_arena: &mut (dyn MetaArena + '_),
@@ -297,7 +304,8 @@ pub trait StorageTransaction: Sized {
         ty: IndexType,
     ) -> Result<(TableCatalog, IndexId), DatabaseError> {
         let mut table = self
-            .load_table(table_codec, plan_arena, table_name)?
+            .load_table(table_codec, plan_arena, table_name)
+            .await?
             .ok_or(DatabaseError::TableNotFound)?;
         let index_meta = table.add_index_meta(index_name, column_ids, ty, plan_arena)?;
         let index_meta = plan_arena.index(index_meta);
@@ -313,7 +321,7 @@ pub trait StorageTransaction: Sized {
         Ok((table, index_id))
     }
 
-    fn add_index<V: TupleLike + ?Sized>(
+    async fn add_index<V: TupleLike + ?Sized + MaybeSync>(
         &mut self,
         table_codec: &mut TableCodec,
         table_id: TableId,
@@ -323,23 +331,25 @@ pub trait StorageTransaction: Sized {
         if matches!(index.ty, IndexType::PrimaryKey { .. }) {
             return Ok(());
         }
-        table_codec.with_index(table_id, &index, Some(tuple_id), |key, value| {
-            if matches!(index.ty, IndexType::Unique) {
-                if let Some(bytes) = self.get_borrowed(key)? {
-                    return if TableCodec::strip_stamp(bytes.as_ref())?
-                        != TableCodec::strip_stamp(value)?
-                    {
-                        Err(DatabaseError::DuplicateUniqueValue)
-                    } else {
-                        Ok(())
-                    };
+        table_codec
+            .with_index(table_id, &index, Some(tuple_id), async |key, value| {
+                if matches!(index.ty, IndexType::Unique) {
+                    if let Some(bytes) = self.get_borrowed(key).await? {
+                        return if TableCodec::strip_stamp(bytes.as_ref())?
+                            != TableCodec::strip_stamp(value)?
+                        {
+                            Err(DatabaseError::DuplicateUniqueValue)
+                        } else {
+                            Ok(())
+                        };
+                    }
                 }
-            }
-            self.set(key, value)
-        })
+                self.set(key, value)
+            })
+            .await
     }
 
-    fn del_index<V: TupleLike + ?Sized>(
+    async fn del_index<V: TupleLike + ?Sized + MaybeSync>(
         &mut self,
         table_codec: &mut TableCodec,
         table_id: TableId,
@@ -349,12 +359,16 @@ pub trait StorageTransaction: Sized {
         if matches!(index.ty, IndexType::PrimaryKey { .. }) {
             return Ok(());
         }
-        table_codec.with_index(table_id, index, Some(tuple_id), |key, _| self.remove(key))?;
+        table_codec
+            .with_index(table_id, index, Some(tuple_id), async |key, _| {
+                self.remove(key)
+            })
+            .await?;
 
         Ok(())
     }
 
-    fn append_tuple<I, S>(
+    async fn append_tuple<I, S>(
         &mut self,
         table_codec: &mut TableCodec,
         table_id: TableId,
@@ -363,48 +377,59 @@ pub trait StorageTransaction: Sized {
         is_overwrite: bool,
     ) -> Result<(), DatabaseError>
     where
-        I: IntoIterator<Item = S>,
+        I: IntoIterator<Item = S> + MaybeSend,
+        I::IntoIter: MaybeSend,
         S: Borrow<TupleValueSerializableImpl>,
     {
         let tuple_id = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
         let mut serializers = serializers.into_iter();
         let mut write_value = |value: &mut Bytes| tuple.serialize_to(&mut serializers, value);
-        table_codec.with_tuple(
-            table_id,
-            tuple_id,
-            Some((tuple.serialized_len_hint(), &mut write_value)),
-            |key, value| {
-                if !is_overwrite && self.exists(key)? {
-                    return Err(DatabaseError::DuplicatePrimaryKey);
-                }
-                self.set(key, value)
-            },
-        )
+        table_codec
+            .with_tuple(
+                table_id,
+                tuple_id,
+                Some((tuple.serialized_len_hint(), &mut write_value)),
+                async |key, value| {
+                    if !is_overwrite && self.exists(key).await? {
+                        return Err(DatabaseError::DuplicatePrimaryKey);
+                    }
+                    self.set(key, value)
+                },
+            )
+            .await
     }
 
-    fn remove_tuple(
+    async fn remove_tuple(
         &mut self,
         table_codec: &mut TableCodec,
         table_id: TableId,
         tuple_id: &TupleId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_tuple(table_id, tuple_id, None, |key, _| self.remove(key))
+        table_codec
+            .with_tuple(table_id, tuple_id, None, async |key, _| self.remove(key))
+            .await
     }
 
-    fn rewrite_table_metadata(
+    async fn rewrite_table_metadata(
         &mut self,
         table_codec: &mut TableCodec,
         arena: &(impl MetaArena + ?Sized),
         table: &TableCatalog,
     ) -> Result<(), DatabaseError> {
         let table_id = table.id();
-        table_codec.with_columns_bound(table_id, |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        table_codec
+            .with_columns_bound(table_id, async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
-        table_codec.with_index_meta_bound(table_id, |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        table_codec
+            .with_index_meta_bound(table_id, async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
         for column in table.columns().map(|column| arena.column(*column)) {
             table_codec.with_column(table_id, column, true, arena, |key, value| {
@@ -425,7 +450,7 @@ pub trait StorageTransaction: Sized {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn change_column(
+    async fn change_column(
         &mut self,
         table_codec: &mut TableCodec,
         plan_arena: &mut (dyn MetaArena + '_),
@@ -437,7 +462,8 @@ pub trait StorageTransaction: Sized {
         not_null_change: &NotNullChange,
     ) -> Result<TableCatalog, DatabaseError> {
         let table = self
-            .load_table(table_codec, plan_arena, table_name)?
+            .load_table(table_codec, plan_arena, table_name)
+            .await?
             .ok_or(DatabaseError::TableNotFound)?;
         let mut column_catalogs = Vec::with_capacity(table.columns_len());
         let mut found = false;
@@ -513,15 +539,19 @@ pub trait StorageTransaction: Sized {
             index_metas.into_iter(),
             plan_arena,
         )?;
-        self.rewrite_table_metadata(table_codec, plan_arena, &updated_table)?;
-        table_codec.with_statistics_bound(updated_table.id(), |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        self.rewrite_table_metadata(table_codec, plan_arena, &updated_table)
+            .await?;
+        table_codec
+            .with_statistics_bound(updated_table.id(), async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
         Ok(updated_table)
     }
 
-    fn add_column(
+    async fn add_column(
         &mut self,
         table_codec: &mut TableCodec,
         plan_arena: &mut (dyn MetaArena + '_),
@@ -530,7 +560,8 @@ pub trait StorageTransaction: Sized {
         if_not_exists: bool,
     ) -> Result<(TableCatalog, ColumnId), DatabaseError> {
         let mut table = self
-            .load_table(table_codec, plan_arena, table_name)?
+            .load_table(table_codec, plan_arena, table_name)
+            .await?
             .ok_or(DatabaseError::TableNotFound)?;
         if !column.nullable() && column.default_value(plan_arena)?.is_none() {
             return Err(DatabaseError::NeedNullAbleOrDefault);
@@ -572,7 +603,7 @@ pub trait StorageTransaction: Sized {
         Ok((table, col_id))
     }
 
-    fn drop_column(
+    async fn drop_column(
         &mut self,
         table_codec: &mut TableCodec,
         plan_arena: &mut (dyn MetaArena + '_),
@@ -580,7 +611,8 @@ pub trait StorageTransaction: Sized {
         column_name: &str,
     ) -> Result<TableCatalog, DatabaseError> {
         let table_catalog = self
-            .load_table(table_codec, plan_arena, table_name)?
+            .load_table(table_codec, plan_arena, table_name)
+            .await?
             .ok_or(DatabaseError::TableNotFound)?;
         let column_id = {
             let column = plan_arena.column(table_catalog.get_column_by_name(column_name).unwrap());
@@ -592,7 +624,8 @@ pub trait StorageTransaction: Sized {
         };
 
         let table_id = table_catalog.id();
-        self.remove_column_statistics(table_codec, table_id, column_id, plan_arena)?;
+        self.remove_column_statistics(table_codec, table_id, column_id, plan_arena)
+            .await?;
         for index_meta in table_catalog.indexes.iter() {
             let index_meta = plan_arena.index(*index_meta);
             if !index_meta.column_ids.contains(&column_id) {
@@ -602,35 +635,43 @@ pub trait StorageTransaction: Sized {
                 self.remove(key)
             })?;
 
-            table_codec.with_index_bound(table_id, index_meta.id, |min, max, pool| {
-                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-            })?;
+            table_codec
+                .with_index_bound(table_id, index_meta.id, async |min, max, pool| {
+                    self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                        .await
+                })
+                .await?;
 
-            self.remove_index_statistics(table_codec, table_id, index_meta.id)?;
+            self.remove_index_statistics(table_codec, table_id, index_meta.id)
+                .await?;
         }
-        self.load_table(table_codec, plan_arena, table_name)?
+        self.load_table(table_codec, plan_arena, table_name)
+            .await?
             .ok_or(DatabaseError::TableNotFound)
     }
 
-    fn create_view(
+    async fn create_view(
         &mut self,
         table_codec: &mut TableCodec,
         arena: &mut (dyn MetaArena + '_),
         view: &View,
         or_replace: bool,
     ) -> Result<TableId, DatabaseError> {
-        let view_id = match self.root_table(table_codec, &view.name, arena)? {
+        let view_id = match self.root_table(table_codec, &view.name, arena).await? {
             Some(meta) if !meta.is_view => return Err(DatabaseError::TableExists),
             Some(_) if !or_replace => return Err(DatabaseError::ViewExists),
             Some(meta) => meta.id,
-            None => self.create_root_table(table_codec, arena, view.name.clone(), true)?,
+            None => {
+                self.create_root_table(table_codec, arena, view.name.clone(), true)
+                    .await?
+            }
         };
         table_codec.with_view_value(view_id, view, arena, |key, value| self.set(key, value))?;
 
         Ok(view_id)
     }
 
-    fn create_table(
+    async fn create_table(
         &mut self,
         table_codec: &mut TableCodec,
         plan_arena: &mut (dyn MetaArena + '_),
@@ -638,14 +679,18 @@ pub trait StorageTransaction: Sized {
         columns: Vec<ColumnCatalog>,
         if_not_exists: bool,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
-        match self.root_table(table_codec, &table_name, plan_arena)? {
+        match self
+            .root_table(table_codec, &table_name, plan_arena)
+            .await?
+        {
             Some(meta) if meta.is_view => return Err(DatabaseError::ViewExists),
             Some(_) if if_not_exists => return Ok(None),
             Some(_) => return Err(DatabaseError::TableExists),
             None => (),
         }
-        let table_id =
-            self.create_root_table(table_codec, plan_arena, table_name.clone(), false)?;
+        let table_id = self
+            .create_root_table(table_codec, plan_arena, table_name.clone(), false)
+            .await?;
         let mut table_catalog = TableCatalog::new(table_id, table_name, columns, plan_arena)?;
 
         for (_, column) in table_catalog.primary_keys() {
@@ -666,48 +711,54 @@ pub trait StorageTransaction: Sized {
     }
 
     /// The table or view registered under `table_name`.
-    fn root_table(
+    async fn root_table(
         &self,
         table_codec: &mut TableCodec,
         table_name: &str,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<TableMeta>, DatabaseError> {
         let bytes = table_codec
-            .with_root_table(table_name, None, arena, |key, _| self.get_borrowed(key))?;
+            .with_root_table(table_name, None, arena, async |key, _| {
+                self.get_borrowed(key).await
+            })
+            .await?;
         bytes
             .map(|bytes| TableCodec::decode_root_table::<Self>(bytes.as_ref(), arena))
             .transpose()
     }
 
     /// Registers a new table or view under `table_name` with the next id.
-    fn create_root_table(
+    async fn create_root_table(
         &mut self,
         table_codec: &mut TableCodec,
         arena: &(impl MetaArena + ?Sized),
         table_name: TableName,
         is_view: bool,
     ) -> Result<TableId, DatabaseError> {
-        let table_id = table_codec.with_next_table_id(|key| {
-            let table_id = match self.get_borrowed(key)? {
-                Some(bytes) => TableId::from_le_bytes(
-                    bytes
-                        .as_ref()
-                        .try_into()
-                        .map_err(|_| DatabaseError::InvalidValue("next table id".to_string()))?,
-                ),
-                None => 0,
-            };
-            self.set(key, &(table_id + 1).to_le_bytes())?;
-            Ok(table_id)
-        })?;
+        let table_id = table_codec
+            .with_next_table_id(async |key| {
+                let table_id = match self.get_borrowed(key).await? {
+                    Some(bytes) => {
+                        TableId::from_le_bytes(bytes.as_ref().try_into().map_err(|_| {
+                            DatabaseError::InvalidValue("next table id".to_string())
+                        })?)
+                    }
+                    None => 0,
+                };
+                self.set(key, &(table_id + 1).to_le_bytes())?;
+                Ok(table_id)
+            })
+            .await?;
         let meta = TableMeta::new(table_name.clone(), table_id, is_view);
-        table_codec.with_root_table(&table_name, Some(&meta), arena, |key, value| {
-            self.set(key, value)
-        })?;
+        table_codec
+            .with_root_table(&table_name, Some(&meta), arena, async |key, value| {
+                self.set(key, value)
+            })
+            .await?;
         Ok(table_id)
     }
 
-    fn drop_view(
+    async fn drop_view(
         &mut self,
         table_codec: &mut TableCodec,
         arena: &mut (dyn MetaArena + '_),
@@ -715,7 +766,8 @@ pub trait StorageTransaction: Sized {
         if_exists: bool,
     ) -> Result<bool, DatabaseError> {
         let Some(meta) = self
-            .root_table(table_codec, &view_name, arena)?
+            .root_table(table_codec, &view_name, arena)
+            .await?
             .filter(|meta| meta.is_view)
         else {
             if if_exists {
@@ -725,13 +777,17 @@ pub trait StorageTransaction: Sized {
             }
         };
 
-        table_codec.with_view(meta.id, |key, _| self.remove(key))?;
-        table_codec.with_root_table(&view_name, None, arena, |key, _| self.remove(key))?;
+        table_codec
+            .with_view(meta.id, async |key, _| self.remove(key))
+            .await?;
+        table_codec
+            .with_root_table(&view_name, None, arena, async |key, _| self.remove(key))
+            .await?;
 
         Ok(true)
     }
 
-    fn drop_index(
+    async fn drop_index(
         &mut self,
         table_codec: &mut TableCodec,
         plan_arena: &mut (dyn MetaArena + '_),
@@ -740,7 +796,8 @@ pub trait StorageTransaction: Sized {
         if_exists: bool,
     ) -> Result<Option<(TableCatalog, IndexId)>, DatabaseError> {
         let table = self
-            .load_table(table_codec, plan_arena, table_name)?
+            .load_table(table_codec, plan_arena, table_name)
+            .await?
             .ok_or(DatabaseError::TableNotFound)?;
         let Some(index_meta_ref) = table
             .indexes
@@ -765,19 +822,24 @@ pub trait StorageTransaction: Sized {
             self.remove(key)
         })?;
 
-        table_codec.with_index_bound(table.id(), index_id, |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        table_codec
+            .with_index_bound(table.id(), index_id, async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
-        self.remove_index_statistics(table_codec, table.id(), index_id)?;
+        self.remove_index_statistics(table_codec, table.id(), index_id)
+            .await?;
 
-        self.load_table(table_codec, plan_arena, table_name)?
+        self.load_table(table_codec, plan_arena, table_name)
+            .await?
             .map(|table| (table, index_id))
             .map(Some)
             .ok_or(DatabaseError::TableNotFound)
     }
 
-    fn drop_table(
+    async fn drop_table(
         &mut self,
         table_codec: &mut TableCodec,
         plan_arena: &mut (dyn MetaArena + '_),
@@ -785,7 +847,8 @@ pub trait StorageTransaction: Sized {
         if_exists: bool,
     ) -> Result<bool, DatabaseError> {
         let Some(meta) = self
-            .root_table(table_codec, &table_name, plan_arena)?
+            .root_table(table_codec, &table_name, plan_arena)
+            .await?
             .filter(|meta| !meta.is_view)
         else {
             if if_exists {
@@ -794,39 +857,56 @@ pub trait StorageTransaction: Sized {
                 return Err(DatabaseError::TableNotFound);
             }
         };
-        self.drop_data(table_codec, meta.id)?;
+        self.drop_data(table_codec, meta.id).await?;
 
-        table_codec.with_columns_bound(meta.id, |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        table_codec
+            .with_columns_bound(meta.id, async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
-        table_codec.with_index_meta_bound(meta.id, |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        table_codec
+            .with_index_meta_bound(meta.id, async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
-        table_codec.with_root_table(table_name.as_ref(), None, plan_arena, |key, _| {
-            self.remove(key)
-        })?;
+        table_codec
+            .with_root_table(table_name.as_ref(), None, plan_arena, async |key, _| {
+                self.remove(key)
+            })
+            .await?;
 
         Ok(true)
     }
 
-    fn drop_data(
+    async fn drop_data(
         &mut self,
         table_codec: &mut TableCodec,
         table_id: TableId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_tuple_bound(table_id, |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        table_codec
+            .with_tuple_bound(table_id, async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
-        table_codec.with_all_index_bound(table_id, |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        table_codec
+            .with_all_index_bound(table_id, async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
-        table_codec.with_statistics_bound(table_id, |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })
+        table_codec
+            .with_statistics_bound(table_id, async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -843,7 +923,7 @@ pub trait StorageTransaction: Sized {
         Ok(names.view(view_cache, view_name))
     }
 
-    fn load_view(
+    async fn load_view(
         &self,
         table_codec: &mut TableCodec,
         table_arena: &TableArenaCell,
@@ -852,34 +932,41 @@ pub trait StorageTransaction: Sized {
         view_name: TableName,
     ) -> Result<Option<(TableId, View)>, DatabaseError> {
         let Some(meta) = self
-            .root_table(table_codec, &view_name, &mut *table_arena.borrow_mut())?
+            .root_table(table_codec, &view_name, &mut *table_arena.borrow_mut())
+            .await?
             .filter(|meta| meta.is_view)
         else {
             return Ok(None);
         };
-        table_codec.with_view(meta.id, |key, _| {
-            let Some(bytes) = self.get_borrowed(key)? else {
-                return Ok(None);
-            };
-            TableCodec::decode_view::<Self>(
-                bytes.as_ref(),
-                scala_functions,
-                table_functions,
-                table_arena.borrow_mut(),
-            )
-            .map(|view| Some((meta.id, view)))
-        })
+        table_codec
+            .with_view(meta.id, async |key, _| {
+                let Some(bytes) = self.get_borrowed(key).await? else {
+                    return Ok(None);
+                };
+                TableCodec::decode_view::<Self>(
+                    bytes.as_ref(),
+                    scala_functions,
+                    table_functions,
+                    table_arena.borrow_mut(),
+                )
+                .map(|view| Some((meta.id, view)))
+            })
+            .await
     }
 
-    fn views<'a>(
+    async fn views<'a>(
         &'a self,
         table_codec: &mut TableCodec,
     ) -> Result<ViewIter<'a, Self>, DatabaseError> {
-        table_codec.with_view_bound(|min, max, pool| {
-            Ok(ViewIter {
-                iter: self.range(Bound::Included(min), Bound::Included(max), pool)?,
+        table_codec
+            .with_view_bound(async |min, max, pool| {
+                Ok(ViewIter {
+                    iter: self
+                        .range(Bound::Included(min), Bound::Included(max), pool)
+                        .await?,
+                })
             })
-        })
+            .await
     }
 
     fn table<'a>(
@@ -891,19 +978,21 @@ pub trait StorageTransaction: Sized {
         Ok(names.table(table_cache, table_name))
     }
 
-    fn load_table(
+    async fn load_table(
         &self,
         table_codec: &mut TableCodec,
         arena: &mut (impl MetaArena + ?Sized),
         table_name: &str,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
         let Some(meta) = self
-            .root_table(table_codec, table_name, arena)?
+            .root_table(table_codec, table_name, arena)
+            .await?
             .filter(|meta| !meta.is_view)
         else {
             return Ok(None);
         };
-        self.table_collect(table_codec, meta.id, arena)?
+        self.table_collect(table_codec, meta.id, arena)
+            .await?
             .map(|(columns, indexes)| {
                 TableCatalog::reload(
                     meta.id,
@@ -916,18 +1005,22 @@ pub trait StorageTransaction: Sized {
             .transpose()
     }
 
-    fn tables<'a>(
+    async fn tables<'a>(
         &'a self,
         table_codec: &mut TableCodec,
     ) -> Result<TableIter<'a, Self>, DatabaseError> {
-        table_codec.with_root_table_bound(|min, max, pool| {
-            Ok(TableIter {
-                iter: self.range(Bound::Included(min), Bound::Included(max), pool)?,
+        table_codec
+            .with_root_table_bound(async |min, max, pool| {
+                Ok(TableIter {
+                    iter: self
+                        .range(Bound::Included(min), Bound::Included(max), pool)
+                        .await?,
+                })
             })
-        })
+            .await
     }
 
-    fn save_column_statistics(
+    async fn save_column_statistics(
         &mut self,
         table_codec: &mut TableCodec,
         table_id: TableId,
@@ -935,28 +1028,35 @@ pub trait StorageTransaction: Sized {
         meta: &HistogramMeta,
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
-        table_codec.with_column_statistics(table_id, column_id, Some(meta), arena, |key, value| {
-            self.set(key, value)
-        })
+        table_codec
+            .with_column_statistics(
+                table_id,
+                column_id,
+                Some(meta),
+                arena,
+                async |key, value| self.set(key, value),
+            )
+            .await
     }
 
-    fn column_statistics(
+    async fn column_statistics(
         &self,
         table_codec: &mut TableCodec,
         table_id: TableId,
         column_id: ColumnId,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<HistogramMeta>, DatabaseError> {
-        let value =
-            table_codec.with_column_statistics(table_id, column_id, None, arena, |key, _| {
-                self.get_borrowed(key)
-            })?;
+        let value = table_codec
+            .with_column_statistics(table_id, column_id, None, arena, async |key, _| {
+                self.get_borrowed(key).await
+            })
+            .await?;
         value
             .map(|bytes| TableCodec::decode_column_statistics::<Self>(bytes.as_ref(), arena))
             .transpose()
     }
 
-    fn remove_column_statistics(
+    async fn remove_column_statistics(
         &mut self,
         table_codec: &mut TableCodec,
         table_id: TableId,
@@ -964,7 +1064,10 @@ pub trait StorageTransaction: Sized {
         arena: &(impl MetaArena + ?Sized),
     ) -> Result<(), DatabaseError> {
         table_codec
-            .with_column_statistics(table_id, column_id, None, arena, |key, _| self.remove(key))
+            .with_column_statistics(table_id, column_id, None, arena, async |key, _| {
+                self.remove(key)
+            })
+            .await
     }
 
     fn save_index_statistics(
@@ -1024,107 +1127,117 @@ pub trait StorageTransaction: Sized {
         Ok(())
     }
 
-    fn index_statistics(
+    async fn index_statistics(
         &self,
         table_codec: &mut TableCodec,
         table_id: TableId,
         index_id: IndexId,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<IndexStatistics>, DatabaseError> {
-        table_codec.with_index_statistics_bound(table_id, index_id, |min, max, pool| {
-            let mut iter = self.range(Bound::Included(min), Bound::Included(max), pool)?;
-            let mut root = None;
-            let mut buckets = Vec::new();
-            let mut sketch_meta = None;
-            let mut sketch_pages = Vec::<CountMinSketchPage>::new();
-            let mut top_n = None;
+        table_codec
+            .with_index_statistics_bound(table_id, index_id, async |min, max, pool| {
+                let mut iter = self
+                    .range(Bound::Included(min), Bound::Included(max), pool)
+                    .await?;
+                let mut root = None;
+                let mut buckets = Vec::new();
+                let mut sketch_meta = None;
+                let mut sketch_pages = Vec::<CountMinSketchPage>::new();
+                let mut top_n = None;
 
-            while let Some((key, value)) = iter.try_next()? {
-                match TableCodec::decode_index_statistics_codec_type(key)? {
-                    IndexStatisticsCodecType::Root => {
-                        root = Some(TableCodec::decode_index_statistics::<Self>(value, arena)?);
-                    }
-                    IndexStatisticsCodecType::SketchMeta => {
-                        sketch_meta = Some(
-                            TableCodec::decode_index_statistics_sketch_meta::<Self>(value, arena)?,
-                        );
-                    }
-                    IndexStatisticsCodecType::SketchPage => {
-                        sketch_pages.push(TableCodec::decode_index_statistics_sketch_page::<Self>(
-                            value, arena,
-                        )?);
-                    }
-                    IndexStatisticsCodecType::Bucket => {
-                        buckets.push(TableCodec::decode_index_statistics_bucket::<Self>(
-                            value, arena,
-                        )?);
-                    }
-                    IndexStatisticsCodecType::TopN => {
-                        top_n = Some(TableCodec::decode_index_statistics_top_n::<Self>(
-                            value, arena,
-                        )?);
+                while let Some((key, value)) = iter.try_next().await? {
+                    match TableCodec::decode_index_statistics_codec_type(key)? {
+                        IndexStatisticsCodecType::Root => {
+                            root = Some(TableCodec::decode_index_statistics::<Self>(value, arena)?);
+                        }
+                        IndexStatisticsCodecType::SketchMeta => {
+                            sketch_meta = Some(TableCodec::decode_index_statistics_sketch_meta::<
+                                Self,
+                            >(value, arena)?);
+                        }
+                        IndexStatisticsCodecType::SketchPage => {
+                            sketch_pages.push(TableCodec::decode_index_statistics_sketch_page::<
+                                Self,
+                            >(value, arena)?);
+                        }
+                        IndexStatisticsCodecType::Bucket => {
+                            buckets.push(TableCodec::decode_index_statistics_bucket::<Self>(
+                                value, arena,
+                            )?);
+                        }
+                        IndexStatisticsCodecType::TopN => {
+                            top_n = Some(TableCodec::decode_index_statistics_top_n::<Self>(
+                                value, arena,
+                            )?);
+                        }
                     }
                 }
-            }
-            iter.recycle(pool);
+                iter.recycle(pool);
 
-            match (root, sketch_meta) {
-                (Some(root), Some(sketch_meta)) => {
-                    let sketch = CountMinSketch::from_storage_parts(sketch_meta, sketch_pages)?;
-                    IndexStatistics::from_parts(root, buckets, sketch, top_n).map(Some)
+                match (root, sketch_meta) {
+                    (Some(root), Some(sketch_meta)) => {
+                        let sketch = CountMinSketch::from_storage_parts(sketch_meta, sketch_pages)?;
+                        IndexStatistics::from_parts(root, buckets, sketch, top_n).map(Some)
+                    }
+                    (None, None)
+                        if buckets.is_empty() && sketch_pages.is_empty() && top_n.is_none() =>
+                    {
+                        Ok(None)
+                    }
+                    _ => Err(DatabaseError::InvalidValue(
+                        "statistics meta is incomplete".to_string(),
+                    )),
                 }
-                (None, None)
-                    if buckets.is_empty() && sketch_pages.is_empty() && top_n.is_none() =>
-                {
-                    Ok(None)
-                }
-                _ => Err(DatabaseError::InvalidValue(
-                    "statistics meta is incomplete".to_string(),
-                )),
-            }
-        })
+            })
+            .await
     }
 
-    fn remove_index_statistics(
+    async fn remove_index_statistics(
         &mut self,
         table_codec: &mut TableCodec,
         table_id: TableId,
         index_id: IndexId,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_index_statistics_bound(table_id, index_id, |min, max, pool| {
-            self.remove_range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        table_codec
+            .with_index_statistics_bound(table_id, index_id, async |min, max, pool| {
+                self.remove_range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
         Ok(())
     }
 
     #[allow(clippy::type_complexity)]
-    fn table_collect(
+    async fn table_collect(
         &self,
         table_codec: &mut TableCodec,
         table_id: TableId,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<(Vec<ColumnCatalog>, Vec<IndexMeta>)>, DatabaseError> {
-        table_codec.with_table_bound(table_id, |table_min, table_max, pool| {
-            let mut column_iter =
-                self.range(Bound::Included(table_min), Bound::Included(table_max), pool)?;
+        table_codec
+            .with_table_bound(table_id, async |table_min, table_max, pool| {
+                let mut column_iter = self
+                    .range(Bound::Included(table_min), Bound::Included(table_max), pool)
+                    .await?;
 
-            let mut columns = Vec::new();
-            let mut index_metas = Vec::new();
+                let mut columns = Vec::new();
+                let mut index_metas = Vec::new();
 
-            // Tips: only `Column`, `IndexMeta`, `TableMeta`
-            while let Some((key, value)) = column_iter.try_next().ok().flatten() {
-                if key.starts_with(table_min) {
-                    let mut cursor = Cursor::new(value);
-                    columns.push(TableCodec::decode_column::<Self, _>(&mut cursor, arena)?);
-                } else {
-                    index_metas.push(TableCodec::decode_index_meta::<Self>(value, arena)?);
+                // Tips: only `Column`, `IndexMeta`, `TableMeta`
+                while let Some((key, value)) = column_iter.try_next().await.ok().flatten() {
+                    if key.starts_with(table_min) {
+                        let mut cursor = Cursor::new(value);
+                        columns.push(TableCodec::decode_column::<Self, _>(&mut cursor, arena)?);
+                    } else {
+                        index_metas.push(TableCodec::decode_index_meta::<Self>(value, arena)?);
+                    }
                 }
-            }
-            column_iter.recycle(pool);
+                column_iter.recycle(pool);
 
-            Ok((!columns.is_empty()).then_some((columns, index_metas)))
-        })
+                Ok((!columns.is_empty()).then_some((columns, index_metas)))
+            })
+            .await
     }
 
     fn create_index_meta_from_column(
@@ -1175,44 +1288,44 @@ pub trait StorageTransaction: Sized {
         Ok(())
     }
 
-    fn get_borrowed<'a>(
+    async fn get_borrowed<'a>(
         &'a self,
         key: &[u8],
     ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError>;
 
     fn point_cursor(&self) -> Result<Self::PointCursor<'_>, DatabaseError>;
 
-    fn get_at<'a>(
+    async fn get_at<'a>(
         &'a self,
         _cursor: &Self::PointCursor<'a>,
         key: &[u8],
     ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
-        self.get_borrowed(key)
+        self.get_borrowed(key).await
     }
 
-    fn exists(&self, key: &[u8]) -> Result<bool, DatabaseError> {
-        Ok(self.get_borrowed(key)?.is_some())
+    async fn exists(&self, key: &[u8]) -> Result<bool, DatabaseError> {
+        Ok(self.get_borrowed(key).await?.is_some())
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), DatabaseError>;
 
     fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError>;
 
-    fn range<'txn, 'key>(
+    async fn range<'txn, 'key>(
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
         pool: &mut BytesPool,
     ) -> Result<Self::IterType<'txn>, DatabaseError>;
 
-    fn range_rev<'txn, 'key>(
+    async fn range_rev<'txn, 'key>(
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
         pool: &mut BytesPool,
     ) -> Result<Self::RevIterType<'txn>, DatabaseError>;
 
-    fn remove_range(
+    async fn remove_range(
         &mut self,
         min: Bound<&[u8]>,
         max: Bound<&[u8]>,
@@ -1226,14 +1339,16 @@ pub trait StorageTransaction: Sized {
 
         loop {
             data_keys.clear();
-            let mut iter = self.range(
-                bytes_bound_as_slice(&lower),
-                bytes_bound_as_slice(&upper),
-                pool,
-            )?;
+            let mut iter = self
+                .range(
+                    bytes_bound_as_slice(&lower),
+                    bytes_bound_as_slice(&upper),
+                    pool,
+                )
+                .await?;
 
             while data_keys.len() < DELETE_BATCH_SIZE {
-                let Some((key, _)) = iter.try_next()? else {
+                let Some((key, _)) = iter.try_next().await? else {
                     break;
                 };
                 data_keys.push(key.to_vec());
@@ -1257,7 +1372,7 @@ pub trait StorageTransaction: Sized {
         }
     }
 
-    fn commit(self) -> Result<(), DatabaseError>;
+    async fn commit(self) -> Result<(), DatabaseError>;
 }
 
 pub(crate) fn owned_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
@@ -1309,8 +1424,9 @@ fn encode_bound_key(buffer: &mut Bytes, key: &[u8], is_upper: bool) {
     }
 }
 
+#[dual]
 #[inline]
-fn encode_bound<'a>(
+async fn encode_bound<'a>(
     table_codec: &mut TableCodec,
     bound: &Bound<RangeValue>,
     is_upper: bool,
@@ -1320,19 +1436,24 @@ fn encode_bound<'a>(
 ) -> Result<Bound<&'a [u8]>, DatabaseError> {
     match bound {
         Bound::Included(val) => {
-            inner.bound_key(table_codec, params, val.value()?, is_upper, buffer)?;
+            inner
+                .bound_key(table_codec, params, val.value()?, is_upper, buffer)
+                .await?;
             Ok(Bound::Included(buffer.as_slice()))
         }
         Bound::Excluded(val) => {
-            inner.bound_key(table_codec, params, val.value()?, !is_upper, buffer)?;
+            inner
+                .bound_key(table_codec, params, val.value()?, !is_upper, buffer)
+                .await?;
             Ok(Bound::Excluded(buffer.as_slice()))
         }
         Bound::Unbounded => Ok(Bound::Unbounded),
     }
 }
 
+#[dual]
 trait IndexImpl<T: StorageTransaction> {
-    fn index_lookup_into(
+    async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
@@ -1342,7 +1463,7 @@ trait IndexImpl<T: StorageTransaction> {
         cover_mapping: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError>;
 
-    fn eq_to_res<'a>(
+    async fn eq_to_res<'a>(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
@@ -1352,7 +1473,7 @@ trait IndexImpl<T: StorageTransaction> {
         encode_max: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError>;
 
-    fn bound_key(
+    async fn bound_key(
         &self,
         table_codec: &mut TableCodec,
         params: &IndexImplParams<T>,
@@ -1452,6 +1573,7 @@ struct IndexImplParams<'a, T: StorageTransaction> {
     reverse: bool,
 }
 
+#[dual]
 impl<T: StorageTransaction> IndexImplParams<'_, T> {
     #[inline]
     pub(crate) fn index_meta(&self) -> &IndexMeta {
@@ -1464,30 +1586,32 @@ impl<T: StorageTransaction> IndexImplParams<'_, T> {
     }
 
     #[inline]
-    fn get_tuple_by_id_into(
+    async fn get_tuple_by_id_into(
         &self,
         table_codec: &mut TableCodec,
         tuple_id: &TupleId,
         tuple: &mut Tuple,
     ) -> Result<bool, DatabaseError> {
-        table_codec.with_tuple_unchecked(self.table_id, tuple_id, None, |key, _, pool| {
-            let Some(bytes) = self.tx.get_borrowed(key)? else {
-                return Ok(false);
-            };
-            // SAFETY: `bytes` was read from `self.tx`.
-            unsafe {
-                TableCodec::decode_tuple_into(
-                    tuple,
-                    self.deserializers.deserializers(),
-                    Some(tuple_id.clone()),
-                    bytes.as_ref(),
-                    self.deserializers.total_len,
-                    pool,
-                    self.tx.mapped_scope(),
-                )?
-            };
-            Ok(true)
-        })
+        table_codec
+            .with_tuple_unchecked(self.table_id, tuple_id, None, async |key, _, pool| {
+                let Some(bytes) = self.tx.get_borrowed(key).await? else {
+                    return Ok(false);
+                };
+                // SAFETY: `bytes` was read from `self.tx`.
+                unsafe {
+                    TableCodec::decode_tuple_into(
+                        tuple,
+                        self.deserializers.deserializers(),
+                        Some(tuple_id.clone()),
+                        bytes.as_ref(),
+                        self.deserializers.total_len,
+                        pool,
+                        self.tx.mapped_scope(),
+                    )?
+                };
+                Ok(true)
+            })
+            .await
     }
 }
 
@@ -1502,8 +1626,9 @@ pub enum RangeIter<'a, T: StorageTransaction + 'a> {
     Reverse(T::RevIterType<'a>),
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> RangeIter<'a, T> {
-    fn open(
+    async fn open(
         tx: &'a T,
         min: Bound<&[u8]>,
         max: Bound<&[u8]>,
@@ -1511,9 +1636,9 @@ impl<'a, T: StorageTransaction + 'a> RangeIter<'a, T> {
         pool: &mut BytesPool,
     ) -> Result<Self, DatabaseError> {
         Ok(if reverse {
-            RangeIter::Reverse(tx.range_rev(min, max, pool)?)
+            RangeIter::Reverse(tx.range_rev(min, max, pool).await?)
         } else {
-            RangeIter::Forward(tx.range(min, max, pool)?)
+            RangeIter::Forward(tx.range(min, max, pool).await?)
         })
     }
 
@@ -1525,45 +1650,57 @@ impl<'a, T: StorageTransaction + 'a> RangeIter<'a, T> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> InnerIter for RangeIter<'a, T> {
-    fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
+    async fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
         match self {
-            RangeIter::Forward(iter) => iter.try_next(),
-            RangeIter::Reverse(iter) => iter.try_next(),
+            RangeIter::Forward(iter) => iter.try_next().await,
+            RangeIter::Reverse(iter) => iter.try_next().await,
         }
     }
 }
 
+#[dual]
 impl<T: StorageTransaction> IndexImpl<T> for IndexImplEnum {
-    fn index_lookup_into(
+    async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
         key: &[u8],
         value: &[u8],
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         cover_mapping: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         match self {
             IndexImplEnum::PrimaryKey(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                inner
+                    .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                    .await
             }
             IndexImplEnum::Unique(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                inner
+                    .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                    .await
             }
             IndexImplEnum::Normal(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                inner
+                    .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                    .await
             }
             IndexImplEnum::Composite(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                inner
+                    .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                    .await
             }
             IndexImplEnum::Covered(inner) => {
-                inner.index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                inner
+                    .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
+                    .await
             }
         }
     }
 
-    fn eq_to_res<'a>(
+    async fn eq_to_res<'a>(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
@@ -1574,59 +1711,80 @@ impl<T: StorageTransaction> IndexImpl<T> for IndexImplEnum {
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         match self {
             IndexImplEnum::PrimaryKey(inner) => {
-                inner.eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                inner
+                    .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                    .await
             }
             IndexImplEnum::Unique(inner) => {
-                inner.eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                inner
+                    .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                    .await
             }
             IndexImplEnum::Normal(inner) => {
-                inner.eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                inner
+                    .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                    .await
             }
             IndexImplEnum::Composite(inner) => {
-                inner.eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                inner
+                    .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                    .await
             }
             IndexImplEnum::Covered(inner) => {
-                inner.eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                inner
+                    .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
+                    .await
             }
         }
     }
 
-    fn bound_key(
+    async fn bound_key(
         &self,
         table_codec: &mut TableCodec,
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         value: &DataValue,
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         match self {
             IndexImplEnum::PrimaryKey(inner) => {
-                inner.bound_key(table_codec, params, value, is_upper, out)
+                inner
+                    .bound_key(table_codec, params, value, is_upper, out)
+                    .await
             }
             IndexImplEnum::Unique(inner) => {
-                inner.bound_key(table_codec, params, value, is_upper, out)
+                inner
+                    .bound_key(table_codec, params, value, is_upper, out)
+                    .await
             }
             IndexImplEnum::Normal(inner) => {
-                inner.bound_key(table_codec, params, value, is_upper, out)
+                inner
+                    .bound_key(table_codec, params, value, is_upper, out)
+                    .await
             }
             IndexImplEnum::Composite(inner) => {
-                inner.bound_key(table_codec, params, value, is_upper, out)
+                inner
+                    .bound_key(table_codec, params, value, is_upper, out)
+                    .await
             }
             IndexImplEnum::Covered(inner) => {
-                inner.bound_key(table_codec, params, value, is_upper, out)
+                inner
+                    .bound_key(table_codec, params, value, is_upper, out)
+                    .await
             }
         }
     }
 }
 
+#[dual]
 impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
-    fn index_lookup_into(
+    async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
         key: &[u8],
         value: &[u8],
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         _: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         let tuple_id = params
@@ -1647,7 +1805,7 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         }
     }
 
-    fn eq_to_res<'a>(
+    async fn eq_to_res<'a>(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
@@ -1656,11 +1814,11 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         _: &mut Bytes,
         _: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        let found =
-            table_codec.with_tuple_unchecked(params.table_id, value, None, |key, _, pool| {
+        let found = table_codec
+            .with_tuple_unchecked(params.table_id, value, None, async |key, _, pool| {
                 let bytes = match &params.cursor {
-                    Some(cursor) => params.tx.get_at(cursor, key)?,
-                    None => params.tx.get_borrowed(key)?,
+                    Some(cursor) => params.tx.get_at(cursor, key).await?,
+                    None => params.tx.get_borrowed(key).await?,
                 };
                 let Some(bytes) = bytes else {
                     return Ok(false);
@@ -1678,7 +1836,8 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
                     )?
                 };
                 Ok(true)
-            })?;
+            })
+            .await?;
         Ok(if found {
             IndexResult::Hit
         } else {
@@ -1686,50 +1845,57 @@ impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
         })
     }
 
-    fn bound_key(
+    async fn bound_key(
         &self,
         table_codec: &mut TableCodec,
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         value: &DataValue,
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        table_codec.with_tuple_unchecked(params.table_id, value, None, |key, _, _| {
-            encode_bound_key(out, key, is_upper);
-            Ok(())
-        })
+        table_codec
+            .with_tuple_unchecked(params.table_id, value, None, async |key, _, _| {
+                encode_bound_key(out, key, is_upper);
+                Ok(())
+            })
+            .await
     }
 }
 
+#[dual]
 #[inline(always)]
-fn secondary_index_lookup<T: StorageTransaction>(
+async fn secondary_index_lookup<T: StorageTransaction>(
     table_codec: &mut TableCodec,
     tuple: &mut Tuple,
     bytes: &[u8],
-    params: &IndexImplParams<T>,
+    params: &IndexImplParams<'_, T>,
 ) -> Result<(), DatabaseError> {
     let tuple_id = TableCodec::decode_index(bytes)?;
-    if params.get_tuple_by_id_into(table_codec, &tuple_id, tuple)? {
+    if params
+        .get_tuple_by_id_into(table_codec, &tuple_id, tuple)
+        .await?
+    {
         Ok(())
     } else {
         Err(DatabaseError::TupleIdNotFound(tuple_id))
     }
 }
 
+#[dual]
 impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
-    fn index_lookup_into(
+    async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
         _: &[u8],
         value: &[u8],
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         _: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
-        secondary_index_lookup(table_codec, tuple, value, params)
+        secondary_index_lookup(table_codec, tuple, value, params).await
     }
 
-    fn eq_to_res<'a>(
+    async fn eq_to_res<'a>(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
@@ -1739,57 +1905,65 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
         _: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Unique);
-        let Some(bytes) = table_codec.with_index(params.table_id, &index, None, |key, _| {
-            params.tx.get_borrowed(key)
-        })?
+        let Some(bytes) = table_codec
+            .with_index(params.table_id, &index, None, async |key, _| {
+                params.tx.get_borrowed(key).await
+            })
+            .await?
         else {
             return Ok(IndexResult::Miss);
         };
         let tuple_id = TableCodec::decode_index(bytes.as_ref())?;
-        if params.get_tuple_by_id_into(table_codec, &tuple_id, tuple)? {
+        if params
+            .get_tuple_by_id_into(table_codec, &tuple_id, tuple)
+            .await?
+        {
             Ok(IndexResult::Hit)
         } else {
             Err(DatabaseError::TupleIdNotFound(tuple_id))
         }
     }
 
-    fn bound_key(
+    async fn bound_key(
         &self,
         table_codec: &mut TableCodec,
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         value: &DataValue,
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Unique);
 
-        table_codec.with_index(params.table_id, &index, None, |key, _| {
-            if index.values.len() < params.index_meta().column_ids.len() {
-                // A partial UNIQUE key bounds a prefix, not one exact index entry.
-                encode_bound_key(out, key, is_upper);
-            } else {
-                out.clear();
-                out.extend_from_slice(key);
-            }
-            Ok(())
-        })
+        table_codec
+            .with_index(params.table_id, &index, None, async |key, _| {
+                if index.values.len() < params.index_meta().column_ids.len() {
+                    // A partial UNIQUE key bounds a prefix, not one exact index entry.
+                    encode_bound_key(out, key, is_upper);
+                } else {
+                    out.clear();
+                    out.extend_from_slice(key);
+                }
+                Ok(())
+            })
+            .await
     }
 }
 
+#[dual]
 impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
-    fn index_lookup_into(
+    async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
         _: &[u8],
         value: &[u8],
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         _: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
-        secondary_index_lookup(table_codec, tuple, value, params)
+        secondary_index_lookup(table_codec, tuple, value, params).await
     }
 
-    fn eq_to_res<'a>(
+    async fn eq_to_res<'a>(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
@@ -1807,38 +1981,42 @@ impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
             encode_min,
             encode_max,
         )
+        .await
     }
 
-    fn bound_key(
+    async fn bound_key(
         &self,
         table_codec: &mut TableCodec,
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         value: &DataValue,
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Normal);
-        table_codec.with_index(params.table_id, &index, None, |key, _| {
-            encode_bound_key(out, key, is_upper);
-            Ok(())
-        })
+        table_codec
+            .with_index(params.table_id, &index, None, async |key, _| {
+                encode_bound_key(out, key, is_upper);
+                Ok(())
+            })
+            .await
     }
 }
 
+#[dual]
 impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
-    fn index_lookup_into(
+    async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
         _: &[u8],
         value: &[u8],
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         _: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
-        secondary_index_lookup(table_codec, tuple, value, params)
+        secondary_index_lookup(table_codec, tuple, value, params).await
     }
 
-    fn eq_to_res<'a>(
+    async fn eq_to_res<'a>(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
@@ -1856,12 +2034,13 @@ impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
             encode_min,
             encode_max,
         )
+        .await
     }
 
-    fn bound_key(
+    async fn bound_key(
         &self,
         table_codec: &mut TableCodec,
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         value: &DataValue,
         is_upper: bool,
         out: &mut Bytes,
@@ -1871,21 +2050,24 @@ impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
             value.as_slice(),
             IndexType::Composite,
         );
-        table_codec.with_index(params.table_id, &index, None, |key, _| {
-            encode_bound_key(out, key, is_upper);
-            Ok(())
-        })
+        table_codec
+            .with_index(params.table_id, &index, None, async |key, _| {
+                encode_bound_key(out, key, is_upper);
+                Ok(())
+            })
+            .await
     }
 }
 
+#[dual]
 impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
-    fn index_lookup_into(
+    async fn index_lookup_into(
         &self,
         _: &mut TableCodec,
         tuple: &mut Tuple,
         key: &[u8],
         value: &[u8],
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         cover_mapping: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         let ty = params.value_ty();
@@ -1909,7 +2091,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
         }
     }
 
-    fn eq_to_res<'a>(
+    async fn eq_to_res<'a>(
         &self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
@@ -1927,12 +2109,13 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
             encode_min,
             encode_max,
         )
+        .await
     }
 
-    fn bound_key(
+    async fn bound_key(
         &self,
         table_codec: &mut TableCodec,
-        params: &IndexImplParams<T>,
+        params: &IndexImplParams<'_, T>,
         value: &DataValue,
         is_upper: bool,
         out: &mut Bytes,
@@ -1942,15 +2125,18 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
             value.as_slice(),
             params.index_meta().ty,
         );
-        table_codec.with_index(params.table_id, &index, None, |key, _| {
-            encode_bound_key(out, key, is_upper);
-            Ok(())
-        })
+        table_codec
+            .with_index(params.table_id, &index, None, async |key, _| {
+                encode_bound_key(out, key, is_upper);
+                Ok(())
+            })
+            .await
     }
 }
 
+#[dual]
 #[inline(always)]
-fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
+async fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
     table_codec: &mut TableCodec,
     tuple: &mut Tuple,
     index_impl: &impl IndexImpl<T>,
@@ -1960,8 +2146,12 @@ fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
     encode_max: &mut Bytes,
 ) -> Result<IndexResult<'a, T>, DatabaseError> {
     let _ = tuple;
-    index_impl.bound_key(table_codec, params, value, false, encode_min)?;
-    index_impl.bound_key(table_codec, params, value, true, encode_max)?;
+    index_impl
+        .bound_key(table_codec, params, value, false, encode_min)
+        .await?;
+    index_impl
+        .bound_key(table_codec, params, value, true, encode_max)
+        .await?;
 
     let iter = RangeIter::open(
         params.tx,
@@ -1969,7 +2159,8 @@ fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
         Bound::Included(encode_max.as_slice()),
         params.reverse,
         table_codec.bytes_pool(),
-    )?;
+    )
+    .await?;
     Ok(IndexResult::Scope(iter))
 }
 
@@ -2088,20 +2279,24 @@ pub struct TupleIter<'a, T: StorageTransaction + 'a> {
     mapped: Option<&'a MappedScope>,
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
     pub(crate) fn recycle(self, pool: &mut BytesPool) {
         self.iter.recycle(pool);
     }
 
-    pub(crate) fn reset(
+    pub(crate) async fn reset(
         &mut self,
         tx: &'a T,
         table_codec: &mut TableCodec,
         bounds: Bounds,
     ) -> Result<(), DatabaseError> {
-        let iter = table_codec.with_tuple_bound(self.table_id, |min, max, pool| {
-            tx.range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        let iter = table_codec
+            .with_tuple_bound(self.table_id, async |min, max, pool| {
+                tx.range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
         mem::replace(&mut self.iter, iter).recycle(table_codec.bytes_pool());
         self.mapped = tx.mapped_scope();
         self.bounds = IterBounds::new(bounds.0.unwrap_or(0), bounds.1);
@@ -2109,13 +2304,14 @@ impl<'a, T: StorageTransaction + 'a> TupleIter<'a, T> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> Iter for TupleIter<'a, T> {
-    fn next_tuple_into(
+    async fn next_tuple_into(
         &mut self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
     ) -> Result<bool, DatabaseError> {
-        while let Some((key, value)) = self.iter.try_next()? {
+        while let Some((key, value)) = self.iter.try_next().await? {
             if table_codec.is_own_write(value) || self.bounds.consume_offset() {
                 continue;
             }
@@ -2199,6 +2395,7 @@ pub enum IndexIterState<'a, T: StorageTransaction + 'a> {
     Over,
 }
 
+#[dual]
 impl<'a, T: StorageTransaction> IndexIter<'a, T> {
     pub(crate) fn recycle(self, pool: &mut BytesPool) {
         if let IndexIterState::Range(iter) = self.state {
@@ -2224,7 +2421,7 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
         Some(range)
     }
 
-    pub(crate) fn next_tuple_into(
+    pub(crate) async fn next_tuple_into(
         &mut self,
         view: IndexScanView<'_>,
         bound_buffers: &mut [Bytes; 2],
@@ -2256,7 +2453,8 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
                                 encode_min,
                                 &self.params,
                                 &self.inner,
-                            )?;
+                            )
+                            .await?;
                             let encode_max = encode_bound(
                                 table_codec,
                                 max,
@@ -2264,12 +2462,15 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
                                 encode_max,
                                 &self.params,
                                 &self.inner,
-                            )?;
+                            )
+                            .await?;
 
                             let tx = self.params.tx;
                             let reverse = self.params.reverse;
                             let open_iter =
-                                move |bound_min: &[u8], bound_max: &[u8], pool: &mut BytesPool| {
+                                async move |bound_min: &[u8],
+                                            bound_max: &[u8],
+                                            pool: &mut BytesPool| {
                                     RangeIter::open(
                                         tx,
                                         fill_default_bound(encode_min, bound_min),
@@ -2277,11 +2478,14 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
                                         reverse,
                                         pool,
                                     )
+                                    .await
                                 };
                             let iter = if matches!(index_meta.ty, IndexType::PrimaryKey { .. }) {
-                                table_codec.with_tuple_bound(table_id, open_iter)?
+                                table_codec.with_tuple_bound(table_id, open_iter).await?
                             } else {
-                                table_codec.with_index_bound(table_id, index_meta.id, open_iter)?
+                                table_codec
+                                    .with_index_bound(table_id, index_meta.id, open_iter)
+                                    .await?
                             };
                             self.state = IndexIterState::Range(iter);
                         }
@@ -2292,14 +2496,18 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
                             {
                                 self.params.cursor = Some(self.params.tx.point_cursor()?);
                             }
-                            match self.inner.eq_to_res(
-                                table_codec,
-                                tuple,
-                                val.value()?,
-                                &self.params,
-                                encode_min,
-                                encode_max,
-                            )? {
+                            match self
+                                .inner
+                                .eq_to_res(
+                                    table_codec,
+                                    tuple,
+                                    val.value()?,
+                                    &self.params,
+                                    encode_min,
+                                    encode_max,
+                                )
+                                .await?
+                            {
                                 IndexResult::Hit => {
                                     if self.bounds.consume_offset() {
                                         continue;
@@ -2317,19 +2525,21 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
                     }
                 }
                 IndexIterState::Range(iter) => {
-                    while let Some((key, value)) = iter.try_next()? {
+                    while let Some((key, value)) = iter.try_next().await? {
                         if table_codec.is_own_write(value) || self.bounds.consume_offset() {
                             continue;
                         }
                         self.bounds.consume_limit();
-                        self.inner.index_lookup_into(
-                            table_codec,
-                            tuple,
-                            key,
-                            value,
-                            &self.params,
-                            view.cover_mapping,
-                        )?;
+                        self.inner
+                            .index_lookup_into(
+                                table_codec,
+                                tuple,
+                                key,
+                                value,
+                                &self.params,
+                                view.cover_mapping,
+                            )
+                            .await?;
 
                         return Ok(true);
                     }
@@ -2345,8 +2555,9 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
     }
 }
 
-pub trait InnerIter {
-    fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError>;
+#[dual]
+pub trait InnerIter: MaybeSend {
+    async fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError>;
 
     #[doc(hidden)]
     fn recycle(self, pool: &mut BytesPool)
@@ -2357,8 +2568,9 @@ pub trait InnerIter {
     }
 }
 
-pub trait Iter {
-    fn next_tuple_into(
+#[dual]
+pub trait Iter: MaybeSend {
+    async fn next_tuple_into(
         &mut self,
         table_codec: &mut TableCodec,
         tuple: &mut Tuple,
@@ -2369,13 +2581,14 @@ pub struct TableIter<'a, T: StorageTransaction + 'a> {
     pub(crate) iter: T::IterType<'a>,
 }
 
+#[dual]
 impl<T: StorageTransaction> TableIter<'_, T> {
-    pub fn try_next(
+    pub async fn try_next(
         &mut self,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<TableMeta>, DatabaseError> {
         // Views share the root namespace.
-        while let Some((_, value)) = self.iter.try_next()? {
+        while let Some((_, value)) = self.iter.try_next().await? {
             let meta = TableCodec::decode_root_table::<T>(value, arena)?;
             if !meta.is_view {
                 return Ok(Some(meta));
@@ -2389,12 +2602,13 @@ pub struct ViewIter<'a, T: StorageTransaction + 'a> {
     pub(crate) iter: T::IterType<'a>,
 }
 
+#[dual]
 impl<T: StorageTransaction> ViewIter<'_, T> {
-    pub fn try_next(
+    pub async fn try_next(
         &mut self,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<Option<TableName>, DatabaseError> {
-        let Some((_, value)) = self.iter.try_next()? else {
+        let Some((_, value)) = self.iter.try_next().await? else {
             return Ok(None);
         };
 
@@ -2403,13 +2617,14 @@ impl<T: StorageTransaction> ViewIter<'_, T> {
 }
 
 // GRCOV_EXCL_START
+#[crate::dual::dual]
 #[cfg(test)]
-pub(crate) fn check_range_rev_matches_range<T: StorageTransaction>(
+pub(crate) async fn check_range_rev_matches_range<T: StorageTransaction>(
     tx: &mut T,
 ) -> Result<(), DatabaseError> {
-    fn keys<I: InnerIter>(mut iter: I) -> Result<Vec<Vec<u8>>, DatabaseError> {
+    async fn keys<I: InnerIter>(mut iter: I) -> Result<Vec<Vec<u8>>, DatabaseError> {
         let mut keys = Vec::new();
-        while let Some((key, _)) = iter.try_next()? {
+        while let Some((key, _)) = iter.try_next().await? {
             keys.push(key.to_vec());
         }
         Ok(keys)
@@ -2467,37 +2682,45 @@ pub(crate) fn check_range_rev_matches_range<T: StorageTransaction>(
                 .cloned()
                 .collect();
             assert_eq!(
-                keys(tx.range(*min, *max, &mut pool)?)?,
+                keys(tx.range(*min, *max, &mut pool).await?).await?,
                 expected,
                 "min={min:?} max={max:?}"
             );
             expected.reverse();
-            let actual = keys(tx.range_rev(*min, *max, &mut pool)?)?;
+            let actual = keys(tx.range_rev(*min, *max, &mut pool).await?).await?;
             assert_eq!(actual, expected, "min={min:?} max={max:?}");
         }
     }
     Ok(())
 }
 
+#[crate::dual::dual]
 #[cfg(test)]
-pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
+pub(crate) async fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
     mut db: crate::db::Database<S>,
 ) -> Result<(), DatabaseError> {
-    db.ddl("create table t (id int primary key, v int not null)")?;
+    db.ddl("create table t (id int primary key, v int not null)")
+        .await?;
     let mut tx = db.new_transaction(false)?;
-    tx.run("insert into t values (1,1), (2,2), (3,3), (4,4), (5,5)")?
-        .done()?;
-    tx.run("update t set id = id + 1000 where id > 3 and id < 3000")?
-        .done()?;
-    tx.run("insert into t select id + 1000, v from t where id < 3000")?
-        .done()?;
-    let mut iter = tx.run("select id from t order by id")?;
+    tx.run("insert into t values (1,1), (2,2), (3,3), (4,4), (5,5)")
+        .await?
+        .done()
+        .await?;
+    tx.run("update t set id = id + 1000 where id > 3 and id < 3000")
+        .await?
+        .done()
+        .await?;
+    tx.run("insert into t select id + 1000, v from t where id < 3000")
+        .await?
+        .done()
+        .await?;
+    let mut iter = tx.run("select id from t order by id").await?;
     let mut ids = Vec::new();
-    while let Some(id) = iter.next_tuple(|_, tuple| tuple[0].clone())? {
+    while let Some(id) = iter.next_tuple(|_, tuple| tuple[0].clone()).await? {
         ids.push(id);
     }
-    iter.done()?;
-    tx.commit()?;
+    iter.done().await?;
+    tx.commit().await?;
     let expected = [1, 2, 3, 1001, 1002, 1003, 1004, 1005, 2004, 2005]
         .map(DataValue::Int32)
         .to_vec();
@@ -2505,8 +2728,11 @@ pub(crate) fn check_explicit_transaction_does_not_rescan_own_writes<S: Storage>(
     Ok(())
 }
 
+#[crate::dual::dual]
 #[cfg(test)]
-pub(crate) fn check_remove_range<T: StorageTransaction>(tx: &mut T) -> Result<(), DatabaseError> {
+pub(crate) async fn check_remove_range<T: StorageTransaction>(
+    tx: &mut T,
+) -> Result<(), DatabaseError> {
     let data: Vec<[u8; 4]> = (0u32..3000).map(u32::to_be_bytes).collect();
     let [k0, k1, k10, k2500, k2999, k5000] = [0u32, 1, 10, 2500, 2999, 5000].map(u32::to_be_bytes);
     type Case<'a> = (Bound<&'a [u8]>, Bound<&'a [u8]>);
@@ -2524,11 +2750,13 @@ pub(crate) fn check_remove_range<T: StorageTransaction>(tx: &mut T) -> Result<()
         for key in &data {
             tx.set(key, &[7; 64])?;
         }
-        tx.remove_range(min, max, &mut pool)?;
+        tx.remove_range(min, max, &mut pool).await?;
 
-        let mut iter = tx.range(Bound::Unbounded, Bound::Unbounded, &mut pool)?;
+        let mut iter = tx
+            .range(Bound::Unbounded, Bound::Unbounded, &mut pool)
+            .await?;
         let mut remaining = Vec::new();
-        while let Some((key, _)) = iter.try_next()? {
+        while let Some((key, _)) = iter.try_next().await? {
             remaining.push(key.to_vec());
         }
         let expected: Vec<Vec<u8>> = data
@@ -2583,16 +2811,18 @@ pub(crate) fn deserializers_for_test(
 }
 
 /// Reads one tuple with `next`, which is given a fresh codec and tuple.
+#[crate::dual::dual]
 #[cfg(test)]
-pub(crate) fn next_tuple_for_test(
-    mut next: impl FnMut(&mut TableCodec, &mut Tuple) -> Result<bool, DatabaseError>,
+pub(crate) async fn next_tuple_for_test(
+    mut next: impl AsyncFnMut(&mut TableCodec, &mut Tuple) -> Result<bool, DatabaseError>,
 ) -> Result<Option<Tuple>, DatabaseError> {
     let mut tuple = Tuple::default();
     let mut table_codec = TableCodec::default();
-    Ok(next(&mut table_codec, &mut tuple)?.then_some(tuple))
+    Ok(next(&mut table_codec, &mut tuple).await?.then_some(tuple))
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::catalog::view::View;
@@ -2603,7 +2833,7 @@ mod test {
     use crate::errors::DatabaseError;
     use crate::expression::range_detacher::Range;
     use crate::planner::{PlanArena, TableArenaCell};
-    use crate::storage::rocksdb::{RocksStorage, RocksTransaction};
+    use crate::storage::memory::{MemoryStorage, MemoryTransaction};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::NameMapping;
     use crate::storage::{
@@ -2616,7 +2846,6 @@ mod test {
     use crate::types::LogicalType;
     use std::collections::Bound;
     use std::sync::Arc;
-    use tempfile::TempDir;
 
     fn full_columns(names: &NameMapping, table_cache: &TableCache) -> Vec<ColumnRef> {
         names
@@ -2657,9 +2886,8 @@ mod test {
     }
 
     #[test]
-    fn test_table_create_drop() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_table_create_drop() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -2671,10 +2899,11 @@ mod test {
             &mut table_cache,
             &mut transaction,
             &mut plan_arena,
-        )?;
+        )
+        .await?;
         let plan_arena = PlanArena::new(&table_arena);
 
-        let fn_assert = |transaction: &mut RocksTransaction,
+        let fn_assert = |transaction: &mut MemoryTransaction,
                          names: &NameMapping,
                          table_cache: &TableCache,
                          plan_arena: &PlanArena|
@@ -2758,7 +2987,8 @@ mod test {
         let mut table_codec = TableCodec::default();
         let table_name = "t1".to_string();
         let table = transaction
-            .load_table(&mut table_codec, table_arena.borrow_mut(), &table_name)?
+            .load_table(&mut table_codec, table_arena.borrow_mut(), &table_name)
+            .await?
             .ok_or(DatabaseError::TableNotFound)?;
         reloaded_names.insert_table(&mut reloaded_table_cache, table);
         let plan_arena = PlanArena::new(&table_arena);
@@ -2773,10 +3003,9 @@ mod test {
     }
 
     #[test]
-    fn test_tuple_append_delete() -> Result<(), DatabaseError> {
+    async fn test_tuple_append_delete() -> Result<(), DatabaseError> {
         let mut table_codec = TableCodec::default();
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+        let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -2788,22 +3017,25 @@ mod test {
             &mut table_cache,
             &mut transaction,
             &mut plan_arena,
-        )?;
+        )
+        .await?;
         let plan_arena = PlanArena::new(&table_arena);
 
         let tuples = build_tuples();
         for tuple in build_tuples() {
-            transaction.append_tuple(
-                &mut table_codec,
-                0,
-                &tuple.into(),
-                &[
-                    LogicalType::Integer.serializable(),
-                    LogicalType::Boolean.serializable(),
-                    LogicalType::Integer.serializable(),
-                ],
-                false,
-            )?;
+            transaction
+                .append_tuple(
+                    &mut table_codec,
+                    0,
+                    &tuple.into(),
+                    &[
+                        LogicalType::Integer.serializable(),
+                        LogicalType::Boolean.serializable(),
+                        LogicalType::Integer.serializable(),
+                    ],
+                    false,
+                )
+                .await?;
         }
         {
             let deserializers = project_deserializers_for_test(
@@ -2814,40 +3046,60 @@ mod test {
                 &plan_arena,
                 true,
             );
-            let mut tuple_iter = transaction.read(
-                &mut table_codec,
-                &deserializers,
-                names.table(&table_cache, "t1").unwrap().id(),
-                (None, None),
-            )?;
+            let mut tuple_iter = transaction
+                .read(
+                    &mut table_codec,
+                    &deserializers,
+                    names.table(&table_cache, "t1").unwrap().id(),
+                    (None, None),
+                )
+                .await?;
 
             assert_eq!(
-                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
+                super::next_tuple_for_test(async |codec, tuple| {
+                    tuple_iter.next_tuple_into(codec, tuple).await
+                })
+                .await?
+                .unwrap(),
                 tuples[0]
             );
             assert_eq!(
-                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
+                super::next_tuple_for_test(async |codec, tuple| {
+                    tuple_iter.next_tuple_into(codec, tuple).await
+                })
+                .await?
+                .unwrap(),
                 tuples[1]
             );
             assert_eq!(
-                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
+                super::next_tuple_for_test(async |codec, tuple| {
+                    tuple_iter.next_tuple_into(codec, tuple).await
+                })
+                .await?
+                .unwrap(),
                 tuples[2]
             );
 
-            let mut iter = table_codec.with_tuple_bound(0, |min, max, pool| {
-                transaction.range(Bound::Included(min), Bound::Included(max), pool)
-            })?;
+            let mut iter = table_codec
+                .with_tuple_bound(0, async |min, max, pool| {
+                    transaction
+                        .range(Bound::Included(min), Bound::Included(max), pool)
+                        .await
+                })
+                .await?;
 
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            assert!(iter.try_next()?.is_none());
+            assert!(iter.try_next().await?.is_none());
         }
 
-        transaction.remove_tuple(&mut table_codec, 0, &tuples[1].values[0])?;
+        transaction
+            .remove_tuple(&mut table_codec, 0, &tuples[1].values[0])
+            .await?;
         {
             let deserializers = project_deserializers_for_test(
                 &names,
@@ -2857,41 +3109,54 @@ mod test {
                 &plan_arena,
                 true,
             );
-            let mut tuple_iter = transaction.read(
-                &mut table_codec,
-                &deserializers,
-                names.table(&table_cache, "t1").unwrap().id(),
-                (None, None),
-            )?;
+            let mut tuple_iter = transaction
+                .read(
+                    &mut table_codec,
+                    &deserializers,
+                    names.table(&table_cache, "t1").unwrap().id(),
+                    (None, None),
+                )
+                .await?;
 
             assert_eq!(
-                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
+                super::next_tuple_for_test(async |codec, tuple| {
+                    tuple_iter.next_tuple_into(codec, tuple).await
+                })
+                .await?
+                .unwrap(),
                 tuples[0]
             );
             assert_eq!(
-                super::next_tuple_for_test(|codec, tuple| tuple_iter.next_tuple_into(codec, tuple))?.unwrap(),
+                super::next_tuple_for_test(async |codec, tuple| {
+                    tuple_iter.next_tuple_into(codec, tuple).await
+                })
+                .await?
+                .unwrap(),
                 tuples[2]
             );
 
-            let mut iter = table_codec.with_tuple_bound(0, |min, max, pool| {
-                transaction.range(Bound::Included(min), Bound::Included(max), pool)
-            })?;
+            let mut iter = table_codec
+                .with_tuple_bound(0, async |min, max, pool| {
+                    transaction
+                        .range(Bound::Included(min), Bound::Included(max), pool)
+                        .await
+                })
+                .await?;
 
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            assert!(iter.try_next()?.is_none());
+            assert!(iter.try_next().await?.is_none());
         }
 
         Ok(())
     }
 
     #[test]
-    fn test_add_index_meta() -> Result<(), DatabaseError> {
+    async fn test_add_index_meta() -> Result<(), DatabaseError> {
         let mut table_codec = TableCodec::default();
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+        let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -2903,7 +3168,8 @@ mod test {
             &mut table_cache,
             &mut transaction,
             &mut plan_arena,
-        )?;
+        )
+        .await?;
         let mut plan_arena = PlanArena::new(&table_arena);
         let (c2_column_id, c3_column_id) = {
             let t1_table = transaction.table(&names, &table_cache, "t1")?.unwrap();
@@ -2914,29 +3180,33 @@ mod test {
             )
         };
 
-        let (table, _) = transaction.add_index_meta(
-            &mut table_codec,
-            &mut plan_arena,
-            "t1",
-            "i1".to_string(),
-            vec![c3_column_id],
-            IndexType::Normal,
-        )?;
+        let (table, _) = transaction
+            .add_index_meta(
+                &mut table_codec,
+                &mut plan_arena,
+                "t1",
+                "i1".to_string(),
+                vec![c3_column_id],
+                IndexType::Normal,
+            )
+            .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
         names.insert_table(&mut table_cache, table);
         let mut plan_arena = PlanArena::new(&table_arena);
-        let (table, _) = transaction.add_index_meta(
-            &mut table_codec,
-            &mut plan_arena,
-            "t1",
-            "i2".to_string(),
-            vec![c3_column_id, c2_column_id],
-            IndexType::Composite,
-        )?;
+        let (table, _) = transaction
+            .add_index_meta(
+                &mut table_codec,
+                &mut plan_arena,
+                "t1",
+                "i2".to_string(),
+                vec![c3_column_id, c2_column_id],
+                IndexType::Composite,
+            )
+            .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
         names.insert_table(&mut table_cache, table);
 
-        let fn_assert = |transaction: &mut RocksTransaction,
+        let fn_assert = |transaction: &mut MemoryTransaction,
                          names: &NameMapping,
                          table_cache: &TableCache|
          -> Result<(), DatabaseError> {
@@ -2966,30 +3236,39 @@ mod test {
         let mut reloaded_table_cache = crate::storage::TableCache::default();
         let table_name = "t1".to_string();
         let table = transaction
-            .load_table(&mut table_codec, table_arena.borrow_mut(), &table_name)?
+            .load_table(&mut table_codec, table_arena.borrow_mut(), &table_name)
+            .await?
             .ok_or(DatabaseError::TableNotFound)?;
         reloaded_names.insert_table(&mut reloaded_table_cache, table);
         let mut plan_arena = PlanArena::new(&table_arena);
         fn_assert(&mut transaction, &reloaded_names, &reloaded_table_cache)?;
         {
-            let mut iter = table_codec.with_index_meta_bound(0, |min, max, pool| {
-                transaction.range(Bound::Included(min), Bound::Included(max), pool)
-            })?;
+            let mut iter = table_codec
+                .with_index_meta_bound(0, async |min, max, pool| {
+                    transaction
+                        .range(Bound::Included(min), Bound::Included(max), pool)
+                        .await
+                })
+                .await?;
 
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            assert!(iter.try_next()?.is_none());
+            assert!(iter.try_next().await?.is_none());
         }
-        match transaction.drop_index(&mut table_codec, &mut plan_arena, "t1", "pk_index", false) {
+        match transaction
+            .drop_index(&mut table_codec, &mut plan_arena, "t1", "pk_index", false)
+            .await
+        {
             Err(DatabaseError::InvalidIndex) => (),
             _ => unreachable!(),
         }
-        if let Some((table, _)) =
-            transaction.drop_index(&mut table_codec, &mut plan_arena, "t1", "i1", false)?
+        if let Some((table, _)) = transaction
+            .drop_index(&mut table_codec, &mut plan_arena, "t1", "i1", false)
+            .await?
         {
             let table = table.transplant_to_table_arena(&plan_arena)?;
             names.insert_table(&mut table_cache, table);
@@ -3004,29 +3283,33 @@ mod test {
             assert_eq!(i2_meta.name, "i2".to_string());
             assert_eq!(i2_meta.ty, IndexType::Composite);
 
-            let mut iter = table_codec.with_index_meta_bound(0, |min, max, pool| {
-                transaction.range(Bound::Included(min), Bound::Included(max), pool)
-            })?;
+            let mut iter = table_codec
+                .with_index_meta_bound(0, async |min, max, pool| {
+                    transaction
+                        .range(Bound::Included(min), Bound::Included(max), pool)
+                        .await
+                })
+                .await?;
 
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            assert!(iter.try_next()?.is_none());
+            assert!(iter.try_next().await?.is_none());
         }
 
         Ok(())
     }
 
     #[test]
-    fn test_index_insert_delete() -> Result<(), DatabaseError> {
+    async fn test_index_insert_delete() -> Result<(), DatabaseError> {
         fn build_index_iter<'a>(
-            transaction: &'a RocksTransaction<'a>,
+            transaction: &'a MemoryTransaction,
             names: &NameMapping,
             table_cache: &'a TableCache,
             plan_arena: &'a PlanArena<'a>,
             deserializers: &'a TupleDeserializers,
-        ) -> Result<IndexIter<'a, RocksTransaction<'a>>, DatabaseError> {
+        ) -> Result<IndexIter<'a, MemoryTransaction>, DatabaseError> {
             let table_name: crate::catalog::TableName = "t1".to_string();
             let index_meta = names
                 .table(table_cache, &table_name)
@@ -3054,8 +3337,7 @@ mod test {
         };
 
         let mut table_codec = TableCodec::default();
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+        let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -3067,19 +3349,22 @@ mod test {
             &mut table_cache,
             &mut transaction,
             &mut plan_arena,
-        )?;
+        )
+        .await?;
         let mut plan_arena = PlanArena::new(&table_arena);
         let t1_table = transaction.table(&names, &table_cache, "t1")?.unwrap();
         let c3_column_id = *t1_table.get_column_id_by_name("c3").unwrap();
 
-        let (table, _) = transaction.add_index_meta(
-            &mut table_codec,
-            &mut plan_arena,
-            "t1",
-            "i1".to_string(),
-            vec![c3_column_id],
-            IndexType::Normal,
-        )?;
+        let (table, _) = transaction
+            .add_index_meta(
+                &mut table_codec,
+                &mut plan_arena,
+                "t1",
+                "i1".to_string(),
+                vec![c3_column_id],
+                IndexType::Normal,
+            )
+            .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
         names.insert_table(&mut table_cache, table);
         let plan_arena = PlanArena::new(&table_arena);
@@ -3112,20 +3397,24 @@ mod test {
             ),
         ];
         for (tuple_id, index) in indexes.iter().cloned() {
-            transaction.add_index(&mut table_codec, 0, index, &tuple_id)?;
+            transaction
+                .add_index(&mut table_codec, 0, index, &tuple_id)
+                .await?;
         }
         for tuple in build_tuples() {
-            transaction.append_tuple(
-                &mut table_codec,
-                0,
-                &tuple.into(),
-                &[
-                    LogicalType::Integer.serializable(),
-                    LogicalType::Boolean.serializable(),
-                    LogicalType::Integer.serializable(),
-                ],
-                false,
-            )?;
+            transaction
+                .append_tuple(
+                    &mut table_codec,
+                    0,
+                    &tuple.into(),
+                    &[
+                        LogicalType::Integer.serializable(),
+                        LogicalType::Boolean.serializable(),
+                        LogicalType::Integer.serializable(),
+                    ],
+                    false,
+                )
+                .await?;
         }
         {
             let deserializers = project_deserializers_for_test(
@@ -3145,64 +3434,79 @@ mod test {
             )?;
 
             assert_eq!(
-                super::next_tuple_for_test(|codec, tuple| {
-                    index_iter.next_tuple_into(
-                        IndexScanView {
-                            range: &full,
-                            cover_mapping: None,
-                        },
-                        &mut Default::default(),
-                        codec,
-                        tuple,
-                    )
-                })?
+                super::next_tuple_for_test(async |codec, tuple| {
+                    index_iter
+                        .next_tuple_into(
+                            IndexScanView {
+                                range: &full,
+                                cover_mapping: None,
+                            },
+                            &mut Default::default(),
+                            codec,
+                            tuple,
+                        )
+                        .await
+                })
+                .await?
                 .unwrap(),
                 tuples[0]
             );
             assert_eq!(
-                super::next_tuple_for_test(|codec, tuple| {
-                    index_iter.next_tuple_into(
-                        IndexScanView {
-                            range: &full,
-                            cover_mapping: None,
-                        },
-                        &mut Default::default(),
-                        codec,
-                        tuple,
-                    )
-                })?
+                super::next_tuple_for_test(async |codec, tuple| {
+                    index_iter
+                        .next_tuple_into(
+                            IndexScanView {
+                                range: &full,
+                                cover_mapping: None,
+                            },
+                            &mut Default::default(),
+                            codec,
+                            tuple,
+                        )
+                        .await
+                })
+                .await?
                 .unwrap(),
                 tuples[2]
             );
             assert_eq!(
-                super::next_tuple_for_test(|codec, tuple| {
-                    index_iter.next_tuple_into(
-                        IndexScanView {
-                            range: &full,
-                            cover_mapping: None,
-                        },
-                        &mut Default::default(),
-                        codec,
-                        tuple,
-                    )
-                })?
+                super::next_tuple_for_test(async |codec, tuple| {
+                    index_iter
+                        .next_tuple_into(
+                            IndexScanView {
+                                range: &full,
+                                cover_mapping: None,
+                            },
+                            &mut Default::default(),
+                            codec,
+                            tuple,
+                        )
+                        .await
+                })
+                .await?
                 .unwrap(),
                 tuples[1]
             );
 
-            let mut iter = table_codec.with_index_bound(0, 1, |min, max, pool| {
-                transaction.range(Bound::Included(min), Bound::Included(max), pool)
-            })?;
+            let mut iter = table_codec
+                .with_index_bound(0, 1, async |min, max, pool| {
+                    transaction
+                        .range(Bound::Included(min), Bound::Included(max), pool)
+                        .await
+                })
+                .await?;
 
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            let (_, value) = iter.try_next()?.unwrap();
+            let (_, value) = iter.try_next().await?.unwrap();
             dbg!(value);
-            assert!(iter.try_next()?.is_none());
+            assert!(iter.try_next().await?.is_none());
         }
-        transaction.del_index(&mut table_codec, 0, &indexes[0].1, &indexes[0].0)?;
+        transaction
+            .del_index(&mut table_codec, 0, &indexes[0].1, &indexes[0].0)
+            .await?;
 
         let deserializers = project_deserializers_for_test(
             &names,
@@ -3222,53 +3526,62 @@ mod test {
         )?;
 
         assert_eq!(
-            super::next_tuple_for_test(|codec, tuple| {
-                index_iter.next_tuple_into(
-                    IndexScanView {
-                        range: &full,
-                        cover_mapping: None,
-                    },
-                    &mut Default::default(),
-                    codec,
-                    tuple,
-                )
-            })?
+            super::next_tuple_for_test(async |codec, tuple| {
+                index_iter
+                    .next_tuple_into(
+                        IndexScanView {
+                            range: &full,
+                            cover_mapping: None,
+                        },
+                        &mut Default::default(),
+                        codec,
+                        tuple,
+                    )
+                    .await
+            })
+            .await?
             .unwrap(),
             tuples[2]
         );
         assert_eq!(
-            super::next_tuple_for_test(|codec, tuple| {
-                index_iter.next_tuple_into(
-                    IndexScanView {
-                        range: &full,
-                        cover_mapping: None,
-                    },
-                    &mut Default::default(),
-                    codec,
-                    tuple,
-                )
-            })?
+            super::next_tuple_for_test(async |codec, tuple| {
+                index_iter
+                    .next_tuple_into(
+                        IndexScanView {
+                            range: &full,
+                            cover_mapping: None,
+                        },
+                        &mut Default::default(),
+                        codec,
+                        tuple,
+                    )
+                    .await
+            })
+            .await?
             .unwrap(),
             tuples[1]
         );
 
-        let mut iter = table_codec.with_index_bound(0, 1, |min, max, pool| {
-            transaction.range(Bound::Included(min), Bound::Included(max), pool)
-        })?;
+        let mut iter = table_codec
+            .with_index_bound(0, 1, async |min, max, pool| {
+                transaction
+                    .range(Bound::Included(min), Bound::Included(max), pool)
+                    .await
+            })
+            .await?;
 
-        let (_, value) = iter.try_next()?.unwrap();
+        let (_, value) = iter.try_next().await?.unwrap();
         dbg!(value);
-        let (_, value) = iter.try_next()?.unwrap();
+        let (_, value) = iter.try_next().await?.unwrap();
         dbg!(value);
-        assert!(iter.try_next()?.is_none());
+        assert!(iter.try_next().await?.is_none());
 
         Ok(())
     }
 
     #[test]
-    fn test_column_add_drop() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_column_add_drop() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -3281,7 +3594,8 @@ mod test {
             &mut table_cache,
             &mut transaction,
             &mut plan_arena,
-        )?;
+        )
+        .await?;
         let mut plan_arena = PlanArena::new(&table_arena);
         let table_name: TableName = "t1".to_string();
 
@@ -3290,13 +3604,15 @@ mod test {
             true,
             ColumnDesc::new(LogicalType::Integer, None, false, None)?,
         );
-        let (table, new_column_id) = transaction.add_column(
-            &mut table_codec,
-            &mut plan_arena,
-            &table_name,
-            &new_column,
-            false,
-        )?;
+        let (table, new_column_id) = transaction
+            .add_column(
+                &mut table_codec,
+                &mut plan_arena,
+                &table_name,
+                &new_column,
+                false,
+            )
+            .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
         names.insert_table(&mut table_cache, table);
         let mut plan_arena = PlanArena::new(&table_arena);
@@ -3309,6 +3625,7 @@ mod test {
                     &new_column,
                     false,
                 )
+                .await
                 .is_err());
             assert_eq!(
                 new_column_id,
@@ -3319,7 +3636,8 @@ mod test {
                         &table_name,
                         &new_column,
                         true,
-                    )?
+                    )
+                    .await?
                     .1
             );
         }
@@ -3341,8 +3659,9 @@ mod test {
             let column = table.get_column_by_name("c4").unwrap();
             assert_eq!(table_arena.borrow().column(column), &new_column);
         }
-        let table =
-            transaction.drop_column(&mut table_codec, &mut plan_arena, &table_name, "c4")?;
+        let table = transaction
+            .drop_column(&mut table_codec, &mut plan_arena, &table_name, "c4")
+            .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
         names.insert_table(&mut table_cache, table);
         {
@@ -3357,8 +3676,8 @@ mod test {
     }
 
     #[test]
-    fn test_view_create_drop() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_view_create_drop() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let scala_functions = Default::default();
         let table_functions = Default::default();
 
@@ -3378,7 +3697,9 @@ mod test {
         let mut names = NameMapping::default();
         let mut view_cache = crate::storage::ViewCache::default();
         let mut table_codec = TableCodec::default();
-        let view_id = transaction.create_view(&mut table_codec, &mut plan_arena, &view, true)?;
+        let view_id = transaction
+            .create_view(&mut table_codec, &mut plan_arena, &view, true)
+            .await?;
         names.insert_view(&mut view_cache, view_id, view.clone());
 
         assert_eq!(
@@ -3408,10 +3729,16 @@ mod test {
                 .unwrap()
         );
 
-        if transaction.drop_view(&mut table_codec, &mut plan_arena, view_name.clone(), false)? {
+        if transaction
+            .drop_view(&mut table_codec, &mut plan_arena, view_name.clone(), false)
+            .await?
+        {
             names.remove(&view_name);
         }
-        if transaction.drop_view(&mut table_codec, &mut plan_arena, view_name.clone(), true)? {
+        if transaction
+            .drop_view(&mut table_codec, &mut plan_arena, view_name.clone(), true)
+            .await?
+        {
             names.remove(&view_name);
         }
         assert!(transaction

@@ -12,9 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
-    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+    build_read, ArenaBound, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::sort::{SortField, SortOperator};
 use crate::planner::LogicalPlan;
@@ -156,7 +157,7 @@ pub(crate) struct SortTuple {
 }
 
 pub struct Sort<'a> {
-    rows: NullableVec<'static, (usize, SortTuple)>,
+    rows: ArenaBound<NullableVec<'static, (usize, SortTuple)>>,
     _arena: Box<Bump>,
     sort_fields: &'a [SortField],
     input: ExecNode<'a>,
@@ -178,7 +179,7 @@ impl<'a> ReadExecutor<'a> for Sort<'a> {
             )
         };
         ExecNode::Sort(Box::new(Sort {
-            rows,
+            rows: ArenaBound(rows),
             _arena: sort_arena,
             sort_fields,
             input,
@@ -186,17 +187,18 @@ impl<'a> ReadExecutor<'a> for Sort<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows.clear();
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -207,7 +209,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
                 arena.produce(row.tuple);
                 return Ok(());
             }
-            while self.input.next_tuple(arena, plan_arena)? {
+            while self.input.next_tuple(arena, plan_arena).await? {
                 let offset = self.rows.len();
                 self.rows.put((
                     offset,
@@ -229,6 +231,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Sort<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
@@ -243,7 +246,7 @@ mod test {
     use std::cell::Cell;
 
     #[test]
-    fn memory_sort_restores_scalar_values_for_each_output_row() -> Result<(), DatabaseError> {
+    async fn memory_sort_restores_scalar_values_for_each_output_row() -> Result<(), DatabaseError> {
         use super::Sort;
         use crate::execution::ReadExecutor;
         use crate::planner::operator::scalar_query_init::ScalarQueryInitOperator;
@@ -308,11 +311,11 @@ mod test {
         // Select the memory executor explicitly even when the spill feature is enabled.
         let mut root = <Sort as ReadExecutor>::into_executor((&op, &plan), &mut arena, &metadata);
         let mut metadata = ExecMetaArena::new(metadata);
-        assert!(root.next_tuple(&mut arena, &mut metadata)?);
+        assert!(root.next_tuple(&mut arena, &mut metadata).await?);
         assert_eq!(*arena.result_tuple(), vec![DataValue::Int32(1)]);
-        root.reset(&mut arena, &mut metadata)?;
+        root.reset(&mut arena, &mut metadata).await?;
         for expected in [1, 2, 3] {
-            assert!(root.next_tuple(&mut arena, &mut metadata)?);
+            assert!(root.next_tuple(&mut arena, &mut metadata).await?);
             assert_eq!(*arena.result_tuple(), vec![DataValue::Int32(expected)]);
             assert_eq!(
                 metadata.init_value(result),
@@ -326,17 +329,17 @@ mod test {
                 &DataValue::Int32(expected)
             );
         }
-        assert!(!root.next_tuple(&mut arena, &mut metadata)?);
-        root.reset(&mut arena, &mut metadata)?;
+        assert!(!root.next_tuple(&mut arena, &mut metadata).await?);
+        root.reset(&mut arena, &mut metadata).await?;
         for expected in [1, 2, 3] {
-            assert!(root.next_tuple(&mut arena, &mut metadata)?);
+            assert!(root.next_tuple(&mut arena, &mut metadata).await?);
             assert_eq!(*arena.result_tuple(), vec![DataValue::Int32(expected)]);
             assert_eq!(
                 metadata.init_value(result),
                 Some(&DataValue::Int32(expected))
             );
         }
-        assert!(!root.next_tuple(&mut arena, &mut metadata)?);
+        assert!(!root.next_tuple(&mut arena, &mut metadata).await?);
         Ok(())
     }
 

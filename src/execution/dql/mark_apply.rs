@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::predicates_matched;
 use crate::execution::runs::{Runs, RunsBuilder, RunsCursor};
@@ -58,6 +59,7 @@ enum RightInput {
     Materialized(MaterializedKeys),
 }
 
+#[dual]
 impl RightInput {
     fn new(materialize: bool) -> Self {
         if materialize {
@@ -68,7 +70,7 @@ impl RightInput {
     }
 
     // Return the first terminal predicate result, or None after exhausting the RHS.
-    fn scan<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    async fn scan<'a, T: StorageTransaction + 'a, A: MetaArena + 'a>(
         root: &mut ExecNode<'a>,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -81,8 +83,8 @@ impl RightInput {
         if let Some(probe) = probe {
             arena.push_runtime_probe(probe);
         }
-        root.reset(arena, plan_arena)?;
-        while root.next_tuple(arena, plan_arena)? {
+        root.reset(arena, plan_arena).await?;
+        while root.next_tuple(arena, plan_arena).await? {
             if let Some(value) = evaluate(arena.result_tuple(), plan_arena)? {
                 return Ok(Some(value));
             }
@@ -118,8 +120,9 @@ impl<'a> ReadExecutor<'a> for MarkApply<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -129,10 +132,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
         if arena.restarting() || !self.op.materialize || self.right_input.is_none() {
             self.right_input = Some(RightInput::new(self.op.materialize));
         }
-        self.left_input.reset(arena, plan_arena)
+        self.left_input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -141,7 +144,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
             arena.finish();
             return Ok(());
         };
-        if !self.left_input.next_tuple(arena, plan_arena)? {
+        if !self.left_input.next_tuple(arena, plan_arena).await? {
             // Return the temporarily owned cache so reset can reuse it after EOF.
             if self.op.materialize {
                 self.right_input = Some(input);
@@ -157,7 +160,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
             {
                 (input, DataValue::Null)
             }
-            _ => self.mark_value(input, arena, plan_arena, &left)?,
+            _ => self.mark_value(input, arena, plan_arena, &left).await?,
         };
         self.right_input = Some(input);
         left.push(marker);
@@ -166,6 +169,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for MarkApply<'a> {
     }
 }
 
+#[dual]
 impl<'a> MarkApply<'a> {
     fn runtime_probe_for(&self, param_value: Option<DataValue>) -> Option<RuntimeIndexProbe> {
         self.op.parameterized_probe()?;
@@ -203,7 +207,7 @@ impl<'a> MarkApply<'a> {
             .transpose()
     }
 
-    fn mark_value<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    async fn mark_value<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         mut input: RightInput,
         arena: &mut ExecContext<'_, 'a, '_, T>,
@@ -224,22 +228,26 @@ impl<'a> MarkApply<'a> {
                         Ok(predicates_matched(predicates, left_tuple, right, meta)?
                             .then_some(DataValue::Boolean(true)))
                     },
-                )?
+                )
+                .await?
                 .unwrap_or(DataValue::Boolean(false))
             }
             MarkApplyKind::Quantified(quantifier) => {
                 if let RightInput::Materialize = input {
                     input = RightInput::Materialized(
-                        self.materialize_keys(arena, plan_arena, left_tuple)?,
+                        self.materialize_keys(arena, plan_arena, left_tuple).await?,
                     );
                 }
                 match &input {
                     RightInput::Materialized(keys) => {
                         self.lookup_keys(keys, quantifier, plan_arena, left_tuple)?
                     }
-                    _ => self.scan_quantified_right_input(
-                        arena, plan_arena, probe, quantifier, left_tuple,
-                    )?,
+                    _ => {
+                        self.scan_quantified_right_input(
+                            arena, plan_arena, probe, quantifier, left_tuple,
+                        )
+                        .await?
+                    }
                 }
             }
         };
@@ -267,7 +275,7 @@ impl<'a> MarkApply<'a> {
         Ok((*op, *left_expr, *right_expr, evaluator))
     }
 
-    fn materialize_keys<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    async fn materialize_keys<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -275,10 +283,10 @@ impl<'a> MarkApply<'a> {
     ) -> Result<MaterializedKeys, DatabaseError> {
         let (_, _, right_expr, _) = Self::quantified_comparison(self.op.predicates(), plan_arena)?;
         let root = &mut self.right_root;
-        root.reset(arena, plan_arena)?;
+        root.reset(arena, plan_arena).await?;
         let mut builder = KeysBuilder::new(compare_keys);
         let (mut is_empty, mut has_null) = (true, false);
-        while root.next_tuple(arena, plan_arena)? {
+        while root.next_tuple(arena, plan_arena).await? {
             // RHS positions follow the outer row, so evaluate against the joined layout.
             let values = SplitTupleRef::new(left_tuple, arena.result_tuple());
             let key = plan_arena
@@ -358,7 +366,7 @@ impl<'a> MarkApply<'a> {
         })
     }
 
-    fn scan_quantified_right_input<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    async fn scan_quantified_right_input<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -392,7 +400,8 @@ impl<'a> MarkApply<'a> {
                     }
                     Ok(None)
                 },
-            )?;
+            )
+            .await?;
             if let Some(value) = value {
                 return Ok(value);
             }
@@ -417,6 +426,7 @@ impl<'a> MarkApply<'a> {
         };
         std::iter::once(first).chain(null_keys)
     }
+
     fn quantified_row_value(
         predicates: &[ExprRef],
         left_tuple: &TupleImpl,
@@ -442,6 +452,7 @@ impl<'a> MarkApply<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
@@ -451,7 +462,7 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, LogicalPlan};
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::memory::MemoryStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::evaluator::{binary_create, cast_create};
     use crate::types::index::RuntimeIndexProbe;
@@ -494,11 +505,11 @@ mod tests {
         build_values_with_schema(arena, vec![(name, LogicalType::Integer)], rows)
     }
 
-    fn build_test_storage() -> Result<(TableCache, TempDir, RocksStorage), DatabaseError> {
+    fn build_test_storage() -> Result<(TableCache, TempDir, MemoryStorage), DatabaseError> {
         let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+        let storage = MemoryStorage::new();
 
         Ok((table_cache, temp_dir, storage))
     }
@@ -535,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_exists_apply_appends_boolean_match_column() -> Result<(), DatabaseError> {
+    async fn mark_exists_apply_appends_boolean_match_column() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values(
@@ -568,7 +579,7 @@ mod tests {
         );
         let mut tuples = Vec::new();
         let mut plan_arena = ExecMetaArena::new(plan_arena);
-        while root.next_tuple(&mut arena, &mut plan_arena)? {
+        while root.next_tuple(&mut arena, &mut plan_arena).await? {
             tuples.push(arena.take_tuple());
         }
 
@@ -590,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_exists_apply_treats_null_predicate_as_not_matched() -> Result<(), DatabaseError> {
+    async fn mark_exists_apply_treats_null_predicate_as_not_matched() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values(
@@ -617,7 +628,8 @@ mod tests {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         assert_eq!(
             tuples
@@ -636,8 +648,8 @@ mod tests {
     }
 
     #[test]
-    fn mark_exists_apply_sets_runtime_probe_before_residual_predicates() -> Result<(), DatabaseError>
-    {
+    async fn mark_exists_apply_sets_runtime_probe_before_residual_predicates(
+    ) -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values_with_schema(
@@ -697,7 +709,8 @@ mod tests {
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let input = exec.right_input.take().unwrap();
         assert_eq!(
-            exec.mark_value(input, &mut arena, &mut plan_arena, &left_tuple)?
+            exec.mark_value(input, &mut arena, &mut plan_arena, &left_tuple)
+                .await?
                 .1,
             DataValue::Boolean(true)
         );
@@ -710,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_in_apply_sets_eq_runtime_probe_for_non_null_value() -> Result<(), DatabaseError> {
+    async fn mark_in_apply_sets_eq_runtime_probe_for_non_null_value() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values_with_schema(
@@ -751,7 +764,8 @@ mod tests {
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let input = exec.right_input.take().unwrap();
         assert_eq!(
-            exec.mark_value(input, &mut arena, &mut plan_arena, &left_tuple)?
+            exec.mark_value(input, &mut arena, &mut plan_arena, &left_tuple)
+                .await?
                 .1,
             DataValue::Boolean(true)
         );
@@ -764,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_in_apply_sets_scope_runtime_probe_for_null_value() -> Result<(), DatabaseError> {
+    async fn mark_in_apply_sets_scope_runtime_probe_for_null_value() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values_with_schema(
@@ -805,7 +819,8 @@ mod tests {
         let mut plan_arena = ExecMetaArena::new(plan_arena);
         let input = exec.right_input.take().unwrap();
         assert_eq!(
-            exec.mark_value(input, &mut arena, &mut plan_arena, &left_tuple)?
+            exec.mark_value(input, &mut arena, &mut plan_arena, &left_tuple)
+                .await?
                 .1,
             DataValue::Null
         );
@@ -821,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_in_apply_appends_boolean_match_column() -> Result<(), DatabaseError> {
+    async fn mark_in_apply_appends_boolean_match_column() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values(
@@ -850,7 +865,8 @@ mod tests {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         assert_eq!(
             tuples
@@ -869,7 +885,8 @@ mod tests {
     }
 
     #[test]
-    fn guard_false_skips_failing_rhs_but_true_and_null_evaluate_it() -> Result<(), DatabaseError> {
+    async fn guard_false_skips_failing_rhs_but_true_and_null_evaluate_it(
+    ) -> Result<(), DatabaseError> {
         let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let cache = &table_cache;
@@ -944,7 +961,7 @@ mod tests {
                     let mut meta = ExecMetaArena::new(meta);
                     let result = exec.next_tuple(&mut arena, &mut meta);
                     if use_guard && flag == DataValue::Boolean(false) {
-                        result?;
+                        result.await?;
                         assert_eq!(
                             *arena.result_tuple(),
                             vec![DataValue::Int32(1), flag, DataValue::Null]
@@ -953,10 +970,10 @@ mod tests {
                             exec.right_input,
                             Some(RightInput::Streaming | RightInput::Materialize)
                         ));
-                        exec.next_tuple(&mut arena, &mut meta)?;
+                        exec.next_tuple(&mut arena, &mut meta).await?;
                         assert_eq!(exec.right_input.is_none(), !op.materialize);
                     } else {
-                        assert!(matches!(result, Err(DatabaseError::ParseInt(_))));
+                        assert!(matches!(result.await, Err(DatabaseError::ParseInt(_))));
                     }
                 }
             }
@@ -965,7 +982,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_skips_preserve_materialized_rhs() -> Result<(), DatabaseError> {
+    async fn guard_skips_preserve_materialized_rhs() -> Result<(), DatabaseError> {
         let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
         let cache = &table_cache;
@@ -1027,7 +1044,7 @@ mod tests {
             };
             let mut meta = ExecMetaArena::new(meta);
             for (index, (key, flag, marker)) in cases.iter().enumerate() {
-                exec.next_tuple(&mut arena, &mut meta)?;
+                exec.next_tuple(&mut arena, &mut meta).await?;
                 assert_eq!(
                     *arena.result_tuple(),
                     vec![DataValue::Int32(*key), flag.clone(), marker.clone()]
@@ -1046,14 +1063,14 @@ mod tests {
                     assert!(matches!(exec.right_input, Some(RightInput::Streaming)));
                 }
             }
-            exec.next_tuple(&mut arena, &mut meta)?;
+            exec.next_tuple(&mut arena, &mut meta).await?;
             assert_eq!(exec.right_input.is_none(), !materialize);
         }
         Ok(())
     }
 
     #[test]
-    fn quantified_apply_materializes_once_and_reuses_keys_after_short_circuit(
+    async fn quantified_apply_materializes_once_and_reuses_keys_after_short_circuit(
     ) -> Result<(), DatabaseError> {
         let (table_cache, _temp_dir, storage) = build_test_storage()?;
         let transaction = storage.transaction()?;
@@ -1106,7 +1123,9 @@ mod tests {
                 };
                 let tuple: TupleImpl = Tuple::new(None, vec![value]).into();
                 let input = exec.right_input.take().unwrap();
-                let (input, value) = exec.mark_value(input, &mut arena, &mut meta, &tuple)?;
+                let (input, value) = exec
+                    .mark_value(input, &mut arena, &mut meta, &tuple)
+                    .await?;
                 exec.right_input = Some(input);
                 assert_eq!(value, expected);
                 // A short-circuited match still caches every RHS key.
@@ -1114,21 +1133,21 @@ mod tests {
                     panic!("the first lookup must materialize the RHS")
                 };
                 assert!(!keys.is_empty && keys.has_null);
-                exec.reset(&mut arena, &mut meta)?;
+                exec.reset(&mut arena, &mut meta).await?;
                 assert!(matches!(
                     exec.right_input,
                     Some(RightInput::Materialized(_))
                 ));
             }
             // Exhausting the left must not discard the RHS cache either.
-            while exec.left_input.next_tuple(&mut arena, &mut meta)? {}
-            exec.next_tuple(&mut arena, &mut meta)?;
+            while exec.left_input.next_tuple(&mut arena, &mut meta).await? {}
+            exec.next_tuple(&mut arena, &mut meta).await?;
             assert!(matches!(
                 exec.right_input,
                 Some(RightInput::Materialized(_))
             ));
-            exec.reset(&mut arena, &mut meta)?;
-            exec.next_tuple(&mut arena, &mut meta)?;
+            exec.reset(&mut arena, &mut meta).await?;
+            exec.next_tuple(&mut arena, &mut meta).await?;
             assert_eq!(
                 *arena.result_tuple(),
                 vec![
@@ -1149,12 +1168,14 @@ mod tests {
             exec.right_root = build_read(&mut arena, &meta, &empty);
             exec.right_input = Some(RightInput::Materialize);
             let input = exec.right_input.take().unwrap();
-            let (input, value) = exec.mark_value(
-                input,
-                &mut arena,
-                &mut meta,
-                &TupleImpl::from(Tuple::new(None, vec![DataValue::Null])),
-            )?;
+            let (input, value) = exec
+                .mark_value(
+                    input,
+                    &mut arena,
+                    &mut meta,
+                    &TupleImpl::from(Tuple::new(None, vec![DataValue::Null])),
+                )
+                .await?;
             exec.right_input = Some(input);
             assert_eq!(
                 value,
@@ -1164,12 +1185,12 @@ mod tests {
                 exec.right_input,
                 Some(RightInput::Materialized(_))
             ));
-            exec.reset(&mut arena, &mut meta)?;
+            exec.reset(&mut arena, &mut meta).await?;
             assert!(matches!(
                 exec.right_input,
                 Some(RightInput::Materialized(_))
             ));
-            exec.next_tuple(&mut arena, &mut meta)?;
+            exec.next_tuple(&mut arena, &mut meta).await?;
             assert_eq!(
                 arena.result_tuple().iter().last(),
                 Some(&DataValue::Boolean(matches!(
@@ -1182,7 +1203,7 @@ mod tests {
     }
 
     #[test]
-    fn paused_rhs_survives_left_subquery_rebuilds() -> Result<(), DatabaseError> {
+    async fn paused_rhs_survives_left_subquery_rebuilds() -> Result<(), DatabaseError> {
         let tables = crate::planner::TableArenaCell::default();
         let mut meta = crate::planner::PlanArena::new(&tables);
         let mut left = build_values(
@@ -1227,7 +1248,8 @@ mod tests {
             &table_cache,
             meta,
             &transaction,
-        ))?;
+        ))
+        .await?;
         assert_eq!(
             tuples
                 .into_iter()
@@ -1260,7 +1282,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_in_apply_treats_null_predicate_as_not_matched() -> Result<(), DatabaseError> {
+    async fn mark_in_apply_treats_null_predicate_as_not_matched() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values(
@@ -1289,7 +1311,8 @@ mod tests {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         assert_eq!(
             tuples
@@ -1308,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn mark_in_apply_ignores_null_correlated_predicate_rows() -> Result<(), DatabaseError> {
+    async fn mark_in_apply_ignores_null_correlated_predicate_rows() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let mut left = build_values(
@@ -1360,7 +1383,8 @@ mod tests {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         assert_eq!(
             tuples

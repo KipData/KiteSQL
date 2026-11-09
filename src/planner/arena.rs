@@ -15,6 +15,7 @@
 use crate::catalog::view::View;
 use crate::catalog::{ColumnCatalog, ColumnRef, SourceId, TableCatalog, TableId, TableName};
 use crate::db::Param;
+use crate::dual::{MaybeSend, MaybeSync};
 use crate::errors::DatabaseError;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::ScalarExpression;
@@ -229,7 +230,7 @@ impl std::ops::DerefMut for ArenaExprMut<'_> {
     }
 }
 
-pub trait MetaArena {
+pub trait MetaArena: MaybeSend + MaybeSync {
     fn table_arena_cell<'a>(&self) -> &'a TableArenaCell
     where
         Self: 'a,
@@ -1375,6 +1376,7 @@ impl MetaArena for ParamArena<'_> {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::dual::dual;
 // GRCOV_EXCL_START
 #[cfg(test)]
 use crate::planner::operator::{PhysicalOption, PlanImpl, RowCountOption, SortOption};
@@ -65,10 +66,11 @@ pub struct Program<'p> {
     pub(crate) arena: ExecMetaArena<ParamArena<'p>>,
 }
 
+#[dual]
 impl<'p> Program<'p> {
     /// Runs the program with `params` in `transaction`. The returned iterator borrows the
     /// program until the execution ends.
-    pub fn execute<'a, 'txn, 'v, S: Storage>(
+    pub async fn execute<'a, 'txn, 'v, S: Storage>(
         &'a mut self,
         transaction: &'a mut Transaction<'txn, S>,
         params: impl AsRef<[(usize, Param<'v>)]>,
@@ -88,7 +90,8 @@ impl<'p> Program<'p> {
             &mut transaction.inner,
             &mut self.executor,
             &mut self.arena,
-        )?;
+        )
+        .await?;
         Ok(ProgramIter {
             guard: TransactionGuard {
                 arena,
@@ -206,6 +209,7 @@ pub struct ProgramIter<'a, 'p, T: StorageTransaction + 'p> {
     program: &'a mut Program<'p>,
 }
 
+#[dual]
 impl<'a, 'p, T: StorageTransaction + 'p> ProgramIter<'a, 'p, T> {
     #[inline]
     pub fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
@@ -214,17 +218,17 @@ impl<'a, 'p, T: StorageTransaction + 'p> ProgramIter<'a, 'p, T> {
     }
 
     #[inline]
-    pub fn next_tuple<R>(
+    pub async fn next_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError> {
         let Program { executor, arena } = &mut *self.program;
-        self.guard.next_tuple(executor, arena, f)
+        self.guard.next_tuple(executor, arena, f).await
     }
 
     #[inline]
-    pub fn done(mut self) -> Result<(), DatabaseError> {
-        while self.next_tuple(|_, _| ())?.is_some() {}
+    pub async fn done(mut self) -> Result<(), DatabaseError> {
+        while self.next_tuple(|_, _| ()).await?.is_some() {}
         Ok(())
     }
 }
@@ -235,34 +239,37 @@ impl<T: StorageTransaction> Drop for ProgramIter<'_, '_, T> {
     }
 }
 
+#[dual]
 impl<'a, 'p, T: StorageTransaction + 'p> TxnResultIter<'a> for ProgramIter<'a, 'p, T> {
-    fn next_txn_tuple<R>(
+    async fn next_txn_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, 'a>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError> {
-        ProgramIter::next_tuple(self, f)
+        ProgramIter::next_tuple(self, f).await
     }
 }
 
+#[dual]
 impl<'p, T: StorageTransaction + 'p> ResultIter for ProgramIter<'_, 'p, T> {
     fn schema<R>(&self, f: impl FnOnce(&SchemaView<'_, '_>) -> R) -> R {
         ProgramIter::schema(self, f)
     }
 
-    fn next_tuple<R>(
+    async fn next_tuple<R: MaybeSend>(
         &mut self,
-        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R,
+        f: impl FnOnce(&SchemaView<'_, '_>, &mut ResultRow<'_, '_>) -> R + MaybeSend,
     ) -> Result<Option<R>, DatabaseError> {
-        ProgramIter::next_tuple(self, f)
+        ProgramIter::next_tuple(self, f).await
     }
 
-    fn done(self) -> Result<(), DatabaseError> {
-        ProgramIter::done(self)
+    async fn done(self) -> Result<(), DatabaseError> {
+        ProgramIter::done(self).await
     }
 }
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -281,7 +288,7 @@ mod tests {
     use std::ops::Bound;
 
     #[test]
-    fn prepare_caches_scalar_output_schema() -> Result<(), DatabaseError> {
+    async fn prepare_caches_scalar_output_schema() -> Result<(), DatabaseError> {
         let db = DataBaseBuilder::path(".").build_in_memory()?;
         let mut plan = db.program_sql(
             "select (($1 * 3 + 7) % 97) + ($1 / 2)",
@@ -289,7 +296,9 @@ mod tests {
         )?;
         let mut tx = db.new_transaction(false)?;
         for (value, expected) in [(7, 31_i64), (23, 87_i64)] {
-            let mut iter = plan.execute(&mut tx, [(1, DataValue::Int64(value).into())])?;
+            let mut iter = plan
+                .execute(&mut tx, [(1, DataValue::Int64(value).into())])
+                .await?;
             iter.schema(|schema| {
                 assert_eq!(schema.len(), 1);
                 assert_eq!(
@@ -298,19 +307,21 @@ mod tests {
                 );
             });
             assert_eq!(
-                iter.next_tuple(|_, row| row.clone())?.unwrap(),
+                iter.next_tuple(|_, row| row.clone()).await?.unwrap(),
                 vec![DataValue::Int64(expected)]
             );
-            assert!(iter.next_tuple(|_, _| ())?.is_none());
-            iter.done()?;
+            assert!(iter.next_tuple(|_, _| ()).await?.is_none());
+            iter.done().await?;
         }
-        let mut iter = plan.execute(&mut tx, [(1, DataValue::Int64(7).into())])?;
+        let mut iter = plan
+            .execute(&mut tx, [(1, DataValue::Int64(7).into())])
+            .await?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.clone())?.unwrap(),
+            iter.next_tuple(|_, row| row.clone()).await?.unwrap(),
             vec![DataValue::Int64(31)]
         );
-        iter.done()?;
-        tx.commit()?;
+        iter.done().await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -504,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn parameter_order_dependent_predicates_remain_correct() -> Result<(), DatabaseError> {
+    async fn parameter_order_dependent_predicates_remain_correct() -> Result<(), DatabaseError> {
         fn has_filter(plan: &LogicalPlan) -> bool {
             matches!(
                 &plan.operator,
@@ -519,10 +530,13 @@ mod tests {
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
             .build_in_memory()?;
-        db.ddl("create table parameter_order(id int primary key)")?;
-        db.run("insert into parameter_order values(1),(2),(3),(4)")?
-            .done()?;
-        db.analyze("parameter_order")?;
+        db.ddl("create table parameter_order(id int primary key)")
+            .await?;
+        db.run("insert into parameter_order values(1),(2),(3),(4)")
+            .await?
+            .done()
+            .await?;
+        db.analyze("parameter_order").await?;
         let mut tx = db.new_transaction(false)?;
 
         let mut lower_bounds = db.program_sql(
@@ -530,48 +544,55 @@ mod tests {
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
         )?;
         assert!(has_filter(lower_bounds.executor.plan()));
-        let mut iter = lower_bounds.execute(
-            &mut tx,
-            [
-                (1, DataValue::Int32(3).into()),
-                (2, DataValue::Int32(1).into()),
-            ],
-        )?;
+        let mut iter = lower_bounds
+            .execute(
+                &mut tx,
+                [
+                    (1, DataValue::Int32(3).into()),
+                    (2, DataValue::Int32(1).into()),
+                ],
+            )
+            .await?;
         let mut rows = Vec::new();
         while iter
-            .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
+            .next_tuple(|_, row| rows.push(row.value_at(0).clone()))
+            .await?
             .is_some()
         {}
-        iter.done()?;
+        iter.done().await?;
         assert_eq!(rows, vec![DataValue::Int32(3), DataValue::Int32(4)]);
 
         let mut equalities = db.program_sql(
             "select id from parameter_order where id = $1 and id = $2",
             &[(1, LogicalType::Integer), (2, LogicalType::Integer)],
         )?;
-        let mut iter = equalities.execute(
-            &mut tx,
-            [
-                (1, DataValue::Int32(2).into()),
-                (2, DataValue::Int32(2).into()),
-            ],
-        )?;
+        let mut iter = equalities
+            .execute(
+                &mut tx,
+                [
+                    (1, DataValue::Int32(2).into()),
+                    (2, DataValue::Int32(2).into()),
+                ],
+            )
+            .await?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.value_at(0).clone())?,
+            iter.next_tuple(|_, row| row.value_at(0).clone()).await?,
             Some(DataValue::Int32(2))
         );
-        assert!(iter.next_tuple(|_, _| ())?.is_none());
-        iter.done()?;
+        assert!(iter.next_tuple(|_, _| ()).await?.is_none());
+        iter.done().await?;
 
-        let mut iter = equalities.execute(
-            &mut tx,
-            [
-                (1, DataValue::Int32(2).into()),
-                (2, DataValue::Int32(3).into()),
-            ],
-        )?;
-        assert!(iter.next_tuple(|_, _| ())?.is_none());
-        iter.done()?;
+        let mut iter = equalities
+            .execute(
+                &mut tx,
+                [
+                    (1, DataValue::Int32(2).into()),
+                    (2, DataValue::Int32(3).into()),
+                ],
+            )
+            .await?;
+        assert!(iter.next_tuple(|_, _| ()).await?.is_none());
+        iter.done().await?;
 
         let mut unions = db.program_sql(
             "select id from parameter_order where (id=$1 or id=$2) and id>$3 order by id",
@@ -613,23 +634,26 @@ mod tests {
                 vec![],
             ),
         ] {
-            let mut iter = unions.execute(
-                &mut tx,
-                [(1, first.into()), (2, second.into()), (3, lower.into())],
-            )?;
+            let mut iter = unions
+                .execute(
+                    &mut tx,
+                    [(1, first.into()), (2, second.into()), (3, lower.into())],
+                )
+                .await?;
             let mut rows = Vec::new();
             while iter
-                .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
+                .next_tuple(|_, row| rows.push(row.value_at(0).clone()))
+                .await?
                 .is_some()
             {}
-            iter.done()?;
+            iter.done().await?;
             assert_eq!(rows, expected);
         }
         Ok(())
     }
 
     #[test]
-    fn repeated_execution_and_null_do_not_stale_parameters() -> Result<(), DatabaseError> {
+    async fn repeated_execution_and_null_do_not_stale_parameters() -> Result<(), DatabaseError> {
         let db = DataBaseBuilder::path(".").build_in_memory()?;
         let mut plan = db.program_sql(
             "values ($1 + $2), ($2)",
@@ -640,38 +664,42 @@ mod tests {
             (DataValue::Null, DataValue::Null),
             (DataValue::Int32(3), DataValue::Int32(13)),
         ] {
-            let mut iter = plan.execute(
-                &mut tx,
-                [(1, DataValue::Int32(10).into()), (2, value.clone().into())],
-            )?;
+            let mut iter = plan
+                .execute(
+                    &mut tx,
+                    [(1, DataValue::Int32(10).into()), (2, value.clone().into())],
+                )
+                .await?;
             assert_eq!(
-                iter.next_tuple(|_, row| row.value_at(0).clone())?,
+                iter.next_tuple(|_, row| row.value_at(0).clone()).await?,
                 Some(expected)
             );
             assert_eq!(
-                iter.next_tuple(|_, row| row.value_at(0).clone())?,
+                iter.next_tuple(|_, row| row.value_at(0).clone()).await?,
                 Some(value)
             );
-            assert!(iter.next_tuple(|_, _| ())?.is_none());
-            iter.done()?;
+            assert!(iter.next_tuple(|_, _| ()).await?.is_none());
+            iter.done().await?;
         }
 
         assert!(matches!(
-            plan.execute(&mut tx, [(1, DataValue::Int32(10).into())]),
+            plan.execute(&mut tx, [(1, DataValue::Int32(10).into())]).await,
             Err(DatabaseError::ParametersNotFound { name, .. }) if name == "$2"
         ));
-        let mut iter = plan.execute(
-            &mut tx,
-            [
-                (1, DataValue::Int32(10).into()),
-                (2, DataValue::Int32(4).into()),
-            ],
-        )?;
+        let mut iter = plan
+            .execute(
+                &mut tx,
+                [
+                    (1, DataValue::Int32(10).into()),
+                    (2, DataValue::Int32(4).into()),
+                ],
+            )
+            .await?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.value_at(0).clone())?,
+            iter.next_tuple(|_, row| row.value_at(0).clone()).await?,
             Some(DataValue::Int32(14))
         );
-        iter.done()?;
+        iter.done().await?;
 
         Ok(())
     }
@@ -690,14 +718,17 @@ mod tests {
     }
 
     #[test]
-    fn null_parameters_empty_index_ranges() -> Result<(), DatabaseError> {
+    async fn null_parameters_empty_index_ranges() -> Result<(), DatabaseError> {
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
             .build_in_memory()?;
-        db.ddl("create table t(w int, k int, primary key(w,k))")?;
-        db.run("insert into t values(1,1),(1,2),(2,1),(2,2),(2,4)")?
-            .done()?;
-        db.analyze("t")?;
+        db.ddl("create table t(w int, k int, primary key(w,k))")
+            .await?;
+        db.run("insert into t values(1,1),(1,2),(2,1),(2,2),(2,4)")
+            .await?
+            .done()
+            .await?;
+        db.analyze("t").await?;
         let ty = LogicalType::Integer;
         let mut tx = db.new_transaction(false)?;
         // A NULL bound used to reach storage as a NULL key: the composite scope below became
@@ -727,23 +758,26 @@ mod tests {
                     .collect::<Vec<_>>(),
             )?;
             assert!(index_range(plan.executor.plan()).is_some(), "{sql}");
-            let mut iter = plan.execute(&mut tx, &params)?;
-            assert!(iter.next_tuple(|_, _| ())?.is_none(), "{sql}");
-            iter.done()?;
+            let mut iter = plan.execute(&mut tx, &params).await?;
+            assert!(iter.next_tuple(|_, _| ()).await?.is_none(), "{sql}");
+            iter.done().await?;
         }
 
         Ok(())
     }
 
     #[test]
-    fn composite_index_ranges_bind_for_each_execution() -> Result<(), DatabaseError> {
+    async fn composite_index_ranges_bind_for_each_execution() -> Result<(), DatabaseError> {
         let mut db = DataBaseBuilder::path(".")
             .histogram_buckets(2)
             .build_in_memory()?;
-        db.ddl("create table t(w int, k int, primary key(w,k))")?;
-        db.run("insert into t values(1,1),(1,2),(1,3),(2,1),(2,2),(2,4)")?
-            .done()?;
-        db.analyze("t")?;
+        db.ddl("create table t(w int, k int, primary key(w,k))")
+            .await?;
+        db.run("insert into t values(1,1),(1,2),(1,3),(2,1),(2,2),(2,4)")
+            .await?
+            .done()
+            .await?;
+        db.analyze("t").await?;
         let mut tx = db.new_transaction(false)?;
         let mut plan = db.program_sql(
             "select k from t where w=$1 and k >= $2 and k < $3 order by k",
@@ -754,35 +788,40 @@ mod tests {
             ],
         )?;
         assert!(index_range(plan.executor.plan()).is_some());
-        let mut iter = plan.execute(
-            &mut tx,
-            [
-                (1, DataValue::Int32(2).into()),
-                (2, DataValue::Int32(2).into()),
-                (3, DataValue::Int32(5).into()),
-            ],
-        )?;
+        let mut iter = plan
+            .execute(
+                &mut tx,
+                [
+                    (1, DataValue::Int32(2).into()),
+                    (2, DataValue::Int32(2).into()),
+                    (3, DataValue::Int32(5).into()),
+                ],
+            )
+            .await?;
         let mut rows = Vec::new();
         while iter
-            .next_tuple(|_, row| rows.push(row.value_at(0).clone()))?
+            .next_tuple(|_, row| rows.push(row.value_at(0).clone()))
+            .await?
             .is_some()
         {}
-        iter.done()?;
+        iter.done().await?;
         assert_eq!(rows, vec![DataValue::Int32(2), DataValue::Int32(4)]);
-        let mut iter = plan.execute(
-            &mut tx,
-            [
-                (1, DataValue::Int32(1).into()),
-                (2, DataValue::Int32(1).into()),
-                (3, DataValue::Int32(2).into()),
-            ],
-        )?;
+        let mut iter = plan
+            .execute(
+                &mut tx,
+                [
+                    (1, DataValue::Int32(1).into()),
+                    (2, DataValue::Int32(1).into()),
+                    (3, DataValue::Int32(2).into()),
+                ],
+            )
+            .await?;
         assert_eq!(
-            iter.next_tuple(|_, row| row.value_at(0).clone())?,
+            iter.next_tuple(|_, row| row.value_at(0).clone()).await?,
             Some(DataValue::Int32(1))
         );
-        assert!(iter.next_tuple(|_, _| ())?.is_none());
-        iter.done()?;
+        assert!(iter.next_tuple(|_, _| ()).await?.is_none());
+        iter.done().await?;
 
         // The lower bound is computed only after binding; it must still be
         // intersected with the prepared upper bound instead of scanning the
@@ -871,16 +910,18 @@ mod tests {
             (DataValue::Int32(24), vec![4]),
             (DataValue::Null, vec![]),
         ] {
-            let mut iter = plan.execute(
-                &mut tx,
-                [
-                    (1, DataValue::Int32(2).into()),
-                    (2, DataValue::Int32(5).into()),
-                    (3, lower.into()),
-                ],
-            )?;
+            let mut iter = plan
+                .execute(
+                    &mut tx,
+                    [
+                        (1, DataValue::Int32(2).into()),
+                        (2, DataValue::Int32(5).into()),
+                        (3, lower.into()),
+                    ],
+                )
+                .await?;
             let mut rows = Vec::new();
-            while let Some(k) = iter.next_tuple(|_, row| row.value_at(0).clone())? {
+            while let Some(k) = iter.next_tuple(|_, row| row.value_at(0).clone()).await? {
                 rows.push(k);
             }
             let expected = expected
@@ -893,12 +934,16 @@ mod tests {
     }
 
     #[test]
-    fn rerun_rebuilds_materialized_subquery() -> Result<(), DatabaseError> {
+    async fn rerun_rebuilds_materialized_subquery() -> Result<(), DatabaseError> {
         let mut db = DataBaseBuilder::path(".").build_in_memory()?;
-        db.ddl("create table t1 (c1 int primary key, name varchar)")?;
-        db.ddl("create table t2 (c1 int primary key, name varchar)")?;
-        db.run("insert into t1 values (0, 'a'), (1, 'b'), (2, 'c'), (3, 'd')")?
-            .done()?;
+        db.ddl("create table t1 (c1 int primary key, name varchar)")
+            .await?;
+        db.ddl("create table t2 (c1 int primary key, name varchar)")
+            .await?;
+        db.run("insert into t1 values (0, 'a'), (1, 'b'), (2, 'c'), (3, 'd')")
+            .await?
+            .done()
+            .await?;
         let mut plan =
             db.program_sql("select c1 from t1 where name in (select name from t2)", &[])?;
 
@@ -907,15 +952,15 @@ mod tests {
             ("insert into t2 values (0, 'b')", vec![1]),
             ("insert into t2 values (1, 'd')", vec![1, 3]),
         ] {
-            db.run(insert)?.done()?;
+            db.run(insert).await?.done().await?;
             let mut tx = db.new_transaction(true)?;
-            let mut iter = plan.execute(&mut tx, [])?;
+            let mut iter = plan.execute(&mut tx, []).await?;
             let mut rows = Vec::new();
-            while let Some(c1) = iter.next_tuple(|_, row| row.value_at(0).clone())? {
+            while let Some(c1) = iter.next_tuple(|_, row| row.value_at(0).clone()).await? {
                 rows.push(c1);
             }
-            iter.done()?;
-            tx.commit()?;
+            iter.done().await?;
+            tx.commit().await?;
             let expected = expected
                 .into_iter()
                 .map(DataValue::Int32)

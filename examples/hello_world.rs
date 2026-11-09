@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "orm"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "async"), feature = "orm"))]
 mod app {
     use kite_sql::db::{DataBaseBuilder, Database};
     use kite_sql::errors::DatabaseError;
@@ -129,13 +129,18 @@ mod app {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+// The examples use the sync API.
+#[cfg(any(target_arch = "wasm32", feature = "async"))]
 fn main() {}
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "orm"))]
+#[cfg(all(not(target_arch = "wasm32"), not(feature = "async"), feature = "orm"))]
 fn main() -> Result<(), kite_sql::errors::DatabaseError> {
     app::run()
 }
 
-#[cfg(all(not(target_arch = "wasm32"), not(feature = "orm")))]
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    not(feature = "async"),
+    not(feature = "orm")
+))]
 fn main() {}

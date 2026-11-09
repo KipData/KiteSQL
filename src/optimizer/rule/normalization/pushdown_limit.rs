@@ -139,6 +139,7 @@ impl NormalizationRule for PushLimitIntoScan {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;
@@ -149,8 +150,8 @@ mod tests {
     use crate::planner::PlanArena;
 
     #[test]
-    fn test_limit_project_transpose() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_limit_project_transpose() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena("select c1, c2 from t1 limit 1", &mut arena)?;
 
@@ -178,8 +179,8 @@ mod tests {
     }
 
     #[test]
-    fn test_push_limit_through_join() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_push_limit_through_join() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select * from t1 left join t2 on c1 = c3 limit 1",
@@ -215,8 +216,8 @@ mod tests {
     }
 
     #[test]
-    fn test_push_limit_into_table_scan() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_push_limit_into_table_scan() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena("select * from t1 limit 1 offset 1", &mut arena)?;
 

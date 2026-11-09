@@ -356,6 +356,7 @@ impl NormalizationRule for PropagateJoinConstants {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::{eq_operands, for_each_conjunct, table_column};
     use super::{PropagateFilterConstants, PropagateJoinConstants};
@@ -426,8 +427,8 @@ mod tests {
     }
 
     /// Runs the rules of the default "Predicate Pushdown" batch (same order as `db.rs`).
-    fn propagate_join(sql: &str) -> Result<(Vec<String>, Vec<String>), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn propagate_join(sql: &str) -> Result<(Vec<String>, Vec<String>), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(sql, &mut arena)?;
         let mut plan = HepOptimizerPipeline::builder()
@@ -453,8 +454,8 @@ mod tests {
     }
 
     #[test]
-    fn filter_derives_constant_through_column_equality() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn filter_derives_constant_through_column_equality() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let mut plan =
             table_state.plan_with_arena("select * from t1 where c1 = c2 and c2 = 1", &mut arena)?;
@@ -468,8 +469,8 @@ mod tests {
     }
 
     #[test]
-    fn filter_closes_equality_chains() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn filter_closes_equality_chains() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let mut plan = table_state.plan_with_arena(
             "select * from t1, t2 where c1 = c3 and c3 = c2 and c2 = 1",
@@ -483,8 +484,8 @@ mod tests {
     }
 
     #[test]
-    fn filter_ignores_null_and_non_equality() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn filter_ignores_null_and_non_equality() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         for sql in [
             "select * from t1 where c1 = c2 and c2 = null",
             "select * from t1 where c1 > c2 and c2 = 1",
@@ -502,59 +503,59 @@ mod tests {
     }
 
     #[test]
-    fn inner_join_propagates_both_ways() -> Result<(), DatabaseError> {
+    async fn inner_join_propagates_both_ways() -> Result<(), DatabaseError> {
         assert_eq!(
-            propagate_join("select * from t1 join t2 on c1 = c3 where c1 = 1")?,
+            propagate_join("select * from t1 join t2 on c1 = c3 where c1 = 1").await?,
             (vec!["c1 = 1".into()], vec!["c3 = 1".into()])
         );
         assert_eq!(
-            propagate_join("select * from t1 join t2 on c1 = c3 where c3 = 1")?,
+            propagate_join("select * from t1 join t2 on c1 = c3 where c3 = 1").await?,
             (vec!["c1 = 1".into()], vec!["c3 = 1".into()])
         );
         Ok(())
     }
 
     #[test]
-    fn left_join_only_constrains_right_side() -> Result<(), DatabaseError> {
+    async fn left_join_only_constrains_right_side() -> Result<(), DatabaseError> {
         assert_eq!(
-            propagate_join("select * from t1 left join t2 on c1 = c3 where c1 = 1")?,
+            propagate_join("select * from t1 left join t2 on c1 = c3 where c1 = 1").await?,
             (vec!["c1 = 1".into()], vec!["c3 = 1".into()])
         );
         // The non-preserved side's ON constant is pushed down, never derived onto the left.
         assert_eq!(
-            propagate_join("select * from t1 left join t2 on c1 = c3 and c3 = 1")?,
+            propagate_join("select * from t1 left join t2 on c1 = c3 and c3 = 1").await?,
             (vec![], vec!["c3 = 1".into()])
         );
         // The preserved side's ON constant stays on the join but still derives the right side.
         assert_eq!(
-            propagate_join("select * from t1 left join t2 on c1 = c3 and c1 = 1")?,
+            propagate_join("select * from t1 left join t2 on c1 = c3 and c1 = 1").await?,
             (vec![], vec!["c3 = 1".into()])
         );
         Ok(())
     }
 
     #[test]
-    fn right_join_only_constrains_left_side() -> Result<(), DatabaseError> {
+    async fn right_join_only_constrains_left_side() -> Result<(), DatabaseError> {
         assert_eq!(
-            propagate_join("select * from t1 right join t2 on c1 = c3 where c3 = 1")?,
+            propagate_join("select * from t1 right join t2 on c1 = c3 where c3 = 1").await?,
             (vec!["c1 = 1".into()], vec!["c3 = 1".into()])
         );
         assert_eq!(
-            propagate_join("select * from t1 right join t2 on c1 = c3 and c1 = 1")?,
+            propagate_join("select * from t1 right join t2 on c1 = c3 and c1 = 1").await?,
             (vec!["c1 = 1".into()], vec![])
         );
         assert_eq!(
-            propagate_join("select * from t1 right join t2 on c1 = c3 and c3 = 1")?,
+            propagate_join("select * from t1 right join t2 on c1 = c3 and c3 = 1").await?,
             (vec!["c1 = 1".into()], vec![])
         );
         Ok(())
     }
 
-    fn propagate_from_side(
+    async fn propagate_from_side(
         join: &str,
         fact_on_left: bool,
     ) -> Result<(bool, Vec<String>, Vec<String>), DatabaseError> {
-        let table_state = build_t1_table()?;
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let mut plan = table_state
             .plan_with_arena(format!("select * from t1 {join} t2 on c1 = c3"), &mut arena)?;
@@ -586,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn join_type_limits_propagation_direction() -> Result<(), DatabaseError> {
+    async fn join_type_limits_propagation_direction() -> Result<(), DatabaseError> {
         let one = |column: &str| vec![format!("{column} = 1")];
         // (join, fact on left, expected (applied, left facts, right facts))
         let cases = [
@@ -602,7 +603,7 @@ mod tests {
         ];
         for (join, fact_on_left, expected) in cases {
             assert_eq!(
-                propagate_from_side(join, fact_on_left)?,
+                propagate_from_side(join, fact_on_left).await?,
                 expected,
                 "{join}, fact on left: {fact_on_left}"
             );

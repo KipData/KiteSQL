@@ -14,13 +14,14 @@
 
 use clap::Parser;
 use kite_sql::db::DataBaseBuilder;
-use sqllogictest::Runner;
+use sqllogictest::{AsyncDB, MakeConnection, Runner};
 use sqllogictest_test::SQLBase;
 use std::fs::File;
 use std::io;
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
+#[cfg(not(feature = "async"))]
 use tempfile::TempDir;
 
 #[derive(Parser, Debug)]
@@ -39,16 +40,49 @@ fn main() {
     println!("KiteSQL Test Start!\n");
     init_20000_row_csv().expect("failed to init csv");
     init_distinct_rows_csv().expect("failed to init distinct csv");
-    let mut file_num = 0;
     let start = Instant::now();
 
-    let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-    let mut tester = Runner::new(|| {
-        let db = DataBaseBuilder::path(temp_dir.path()).build_lmdb();
-        std::future::ready(db.map(|db| SQLBase { db }))
-    });
+    #[cfg(not(feature = "async"))]
+    let file_num = {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        run_files(
+            Runner::new(|| {
+                let db = DataBaseBuilder::path(temp_dir.path()).build_lmdb();
+                std::future::ready(db.map(|db| SQLBase { db }))
+            }),
+            &args.path,
+        )
+    };
+    // The async path, over a memory storage whose every read suspends once.
+    #[cfg(feature = "async")]
+    let file_num = {
+        let storage = kite_sql::storage::memory::MemoryStorage::new();
+        let reads = storage.clone();
+        let file_num = run_files(
+            Runner::new(move || {
+                let db = DataBaseBuilder::path(".").build_with_storage(storage.clone());
+                std::future::ready(db.map(|db| SQLBase { db }))
+            }),
+            &args.path,
+        );
+        println!("|- Suspended reads: {}", reads.suspensions());
+        file_num
+    };
+    println!("Passed all tests for a total of {} files!!!", file_num + 1);
+    println!("|- Total time spent: {:?}", start.elapsed());
+    if cfg!(debug_assertions) {
+        println!("|- Debug mode");
+    } else {
+        println!("|- Release mode");
+    }
+}
 
-    for slt_file in glob::glob(&args.path).expect("failed to find slt files") {
+fn run_files<D: AsyncDB, M: MakeConnection<Conn = D>>(
+    mut tester: Runner<D, M>,
+    path: &str,
+) -> usize {
+    let mut file_num = 0;
+    for slt_file in glob::glob(path).expect("failed to find slt files") {
         let filepath = slt_file.expect("failed to read slt file");
         println!(
             "-> Now the test file is: {}, num: {}",
@@ -62,13 +96,7 @@ fn main() {
         println!("-> Pass!\n");
         file_num += 1;
     }
-    println!("Passed all tests for a total of {} files!!!", file_num + 1);
-    println!("|- Total time spent: {:?}", start.elapsed());
-    if cfg!(debug_assertions) {
-        println!("|- Debug mode");
-    } else {
-        println!("|- Release mode");
-    }
+    file_num
 }
 
 fn init_20000_row_csv() -> io::Result<()> {

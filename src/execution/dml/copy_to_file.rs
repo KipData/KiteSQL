@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::binder::copy::FileFormat;
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -79,17 +80,18 @@ impl CopyToFile<'_> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.done = false;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -100,7 +102,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
         }
 
         let mut writer = self.create_writer()?;
-        while self.input.next_tuple(arena, plan_arena)? {
+        while self.input.next_tuple(arena, plan_arena).await? {
             writer.write_record(arena.result_tuple().iter().map(|v| v.to_string()))?;
         }
         writer.flush().map_err(DatabaseError::from)?;
@@ -118,6 +120,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyToFile<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::binder::copy::ExtSource;
@@ -129,7 +132,7 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn read_csv() -> Result<(), DatabaseError> {
+    async fn read_csv() -> Result<(), DatabaseError> {
         let tmp_dir = TempDir::new()?;
         let file_path = tmp_dir.path().join("test.csv");
 
@@ -146,12 +149,22 @@ mod tests {
         };
 
         let temp_dir = TempDir::new().unwrap();
-        let mut db = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-        db.ddl("create table t1 (a int primary key, b float, c varchar(10))")?;
-        db.load(CatalogKind::Table("t1".to_string()))?;
-        db.run("insert into t1 values (1, 1.1, 'foo')")?.done()?;
-        db.run("insert into t1 values (2, 2.0, 'fooo')")?.done()?;
-        db.run("insert into t1 values (3, 2.1, 'Kite')")?.done()?;
+        let mut db = DataBaseBuilder::path(temp_dir.path()).build_in_memory()?;
+        db.ddl("create table t1 (a int primary key, b float, c varchar(10))")
+            .await?;
+        db.load(CatalogKind::Table("t1".to_string())).await?;
+        db.run("insert into t1 values (1, 1.1, 'foo')")
+            .await?
+            .done()
+            .await?;
+        db.run("insert into t1 values (2, 2.0, 'fooo')")
+            .await?
+            .done()
+            .await?;
+        db.run("insert into t1 values (3, 2.1, 'Kite')")
+            .await?
+            .done()
+            .await?;
 
         let mut plan_arena = crate::planner::PlanArena::new(db.state.table_arena());
         let transaction = db.storage.transaction()?;
@@ -168,7 +181,10 @@ mod tests {
             &transaction,
         );
 
-        let tuple = executor.next_tuple()?.expect("executor should yield once");
+        let tuple = executor
+            .next_tuple()
+            .await?
+            .expect("executor should yield once");
 
         let mut rdr = csv::Reader::from_path(file_path)?;
         let headers = rdr.headers()?.clone();

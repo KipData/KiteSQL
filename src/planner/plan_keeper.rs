@@ -35,6 +35,12 @@ impl<'p> PlanKeeper<'p> {
     }
 }
 
+// SAFETY: `PlanKeeper` owns the plan like a `Box` and only lends `&LogicalPlan`; moving it to
+// another thread moves the plan and every borrower with it, which needs `LogicalPlan: Send + Sync`.
+unsafe impl Send for PlanKeeper<'_> where LogicalPlan: Send + Sync {}
+// SAFETY: shared access only ever reads the plan.
+unsafe impl Sync for PlanKeeper<'_> where LogicalPlan: Sync {}
+
 impl Drop for PlanKeeper<'_> {
     fn drop(&mut self) {
         // SAFETY: `owned` comes from `Box::into_raw` and is only freed here.

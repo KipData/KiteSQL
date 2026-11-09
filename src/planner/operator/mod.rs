@@ -1140,6 +1140,7 @@ impl Explain for PhysicalOption {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::catalog::view::View;

@@ -2177,6 +2177,7 @@ impl<'a: 'b, 'b, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::{InputPositionBinder, ProjectionOutputBinder};
     use crate::binder::test::build_t1_table;
@@ -2202,8 +2203,8 @@ mod tests {
     }
 
     #[test]
-    fn test_select_bind() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_select_bind() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table().await?;
 
         let plan_1 = table_states.plan("select * from t1")?;
         println!("just_col:\n {plan_1:#?}");
@@ -2366,8 +2367,8 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_subquery_in_where_binds_as_init() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_scalar_subquery_in_where_binds_as_init() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_states.table_arena);
         let mut plan = table_states.plan_with_arena(
             "select * from t1 where c1 = (select max(c3) from t2)",
@@ -2392,8 +2393,8 @@ mod tests {
     }
 
     #[test]
-    fn test_in_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_in_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table().await?;
         let plan = table_states.plan("select * from t1 where c1 in (select c3 from t2)")?;
         assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 1);
 
@@ -2401,8 +2402,8 @@ mod tests {
     }
 
     #[test]
-    fn test_select_mark_alias_is_produced_before_where() -> Result<(), DatabaseError> {
-        let tables = build_t1_table()?;
+    async fn test_select_mark_alias_is_produced_before_where() -> Result<(), DatabaseError> {
+        let tables = build_t1_table().await?;
         let mut arena = PlanArena::new(&tables.table_arena);
         let mut plan = tables.plan_with_arena(
             "select c1,c2 in (select c3 from t2) as matched from t1 where matched",
@@ -2449,8 +2450,8 @@ mod tests {
     }
 
     #[test]
-    fn test_any_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_any_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table().await?;
         let plan = table_states.plan("select * from t1 where c1 < any(select c3 from t2)")?;
         assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 1);
 
@@ -2458,8 +2459,8 @@ mod tests {
     }
 
     #[test]
-    fn test_some_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_some_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table().await?;
         let plan = table_states.plan("select * from t1 where c1 = some(select c3 from t2)")?;
         assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 1);
 
@@ -2467,8 +2468,8 @@ mod tests {
     }
 
     #[test]
-    fn test_all_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_all_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table().await?;
         let plan = table_states.plan("select * from t1 where c1 > all(select c3 from t2)")?;
         assert_quantified_mark_apply(&plan, MarkApplyQuantifier::All, 1);
 
@@ -2476,8 +2477,9 @@ mod tests {
     }
 
     #[test]
-    fn test_correlated_in_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_correlated_in_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError>
+    {
+        let table_states = build_t1_table().await?;
         let plan =
             table_states.plan("select * from t1 where c1 in (select c3 from t2 where c4 = c2)")?;
         assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 2);
@@ -2486,8 +2488,9 @@ mod tests {
     }
 
     #[test]
-    fn test_correlated_any_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_correlated_any_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError>
+    {
+        let table_states = build_t1_table().await?;
         let plan = table_states
             .plan("select * from t1 where c1 < any(select c3 from t2 where c4 = c2)")?;
         assert_quantified_mark_apply(&plan, MarkApplyQuantifier::Any, 2);
@@ -2496,8 +2499,9 @@ mod tests {
     }
 
     #[test]
-    fn test_correlated_all_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_correlated_all_subquery_in_where_binds_as_mark_apply() -> Result<(), DatabaseError>
+    {
+        let table_states = build_t1_table().await?;
         let plan = table_states
             .plan("select * from t1 where c1 > all(select c3 from t2 where c4 = c2)")?;
         assert_quantified_mark_apply(&plan, MarkApplyQuantifier::All, 2);
@@ -2506,8 +2510,8 @@ mod tests {
     }
 
     #[test]
-    fn test_multiple_scalar_subqueries_have_independent_slots() -> Result<(), DatabaseError> {
-        let table_states = build_t1_table()?;
+    async fn test_multiple_scalar_subqueries_have_independent_slots() -> Result<(), DatabaseError> {
+        let table_states = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_states.table_arena);
         let plan = table_states.plan_with_arena(
             "select * from t1 where c1 <= (select 4) and c1 > (select 1)",

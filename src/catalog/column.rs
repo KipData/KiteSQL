@@ -242,6 +242,7 @@ impl ColumnCatalog {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;

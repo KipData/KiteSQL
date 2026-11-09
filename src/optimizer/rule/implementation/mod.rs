@@ -321,6 +321,7 @@ impl ImplementationRule for ImplementationRuleImpl {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use crate::binder::test::build_t1_table;
     use crate::errors::DatabaseError;
@@ -360,7 +361,7 @@ mod tests {
         }
     }
 
-    fn with_operator_from_sql<F, R>(
+    async fn with_operator_from_sql<F, R>(
         sql: &str,
         predicate: F,
         f: impl FnOnce(Operator, &PlanArena) -> Result<R, DatabaseError>,
@@ -368,7 +369,7 @@ mod tests {
     where
         F: Fn(&Operator) -> bool + Copy,
     {
-        let tables = build_t1_table()?;
+        let tables = build_t1_table().await?;
         let mut arena = PlanArena::new(&tables.table_arena);
         let plan = tables.plan_with_arena(sql, &mut arena)?;
         let operator = find_operator(&plan, predicate).cloned().ok_or_else(|| {
@@ -405,7 +406,7 @@ mod tests {
             .0)
     }
 
-    fn assert_sql_rule(
+    async fn assert_sql_rule(
         sql: &str,
         rule: ImplementationRuleImpl,
         predicate: impl Fn(&Operator) -> bool + Copy,
@@ -413,32 +414,36 @@ mod tests {
     ) -> Result<(), DatabaseError> {
         let option = with_operator_from_sql(sql, predicate, |operator, arena| {
             best_option(rule, &operator, arena)
-        })?;
+        })
+        .await?;
 
         assert_eq!(option.plan, expected_plan);
         Ok(())
     }
 
     #[test]
-    fn test_single_mapping_implementations() -> Result<(), DatabaseError> {
+    async fn test_single_mapping_implementations() -> Result<(), DatabaseError> {
         assert_sql_rule(
             "select count(c1) from t1",
             ImplementationRuleImpl::SimpleAggregate,
             |op| matches!(op, Operator::Aggregate(agg) if agg.groupby_exprs.is_empty()),
             PlanImpl::SimpleAggregate,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "select c1, count(c2) from t1 group by c1",
             ImplementationRuleImpl::GroupByAggregate,
             |op| matches!(op, Operator::Aggregate(agg) if !agg.groupby_exprs.is_empty()),
             PlanImpl::HashAggregate,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "select 1",
             ImplementationRuleImpl::Dummy,
             |op| matches!(op, Operator::Dummy),
             PlanImpl::Dummy,
-        )?;
+        )
+        .await?;
         with_operator_from_sql(
             "select * from t1 where c1 = 1",
             |op| matches!(op, Operator::Filter(_)),
@@ -448,13 +453,15 @@ mod tests {
                 assert_eq!(option.row_count, RowCountOption::Follow);
                 Ok(())
             },
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "select * from t1 limit 1",
             ImplementationRuleImpl::Limit,
             |op| matches!(op, Operator::Limit(_)),
             PlanImpl::Limit,
-        )?;
+        )
+        .await?;
         with_operator_from_sql(
             "select * from t1 where exists(select * from t2)",
             |op| matches!(op, Operator::MarkApply(_)),
@@ -464,61 +471,70 @@ mod tests {
                 assert_eq!(option.row_count, RowCountOption::Follow);
                 Ok(())
             },
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "select c1 from t1",
             ImplementationRuleImpl::Projection,
             |op| matches!(op, Operator::Project(_)),
             PlanImpl::Project,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "select (select c3 from t2 limit 1) from t1",
             ImplementationRuleImpl::ScalarQueryInit,
             |op| matches!(op, Operator::ScalarQueryInit(_)),
             PlanImpl::ScalarQueryInit,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "select (select c3 from t2 limit 1) from t1",
             ImplementationRuleImpl::ScalarSubquery,
             |op| matches!(op, Operator::ScalarSubquery(_)),
             PlanImpl::ScalarSubquery,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "values (1, 2)",
             ImplementationRuleImpl::Values,
             |op| matches!(op, Operator::Values(_)),
             PlanImpl::Values,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "select row_number() over (order by c1) from t1",
             ImplementationRuleImpl::Window,
             |op| matches!(op, Operator::Window(_)),
             PlanImpl::Window,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "select * from t1",
             ImplementationRuleImpl::SeqScan,
             |op| matches!(op, Operator::TableScan(_)),
             PlanImpl::SeqScan,
-        )?;
+        )
+        .await?;
 
         Ok(())
     }
 
     #[test]
-    fn test_join_sort_topk_and_function_scan_implementations() -> Result<(), DatabaseError> {
+    async fn test_join_sort_topk_and_function_scan_implementations() -> Result<(), DatabaseError> {
         assert_sql_rule(
             "select * from t1 join t2 on c1 = c3",
             ImplementationRuleImpl::HashJoin,
             |op| matches!(op, Operator::Join(_)),
             PlanImpl::HashJoin,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "select * from t1 cross join t2",
             ImplementationRuleImpl::HashJoin,
             |op| matches!(op, Operator::Join(_)),
             PlanImpl::NestLoopJoin,
-        )?;
+        )
+        .await?;
 
         with_operator_from_sql(
             "select * from t1 order by c1",
@@ -554,7 +570,8 @@ mod tests {
 
                 Ok(())
             },
-        )?;
+        )
+        .await?;
         let table_arena = TableArenaCell::default();
         let numbers = Numbers::new();
         let mut schema = Vec::new();
@@ -580,81 +597,93 @@ mod tests {
     }
 
     #[test]
-    fn test_dml_and_ddl_implementations() -> Result<(), DatabaseError> {
+    async fn test_dml_and_ddl_implementations() -> Result<(), DatabaseError> {
         assert_sql_rule(
             "analyze table t1",
             ImplementationRuleImpl::Analyze,
             |op| matches!(op, Operator::Analyze(_)),
             PlanImpl::Analyze,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "delete from t1 where c1 = 1",
             ImplementationRuleImpl::Delete,
             |op| matches!(op, Operator::Delete(_)),
             PlanImpl::Delete,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "insert into t1 values (1, 2)",
             ImplementationRuleImpl::Insert,
             |op| matches!(op, Operator::Insert(_)),
             PlanImpl::Insert,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "update t1 set c2 = 3 where c1 = 1",
             ImplementationRuleImpl::Update,
             |op| matches!(op, Operator::Update(_)),
             PlanImpl::Update,
-        )?;
+        )
+        .await?;
         #[cfg(feature = "copy")]
         assert_sql_rule(
             "copy t1 from 'in.csv'",
             ImplementationRuleImpl::CopyFromFile,
             |op| matches!(op, Operator::CopyFromFile(_)),
             PlanImpl::CopyFromFile,
-        )?;
+        )
+        .await?;
         #[cfg(feature = "copy")]
         assert_sql_rule(
             "copy t1 to 'out.csv'",
             ImplementationRuleImpl::CopyToFile,
             |op| matches!(op, Operator::CopyToFile(_)),
             PlanImpl::CopyToFile,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "alter table t1 add column c5 int null",
             ImplementationRuleImpl::AddColumn,
             |op| matches!(op, Operator::AddColumn(_)),
             PlanImpl::AddColumn,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "alter table t1 alter column c2 type bigint",
             ImplementationRuleImpl::ChangeColumn,
             |op| matches!(op, Operator::ChangeColumn(_)),
             PlanImpl::ChangeColumn,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "alter table t1 drop column c2",
             ImplementationRuleImpl::DropColumn,
             |op| matches!(op, Operator::DropColumn(_)),
             PlanImpl::DropColumn,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "create table t3 (id int primary key)",
             ImplementationRuleImpl::CreateTable,
             |op| matches!(op, Operator::CreateTable(_)),
             PlanImpl::CreateTable,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "drop table t1",
             ImplementationRuleImpl::DropTable,
             |op| matches!(op, Operator::DropTable(_)),
             PlanImpl::DropTable,
-        )?;
+        )
+        .await?;
         assert_sql_rule(
             "truncate table t1",
             ImplementationRuleImpl::Truncate,
             |op| matches!(op, Operator::Truncate(_)),
             PlanImpl::Truncate,
-        )?;
+        )
+        .await?;
 
         Ok(())
     }

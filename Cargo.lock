@@ -1149,6 +1149,7 @@ dependencies = [
  "sqlite",
  "sqlparser",
  "tempfile",
+ "tokio",
  "wasm-bindgen",
  "wasm-bindgen-test",
 ]
@@ -2038,9 +2039,11 @@ dependencies = [
 name = "sqllogictest-test"
 version = "0.4.0"
 dependencies = [
+ "async-trait",
  "clap",
  "glob",
  "kite_sql",
+ "kite_sql_serde_macros",
  "sqllogictest",
  "tempfile",
 ]
@@ -2207,6 +2210,27 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "tokio"
+version = "1.54.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
+dependencies = [
+ "pin-project-lite",
+ "tokio-macros",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "385a6cb71ab9ab790c5fe8d67f1645e6c450a7ce006a33de03daa956cf70a496"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.104",
+]
 
 [[package]]
 name = "toml_datetime"

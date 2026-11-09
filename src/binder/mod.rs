@@ -799,17 +799,16 @@ pub(crate) fn is_valid_identifier(s: &str) -> bool {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 pub mod test {
     use crate::binder::{is_valid_identifier, Binder, BinderContext};
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableCatalog};
     use crate::errors::DatabaseError;
     use crate::planner::{LogicalPlan, PlanArena, TableArenaCell};
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::memory::MemoryStorage;
     use crate::storage::{table_codec::TableCodec, Storage, StorageTransaction};
     use crate::types::ColumnId;
     use crate::types::LogicalType::Integer;
-    use std::path::PathBuf;
-    use tempfile::TempDir;
 
     pub(crate) struct TableState<S: Storage> {
         pub(crate) table: TableCatalog,
@@ -855,10 +854,9 @@ pub mod test {
         }
     }
 
-    pub(crate) fn build_t1_table() -> Result<TableState<RocksStorage>, DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    pub(crate) async fn build_t1_table() -> Result<TableState<MemoryStorage>, DatabaseError> {
         let table_arena = TableArenaCell::default();
-        let storage = build_test_catalog(temp_dir.path(), &table_arena)?;
+        let storage = build_test_catalog(&table_arena).await?;
         let table = {
             let arena = table_arena.borrow();
             arena.names.table(&arena.tables, "t1").unwrap().clone()
@@ -871,70 +869,76 @@ pub mod test {
         })
     }
 
-    pub(crate) fn build_test_catalog(
-        path: impl Into<PathBuf> + Send,
+    pub(crate) async fn build_test_catalog(
         table_arena: &TableArenaCell,
-    ) -> Result<RocksStorage, DatabaseError> {
-        let storage = RocksStorage::new(path)?;
+    ) -> Result<MemoryStorage, DatabaseError> {
+        let storage = MemoryStorage::new();
         let mut transaction = storage.transaction()?;
         let mut table_codec = TableCodec::default();
 
         let mut plan_arena = PlanArena::new(table_arena);
-        if let Some(table) = transaction.create_table(
-            &mut table_codec,
-            &mut plan_arena,
-            "t1".to_string(),
-            vec![
-                ColumnCatalog::new(
-                    "c1".to_string(),
-                    false,
-                    ColumnDesc::new(Integer, Some(0), false, None)?,
-                ),
-                ColumnCatalog::new(
-                    "c2".to_string(),
-                    false,
-                    ColumnDesc::new(Integer, None, true, None)?,
-                ),
-            ],
-            false,
-        )? {
+        if let Some(table) = transaction
+            .create_table(
+                &mut table_codec,
+                &mut plan_arena,
+                "t1".to_string(),
+                vec![
+                    ColumnCatalog::new(
+                        "c1".to_string(),
+                        false,
+                        ColumnDesc::new(Integer, Some(0), false, None)?,
+                    ),
+                    ColumnCatalog::new(
+                        "c2".to_string(),
+                        false,
+                        ColumnDesc::new(Integer, None, true, None)?,
+                    ),
+                ],
+                false,
+            )
+            .await?
+        {
             let table = table.transplant_to_table_arena(&plan_arena)?;
             table_arena.borrow_mut().insert_table(table);
         }
 
         let mut plan_arena = PlanArena::new(table_arena);
-        if let Some(table) = transaction.create_table(
-            &mut table_codec,
-            &mut plan_arena,
-            "t2".to_string(),
-            vec![
-                ColumnCatalog::new(
-                    "c3".to_string(),
-                    false,
-                    ColumnDesc::new(Integer, Some(0), false, None)?,
-                ),
-                ColumnCatalog::new(
-                    "c4".to_string(),
-                    false,
-                    ColumnDesc::new(Integer, None, false, None)?,
-                ),
-            ],
-            false,
-        )? {
+        if let Some(table) = transaction
+            .create_table(
+                &mut table_codec,
+                &mut plan_arena,
+                "t2".to_string(),
+                vec![
+                    ColumnCatalog::new(
+                        "c3".to_string(),
+                        false,
+                        ColumnDesc::new(Integer, Some(0), false, None)?,
+                    ),
+                    ColumnCatalog::new(
+                        "c4".to_string(),
+                        false,
+                        ColumnDesc::new(Integer, None, false, None)?,
+                    ),
+                ],
+                false,
+            )
+            .await?
+        {
             let table = table.transplant_to_table_arena(&plan_arena)?;
             table_arena.borrow_mut().insert_table(table);
         }
-        transaction.commit()?;
+        transaction.commit().await?;
 
         Ok(storage)
     }
 
     #[test]
-    fn sorted_bindings_preserve_names_positions_and_scope_isolation() -> Result<(), DatabaseError> {
+    async fn sorted_bindings_preserve_names_positions_and_scope_isolation(
+    ) -> Result<(), DatabaseError> {
         use crate::binder::Source;
         use crate::expression::ScalarExpression;
 
-        let state = build_t1_table()?;
+        let state = build_t1_table().await?;
         let arena = state.table_arena.borrow();
         let plan_arena = PlanArena::new(&state.table_arena);
         let transaction = state.storage.transaction()?;

@@ -414,6 +414,7 @@ fn trim_string(value: &str, trim_what: &str, trim_where: Option<TrimWhereField>)
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::expression::AliasType;

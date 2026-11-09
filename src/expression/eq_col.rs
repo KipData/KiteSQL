@@ -540,6 +540,7 @@ impl<A: MetaArena + ?Sized> ExprVisitor<A> for EqIgnoreColRefPosVisitor<'_, A> {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};

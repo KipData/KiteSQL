@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::hash::FxBuildHasher;
 use crate::execution::{
@@ -63,8 +64,9 @@ impl<'a> ReadExecutor<'a> for SetMembership<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -72,17 +74,17 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership<'a> {
         self.built = false;
         self.right_rows.clear();
         self.right_counts.clear();
-        self.left_input.reset(arena, plan_arena)?;
-        self.right_input.reset(arena, plan_arena)
+        self.left_input.reset(arena, plan_arena).await?;
+        self.right_input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if !self.built {
-            while self.right_input.next_tuple(arena, plan_arena)? {
+            while self.right_input.next_tuple(arena, plan_arena).await? {
                 let tuple = arena.result_tuple();
                 let width = tuple.len();
                 let hash = hash_row(&self.hasher, tuple.iter());
@@ -104,7 +106,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SetMembership<'a> {
         }
 
         loop {
-            if !self.left_input.next_tuple(arena, plan_arena)? {
+            if !self.left_input.next_tuple(arena, plan_arena).await? {
                 arena.finish();
                 return Ok(());
             }

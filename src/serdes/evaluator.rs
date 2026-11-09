@@ -204,9 +204,10 @@ impl ReferenceSerialization for CastEvaluatorRef {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::*;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::memory::MemoryTransaction;
     use crate::types::CharLengthUnits;
     use std::io::{Cursor, Seek, SeekFrom};
 
@@ -222,7 +223,7 @@ mod tests {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            CastEvaluatorParams::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena,)?,
+            CastEvaluatorParams::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena,)?,
             params
         );
 
@@ -237,7 +238,7 @@ mod tests {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            CastEvaluatorRef::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena,)?,
+            CastEvaluatorRef::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena,)?,
             evaluator
         );
 

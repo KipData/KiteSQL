@@ -701,12 +701,13 @@ macro_rules! numeric_binary_evaluator_definition {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test {
     use super::*;
     use crate::errors::DatabaseError;
     use crate::expression::BinaryOperator;
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::memory::MemoryTransaction;
     use crate::types::evaluator::BinaryEvaluatorRef;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -846,7 +847,7 @@ mod test {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            BinaryEvaluatorRef::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena,)?,
+            BinaryEvaluatorRef::decode::<MemoryTransaction, _, _>(&mut cursor, None, &mut arena,)?,
             evaluator
         );
 

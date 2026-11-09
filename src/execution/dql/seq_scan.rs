@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
 };
 use crate::planner::operator::table_scan::TableScanOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
-use crate::storage::table_codec::TableCodec;
 use crate::storage::{Iter, StorageTransaction};
 use crate::types::tuple::Tuple;
 
@@ -40,8 +40,9 @@ impl<'a> ReadExecutor<'a> for SeqScan<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -51,12 +52,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
         let iter = &mut state.iters[self.iter];
         if !iter.is_empty() {
             iter.as_tuple()
-                .reset(transaction, state.table_codec, self.op.limit)?;
+                .reset(transaction, state.table_codec, self.op.limit)
+                .await?;
         }
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -69,21 +71,23 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
                 limit,
                 ..
             } = self.op;
-            let iter =
-                state
-                    .transaction()
-                    .read(state.table_codec, deserializers, *table_id, *limit)?;
+            let iter = state
+                .transaction()
+                .read(state.table_codec, deserializers, *table_id, *limit)
+                .await?;
             state.iters[self.iter] = StorageIter::Tuple(iter);
         }
         let iter = state.iters[self.iter].as_tuple();
         let output = state.result.output_mut();
-        if next_scan_tuple(
-            self.op,
-            |table_codec, tuple| iter.next_tuple_into(table_codec, tuple),
-            state.table_codec,
-            output,
-            plan_arena,
-        )? {
+        let found = loop {
+            if !iter.next_tuple_into(state.table_codec, output).await? {
+                break false;
+            }
+            if scan_predicate_holds(self.op, output, plan_arena)? {
+                break true;
+            }
+        };
+        if found {
             arena.resume();
         } else {
             arena.finish();
@@ -93,30 +97,23 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for SeqScan<'a> {
 }
 
 #[inline]
-pub(crate) fn next_scan_tuple<A: MetaArena>(
+pub(crate) fn scan_predicate_holds<A: MetaArena>(
     op: &TableScanOperator,
-    mut next: impl FnMut(&mut TableCodec, &mut Tuple) -> Result<bool, DatabaseError>,
-    table_codec: &mut TableCodec,
-    tuple: &mut Tuple,
+    tuple: &Tuple,
     arena: &A,
 ) -> Result<bool, DatabaseError> {
-    while next(table_codec, tuple)? {
-        let holds = match op.predicate {
-            Some(predicate) => arena
-                .expression(predicate)
-                .eval(arena, Some(&*tuple))?
-                .is_true()?,
-            None => true,
-        };
-        if holds {
-            return Ok(true);
-        }
+    match op.predicate {
+        Some(predicate) => arena
+            .expression(predicate)
+            .eval(arena, Some(tuple))?
+            .is_true(),
+        None => Ok(true),
     }
-    Ok(false)
 }
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::db::test::build_table;
@@ -129,14 +126,14 @@ mod tests {
     use crate::types::LogicalType;
 
     #[test]
-    fn reset_keeps_seq_iterator_and_restores_offset_limit() -> Result<(), DatabaseError> {
+    async fn reset_keeps_seq_iterator_and_restores_offset_limit() -> Result<(), DatabaseError> {
         let storage = MemoryStorage::new();
         let mut tx = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut tables = TableCache::default();
         let cell = TableArenaCell::default();
         let mut meta = PlanArena::new(&cell);
-        build_table(&mut names, &mut tables, &mut tx, &mut meta)?;
+        build_table(&mut names, &mut tables, &mut tx, &mut meta).await?;
         let meta = PlanArena::new(&cell);
         let serializers = [
             LogicalType::Integer.serializable(),
@@ -159,7 +156,8 @@ mod tests {
                 .into(),
                 &serializers,
                 false,
-            )?;
+            )
+            .await?;
         }
         let op = TableScanOperator {
             table_id: 0,
@@ -181,18 +179,18 @@ mod tests {
             op: &op,
             iter: arena.alloc_iter(),
         };
-        scan.next_tuple(&mut arena, &mut meta)?;
+        scan.next_tuple(&mut arena, &mut meta).await?;
         assert_eq!(arena.result_tuple()[0], DataValue::Int32(2));
         let iterator = &arena.arena.iters[scan.iter] as *const _;
         for _ in 0..3 {
-            scan.reset(&mut arena, &mut meta)?;
-            scan.reset(&mut arena, &mut meta)?;
+            scan.reset(&mut arena, &mut meta).await?;
+            scan.reset(&mut arena, &mut meta).await?;
             for id in [2, 3] {
-                scan.next_tuple(&mut arena, &mut meta)?;
+                scan.next_tuple(&mut arena, &mut meta).await?;
                 assert_eq!(arena.result_tuple()[0], DataValue::Int32(id));
                 assert_eq!(&arena.arena.iters[scan.iter] as *const _, iterator);
             }
-            scan.next_tuple(&mut arena, &mut meta)?;
+            scan.next_tuple(&mut arena, &mut meta).await?;
             assert_eq!(
                 arena.buffer.result.status,
                 Some(crate::execution::ExecStatus::End)

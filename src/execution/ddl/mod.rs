@@ -24,6 +24,7 @@ pub(crate) mod drop_view;
 pub(crate) mod truncate;
 
 use crate::catalog::TableId;
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::storage::table_codec::TableCodec;
 use crate::storage::{InnerIter, StorageTransaction};
@@ -34,8 +35,9 @@ use std::collections::Bound;
 
 const REWRITE_BATCH_SIZE: usize = 1024;
 
+#[dual]
 #[allow(clippy::too_many_arguments)]
-fn read_tuple_batch<T: StorageTransaction>(
+async fn read_tuple_batch<T: StorageTransaction>(
     transaction: &T,
     table_codec: &mut TableCodec,
     table_id: TableId,
@@ -46,58 +48,63 @@ fn read_tuple_batch<T: StorageTransaction>(
     batch_size: usize,
 ) -> Result<usize, DatabaseError> {
     let lower = if let Some(last_pk) = start_after {
-        table_codec.with_tuple_unchecked(table_id, last_pk, None, |key, _, _| {
-            Ok::<_, DatabaseError>(Bound::Excluded(key.to_vec()))
-        })?
+        table_codec
+            .with_tuple_unchecked(table_id, last_pk, None, async |key, _, _| {
+                Ok::<_, DatabaseError>(Bound::Excluded(key.to_vec()))
+            })
+            .await?
     } else {
         Bound::Unbounded
     };
 
-    table_codec.with_tuple_bound(table_id, |min, max, pool| {
-        let lower = match &lower {
-            Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
-            Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
-            Bound::Unbounded => Bound::Included(min),
-        };
-        let mut iter = transaction.range(lower, Bound::Included(max), pool)?;
-        let mut len = 0;
+    table_codec
+        .with_tuple_bound(table_id, async |min, max, pool| {
+            let lower = match &lower {
+                Bound::Included(bytes) => Bound::Included(bytes.as_slice()),
+                Bound::Excluded(bytes) => Bound::Excluded(bytes.as_slice()),
+                Bound::Unbounded => Bound::Included(min),
+            };
+            let mut iter = transaction.range(lower, Bound::Included(max), pool).await?;
+            let mut len = 0;
 
-        while len < batch_size {
-            let Some((key, value)) = iter.try_next()? else {
-                break;
-            };
-            let tuple_id = TableCodec::decode_tuple_key(key, pk_ty)?;
-            let tuple = if len < batch.len() {
-                &mut batch[len]
-            } else {
-                batch.push(TupleImpl::from(Tuple::new(
-                    None,
-                    Vec::with_capacity(old_deserializers.len()),
-                )));
-                batch
-                    .last_mut()
-                    .expect("batch contains the tuple that was just pushed")
-            };
-            // SAFETY: without a scope every value is copied.
-            unsafe {
-                TableCodec::decode_tuple_into(
-                    tuple.output_mut(),
-                    old_deserializers,
-                    Some(tuple_id),
-                    value,
-                    old_deserializers.len(),
-                    pool,
-                    None,
-                )?
-            };
-            len += 1;
-        }
+            while len < batch_size {
+                let Some((key, value)) = iter.try_next().await? else {
+                    break;
+                };
+                let tuple_id = TableCodec::decode_tuple_key(key, pk_ty)?;
+                let tuple = if len < batch.len() {
+                    &mut batch[len]
+                } else {
+                    batch.push(TupleImpl::from(Tuple::new(
+                        None,
+                        Vec::with_capacity(old_deserializers.len()),
+                    )));
+                    batch
+                        .last_mut()
+                        .expect("batch contains the tuple that was just pushed")
+                };
+                // SAFETY: without a scope every value is copied.
+                unsafe {
+                    TableCodec::decode_tuple_into(
+                        tuple.output_mut(),
+                        old_deserializers,
+                        Some(tuple_id),
+                        value,
+                        old_deserializers.len(),
+                        pool,
+                        None,
+                    )?
+                };
+                len += 1;
+            }
 
-        Ok(len)
-    })
+            Ok(len)
+        })
+        .await
 }
 
-pub(crate) fn visit_table_in_batches<T, F>(
+#[dual]
+pub(crate) async fn visit_table_in_batches<T, F>(
     transaction: &T,
     table_codec: &mut TableCodec,
     table_id: TableId,
@@ -122,7 +129,8 @@ where
             last_pk.as_ref(),
             &mut batch,
             REWRITE_BATCH_SIZE,
-        )?;
+        )
+        .await?;
         if batch_len == 0 {
             break;
         }
@@ -142,8 +150,9 @@ where
     Ok(())
 }
 
+#[dual]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn rewrite_table_in_batches<T, F, G>(
+pub(crate) async fn rewrite_table_in_batches<T, F, G>(
     transaction: &mut T,
     table_codec: &mut TableCodec,
     table_id: TableId,
@@ -156,7 +165,7 @@ pub(crate) fn rewrite_table_in_batches<T, F, G>(
 where
     T: StorageTransaction,
     F: FnMut(&mut TupleImpl) -> Result<(), DatabaseError>,
-    G: FnMut(&mut T, &mut TableCodec, &TupleImpl) -> Result<(), DatabaseError>,
+    G: AsyncFnMut(&mut T, &mut TableCodec, &TupleImpl) -> Result<(), DatabaseError>,
 {
     let mut last_pk = None;
     let mut batch = Vec::with_capacity(REWRITE_BATCH_SIZE);
@@ -171,7 +180,8 @@ where
             last_pk.as_ref(),
             &mut batch,
             REWRITE_BATCH_SIZE,
-        )?;
+        )
+        .await?;
         if batch_len == 0 {
             break;
         }
@@ -181,8 +191,10 @@ where
 
         for tuple in batch.iter_mut().take(batch_len) {
             rewrite(tuple)?;
-            transaction.append_tuple(table_codec, table_id, tuple, new_serializers, true)?;
-            after_write(transaction, table_codec, tuple)?;
+            transaction
+                .append_tuple(table_codec, table_id, tuple, new_serializers, true)
+                .await?;
+            after_write(transaction, table_codec, tuple).await?;
         }
 
         if batch_len < REWRITE_BATCH_SIZE {

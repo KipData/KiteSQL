@@ -140,7 +140,7 @@ macro_rules! scala_function {
 ///         .map(|i| Ok(Tuple::new(None, vec![
 ///                 DataValue::Int32(Some(i)),
 ///                 DataValue::Int32(Some(i)),
-///             ])))) as Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>)
+///             ])))) as TableFunctionIter)
 ///     }));
 ///
 ///     let mut kite_sql = DataBaseBuilder::path("./example").build()?;
@@ -175,7 +175,7 @@ macro_rules! table_function {
 
         impl ::kite_sql::expression::function::table::TableFunctionImpl for $struct_name {
             #[allow(unused_variables, clippy::redundant_closure_call)]
-            fn eval(&self, args: &[::kite_sql::planner::ExprRef], arena: &dyn ::kite_sql::planner::MetaArena) -> Result<Box<dyn Iterator<Item=Result<::kite_sql::types::tuple::Tuple, ::kite_sql::errors::DatabaseError>>>, ::kite_sql::errors::DatabaseError> {
+            fn eval(&self, args: &[::kite_sql::planner::ExprRef], arena: &dyn ::kite_sql::planner::MetaArena) -> Result<::kite_sql::expression::function::table::TableFunctionIter, ::kite_sql::errors::DatabaseError> {
                 let mut _index = 0;
 
                 $closure($({

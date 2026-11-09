@@ -46,6 +46,7 @@ pub(crate) fn parse_sql_with_recursion_limit<S: AsRef<str>>(
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[crate::dual::dual]
 mod tests {
     use super::parse_sql;
     use sqlparser::ast::{SetExpr, Statement};

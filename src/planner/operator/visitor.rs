@@ -605,6 +605,7 @@ pub fn walk_operator<'a, V: OperatorVisitor<'a>>(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 pub(crate) mod tests {
     use super::*;
     #[cfg(feature = "copy")]

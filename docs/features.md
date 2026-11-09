@@ -132,7 +132,7 @@ table_function!(MyTableFunction::test_numbers(LogicalType::Integer) -> [c1: Logi
                 DataValue::Int32(Some(i)),
                 DataValue::Int32(Some(i)),
             ]
-        }))) as Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>)
+        }))) as TableFunctionIter)
 }));
 let kite_sql = DataBaseBuilder::path("./data")
    .register_table_function(MyTableFunction::new())

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use super::rewrite_table_in_batches;
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{DDLApply, ExecBuilder, ExecContext, ExecNode, ExecutorNode, WriteExecutor};
 use crate::iter_ext::Itertools;
@@ -38,8 +39,9 @@ impl<'a> WriteExecutor<'a> for AddColumn<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -47,7 +49,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -81,13 +83,15 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
 
         let (unique_index_id, apply) = {
             let (transaction, table_codec) = arena.transaction_codec_mut();
-            let (table, col_id) = transaction.add_column(
-                table_codec,
-                plan_arena,
-                table_catalog.name(),
-                column,
-                *if_not_exists,
-            )?;
+            let (table, col_id) = transaction
+                .add_column(
+                    table_codec,
+                    plan_arena,
+                    table_catalog.name(),
+                    column,
+                    *if_not_exists,
+                )
+                .await?;
             let unique_meta = if column.desc().is_unique() {
                 table
                     .get_unique_index(&col_id, plan_arena)
@@ -106,12 +110,14 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
             .collect_vec();
         serializers.push(column.datatype().serializable());
 
+        let table_id = *table_id;
+        let index_default = default_value.clone();
         let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec) = state.transaction_codec_mut();
         rewrite_table_in_batches(
             transaction,
             table_codec,
-            *table_id,
+            table_id,
             &pk_ty,
             &serializers[..old_schema.len()],
             &serializers,
@@ -123,20 +129,23 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
                 }
                 Ok(())
             },
-            |transaction, table_codec, tuple| {
+            async move |transaction, table_codec, tuple| {
                 if let (Some(unique_index_id), Some(value), Some(tuple_id)) =
-                    (unique_index_id.as_ref(), default_value.as_ref(), tuple.pk())
+                    (unique_index_id.as_ref(), index_default.as_ref(), tuple.pk())
                 {
                     let index = Index::new(
                         *unique_index_id,
                         std::slice::from_ref(value),
                         IndexType::Unique,
                     );
-                    transaction.add_index(table_codec, *table_id, index, tuple_id)?;
+                    transaction
+                        .add_index(table_codec, table_id, index, tuple_id)
+                        .await?;
                 }
                 Ok(())
             },
-        )?;
+        )
+        .await?;
 
         arena.finish();
         Ok(())

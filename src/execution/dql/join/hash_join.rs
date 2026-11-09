@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::dql::join::hash::full_join::FullJoinState;
 use crate::execution::dql::join::hash::inner_join::InnerJoinState;
@@ -131,6 +132,7 @@ impl<'a> HashJoin<'a> {
     }
 }
 
+#[dual]
 impl<'a> HashJoin<'a> {
     fn eval_keys(
         on_keys: &[ExprRef],
@@ -147,7 +149,7 @@ impl<'a> HashJoin<'a> {
         Ok(())
     }
 
-    fn initialize_build<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    async fn initialize_build<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -165,7 +167,7 @@ impl<'a> HashJoin<'a> {
         let mut rows: Vec<BuildRow> = Vec::new();
         let len = self.on_left_keys.len();
 
-        while self.left_input.next_tuple(arena, plan_arena)? {
+        while self.left_input.next_tuple(arena, plan_arena).await? {
             let tuple = arena.take_tuple();
             let row = rows.len();
             // Evaluate the key in place, and drop it again if the key is already there.
@@ -260,18 +262,19 @@ impl<'a> ReadExecutor<'a> for HashJoin<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.state = HashJoinState::Build;
-        self.left_input.reset(arena, plan_arena)?;
-        self.right_input.reset(arena, plan_arena)
+        self.left_input.reset(arena, plan_arena).await?;
+        self.right_input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -280,7 +283,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
             return Err(err);
         }
 
-        self.initialize_build(arena, plan_arena)?;
+        self.initialize_build(arena, plan_arena).await?;
         let mut state = std::mem::replace(&mut self.state, HashJoinState::End);
 
         loop {
@@ -294,7 +297,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
                 } => {
                     let probe_finished = loop {
                         if probe_state.is_none() {
-                            if !self.right_input.next_tuple(arena, plan_arena)? {
+                            if !self.right_input.next_tuple(arena, plan_arena).await? {
                                 break true;
                             }
                             let tuple = arena.take_tuple();
@@ -386,6 +389,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashJoin<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
@@ -401,11 +405,10 @@ mod test {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, ExprRef, LogicalPlan};
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use tempfile::TempDir;
 
     fn optimize_exprs(
         plan: LogicalPlan,
@@ -502,9 +505,8 @@ mod test {
     }
 
     #[test]
-    fn test_inner_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_inner_join() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -540,7 +542,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         assert_eq!(tuples.len(), 3);
 
@@ -561,9 +563,8 @@ mod test {
     }
 
     #[test]
-    fn test_left_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_left_join() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -599,7 +600,8 @@ mod test {
                 &table_cache,
                 plan_arena,
                 &transaction,
-            ))?;
+            ))
+            .await?;
 
             assert_eq!(tuples.len(), 4);
 
@@ -625,9 +627,8 @@ mod test {
     }
 
     #[test]
-    fn test_right_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_right_join() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -663,7 +664,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         assert_eq!(tuples.len(), 4);
 
@@ -688,9 +689,8 @@ mod test {
     }
 
     #[test]
-    fn test_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_right_join_filter_only_left_columns() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -771,7 +771,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         assert_eq!(tuples.len(), 1);
         assert_eq!(
@@ -787,9 +787,8 @@ mod test {
     }
 
     #[test]
-    fn test_full_join() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_full_join() -> Result<(), DatabaseError> {
+        let storage = MemoryStorage::new();
         let transaction = storage.transaction()?;
         let table_cache = crate::storage::TableCache::default();
         let table_arena = crate::planner::TableArenaCell::default();
@@ -825,7 +824,7 @@ mod test {
             plan_arena,
             &transaction,
         );
-        let tuples = try_collect(executor)?;
+        let tuples = try_collect(executor).await?;
 
         assert_eq!(tuples.len(), 5);
 

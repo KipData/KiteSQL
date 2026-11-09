@@ -29,6 +29,7 @@ pub fn null_cast_eval(_value: DataValue) -> Result<DataValue, DatabaseError> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod test {
     use super::*;
 

@@ -439,6 +439,7 @@ impl ExprVisitor<PlanArena<'_>> for SimpleGuardVisitor {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[crate::dual::dual]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};

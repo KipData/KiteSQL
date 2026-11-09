@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::dual::dual;
 use crate::errors::DatabaseError;
 use crate::execution::{
     build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
@@ -47,23 +48,24 @@ impl<'a> ReadExecutor<'a> for StreamDistinctExecutor<'a> {
     }
 }
 
+#[dual]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecutor<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.last_keys = None;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         loop {
-            if !self.input.next_tuple(arena, plan_arena)? {
+            if !self.input.next_tuple(arena, plan_arena).await? {
                 if let Some(last_keys) = self.last_keys.take() {
                     drop(std::mem::replace(arena.result_mut(), last_keys));
                     arena.resume();
@@ -89,6 +91,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamDistinctExecu
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[crate::dual::dual]
 mod tests {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
@@ -104,18 +107,18 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::RocksStorage;
+    use crate::storage::memory::MemoryStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use tempfile::TempDir;
 
     #[allow(clippy::type_complexity)]
-    fn build_test_storage() -> Result<(TableCache, TempDir, RocksStorage), DatabaseError> {
+    fn build_test_storage() -> Result<(TableCache, TempDir, MemoryStorage), DatabaseError> {
         let table_cache = crate::storage::TableCache::default();
 
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+        let storage = MemoryStorage::new();
 
         Ok((table_cache, temp_dir, storage))
     }
@@ -136,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_distinct_single_column_sorted() -> Result<(), DatabaseError> {
+    async fn stream_distinct_single_column_sorted() -> Result<(), DatabaseError> {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -178,7 +181,8 @@ mod tests {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         let actual = tuples
             .into_iter()
@@ -191,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_distinct_multi_column_sorted() -> Result<(), DatabaseError> {
+    async fn stream_distinct_multi_column_sorted() -> Result<(), DatabaseError> {
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
@@ -236,7 +240,8 @@ mod tests {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         let actual = tuples
             .into_iter()
