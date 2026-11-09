@@ -6,13 +6,14 @@ use crate::binder::{
 };
 use crate::catalog::{ColumnCatalog, ColumnRef, TableCatalog};
 use crate::db::{
-    BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, ResultRow, Transaction,
-    TransactionIter, TxnOrmIter, TxnResultIter, TxnValue,
+    AsyncIter, BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, ResultRow,
+    Transaction, TransactionIter, TxnOrmIter, TxnResultIter, TxnValue,
 };
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
 use crate::expression::window::WindowFunctionKind;
 use crate::expression::{self, AliasType, ScalarExpression, TypeCast};
+use crate::maybe_async::MaybeSend;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
@@ -1030,38 +1031,42 @@ where
     }
 }
 
-fn bind_orm_context<'a, E, F>(
+#[maybe_async]
+async fn bind_orm_context<'a, E, F>(
     executor: E,
     read_only: bool,
     build: F,
 ) -> Result<E::Iter, DatabaseError>
 where
-    E: BindSource<'a>,
+    E: BindSource,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
-        &'ctx mut OrmContext<
-            'ctx,
-            'bind,
-            'parent,
-            'arena,
-            E::Transaction,
-            &'static [(usize, LogicalType)],
-        >,
-    ) -> Result<LogicalPlan, DatabaseError>,
+            &'ctx mut OrmContext<
+                'ctx,
+                'bind,
+                'parent,
+                'arena,
+                E::Transaction,
+                &'static [(usize, LogicalType)],
+            >,
+        ) -> Result<LogicalPlan, DatabaseError>
+        + MaybeSend,
 {
     static EMPTY_BIND_PARAMS: &[(usize, LogicalType)] = &[];
-    executor.execute(read_only, |state, tx| {
-        state
-            .build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
-                let mut context = OrmContext { binder, arena };
-                build(&mut context)
-            })
-            .map(Executor::from_plan)
-    })
+    executor
+        .execute(read_only, |state, tx| {
+            state
+                .build_plan(EMPTY_BIND_PARAMS, tx, |binder, arena| {
+                    let mut context = OrmContext { binder, arena };
+                    build(&mut context)
+                })
+                .map(Executor::from_plan)
+        })
+        .await
 }
 
 fn explain_orm_context<'a, E, F>(executor: E, build: F) -> Result<String, DatabaseError>
 where
-    E: BindSource<'a>,
+    E: BindSource,
     F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
         &'ctx mut OrmContext<
             'ctx,
@@ -2771,7 +2776,7 @@ pub trait Model: Sized + FromQueryRow {
 ///     .project_value::<i32>();
 /// # Ok::<(), kite_sql::errors::DatabaseError>(())
 /// ```
-pub trait FromDataValue: Sized {
+pub trait FromDataValue: Sized + MaybeSend {
     /// Returns the logical SQL type used for conversion, when one is required.
     fn logical_type() -> Option<LogicalType>;
 
@@ -2789,7 +2794,7 @@ pub trait FromDataValue: Sized {
 ///     .project_tuple::<(i32, String)>();
 /// # Ok::<(), kite_sql::errors::DatabaseError>(())
 /// ```
-pub trait FromQueryTuple: Sized {
+pub trait FromQueryTuple: Sized + MaybeSend {
     /// Decodes one projected tuple into `Self`.
     fn from_query_tuple(tuple: &mut ResultRow<'_, '_>) -> Result<Self, DatabaseError>;
 }
@@ -2797,7 +2802,7 @@ pub trait FromQueryTuple: Sized {
 /// Conversion trait from a query result row into a Rust value.
 ///
 /// `#[derive(Model)]` and `#[derive(Projection)]` generate this automatically.
-pub trait FromQueryRow: Sized {
+pub trait FromQueryRow: Sized + MaybeSend {
     /// Decodes one result row into `Self`.
     fn from_query_row(
         schema: &SchemaView<'_, '_>,
@@ -2805,7 +2810,7 @@ pub trait FromQueryRow: Sized {
     ) -> Result<Self, DatabaseError>;
 }
 
-pub trait FromTxnRow<'txn>: Sized {
+pub trait FromTxnRow<'txn>: Sized + MaybeSend {
     fn from_txn_row(
         schema: &SchemaView<'_, '_>,
         row: &mut ResultRow<'_, 'txn>,
@@ -2892,6 +2897,7 @@ pub trait OrmQueryResultExt: ResultIter + Sized {
 
 impl<I: ResultIter> OrmQueryResultExt for I {}
 
+#[maybe_async]
 impl<I, T> ProjectValueIter<I, T>
 where
     I: ResultIter,
@@ -2908,8 +2914,28 @@ where
     ///
     /// This is useful when you stop iterating early and want to release the
     /// underlying result stream.
-    pub fn done(self) -> Result<(), DatabaseError> {
-        self.inner.done()
+    pub async fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done().await
+    }
+}
+
+#[maybe_async]
+impl<I, T> AsyncIter for ProjectValueIter<I, T>
+where
+    I: ResultIter + MaybeSend,
+    T: FromDataValue + MaybeSend,
+{
+    #[async_only]
+    type Item = Result<T, DatabaseError>;
+
+    /// Reads the next row.
+    #[async_only]
+    async fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next_tuple(|_, tuple| extract_value_from_tuple::<T>(tuple))
+            .await
+            .transpose()
+            .map(|value| value.and_then(std::convert::identity))
     }
 }
 
@@ -2932,6 +2958,7 @@ pub struct ProjectTupleIter<I, T> {
     _marker: PhantomData<T>,
 }
 
+#[maybe_async]
 impl<I, T> ProjectTupleIter<I, T>
 where
     I: ResultIter,
@@ -2948,11 +2975,33 @@ where
     ///
     /// This is useful when you stop iterating early and want to release the
     /// underlying result stream.
-    pub fn done(self) -> Result<(), DatabaseError> {
-        self.inner.done()
+    pub async fn done(self) -> Result<(), DatabaseError> {
+        self.inner.done().await
     }
 }
 
+#[maybe_async]
+impl<I, T> AsyncIter for ProjectTupleIter<I, T>
+where
+    I: ResultIter + MaybeSend,
+    T: FromQueryTuple + MaybeSend,
+{
+    #[async_only]
+    type Item = Result<T, DatabaseError>;
+
+    /// Reads the next row.
+    #[async_only]
+    async fn next(&mut self) -> Option<Self::Item> {
+        self.inner
+            .next_tuple(|_, tuple| extract_projected_tuple::<T>(tuple))
+            .await
+            .transpose()
+            .map(|tuple| tuple.and_then(std::convert::identity))
+    }
+}
+
+#[maybe_async]
+#[sync_only]
 impl<I, T> Iterator for ProjectValueIter<I, T>
 where
     I: ResultIter,
@@ -2969,6 +3018,8 @@ where
     }
 }
 
+#[maybe_async]
+#[sync_only]
 impl<I, T> Iterator for ProjectTupleIter<I, T>
 where
     I: ResultIter,
@@ -3397,21 +3448,26 @@ fn model_column_rename_compatible(
         && model_column_default(model) == catalog_column_default(column, arena))
 }
 
-fn extract_optional_model<I, M>(iter: I) -> Result<Option<M>, DatabaseError>
+#[maybe_async]
+async fn extract_optional_model<I, M>(iter: I) -> Result<Option<M>, DatabaseError>
 where
     I: ResultIter,
     M: Model,
 {
-    extract_optional_row(iter)
+    extract_optional_row(iter).await
 }
 
-fn extract_optional_row<I, T>(mut iter: I) -> Result<Option<T>, DatabaseError>
+#[maybe_async]
+async fn extract_optional_row<I, T>(mut iter: I) -> Result<Option<T>, DatabaseError>
 where
     I: ResultIter,
     T: FromQueryRow,
 {
     Ok(
-        match iter.next_tuple(|schema, tuple| T::from_query_row(schema, tuple))? {
+        match iter
+            .next_tuple(|schema, tuple| T::from_query_row(schema, tuple))
+            .await?
+        {
             Some(row) => Some(row?),
             None => None,
         },
@@ -3471,7 +3527,8 @@ fn extract_projected_tuple<T: FromQueryTuple>(
     T::from_query_tuple(tuple)
 }
 
-fn orm_analyze<'a, E: BindSource<'a>, M: Model>(executor: E) -> Result<(), DatabaseError> {
+#[maybe_async]
+async fn orm_analyze<E: BindSource, M: Model>(executor: E) -> Result<(), DatabaseError> {
     executor
         .execute(false, |state, tx| {
             state
@@ -3479,14 +3536,14 @@ fn orm_analyze<'a, E: BindSource<'a>, M: Model>(executor: E) -> Result<(), Datab
                     binder.bind_analyze(M::table_name(), arena)
                 })
                 .map(Executor::from_plan)
-        })?
+        })
+        .await?
         .done()
+        .await
 }
 
-fn orm_insert<'a, E: BindSource<'a>, M: Model>(
-    executor: E,
-    model: &M,
-) -> Result<(), DatabaseError> {
+#[maybe_async]
+async fn orm_insert<E: BindSource, M: Model>(executor: E, model: &M) -> Result<(), DatabaseError> {
     let params = model.params();
     executor
         .execute(false, |state, tx| {
@@ -3495,19 +3552,23 @@ fn orm_insert<'a, E: BindSource<'a>, M: Model>(
                     bind_orm_insert_model::<_, _, M>(binder, params, arena)
                 })
                 .map(Executor::from_plan)
-        })?
+        })
+        .await?
         .done()
+        .await
 }
 
-fn orm_get<'a, E: BindSource<'a>, M: Model>(
+#[maybe_async]
+async fn orm_get<E: BindSource, M: Model>(
     executor: E,
     key: &M::PrimaryKey,
 ) -> Result<Option<M>, DatabaseError> {
-    extract_optional_model(bind_get::<_, M>(executor, key)?)
+    extract_optional_model(bind_get::<_, M>(executor, key).await?).await
 }
 
 /// Binds the lookup of one `M` by primary key.
-fn bind_get<'a, E: BindSource<'a>, M: Model>(
+#[maybe_async]
+async fn bind_get<E: BindSource, M: Model>(
     executor: E,
     key: &M::PrimaryKey,
 ) -> Result<E::Iter, DatabaseError> {
@@ -3526,12 +3587,36 @@ fn bind_get<'a, E: BindSource<'a>, M: Model>(
             .finish()?;
         Ok(plan)
     })
+    .await
 }
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
+
+    /// Reads every row of an ORM iterator, on either path.
+    #[keep_async_fn]
+    trait TryCollect<T> {
+        async fn try_collect(self) -> Result<Vec<T>, DatabaseError>;
+    }
+
+    impl<I, T> TryCollect<T> for I
+    where
+        I: AsyncIter<Item = Result<T, DatabaseError>>,
+    {
+        // `next` is `Iterator::next` on the sync path only.
+        #[allow(clippy::while_let_on_iterator)]
+        async fn try_collect(mut self) -> Result<Vec<T>, DatabaseError> {
+            let mut rows = Vec::new();
+            while let Some(row) = self.next().await {
+                rows.push(row?);
+            }
+            Ok(rows)
+        }
+    }
+
     use crate::expression::BinaryOperator;
     use crate::types::tuple::{Schema, SchemaView, Tuple, TupleImpl};
     use std::sync::Arc;
@@ -3724,13 +3809,17 @@ mod tests {
         }
     }
 
-    fn build_orm_unit_database(
-    ) -> Result<crate::db::Database<crate::storage::memory::MemoryStorage>, DatabaseError> {
-        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
+    async fn build_orm_unit_database(
+    ) -> Result<crate::db::Database<crate::storage::TestStorage>, DatabaseError> {
+        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test")
+            .build_in_memory()
+            .await?;
         database
-            .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")?;
+            .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")
+            .await?;
         database
-            .ddl("create table orm_unit_orders (id int primary key, user_id int, amount int)")?;
+            .ddl("create table orm_unit_orders (id int primary key, user_id int, amount int)")
+            .await?;
 
         for user in [
             OrmUnitUser {
@@ -3749,7 +3838,7 @@ mod tests {
                 age: None,
             },
         ] {
-            database.insert(&user)?;
+            database.insert(&user).await?;
         }
 
         for order in [
@@ -3769,7 +3858,7 @@ mod tests {
                 amount: 200,
             },
         ] {
-            database.insert(&order)?;
+            database.insert(&order).await?;
         }
 
         Ok(database)
@@ -3941,15 +4030,20 @@ mod tests {
     }
 
     #[test]
-    fn prepared_orm_query_reuses_plan_and_binds_each_execution() -> Result<(), DatabaseError> {
-        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test").build_in_memory()?;
-        database.create_table::<OrmUnitUser>()?;
+    async fn prepared_orm_query_reuses_plan_and_binds_each_execution() -> Result<(), DatabaseError>
+    {
+        let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test")
+            .build_in_memory()
+            .await?;
+        database.create_table::<OrmUnitUser>().await?;
         for (id, name) in [(1, "Alice"), (2, "Bob"), (3, "Cara")] {
-            database.insert(&OrmUnitUser {
-                id,
-                name: name.into(),
-                age: Some(18),
-            })?;
+            database
+                .insert(&OrmUnitUser {
+                    id,
+                    name: name.into(),
+                    age: Some(18),
+                })
+                .await?;
         }
         let types = [(1, LogicalType::Integer)];
         assert!(matches!(
@@ -3968,9 +4062,11 @@ mod tests {
         let mut tx = database.new_transaction(false)?;
         for (id, expected) in [(1, "Alice"), (3, "Cara"), (2, "Bob")] {
             let rows = plan
-                .execute(&mut tx, [(1, DataValue::Int32(id).into())])?
+                .execute(&mut tx, [(1, DataValue::Int32(id).into())])
+                .await?
                 .orm::<OrmUnitUser>()
-                .collect::<Result<Vec<_>, _>>()?;
+                .try_collect()
+                .await?;
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].name, expected);
         }
@@ -3980,51 +4076,62 @@ mod tests {
                 .finish()
         })?;
         let rows = tx_plan
-            .execute(&mut tx, [(1, DataValue::Int32(2).into())])?
+            .execute(&mut tx, [(1, DataValue::Int32(2).into())])
+            .await?
             .orm::<OrmUnitUser>()
-            .collect::<Result<Vec<_>, _>>()?;
+            .try_collect()
+            .await?;
         assert_eq!(rows[0].name, "Bob");
-        tx.commit()?;
+        tx.commit().await?;
         Ok(())
     }
 
     #[test]
-    fn database_and_transaction_orm_helpers_bind_expected_plans() -> Result<(), DatabaseError> {
+    async fn database_and_transaction_orm_helpers_bind_expected_plans() -> Result<(), DatabaseError>
+    {
         let mut database = crate::db::DataBaseBuilder::path("./orm-unit-test")
             .histogram_buckets(100)
-            .build_in_memory()?;
+            .build_in_memory()
+            .await?;
         database
-            .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")?;
-        database.create_view("orm_unit_user_names", |ctx| {
-            ctx.from::<OrmUnitUser>()?
-                .project_scalars((OrmUnitUser::id(), OrmUnitUser::name()))?
-                .finish()
-        })?;
+            .ddl("create table orm_unit_users (id int primary key, name varchar, age int null)")
+            .await?;
+        database
+            .create_view("orm_unit_user_names", |ctx| {
+                ctx.from::<OrmUnitUser>()?
+                    .project_scalars((OrmUnitUser::id(), OrmUnitUser::name()))?
+                    .finish()
+            })
+            .await?;
 
-        database.insert(&OrmUnitUser {
-            id: 1,
-            name: "Alice".to_string(),
-            age: Some(18),
-        })?;
-        database.insert_many([
-            OrmUnitUser {
-                id: 2,
-                name: "Bob".to_string(),
-                age: Some(20),
-            },
-            OrmUnitUser {
-                id: 3,
-                name: "Cara".to_string(),
-                age: None,
-            },
-        ])?;
+        database
+            .insert(&OrmUnitUser {
+                id: 1,
+                name: "Alice".to_string(),
+                age: Some(18),
+            })
+            .await?;
+        database
+            .insert_many([
+                OrmUnitUser {
+                    id: 2,
+                    name: "Bob".to_string(),
+                    age: Some(20),
+                },
+                OrmUnitUser {
+                    id: 3,
+                    name: "Cara".to_string(),
+                    age: None,
+                },
+            ])
+            .await?;
         assert!(matches!(
-            database.analyze_model::<OrmUnitUser>(),
+            database.analyze_model::<OrmUnitUser>().await,
             Err(DatabaseError::TooManyBuckets(100, 3))
         ));
 
         assert_eq!(
-            database.get::<OrmUnitUser>(&1)?,
+            database.get::<OrmUnitUser>(&1).await?,
             Some(OrmUnitUser {
                 id: 1,
                 name: "Alice".to_string(),
@@ -4033,19 +4140,25 @@ mod tests {
         );
         assert_eq!(
             database
-                .fetch::<OrmUnitUser>()?
-                .collect::<Result<Vec<_>, _>>()?
+                .fetch::<OrmUnitUser>()
+                .await?
+                .try_collect()
+                .await?
                 .len(),
             3
         );
         assert!(database
-            .show_views()?
-            .collect::<Result<Vec<_>, _>>()?
+            .show_views()
+            .await?
+            .try_collect()
+            .await?
             .iter()
             .any(|view| view == "orm_unit_user_names"));
         assert!(database
-            .describe::<OrmUnitUser>()?
-            .collect::<Result<Vec<_>, _>>()?
+            .describe::<OrmUnitUser>()
+            .await?
+            .try_collect()
+            .await?
             .iter()
             .any(|column| column.field == "name"));
 
@@ -4054,7 +4167,8 @@ mod tests {
             id: 4,
             name: "Dora".to_string(),
             age: Some(40),
-        })?;
+        })
+        .await?;
         tx.insert_many([
             OrmUnitUser {
                 id: 5,
@@ -4066,32 +4180,37 @@ mod tests {
                 name: "Finn".to_string(),
                 age: Some(60),
             },
-        ])?;
+        ])
+        .await?;
         assert!(matches!(
-            tx.analyze::<OrmUnitUser>(),
+            tx.analyze::<OrmUnitUser>().await,
             Err(DatabaseError::TooManyBuckets(100, 6))
         ));
 
-        assert_eq!(tx.get::<OrmUnitUser>(&4)?.unwrap().name, "Dora");
+        assert_eq!(tx.get::<OrmUnitUser>(&4).await?.unwrap().name, "Dora");
         assert_eq!(
-            tx.fetch::<OrmUnitUser>()?
-                .collect::<Result<Vec<_>, _>>()?
-                .len(),
+            tx.fetch::<OrmUnitUser>().await?.try_collect().await?.len(),
             6
         );
         assert!(tx
-            .show_tables()?
-            .collect::<Result<Vec<_>, _>>()?
+            .show_tables()
+            .await?
+            .try_collect()
+            .await?
             .iter()
             .any(|table| table == "orm_unit_users"));
         assert!(tx
-            .show_views()?
-            .collect::<Result<Vec<_>, _>>()?
+            .show_views()
+            .await?
+            .try_collect()
+            .await?
             .iter()
             .any(|view| view == "orm_unit_user_names"));
         assert!(tx
-            .describe::<OrmUnitUser>()?
-            .collect::<Result<Vec<_>, _>>()?
+            .describe::<OrmUnitUser>()
+            .await?
+            .try_collect()
+            .await?
             .iter()
             .any(|column| column.field == "age"));
 
@@ -4111,15 +4230,15 @@ mod tests {
             "{plan}"
         );
 
-        tx.commit()?;
+        tx.commit().await?;
 
         Ok(())
     }
 
     #[test]
-    fn expression_scope_helpers_build_filter_projection_and_sort_exprs() -> Result<(), DatabaseError>
-    {
-        let database = build_orm_unit_database()?;
+    async fn expression_scope_helpers_build_filter_projection_and_sort_exprs(
+    ) -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database().await?;
 
         let expression_plan = database.explain(|ctx| {
             ctx.from::<OrmUnitUser>()?
@@ -4197,9 +4316,9 @@ mod tests {
     }
 
     #[test]
-    fn chained_range_and_function_helpers_preserve_values_and_null_rows(
+    async fn chained_range_and_function_helpers_preserve_values_and_null_rows(
     ) -> Result<(), DatabaseError> {
-        let database = build_orm_unit_database()?;
+        let database = build_orm_unit_database().await?;
         let mut iter = database
             .bind(|ctx| {
                 ctx.from::<OrmUnitUser>()?
@@ -4213,12 +4332,13 @@ mod tests {
                     })?
                     .order_by_expr(|e| Ok(e.column(OrmUnitUser::id())?.asc()))?
                     .finish()
-            })?
+            })
+            .await?
             .project_tuple::<(i32, String)>();
-        assert_eq!(iter.next().transpose()?, Some((1, "ALICE".into())));
-        assert_eq!(iter.next().transpose()?, Some((2, "BOB".into())));
-        assert!(iter.next().transpose()?.is_none());
-        iter.done()?;
+        assert_eq!(iter.next().await.transpose()?, Some((1, "ALICE".into())));
+        assert_eq!(iter.next().await.transpose()?, Some((2, "BOB".into())));
+        assert!(iter.next().await.transpose()?.is_none());
+        iter.done().await?;
         let mut iter = database
             .bind(|ctx| {
                 ctx.from::<OrmUnitUser>()?
@@ -4228,17 +4348,18 @@ mod tests {
                     })?
                     .project_scalar(OrmUnitUser::id())?
                     .finish()
-            })?
+            })
+            .await?
             .project_value::<i32>();
-        assert_eq!(iter.next().transpose()?, Some(3));
-        assert!(iter.next().transpose()?.is_none());
-        iter.done()?;
+        assert_eq!(iter.next().await.transpose()?, Some(3));
+        assert!(iter.next().await.transpose()?.is_none());
+        iter.done().await?;
         Ok(())
     }
 
     #[test]
-    fn insert_select_maps_columns_and_rejects_invalid_targets() -> Result<(), DatabaseError> {
-        let database = build_orm_unit_database()?;
+    async fn insert_select_maps_columns_and_rejects_invalid_targets() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database().await?;
         database
             .bind(|ctx| {
                 ctx.insert_select::<OrmUnitUser, _, _>(["name", "id", "age"], |ctx| {
@@ -4253,8 +4374,10 @@ mod tests {
                         })?
                         .finish()
                 })
-            })?
-            .done()?;
+            })
+            .await?
+            .done()
+            .await?;
         database
             .bind(|ctx| {
                 ctx.insert_select::<OrmUnitUser, _, _>(std::iter::empty::<String>(), |ctx| {
@@ -4269,16 +4392,20 @@ mod tests {
                         })?
                         .finish()
                 })
-            })?
-            .done()?;
+            })
+            .await?
+            .done()
+            .await?;
         assert!(matches!(
-            database.bind(
-                |ctx| ctx.insert_select::<OrmUnitUser, _, _>(["id", "name"], |ctx| {
-                    ctx.from::<OrmUnitUser>()?
-                        .project_scalar(OrmUnitUser::id())?
-                        .finish()
-                })
-            ),
+            database
+                .bind(
+                    |ctx| ctx.insert_select::<OrmUnitUser, _, _>(["id", "name"], |ctx| {
+                        ctx.from::<OrmUnitUser>()?
+                            .project_scalar(OrmUnitUser::id())?
+                            .finish()
+                    })
+                )
+                .await,
             Err(DatabaseError::ValuesLenMismatch(2, 1))
         ));
         assert!(database
@@ -4289,12 +4416,18 @@ mod tests {
                         .finish()
                 })
             )
+            .await
             .is_err());
-        let mut iter =
-            database.run("select id,name,age from orm_unit_users where id>3 order by id")?;
+        let mut iter = database
+            .run("select id,name,age from orm_unit_users where id>3 order by id")
+            .await?;
         let mut rows = Vec::new();
-        while iter.next_tuple(|_, row| rows.push(row.clone()))?.is_some() {}
-        iter.done()?;
+        while iter
+            .next_tuple(|_, row| rows.push(row.clone()))
+            .await?
+            .is_some()
+        {}
+        iter.done().await?;
         assert_eq!(
             rows,
             vec![
@@ -4319,8 +4452,9 @@ mod tests {
     }
 
     #[test]
-    fn case_helpers_infer_else_types_and_preserve_null_fallbacks() -> Result<(), DatabaseError> {
-        let database = build_orm_unit_database()?;
+    async fn case_helpers_infer_else_types_and_preserve_null_fallbacks() -> Result<(), DatabaseError>
+    {
+        let database = build_orm_unit_database().await?;
         let mut rows = database
             .bind(|ctx| {
                 ctx.from::<OrmUnitUser>()?
@@ -4338,23 +4472,24 @@ mod tests {
                     })?
                     .order_by(OrmUnitUser::id().asc())?
                     .finish()
-            })?
+            })
+            .await?
             .project_tuple::<(i32, i32, String, Option<i32>)>();
         for expected in [
             (1, 7, "fallback".into(), None),
             (2, 7, "fallback".into(), Some(1)),
             (3, 7, "fallback".into(), None),
         ] {
-            assert_eq!(rows.next().transpose()?, Some(expected));
+            assert_eq!(rows.next().await.transpose()?, Some(expected));
         }
-        assert!(rows.next().transpose()?.is_none());
-        rows.done()?;
+        assert!(rows.next().await.transpose()?.is_none());
+        rows.done().await?;
         Ok(())
     }
 
     #[test]
-    fn grouped_orm_having_reads_the_aggregate_output() -> Result<(), DatabaseError> {
-        let database = build_orm_unit_database()?;
+    async fn grouped_orm_having_reads_the_aggregate_output() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database().await?;
         let mut rows = database
             .bind(|ctx| {
                 ctx.from::<OrmUnitOrder>()?
@@ -4366,31 +4501,36 @@ mod tests {
                     .having(|e| e.column(OrmUnitOrder::user_id())?.eq(1))?
                     .order_by(OrmUnitOrder::user_id().asc())?
                     .finish()
-            })?
+            })
+            .await?
             .project_tuple::<(i32, i32)>();
-        assert_eq!(rows.next().transpose()?, Some((1, 2)));
-        assert!(rows.next().transpose()?.is_none());
-        rows.done()?;
+        assert_eq!(rows.next().await.transpose()?, Some((1, 2)));
+        assert!(rows.next().await.transpose()?.is_none());
+        rows.done().await?;
         assert!(matches!(
-            database.bind(|ctx| {
-                ctx.from::<OrmUnitOrder>()?
-                    .project_tuple(|e| {
-                        Ok(vec![e.column(OrmUnitOrder::user_id())?, e.count_all()?])
-                    })?
-                    .group_by(|e| e.column(OrmUnitOrder::user_id()))?
-                    .having(|e| e.column(OrmUnitOrder::amount())?.gt(100))?
-                    .finish()
-            }),
+            database
+                .bind(|ctx| {
+                    ctx.from::<OrmUnitOrder>()?
+                        .project_tuple(|e| {
+                            Ok(vec![e.column(OrmUnitOrder::user_id())?, e.count_all()?])
+                        })?
+                        .group_by(|e| e.column(OrmUnitOrder::user_id()))?
+                        .having(|e| e.column(OrmUnitOrder::amount())?.gt(100))?
+                        .finish()
+                })
+                .await,
             Err(DatabaseError::AggMiss(_))
         ));
         Ok(())
     }
 
     #[test]
-    fn update_assignments_preserve_unmatched_rows() -> Result<(), DatabaseError> {
-        let database = build_orm_unit_database()?;
+    async fn update_assignments_preserve_unmatched_rows() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database().await?;
         assert!(matches!(
-            database.bind(|ctx| ctx.mutate::<OrmUnitUser>()?.update(|_| Ok(()))),
+            database
+                .bind(|ctx| ctx.mutate::<OrmUnitUser>()?.update(|_| Ok(())))
+                .await,
             Err(DatabaseError::ColumnsEmpty)
         ));
         database
@@ -4404,30 +4544,40 @@ mod tests {
                             ScalarExpression::Constant(DataValue::Int32(25)),
                         )
                     })
-            })?
-            .done()?;
+            })
+            .await?
+            .done()
+            .await?;
         let mut rows = database
             .bind(|ctx| {
                 ctx.from::<OrmUnitUser>()?
                     .project_scalars((OrmUnitUser::id(), OrmUnitUser::name(), OrmUnitUser::age()))?
                     .order_by(OrmUnitUser::id().asc())?
                     .finish()
-            })?
+            })
+            .await?
             .project_tuple::<(i32, String, Option<i32>)>();
         assert_eq!(
-            rows.next().transpose()?,
+            rows.next().await.transpose()?,
             Some((1, "Alicia".into(), Some(25)))
         );
-        assert_eq!(rows.next().transpose()?, Some((2, "Bob".into(), Some(20))));
-        assert_eq!(rows.next().transpose()?, Some((3, "Cara".into(), None)));
-        assert!(rows.next().transpose()?.is_none());
-        rows.done()?;
+        assert_eq!(
+            rows.next().await.transpose()?,
+            Some((2, "Bob".into(), Some(20)))
+        );
+        assert_eq!(
+            rows.next().await.transpose()?,
+            Some((3, "Cara".into(), None))
+        );
+        assert!(rows.next().await.transpose()?.is_none());
+        rows.done().await?;
         Ok(())
     }
 
     #[test]
-    fn query_builder_wrappers_cover_group_having_and_join_variants() -> Result<(), DatabaseError> {
-        let database = build_orm_unit_database()?;
+    async fn query_builder_wrappers_cover_group_having_and_join_variants(
+    ) -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database().await?;
 
         let grouped_plan = database.explain(|ctx| {
             ctx.from::<OrmUnitOrder>()?
@@ -4586,8 +4736,8 @@ mod tests {
     }
 
     #[test]
-    fn query_builder_force_nested_loop_join() -> Result<(), DatabaseError> {
-        let database = build_orm_unit_database()?;
+    async fn query_builder_force_nested_loop_join() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database().await?;
 
         let plan = database.explain(|ctx| {
             ctx.from::<OrmUnitUser>()?
@@ -4615,8 +4765,8 @@ mod tests {
 
     #[cfg(feature = "spill")]
     #[test]
-    fn query_builder_force_spill_aggregate_and_distinct() -> Result<(), DatabaseError> {
-        let database = build_orm_unit_database()?;
+    async fn query_builder_force_spill_aggregate_and_distinct() -> Result<(), DatabaseError> {
+        let database = build_orm_unit_database().await?;
 
         let plan = database.explain(|ctx| {
             ctx.from::<OrmUnitOrder>()?
@@ -4660,6 +4810,30 @@ mod tests {
             "{distinct_plan}"
         );
 
+        Ok(())
+    }
+
+    #[async_only]
+    #[test]
+    async fn async_orm_futures_are_send() -> Result<(), DatabaseError> {
+        fn assert_send<F: std::future::Future + Send>(_: F) {}
+
+        let database = crate::db::DataBaseBuilder::path("./orm-unit-test")
+            .build_in_memory()
+            .await?;
+        assert_send(database.insert(&OrmUnitUser::default()));
+        assert_send(database.get::<OrmUnitUser>(&1));
+        assert_send(database.bind(|ctx| ctx.mutate::<OrmUnitUser>()?.delete()));
+        assert_send(async {
+            database
+                .fetch::<OrmUnitUser>()
+                .await?
+                .next()
+                .await
+                .transpose()
+        });
+        let mut tx = database.new_transaction(false)?;
+        assert_send(async { tx.fetch::<OrmUnitUser>().await?.next().await.transpose() });
         Ok(())
     }
 }

@@ -15,7 +15,7 @@
 use crate::catalog::ColumnCatalog;
 use crate::catalog::ColumnDesc;
 use crate::errors::DatabaseError;
-use crate::expression::function::table::TableFunctionImpl;
+use crate::expression::function::table::{TableFunctionImpl, TableFunctionIter};
 use crate::expression::function::FunctionSummary;
 use crate::planner::MetaArena;
 use crate::planner::{ExprRef, TableArena};
@@ -49,7 +49,7 @@ impl TableFunctionImpl for Numbers {
         &self,
         args: &[ExprRef],
         arena: &(dyn MetaArena + '_),
-    ) -> Result<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>, DatabaseError> {
+    ) -> Result<TableFunctionIter, DatabaseError> {
         let mut value = arena
             .expression(args[0])
             .eval::<[DataValue]>(arena, None)?
@@ -62,7 +62,7 @@ impl TableFunctionImpl for Numbers {
 
         Ok(
             Box::new((0..num).map(|i| Ok(Tuple::new(None, vec![DataValue::Int32(i)]))))
-                as Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>,
+                as TableFunctionIter,
         )
     }
 

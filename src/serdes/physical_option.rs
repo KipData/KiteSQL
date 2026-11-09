@@ -98,7 +98,7 @@ mod tests {
     #[cfg(all(not(feature = "rocksdb"), feature = "lmdb"))]
     use crate::storage::lmdb::LmdbTransaction as TestTransaction;
     #[cfg(feature = "rocksdb")]
-    use crate::storage::rocksdb::OptimisticRocksTransaction as TestTransaction;
+    use crate::storage::TestTransaction;
     use crate::types::value::DataValue;
 
     #[test]
@@ -130,11 +130,8 @@ mod tests {
                 let mut encoded = Vec::new();
                 option.encode(&mut encoded, is_direct, &arena)?;
                 let mut reader = encoded.as_slice();
-                let decoded = PhysicalOption::decode::<TestTransaction<'_>, _, _>(
-                    &mut reader,
-                    None,
-                    &mut arena,
-                )?;
+                let decoded =
+                    PhysicalOption::decode::<TestTransaction, _, _>(&mut reader, None, &mut arena)?;
                 assert_eq!(decoded, option);
                 assert!(reader.is_empty());
             }
@@ -179,7 +176,7 @@ mod tests {
             assert_eq!(encoded, expected);
             let mut reader = encoded.as_slice();
             let decoded =
-                PhysicalOption::decode::<TestTransaction<'_>, _, _>(&mut reader, None, &mut arena)?;
+                PhysicalOption::decode::<TestTransaction, _, _>(&mut reader, None, &mut arena)?;
             assert_eq!(decoded.plan, PlanImpl::Sort);
             assert_eq!(
                 decoded.row_count,

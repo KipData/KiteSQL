@@ -32,6 +32,7 @@ use crate::execution::dql::aggregate::sum::{DistinctSumAccumulator, SumAccumulat
 use crate::execution::dql::aggregate::total::TotalAccumulator;
 use crate::expression::agg::AggKind;
 use crate::expression::ScalarExpression;
+use crate::maybe_async::MaybeSend;
 use crate::planner::ExprRef;
 use crate::planner::MetaArena;
 use crate::types::tuple::{Tuple, TupleLike};
@@ -41,7 +42,7 @@ use std::borrow::Cow;
 /// Tips: Idea for sqlrs
 /// An accumulator represents a stateful object that lives throughout the evaluation of multiple
 /// rows and generically accumulates values.
-pub trait Accumulator {
+pub trait Accumulator: MaybeSend {
     /// updates the accumulator's state from a vector of arrays.
     fn update_value(&mut self, value: &DataValue) -> Result<(), DatabaseError>;
 

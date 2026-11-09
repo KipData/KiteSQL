@@ -84,6 +84,7 @@ impl Hasher for FxHasher {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::FxBuildHasher;
     use std::hash::BuildHasher;

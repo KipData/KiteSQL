@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod maybe_async;
 mod orm;
 mod projection;
 mod reference_serialization;
@@ -51,4 +52,20 @@ pub fn projection(input: TokenStream) -> TokenStream {
         Ok(codegen) => codegen.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+/// Compiles one async source as the sync path, or as the async path with the crate's `async`
+/// feature, in place and under the same names.
+///
+/// ```ignore
+/// #[maybe_async]
+/// impl Scan {
+///     async fn count<T: StorageTransaction>(&self, txn: &T) -> Result<usize, DatabaseError> { .. }
+/// }
+/// ```
+///
+/// `#[sync_only]` / `#[async_only]` keep an impl item, trait item or nested item in one path only.
+#[proc_macro_attribute]
+pub fn maybe_async(attr: TokenStream, item: TokenStream) -> TokenStream {
+    maybe_async::handle(attr.into(), item.into()).into()
 }

@@ -843,6 +843,7 @@ impl LogicalType {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
 

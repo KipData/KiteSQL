@@ -4,17 +4,25 @@ version = "0.1.1"
 edition = "2021"
 
 [features]
-pprof = ["dep:pprof"]
+default      = ["kitesql-sync"]
+# The sync storages: KiteSQL on LMDB and RocksDB, and the dual check against SQLite.
+kitesql-sync = ["kite_sql/lmdb", "kite_sql/rocksdb"]
+# KiteSQL's async path on SlateDB over S3; excludes `kitesql-sync`. Build it with
+# `--no-default-features --features slatedb-s3`.
+slatedb-s3   = ["kite_sql/slatedb-s3"]
+pprof        = ["dep:pprof"]
 
 [dependencies]
 clap            = { version = "4", features = ["derive"] }
 chrono          = { version = "0.4" }
 hdrhistogram     = { version = "7", default-features = false }
-kite_sql        = { path = "..", package = "kite_sql", features = ["rocksdb", "lmdb", "decimal"] }
+kite_sql        = { path = "..", package = "kite_sql", default-features = false, features = ["decimal", "macros", "parser", "time"] }
+futures         = { version = "0.3" }
 indicatif       = { version = "0.17" }
 rand            = { version = "0.8" }
 rust_decimal    = { version = "1" }
 sqlite          = { version = "0.34" }
+tokio           = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 pprof = { version = "0.15", features = ["flamegraph"], optional = true }

@@ -4,9 +4,24 @@ version = "0.4.0"
 edition = "2021"
 default-run = "sqllogictest-test"
 
+[features]
+default = ["lmdb"]
+lmdb    = ["kite_sql/lmdb"]
+# Runs the suite through KiteSQL's async path, over SlateDB on an in-memory object store.
+async   = ["kite_sql/slatedb", "dep:async-trait", "dep:slatedb", "dep:tokio"]
+
+[[bin]]
+name              = "sqlite"
+path              = "src/bin/sqlite.rs"
+required-features = ["lmdb"]
+
 [dependencies]
+async-trait     = { version = "0.1", optional = true }
 clap            = { version = "4" }
-"kite_sql"      = { path = "../..", default-features = false, features = ["copy", "decimal", "lmdb", "macros", "orm", "parser", "spill", "time"] }
+"kite_sql"      = { path = "../..", default-features = false, features = ["copy", "decimal", "macros", "orm", "parser", "spill", "time"] }
+kite_sql_serde_macros = { path = "../../kite_sql_serde_macros" }
 glob            = { version = "0.3" }
 sqllogictest    = { version = "0.29.1" }
+slatedb         = { version = "0.18", optional = true, default-features = false }
 tempfile        = { version = "3.10" }
+tokio           = { version = "1", features = ["rt-multi-thread"], optional = true }

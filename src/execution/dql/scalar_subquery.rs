@@ -46,22 +46,23 @@ impl<'a> ReadExecutor<'a> for ScalarSubquery<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarSubquery<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.returned = false;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        let has_next = self.input.next_tuple(arena, plan_arena)?;
+        let has_next = self.input.next_tuple(arena, plan_arena).await?;
         if self.returned {
             if has_next {
                 return Err(DatabaseError::InvalidValue(

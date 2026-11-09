@@ -348,6 +348,7 @@ fn compare_values(left: &DataValue, right: &DataValue) -> Ordering {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::KllSketchBuilder;
     use crate::errors::DatabaseError;

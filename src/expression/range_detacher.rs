@@ -1638,6 +1638,7 @@ impl fmt::Display for Range {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 pub(crate) mod test_support {
     use super::*;
 
@@ -1672,6 +1673,7 @@ pub(crate) mod test_support {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::uninlined_format_args)]
+#[maybe_async]
 mod test {
     use crate::binder::test::build_t1_table;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
@@ -1903,8 +1905,8 @@ mod test {
     }
 
     #[test]
-    fn test_detach_consumes_and_predicates_with_residual() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_detach_consumes_and_predicates_with_residual() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select * from t1 where c1 > 10 and c2 > 20",
@@ -2036,8 +2038,9 @@ mod test {
     }
 
     #[test]
-    fn test_detach_consumes_complete_or_only_when_both_sides_match() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_detach_consumes_complete_or_only_when_both_sides_match(
+    ) -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
         let plan = table_state
             .plan_with_arena("select * from t1 where c1 = 1 or c1 = 2", &mut plan_arena)?;
@@ -2062,8 +2065,8 @@ mod test {
     }
 
     #[test]
-    fn test_detach_does_not_partially_consume_or() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_detach_does_not_partially_consume_or() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
         let plan = table_state
             .plan_with_arena("select * from t1 where c1 = 1 or c2 = 2", &mut plan_arena)?;
@@ -2080,8 +2083,8 @@ mod test {
     }
 
     #[test]
-    fn test_detach_ideal_cases() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_detach_ideal_cases() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
         {
             let plan =
@@ -2739,8 +2742,8 @@ mod test {
     }
 
     #[test]
-    fn test_detach_only_conjunction_can_keep_partial_range() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_detach_only_conjunction_can_keep_partial_range() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
         let mut detach_c1 = |sql: &str| -> Result<Option<Range>, DatabaseError> {
             let plan = table_state.plan_with_arena(sql, &mut plan_arena)?;
@@ -2788,8 +2791,8 @@ mod test {
 
     // Tips: `null` should be First
     #[test]
-    fn test_detach_null_cases() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_detach_null_cases() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
         // eq
         {
@@ -3879,8 +3882,8 @@ mod test {
 
     /// AND over a union must intersect every piece instead of keeping the disjoint ones.
     #[test]
-    fn test_detach_and_over_or() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_detach_and_over_or() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut plan_arena = crate::planner::PlanArena::new(&table_state.table_arena);
         let eq = |v| Range::Eq(DataValue::Int32(v).into());
         let cases = [

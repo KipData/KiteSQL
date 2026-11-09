@@ -686,6 +686,7 @@ impl ImplementationRuleIndex {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use crate::binder::{Binder, BinderContext};
     use crate::db::DataBaseBuilder;
@@ -824,18 +825,26 @@ mod tests {
     }
 
     #[test]
-    fn test_find_best_selects_cheapest_scan() -> Result<(), DatabaseError> {
+    async fn test_find_best_selects_cheapest_scan() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let mut database = DataBaseBuilder::path(temp_dir.path()).build_rocksdb()?;
-        database.ddl("create table t1 (c1 int primary key, c2 int)")?;
-        database.ddl("create table t2 (c3 int primary key, c4 int)")?;
+        let mut database = DataBaseBuilder::path(temp_dir.path())
+            .build_in_memory()
+            .await?;
+        database
+            .ddl("create table t1 (c1 int primary key, c2 int)")
+            .await?;
+        database
+            .ddl("create table t2 (c3 int primary key, c4 int)")
+            .await?;
 
         for i in 0..1000 {
             database
-                .run(format!("insert into t1 values({}, {})", i, i + 1).as_str())?
-                .done()?;
+                .run(format!("insert into t1 values({}, {})", i, i + 1).as_str())
+                .await?
+                .done()
+                .await?;
         }
-        database.analyze("t1")?;
+        database.analyze("t1").await?;
 
         let transaction = database.storage.transaction()?;
         let c1_column = transaction

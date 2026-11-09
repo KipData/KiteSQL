@@ -66,17 +66,18 @@ impl<'a> ReadExecutor<'a> for ExternalSort<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.rows = None;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -100,7 +101,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ExternalSort<'a> {
             let sort_fields = self.sort_fields;
             let mut rows = SpillVec::new().on_flush(move |_, rows| sort_segment(sort_fields, rows));
             let mut runs = Vec::new();
-            while self.input.next_tuple(arena, plan_arena)? {
+            while self.input.next_tuple(arena, plan_arena).await? {
                 let tuple = arena.take_tuple();
                 let row = SortRow::new(sort_fields, tuple, plan_arena)?;
                 if let Some(segment) = rows.push(row)? {
@@ -288,6 +289,7 @@ fn merge_pass<'on_flush>(
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod test {
     use super::{finish_sort, sort_segment, Run, MERGE_FAN_IN};
     use crate::catalog::{ColumnCatalog, ColumnDesc};

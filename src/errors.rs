@@ -129,6 +129,10 @@ pub enum DatabaseError {
     Lmdb(lmdb::Error),
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     RocksDB(rocksdb::Error),
+    #[cfg(feature = "slatedb")]
+    SlateDB(slatedb::Error),
+    #[cfg(feature = "slatedb")]
+    ObjectStore(slatedb::object_store::Error),
     SharedNotAlign,
     SourceNotFound,
     TableExists,
@@ -237,6 +241,10 @@ impl fmt::Display for DatabaseError {
             Self::Lmdb(err) => write!(f, "lmdb: {err}"),
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
             Self::RocksDB(err) => write!(f, "rocksdb: {err}"),
+            #[cfg(feature = "slatedb")]
+            Self::SlateDB(err) => write!(f, "slatedb: {err}"),
+            #[cfg(feature = "slatedb")]
+            Self::ObjectStore(err) => write!(f, "object store: {err}"),
             Self::SharedNotAlign => {
                 f.write_str("the number of caches cannot be divisible by the number of shards")
             }
@@ -296,6 +304,10 @@ impl Error for DatabaseError {
             Self::Lmdb(err) => Some(err),
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
             Self::RocksDB(err) => Some(err),
+            #[cfg(feature = "slatedb")]
+            Self::SlateDB(err) => Some(err),
+            #[cfg(feature = "slatedb")]
+            Self::ObjectStore(err) => Some(err),
             #[cfg(feature = "decimal")]
             Self::TryFromDecimal(err) => Some(err),
             Self::TryFromInt(err) => Some(err),
@@ -330,6 +342,10 @@ impl_from_database_error!(ParserError, ParserSql);
 impl_from_database_error!(lmdb::Error, Lmdb);
 #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
 impl_from_database_error!(rocksdb::Error, RocksDB);
+#[cfg(feature = "slatedb")]
+impl_from_database_error!(slatedb::Error, SlateDB);
+#[cfg(feature = "slatedb")]
+impl_from_database_error!(slatedb::object_store::Error, ObjectStore);
 #[cfg(feature = "decimal")]
 impl_from_database_error!(rust_decimal::Error, TryFromDecimal);
 impl_from_database_error!(TryFromIntError, TryFromInt);
@@ -342,6 +358,19 @@ impl From<Infallible> for DatabaseError {
 }
 
 impl DatabaseError {
+    pub fn is_conflict(&self) -> bool {
+        match self {
+            #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
+            Self::RocksDB(err) => matches!(
+                err.kind(),
+                rocksdb::ErrorKind::Busy | rocksdb::ErrorKind::TryAgain
+            ),
+            #[cfg(feature = "slatedb")]
+            Self::SlateDB(err) => err.kind() == slatedb::ErrorKind::Transaction,
+            _ => false,
+        }
+    }
+
     pub fn invalid_column(name: impl Into<String>) -> Self {
         Self::InvalidColumn {
             name: name.into(),
@@ -525,6 +554,7 @@ fn build_sql_highlight(sql: &str, span: &SqlErrorSpan) -> Option<String> {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::expression::{BinaryOperator, UnaryOperator};

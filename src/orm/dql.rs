@@ -1,5 +1,6 @@
 use super::*;
 
+#[maybe_async]
 impl<S: Storage> Database<S> {
     /// Prepares an ORM-built plan once into a program for repeated execution with
     /// positional parameters. Use `e.param(id)` inside expression closures, then pass
@@ -32,20 +33,22 @@ impl<S: Storage> Database<S> {
     }
 
     /// Executes a binder-backed plan built inside a closure.
-    pub fn bind<F>(&self, build: F) -> Result<DatabaseIter<'_, S>, DatabaseError>
+    pub async fn bind<F>(&self, build: F) -> Result<DatabaseIter<'_, S>, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
-            &'ctx mut OrmContext<
-                'ctx,
-                'bind,
-                'parent,
-                'arena,
-                S::TransactionType<'_>,
-                &'static [(usize, LogicalType)],
-            >,
-        ) -> Result<LogicalPlan, DatabaseError>,
+                &'ctx mut OrmContext<
+                    'ctx,
+                    'bind,
+                    'parent,
+                    'arena,
+                    S::TransactionType<'_>,
+                    &'static [(usize, LogicalType)],
+                >,
+            )
+                -> Result<LogicalPlan, DatabaseError>
+            + MaybeSend,
     {
-        bind_orm_context(self, false, build)
+        bind_orm_context(self, false, build).await
     }
 
     /// Explains a binder-backed plan built inside a closure.
@@ -90,8 +93,8 @@ impl<S: Storage> Database<S> {
     /// let user = database.get::<User>(&1).unwrap().unwrap();
     /// assert_eq!(user.name, "Alice");
     /// ```
-    pub fn get<M: Model>(&self, key: &M::PrimaryKey) -> Result<Option<M>, DatabaseError> {
-        orm_get::<_, M>(self, key)
+    pub async fn get<M: Model>(&self, key: &M::PrimaryKey) -> Result<Option<M>, DatabaseError> {
+        orm_get::<_, M>(self, key).await
     }
 
     /// Fetches all rows from the model table as a typed iterator.
@@ -118,8 +121,12 @@ impl<S: Storage> Database<S> {
     /// assert_eq!(users.len(), 1);
     /// assert_eq!(users[0].name, "Alice");
     /// ```
-    pub fn fetch<M: Model>(&self) -> Result<OrmIter<DatabaseIter<'_, S>, M>, DatabaseError> {
-        Ok(bind_orm_context(self, true, |ctx| ctx.from::<M>()?.finish())?.orm::<M>())
+    pub async fn fetch<M: Model>(&self) -> Result<OrmIter<DatabaseIter<'_, S>, M>, DatabaseError> {
+        Ok(
+            bind_orm_context(self, true, |ctx| ctx.from::<M>()?.finish())
+                .await?
+                .orm::<M>(),
+        )
     }
 
     /// Lists all table names.
@@ -141,20 +148,20 @@ impl<S: Storage> Database<S> {
     /// let tables = database.show_tables().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
     /// assert!(tables.iter().any(|name| name == "users"));
     /// ```
-    pub fn show_tables(
+    pub async fn show_tables(
         &self,
     ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
         Ok(ProjectValueIter::new(
-            self.bind(|ctx| ctx.binder.bind_show_tables())?,
+            self.bind(|ctx| ctx.binder.bind_show_tables()).await?,
         ))
     }
 
     /// Lists all view names.
-    pub fn show_views(
+    pub async fn show_views(
         &self,
     ) -> Result<ProjectValueIter<DatabaseIter<'_, S>, String>, DatabaseError> {
         Ok(ProjectValueIter::new(
-            self.bind(|ctx| ctx.binder.bind_show_views())?,
+            self.bind(|ctx| ctx.binder.bind_show_views()).await?,
         ))
     }
 
@@ -177,15 +184,17 @@ impl<S: Storage> Database<S> {
     /// let columns = database.describe::<User>().unwrap().collect::<Result<Vec<_>, _>>().unwrap();
     /// assert!(columns.iter().any(|column| column.field == "id"));
     /// ```
-    pub fn describe<M: Model>(
+    pub async fn describe<M: Model>(
         &self,
     ) -> Result<OrmIter<DatabaseIter<'_, S>, DescribeColumn>, DatabaseError> {
         Ok(self
-            .bind(|ctx| ctx.binder.bind_describe(M::table_name()))?
+            .bind(|ctx| ctx.binder.bind_describe(M::table_name()))
+            .await?
             .orm::<DescribeColumn>())
     }
 }
 
+#[maybe_async]
 impl<'a, S: Storage> Transaction<'a, S> {
     /// Prepares an ORM-built plan into a program, against this transaction's view.
     pub fn program<F>(
@@ -213,23 +222,25 @@ impl<'a, S: Storage> Transaction<'a, S> {
     }
 
     /// Executes a binder-backed plan inside the current transaction.
-    pub fn bind<F>(
+    pub async fn bind<F>(
         &mut self,
         build: F,
     ) -> Result<TransactionIter<'_, '_, S::TransactionType<'a>>, DatabaseError>
     where
         F: for<'ctx, 'bind, 'parent, 'arena> FnOnce(
-            &'ctx mut OrmContext<
-                'ctx,
-                'bind,
-                'parent,
-                'arena,
-                S::TransactionType<'a>,
-                &'static [(usize, LogicalType)],
-            >,
-        ) -> Result<LogicalPlan, DatabaseError>,
+                &'ctx mut OrmContext<
+                    'ctx,
+                    'bind,
+                    'parent,
+                    'arena,
+                    S::TransactionType<'a>,
+                    &'static [(usize, LogicalType)],
+                >,
+            )
+                -> Result<LogicalPlan, DatabaseError>
+            + MaybeSend,
     {
-        bind_orm_context(self, false, build)
+        bind_orm_context(self, false, build).await
     }
 
     /// Explains a binder-backed plan inside the current transaction.
@@ -251,13 +262,16 @@ impl<'a, S: Storage> Transaction<'a, S> {
 
     /// Loads a single model by primary key inside the current transaction. A model with a
     /// lifetime may borrow its strings and binaries from the transaction.
-    pub fn get<'t, M: Model + FromTxnRow<'t>>(
+    pub async fn get<'t, M: Model + FromTxnRow<'t>>(
         &'t mut self,
         key: &M::PrimaryKey,
     ) -> Result<Option<M>, DatabaseError> {
-        let mut iter = bind_get::<_, M>(self, key)?;
+        let mut iter = bind_get::<_, M>(self, key).await?;
         Ok(
-            match iter.next_tuple(|schema, row| M::from_txn_row(schema, row))? {
+            match iter
+                .next_tuple(|schema, row| M::from_txn_row(schema, row))
+                .await?
+            {
                 Some(row) => Some(row?),
                 None => None,
             },
@@ -266,46 +280,51 @@ impl<'a, S: Storage> Transaction<'a, S> {
 
     /// Fetches all rows for a model inside the current transaction. A model with a lifetime may
     /// borrow its strings and binaries from the transaction.
-    pub fn fetch<'t, M: Model + FromTxnRow<'t>>(
+    pub async fn fetch<'t, M: Model + FromTxnRow<'t>>(
         &'t mut self,
     ) -> Result<TxnOrmIter<'t, TransactionIter<'t, 't, S::TransactionType<'a>>, M>, DatabaseError>
     {
-        Ok(bind_orm_context(self, true, |ctx| ctx.from::<M>()?.finish())?.txn_orm::<M>())
+        Ok(
+            bind_orm_context(self, true, |ctx| ctx.from::<M>()?.finish())
+                .await?
+                .txn_orm::<M>(),
+        )
     }
 
     /// Lists all table names inside the current transaction.
-    pub fn show_tables(
+    pub async fn show_tables(
         &mut self,
     ) -> Result<
         ProjectValueIter<TransactionIter<'_, '_, S::TransactionType<'a>>, String>,
         DatabaseError,
     > {
         Ok(ProjectValueIter::new(
-            self.bind(|ctx| ctx.binder.bind_show_tables())?,
+            self.bind(|ctx| ctx.binder.bind_show_tables()).await?,
         ))
     }
 
     /// Lists all view names inside the current transaction.
-    pub fn show_views(
+    pub async fn show_views(
         &mut self,
     ) -> Result<
         ProjectValueIter<TransactionIter<'_, '_, S::TransactionType<'a>>, String>,
         DatabaseError,
     > {
         Ok(ProjectValueIter::new(
-            self.bind(|ctx| ctx.binder.bind_show_views())?,
+            self.bind(|ctx| ctx.binder.bind_show_views()).await?,
         ))
     }
 
     /// Describes the schema of the model table inside the current transaction.
-    pub fn describe<M: Model>(
+    pub async fn describe<M: Model>(
         &mut self,
     ) -> Result<
         OrmIter<TransactionIter<'_, '_, S::TransactionType<'a>>, DescribeColumn>,
         DatabaseError,
     > {
         Ok(self
-            .bind(|ctx| ctx.binder.bind_describe(M::table_name()))?
+            .bind(|ctx| ctx.binder.bind_describe(M::table_name()))
+            .await?
             .orm::<DescribeColumn>())
     }
 }

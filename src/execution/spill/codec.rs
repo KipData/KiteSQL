@@ -391,6 +391,7 @@ fn estimated_dynamic_value_size(value: &DataValue) -> usize {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::types::value::Utf8Type;

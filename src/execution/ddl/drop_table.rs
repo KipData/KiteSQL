@@ -34,8 +34,9 @@ impl<'a> WriteExecutor<'a> for DropTable<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropTable<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -43,7 +44,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropTable<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -54,7 +55,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropTable<'a> {
         } = self.op;
 
         let (transaction, table_codec) = arena.transaction_codec_mut();
-        if transaction.drop_table(table_codec, plan_arena, table_name.clone(), *if_exists)? {
+        if transaction
+            .drop_table(table_codec, plan_arena, table_name.clone(), *if_exists)
+            .await?
+        {
             arena.push_ddl_apply(DDLApply::DropTable {
                 name: table_name.clone(),
             });

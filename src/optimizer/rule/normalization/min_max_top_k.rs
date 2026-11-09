@@ -84,6 +84,7 @@ impl NormalizationRule for MinMaxToTopK {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::MinMaxToTopK;
     use crate::binder::test::build_t1_table;
@@ -115,8 +116,8 @@ mod tests {
     }
 
     #[test]
-    fn test_min_to_topk() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_min_to_topk() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let mut plan = table_state.plan_with_arena("select min(c1) from t1", &mut arena)?;
 
@@ -153,8 +154,8 @@ mod tests {
     }
 
     #[test]
-    fn test_max_to_topk() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_max_to_topk() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let mut plan = table_state.plan_with_arena("select max(c2) from t1", &mut arena)?;
 

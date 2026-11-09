@@ -393,6 +393,7 @@ impl<K> ReferenceSerialization for CountMinSketch<K> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use crate::expression::range_detacher::Range;
     use crate::optimizer::core::cm_sketch::{
@@ -400,7 +401,7 @@ mod tests {
     };
     use crate::planner::TableArena;
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::TestTransaction;
     use crate::types::value::DataValue;
     use std::collections::Bound;
     use std::io::Cursor;
@@ -555,7 +556,7 @@ mod tests {
         let mut bytes = Vec::new();
         let mut arena = TableArena::default();
         cms.encode(&mut bytes, false, &arena).unwrap();
-        let decoded = CountMinSketch::<u64>::decode::<RocksTransaction, _, _>(
+        let decoded = CountMinSketch::<u64>::decode::<TestTransaction, _, _>(
             &mut Cursor::new(bytes),
             None,
             &mut arena,

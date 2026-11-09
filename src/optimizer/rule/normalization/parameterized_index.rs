@@ -602,6 +602,7 @@ impl NormalizationRule for ParameterizeInnerJoin {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -748,6 +749,7 @@ mod tests {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod inner_join_tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};

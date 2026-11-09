@@ -225,6 +225,7 @@ impl ColumnTopN {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::ColumnTopN;
     use crate::types::value::DataValue;

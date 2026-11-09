@@ -65,7 +65,7 @@ impl TpccTransaction for Payment {
     type Args = PaymentArgs;
 
     #[allow(unused_variables)]
-    fn run<T: BackendTransaction>(
+    async fn run<T: BackendTransaction>(
         tx: &mut T,
         args: &Self::Args,
         statements: &mut [T::PreparedStatement],
@@ -78,7 +78,8 @@ impl TpccTransaction for Payment {
                 (1, DataValue::Decimal(args.h_amount).into()),
                 (2, DataValue::Int16(args.w_id as i16).into()),
             ],
-        )?;
+        )
+        .await?;
         // "SELECT w_street_1, w_street_2, w_city, w_state, w_zip, w_name FROM warehouse WHERE w_id = ?"
         let mut w_street_1 = String::new();
         let mut w_street_2 = String::new();
@@ -98,7 +99,8 @@ impl TpccTransaction for Payment {
                 w_name = tuple[5].utf8().unwrap().to_string();
                 Ok(())
             },
-        )?;
+        )
+        .await?;
 
         // "UPDATE district SET d_ytd = d_ytd + ? WHERE d_w_id = ? AND d_id = ?"
         tx.execute_drain(
@@ -108,7 +110,8 @@ impl TpccTransaction for Payment {
                 (2, DataValue::Int16(args.w_id as i16).into()),
                 (3, DataValue::Int8(args.d_id as i8).into()),
             ],
-        )?;
+        )
+        .await?;
 
         // "SELECT d_street_1, d_street_2, d_city, d_state, d_zip, d_name FROM district WHERE d_w_id = ? AND d_id = ?"
         let mut d_street_1 = String::new();
@@ -132,7 +135,8 @@ impl TpccTransaction for Payment {
                 d_name = tuple[5].utf8().unwrap().to_string();
                 Ok(())
             },
-        )?;
+        )
+        .await?;
 
         let mut c_id = args.c_id as i32;
         if args.by_name {
@@ -149,7 +153,8 @@ impl TpccTransaction for Payment {
                     name_cnt = tuple[0].i32().unwrap();
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
             // "SELECT c_id FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ? ORDER BY c_first"
             let params = [
                 (1, DataValue::Int16(args.c_w_id as i16).into()),
@@ -163,7 +168,8 @@ impl TpccTransaction for Payment {
             tx.with_query_nth(&mut statements[5], &params, target, &mut |tuple| {
                 c_id = tuple[0].i32().unwrap();
                 Ok(())
-            })?;
+            })
+            .await?;
         }
         // "SELECT c_first, c_middle, c_last, c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_credit, c_credit_lim, c_discount, c_balance, c_since FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_id = ? FOR UPDATE"
         let mut c_first = String::new();
@@ -204,7 +210,8 @@ impl TpccTransaction for Payment {
                 c_since = tuple[13].datetime().unwrap();
                 Ok(())
             },
-        )?;
+        )
+        .await?;
 
         c_balance += args.h_amount;
         if let Some(c_credit) = c_credit {
@@ -222,7 +229,8 @@ impl TpccTransaction for Payment {
                         c_data = tuple[0].utf8().unwrap().to_string();
                         Ok(())
                     },
-                )?;
+                )
+                .await?;
 
                 // https://github.com/AgilData/tpcc/blob/dfbabe1e35cc93b2bf2e107fc699eb29c2097e24/src/main/java/com/codefutures/tpcc/Payment.java#L284
                 // let c_new_data = format!("| {} {} {} {} {} {} {}", c_id, args.c_d_id, args.c_w_id, args.d_id, args.w_id, args.h_amount, )
@@ -237,7 +245,8 @@ impl TpccTransaction for Payment {
                         (4, DataValue::Int8(args.c_d_id as i8).into()),
                         (5, DataValue::Int32(c_id).into()),
                     ],
-                )?;
+                )
+                .await?;
             } else {
                 // "UPDATE customer SET c_balance = ? WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
                 tx.execute_drain(
@@ -248,7 +257,8 @@ impl TpccTransaction for Payment {
                         (3, DataValue::Int8(args.c_d_id as i8).into()),
                         (4, DataValue::Int32(c_id).into()),
                     ],
-                )?;
+                )
+                .await?;
             }
         } else {
             // "UPDATE customer SET c_balance = ? WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
@@ -260,7 +270,8 @@ impl TpccTransaction for Payment {
                     (3, DataValue::Int8(args.c_d_id as i8).into()),
                     (4, DataValue::Int32(c_id).into()),
                 ],
-            )?;
+            )
+            .await?;
         }
         let h_data = format!("\\0{d_name}    \\0");
         // "INSERT INTO history(h_c_d_id, h_c_w_id, h_c_id, h_d_id, h_w_id, h_date, h_amount, h_data) VALUES(?, ?, ?, ?, ?, ?, ?, ?)"
@@ -279,23 +290,24 @@ impl TpccTransaction for Payment {
                 (7, DataValue::Decimal(args.h_amount).into()),
                 (8, DataValue::from(h_data).into()),
             ],
-        )?;
+        )
+        .await?;
 
         Ok(())
     }
 }
 
 impl TpccTest for PaymentTest {
-    fn do_transaction<T: BackendTransaction>(
+    async fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
         tx: &mut T,
         num_ware: usize,
-        _: &TpccArgs,
+        args: &TpccArgs,
         statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
-        let w_id = rng.gen_range(0..num_ware) + 1;
-        let d_id = rng.gen_range(1..DIST_PER_WARE);
+        let w_id = args.home_ware;
+        let d_id = rng.gen_range(1..=DIST_PER_WARE);
         let c_id = nu_rand(rng, 1023, 1, CUST_PER_DIST);
         let c_last = last_name(nu_rand(rng, 255, 0, 999));
         let h_amount = rng.gen_range(1..5000);
@@ -306,7 +318,7 @@ impl TpccTest for PaymentTest {
             } else {
                 (
                     other_ware(rng, w_id, num_ware),
-                    rng.gen_range(1..DIST_PER_WARE),
+                    rng.gen_range(1..=DIST_PER_WARE),
                 )
             }
         } else {
@@ -322,7 +334,7 @@ impl TpccTest for PaymentTest {
             c_last,
             Decimal::from(h_amount),
         );
-        Payment::run(tx, &args, statements)?;
+        Payment::run(tx, &args, statements).await?;
 
         Ok(())
     }

@@ -605,6 +605,7 @@ impl NormalizationRule for PushJoinPredicateIntoScan {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
 
     use crate::binder::test::build_t1_table;
@@ -679,12 +680,12 @@ mod tests {
     }
 
     #[test]
-    fn single_pass_filter_classification_preserves_reference_semantics() -> Result<(), DatabaseError>
-    {
+    async fn single_pass_filter_classification_preserves_reference_semantics(
+    ) -> Result<(), DatabaseError> {
         use crate::expression::AliasType;
         use crate::planner::operator::values::ValuesOperator;
 
-        let table_state = build_t1_table()?;
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let left_column = build_test_column(&mut arena, 1, "left")?;
         let right_column = build_test_column(&mut arena, 2, "right")?;
@@ -737,8 +738,8 @@ mod tests {
     }
 
     #[test]
-    fn test_push_predicate_into_scan() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_push_predicate_into_scan() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         // 1 - c2 < 0 => c2 > 1, directly and through scalar initialization.
         for (sql, through_init) in [
@@ -788,8 +789,8 @@ mod tests {
     }
 
     #[test]
-    fn test_unique_composite_index_uses_tuple_ranges() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_unique_composite_index_uses_tuple_ranges() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let c1 = build_test_column(&mut arena, 1, "c1")?;
         let c2 = build_test_column(&mut arena, 2, "c2")?;
@@ -1151,8 +1152,8 @@ mod tests {
     }
 
     #[test]
-    fn test_push_predicate_through_join_in_left_join() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_push_predicate_through_join_in_left_join() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select * from t1 left join t2 on c1 = c3 where c1 > 1 and c3 < 2",
@@ -1201,8 +1202,8 @@ mod tests {
     }
 
     #[test]
-    fn test_push_predicate_through_join_in_right_join() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_push_predicate_through_join_in_right_join() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select * from t1 right join t2 on c1 = c3 where c1 > 1 and c3 < 2",
@@ -1251,8 +1252,8 @@ mod tests {
     }
 
     #[test]
-    fn cross_join_without_conjunctive_keys_stays_cross() -> Result<(), DatabaseError> {
-        let tables = build_t1_table()?;
+    async fn cross_join_without_conjunctive_keys_stays_cross() -> Result<(), DatabaseError> {
+        let tables = build_t1_table().await?;
         for predicate in ["c1 = c3 or c2 = c4", "c1 < c3", "c1 > 0 and c3 < 9"] {
             let mut arena = PlanArena::new(&tables.table_arena);
             let plan = tables.plan_with_arena(
@@ -1284,8 +1285,8 @@ mod tests {
     }
 
     #[test]
-    fn test_push_predicate_through_join_in_inner_join() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_push_predicate_through_join_in_inner_join() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select * from t1 inner join t2 on c1 = c3 where c1 > 1 and c3 < 2",
@@ -1339,8 +1340,8 @@ mod tests {
     }
 
     #[test]
-    fn test_push_join_predicate_into_scan_inner_join() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_push_join_predicate_into_scan_inner_join() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select * from t1 inner join t2 on t1.c1 = t2.c3 and t1.c1 > 1 and t2.c3 < 2",
@@ -1415,8 +1416,8 @@ mod tests {
     }
 
     #[test]
-    fn test_push_join_predicate_left_outer_preserve_left() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_push_join_predicate_left_outer_preserve_left() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select * from t1 left join t2 on t1.c1 = t2.c3 and t1.c1 > 1",
@@ -1463,8 +1464,8 @@ mod tests {
     }
 
     #[test]
-    fn test_push_join_predicate_left_outer_push_right() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_push_join_predicate_left_outer_push_right() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select * from t1 left join t2 on t1.c1 = t2.c3 and t2.c3 < 2",

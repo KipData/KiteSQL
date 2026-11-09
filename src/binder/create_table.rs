@@ -61,20 +61,18 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::binder::BinderContext;
     use crate::catalog::ColumnDesc;
-    use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
-    use tempfile::TempDir;
 
     #[test]
-    fn test_create_bind() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_create_bind() -> Result<(), DatabaseError> {
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let names = crate::storage::NameMapping::default();
         let table_cache = crate::storage::TableCache::default();

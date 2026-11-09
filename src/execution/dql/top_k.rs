@@ -15,7 +15,7 @@
 use crate::errors::DatabaseError;
 use crate::execution::dql::sort::BumpVec;
 use crate::execution::{
-    build_read, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
+    build_read, ArenaBound, ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor,
 };
 use crate::planner::operator::sort::SortField;
 use crate::planner::operator::top_k::TopKOperator;
@@ -109,7 +109,7 @@ fn top_sort<'a>(
 }
 
 pub struct TopK<'a> {
-    output: Option<std::iter::Skip<BTreeSetIntoIter<CmpItem<'static>>>>,
+    output: Option<ArenaBound<std::iter::Skip<BTreeSetIntoIter<CmpItem<'static>>>>>,
     arena: Box<Bump>,
     sort_fields: &'a [SortField],
     limit: usize,
@@ -144,18 +144,19 @@ impl<'a> ReadExecutor<'a> for TopK<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.output = None;
         self.arena.reset();
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -163,11 +164,11 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
         if self.output.is_none() {
             let keep_count = self.offset.unwrap_or(0) + self.limit;
             #[allow(clippy::mutable_key_type)]
-            let mut set = BTreeSet::new();
+            let mut set = ArenaBound(BTreeSet::new());
 
             let mut sequence = 0;
-            let mut key_scratch = BumpBytes::new_in(&self.arena);
-            while self.input.next_tuple(arena, plan_arena)? {
+            let mut key_scratch = ArenaBound(BumpBytes::new_in(&self.arena));
+            while self.input.next_tuple(arena, plan_arena).await? {
                 top_sort(
                     &mut key_scratch,
                     self.sort_fields,
@@ -181,18 +182,18 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
             }
 
             let offset = self.offset.unwrap_or(0);
-            let rows = set.into_iter().skip(offset);
+            let rows = set.0.into_iter().skip(offset);
             // The arena lives at a stable boxed address, so we can keep the old set/key shape
             // and resume iteration across executor polls.
-            self.output = Some(unsafe {
+            self.output = Some(ArenaBound(unsafe {
                 transmute::<
                     std::iter::Skip<BTreeSetIntoIter<CmpItem<'_>>>,
                     std::iter::Skip<BTreeSetIntoIter<CmpItem<'static>>>,
                 >(rows)
-            });
+            }));
         }
 
-        if let Some(item) = self.output.as_mut().and_then(std::iter::Iterator::next) {
+        if let Some(item) = self.output.as_mut().and_then(|output| output.next()) {
             plan_arena.restore_outer_values(item.outer_values);
             arena.produce(item.tuple);
         } else {
@@ -205,6 +206,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for TopK<'a> {
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[allow(clippy::mutable_key_type)]
+#[maybe_async]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;

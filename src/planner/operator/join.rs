@@ -266,6 +266,7 @@ pub(crate) fn extract_join_keys(
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::*;
 

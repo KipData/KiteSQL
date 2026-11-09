@@ -42,17 +42,18 @@ pub struct ScalarQueryInit<'a> {
     init: ExecNode<'a>,
 }
 
+#[maybe_async]
 impl<'a> ScalarQueryInit<'a> {
-    fn evaluate_init<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    async fn evaluate_init<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         let mut value = DataValue::Null;
-        if self.init.next_tuple(arena, plan_arena)? {
+        if self.init.next_tuple(arena, plan_arena).await? {
             std::mem::swap(&mut value, &mut arena.result_mut()[0]);
         }
-        if self.init.next_tuple(arena, plan_arena)? {
+        if self.init.next_tuple(arena, plan_arena).await? {
             return Err(DatabaseError::InvalidValue(
                 "scalar subquery returned more than one row".into(),
             ));
@@ -104,8 +105,9 @@ impl<'a> ReadExecutor<'a> for ScalarQueryInit<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -116,10 +118,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a>
             ScalarQueryInitState::Initialize
         };
         self.scratch_tuple.output_mut().clear();
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -128,19 +130,19 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a>
             match self.state {
                 ScalarQueryInitState::Initialize => {
                     if plan_arena.init_value(self.reference).is_none() {
-                        self.init.reset(arena, plan_arena)?;
-                        self.evaluate_init(arena, plan_arena)?;
+                        self.init.reset(arena, plan_arena).await?;
+                        self.evaluate_init(arena, plan_arena).await?;
                     }
                     self.state = ScalarQueryInitState::ReadInput;
                 }
                 ScalarQueryInitState::ReadInput => {
-                    if !self.input.next_tuple(arena, plan_arena)? {
+                    if !self.input.next_tuple(arena, plan_arena).await? {
                         self.state = ScalarQueryInitState::Finished;
                     }
                     return Ok(());
                 }
                 ScalarQueryInitState::ReadOuter => {
-                    if !self.input.next_tuple(arena, plan_arena)? {
+                    if !self.input.next_tuple(arena, plan_arena).await? {
                         self.state = ScalarQueryInitState::Finished;
                         return Ok(());
                     }
@@ -156,8 +158,8 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a>
                     self.state = ScalarQueryInitState::EvaluateOuter;
                 }
                 ScalarQueryInitState::EvaluateOuter => {
-                    self.init.reset(arena, plan_arena)?;
-                    self.evaluate_init(arena, plan_arena)?;
+                    self.init.reset(arena, plan_arena).await?;
+                    self.evaluate_init(arena, plan_arena).await?;
                     std::mem::swap(arena.result_mut(), &mut self.scratch_tuple);
                     self.state = ScalarQueryInitState::ReadOuter;
                     arena.resume();
@@ -174,6 +176,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a>
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -182,13 +185,13 @@ mod tests {
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
     use crate::planner::{Childrens, ExecMetaArena, PlanArena, TableArenaCell};
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::LogicalType;
 
     #[test]
-    fn scalar_init_shared_slot_caches_null_and_checks_cardinality() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+    async fn scalar_init_shared_slot_caches_null_and_checks_cardinality(
+    ) -> Result<(), DatabaseError> {
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let tables = TableCache::default();
         let cache = &tables;
@@ -238,13 +241,13 @@ mod tests {
             let mut duplicate_root = build_read(&mut arena, &metadata, &duplicate);
             let mut view = ExecMetaArena::new(metadata);
             if row_count == 2 {
-                assert!(first_root.next_tuple(&mut arena, &mut view).is_err());
+                assert!(first_root.next_tuple(&mut arena, &mut view).await.is_err());
                 assert_eq!(view.init_value(reference), None);
             } else {
-                assert!(first_root.next_tuple(&mut arena, &mut view)?);
+                assert!(first_root.next_tuple(&mut arena, &mut view).await?);
                 assert_eq!(view.init_value(reference), Some(&value));
-                assert!(duplicate_root.next_tuple(&mut arena, &mut view)?);
-                assert!(!duplicate_root.next_tuple(&mut arena, &mut view)?);
+                assert!(duplicate_root.next_tuple(&mut arena, &mut view).await?);
+                assert!(!duplicate_root.next_tuple(&mut arena, &mut view).await?);
             }
         }
         Ok(())

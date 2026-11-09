@@ -559,6 +559,7 @@ impl crate::serdes::ReferenceSerialization for LogicalPlan {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableCatalog};
@@ -1076,6 +1077,7 @@ mod tests {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 pub(crate) mod test {
     use crate::expression::ScalarExpression;
     use crate::planner::{ExprRef, PlanArena};

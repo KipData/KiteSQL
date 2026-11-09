@@ -43,30 +43,31 @@ impl<'a> ReadExecutor<'a> for Union<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Union<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.reading_left = true;
-        self.left_input.reset(arena, plan_arena)?;
-        self.right_input.reset(arena, plan_arena)
+        self.left_input.reset(arena, plan_arena).await?;
+        self.right_input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         if self.reading_left {
-            if self.left_input.next_tuple(arena, plan_arena)? {
+            if self.left_input.next_tuple(arena, plan_arena).await? {
                 arena.resume();
                 return Ok(());
             }
             self.reading_left = false;
         }
-        if self.right_input.next_tuple(arena, plan_arena)? {
+        if self.right_input.next_tuple(arena, plan_arena).await? {
             arena.resume();
         } else {
             arena.finish();

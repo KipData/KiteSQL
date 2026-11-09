@@ -75,6 +75,7 @@ crate::define_cast_evaluator!(date32_to_datetime_cast_eval, DataValue::Date32(va
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod test {
     use super::*;
     use crate::errors::DatabaseError;

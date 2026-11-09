@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
-use crate::execution::dql::seq_scan::next_scan_tuple;
+use crate::execution::dql::seq_scan::scan_predicate_holds;
 use crate::execution::{
     ExecBuilder, ExecContext, ExecNode, ExecutorNode, IterSlot, ReadExecutor, StorageIter,
 };
@@ -132,8 +132,9 @@ impl<'a> ReadExecutor<'a> for IndexScan<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -149,7 +150,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -185,13 +186,18 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
         let iter = state.iters[self.iter].as_index();
         let bound_buffers = state.bound_buffers;
         let output = state.result.output_mut();
-        if next_scan_tuple(
-            self.op,
-            |table_codec, tuple| iter.next_tuple_into(view, bound_buffers, table_codec, tuple),
-            state.table_codec,
-            output,
-            plan_arena,
-        )? {
+        let found = loop {
+            if !iter
+                .next_tuple_into(view, bound_buffers, state.table_codec, output)
+                .await?
+            {
+                break false;
+            }
+            if scan_predicate_holds(self.op, output, plan_arena)? {
+                break true;
+            }
+        };
+        if found {
             arena.resume();
         } else {
             arena.finish();
@@ -202,12 +208,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexScan<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::db::test::build_table;
     use crate::execution::ExecStatus;
     use crate::planner::{PlanArena, TableArenaCell};
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{Storage, TableCache, TupleDeserializers};
     use crate::types::index::RuntimeIndexProbe;
@@ -217,14 +223,15 @@ mod tests {
     use std::ops::Bound;
 
     #[test]
-    fn reset_rebinds_probe_after_partial_read_eof_and_missing_key() -> Result<(), DatabaseError> {
-        let storage = MemoryStorage::new();
+    async fn reset_rebinds_probe_after_partial_read_eof_and_missing_key(
+    ) -> Result<(), DatabaseError> {
+        let storage = crate::storage::new_test_storage().await;
         let mut tx = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut tables = TableCache::default();
         let cell = TableArenaCell::default();
         let mut meta = PlanArena::new(&cell);
-        build_table(&mut names, &mut tables, &mut tx, &mut meta)?;
+        build_table(&mut names, &mut tables, &mut tx, &mut meta).await?;
         let meta = PlanArena::new(&cell);
         let serializers = [
             LogicalType::Integer.serializable(),
@@ -247,7 +254,8 @@ mod tests {
                 .into(),
                 &serializers,
                 false,
-            )?;
+            )
+            .await?;
         }
         let table = names.table(&tables, "t1").unwrap();
         let op = TableScanOperator {
@@ -278,7 +286,7 @@ mod tests {
             min: Bound::Included(DataValue::Int32(1)),
             max: Bound::Included(DataValue::Int32(4)),
         });
-        scan.next_tuple(&mut arena, &mut meta)?;
+        scan.next_tuple(&mut arena, &mut meta).await?;
         assert_eq!(arena.result_tuple()[0], DataValue::Int32(1));
         let iterator = &arena.arena.iters[slot] as *const _;
         for (probe, expected) in [
@@ -301,15 +309,15 @@ mod tests {
             (RuntimeIndexProbe::Eq(DataValue::Int32(1)), vec![1]),
         ] {
             arena.push_runtime_probe(probe);
-            scan.reset(&mut arena, &mut meta)?;
+            scan.reset(&mut arena, &mut meta).await?;
             // An initialized scan is ready now, not at its next pull.
             assert!(arena.buffer.runtime_probe_stack.is_empty());
             for id in expected {
-                scan.next_tuple(&mut arena, &mut meta)?;
+                scan.next_tuple(&mut arena, &mut meta).await?;
                 assert_eq!(arena.result_tuple()[0], DataValue::Int32(id));
                 assert_eq!(&arena.arena.iters[slot] as *const _, iterator);
             }
-            scan.next_tuple(&mut arena, &mut meta)?;
+            scan.next_tuple(&mut arena, &mut meta).await?;
             assert_eq!(arena.buffer.result.status, Some(ExecStatus::End));
             assert!(arena.buffer.runtime_probe_stack.is_empty());
         }

@@ -52,17 +52,18 @@ impl<'a> WriteExecutor<'a> for Update<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.done = false;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -80,7 +81,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
         let mut updated_count = 0;
         let mut values = Vec::with_capacity(value_exprs.len());
 
-        while input.next_tuple(arena, plan_arena)? {
+        while input.next_tuple(arena, plan_arena).await? {
             let mut is_overwrite = true;
 
             let mut tuple = arena.take_tuple();
@@ -94,7 +95,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let old_index = Index::new(index_meta.id, values, index_meta.ty);
-                transaction.del_index(table_codec, table.table_id, &old_index, &old_pk)?;
+                transaction
+                    .del_index(table_codec, table.table_id, &old_index, &old_pk)
+                    .await?;
             }
             // Every expression reads the old row, so evaluate them all before writing.
             for (_, expr) in value_exprs.iter() {
@@ -112,7 +115,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
             if primary_key_changed {
                 let mut state = arena.local_state(plan_arena);
                 let (transaction, table_codec) = state.transaction_codec_mut();
-                transaction.remove_tuple(table_codec, table.table_id, &old_pk)?;
+                transaction
+                    .remove_tuple(table_codec, table.table_id, &old_pk)
+                    .await?;
                 is_overwrite = false;
             }
 
@@ -122,22 +127,28 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let new_index = Index::new(index_meta.id, values, index_meta.ty);
-                transaction.add_index(table_codec, table.table_id, new_index, &new_pk)?;
+                transaction
+                    .add_index(table_codec, table.table_id, new_index, &new_pk)
+                    .await?;
             }
 
             tuple.set_pk(Some(new_pk));
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
             let stamp = if is_overwrite { 0 } else { table_codec.stamp() };
-            table_codec.with_stamp(stamp, |table_codec| {
-                transaction.append_tuple(
-                    table_codec,
-                    table.table_id,
-                    &tuple,
-                    &table.serializers,
-                    is_overwrite,
-                )
-            })?;
+            table_codec
+                .with_stamp(stamp, async |table_codec| {
+                    transaction
+                        .append_tuple(
+                            table_codec,
+                            table.table_id,
+                            &tuple,
+                            &table.serializers,
+                            is_overwrite,
+                        )
+                        .await
+                })
+                .await?;
             updated_count += 1;
         }
         arena.produce(TupleBuilder::build_result(updated_count.to_string()).into());

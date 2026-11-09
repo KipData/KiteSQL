@@ -220,6 +220,7 @@ pub struct RecursiveCte<'a> {
     phase: RecursivePhase,
 }
 
+#[maybe_async]
 impl<'a> RecursiveCte<'a> {
     fn new(anchor_input: ExecNode<'a>, recursive_plan: &'a LogicalPlan) -> Self {
         Self {
@@ -233,7 +234,7 @@ impl<'a> RecursiveCte<'a> {
         }
     }
 
-    fn start_recursive<T: StorageTransaction + 'a, A: MetaArena + 'a>(
+    async fn start_recursive<T: StorageTransaction + 'a, A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -262,8 +263,9 @@ impl<'a> ReadExecutor<'a> for RecursiveCte<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -274,10 +276,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a> {
         if self.recursive_root.take().is_some() {
             arena.truncate_iters(self.iter_mark);
         }
-        self.anchor_input.reset(arena, plan_arena)
+        self.anchor_input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -285,7 +287,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a> {
         loop {
             match self.phase {
                 RecursivePhase::Anchor => {
-                    while self.anchor_input.next_tuple(arena, plan_arena)? {
+                    while self.anchor_input.next_tuple(arena, plan_arena).await? {
                         self.next.push(arena.take_tuple())?;
                     }
                     self.working = mem::take(&mut self.next).finish()?;
@@ -296,7 +298,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a> {
                         arena.produce(tuple);
                         return Ok(());
                     }
-                    if !self.start_recursive(arena, plan_arena)? {
+                    if !self.start_recursive(arena, plan_arena).await? {
                         arena.finish();
                         return Ok(());
                     }
@@ -307,7 +309,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveCte<'a> {
                         .recursive_root
                         .as_mut()
                         .expect("recursive step is built before it runs");
-                    while root.next_tuple(arena, plan_arena)? {
+                    while root.next_tuple(arena, plan_arena).await? {
                         self.next.push(arena.take_tuple())?;
                     }
                     self.recursive_root = None;
@@ -337,8 +339,9 @@ impl<'a> ReadExecutor<'a> for RecursiveScan {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -346,7 +349,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
         self.input.reset()
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -361,6 +364,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for RecursiveScan {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -374,13 +378,11 @@ mod tests {
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::Childrens;
     use crate::planner::LogicalPlan;
-    use crate::storage::rocksdb::RocksStorage;
     use crate::storage::{Storage, TableCache};
     use crate::types::evaluator::binary_create;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::borrow::Cow;
-    use tempfile::TempDir;
 
     #[cfg(feature = "spill")]
     #[test]
@@ -449,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn recursive_cte_replays_each_generation() -> Result<(), DatabaseError> {
+    async fn recursive_cte_replays_each_generation() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = PlanArena::new(&table_arena);
         let column = plan_arena.alloc_column(ColumnCatalog::new(
@@ -500,8 +502,7 @@ mod tests {
             Childrens::Only(Box::new(filter)),
         );
 
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let table_cache = TableCache::default();
         let tuples = try_collect(execute_input::<_, RecursiveCte<'_>>(
@@ -509,7 +510,8 @@ mod tests {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         assert_eq!(
             tuples

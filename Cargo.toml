@@ -2,7 +2,7 @@
 
 [package]
 name          = "kite_sql"
-version       = "0.6.1"
+version       = "0.7.0"
 edition       = "2021"
 authors       = ["Kould <kould2333@gmail.com>", "Xwg <loloxwg@gmail.com>"]
 description   = "SQL as a Function for Rust"
@@ -38,6 +38,14 @@ pprof   = ["pprof/criterion", "pprof/flamegraph"]
 python  = ["parser", "dep:pyo3"]
 shell   = ["parser", "dep:comfy-table", "dep:rustyline"]
 spill   = []
+# Compiles the storage traits, the executor and the database API as async, for storages whose
+# reads are asynchronous. Excludes the sync storages (`rocksdb`, `lmdb`) and `python`, `shell`
+# and `wasm`; pick it in the final application, not in a library.
+async   = []
+# SlateDB storage, on object storage; needs the async path and a tokio runtime.
+slatedb = ["async", "dep:foyer", "dep:slatedb"]
+# SlateDB on Amazon S3 or an S3-compatible store, configured with `S3Config`.
+slatedb-s3 = ["slatedb", "slatedb/aws"]
 wasm    = [
     "dep:js-sys",
     "dep:wasm-bindgen",
@@ -59,6 +67,10 @@ required-features = ["lmdb", "orm", "parser"]
 [[example]]
 name              = "borrowed_parse"
 required-features = ["lmdb", "orm", "parser"]
+
+[[example]]
+name              = "async_s3"
+required-features = ["slatedb-s3", "orm"]
 
 [dependencies]
 bumpalo               = { version = "3", default-features = false, features = ["collections"] }
@@ -82,6 +94,7 @@ pprof = { version = "0.15", features = ["flamegraph", "criterion"] }
 criterion             = { version = "0.5", features = ["html_reports"] }
 indicatif             = { version = "0.17" }
 tempfile              = { version = "3.10" }
+tokio                 = { version = "1", features = ["macros", "rt-multi-thread"] }
 # Benchmark
 sqlite                = { version = "0.34" }
 serde                 = { version = "1", features = ["derive"] }
@@ -92,6 +105,9 @@ serde_json            = { version = "1" }
 lmdb = { version = "0.8.0", optional = true }
 lmdb-sys = { version = "0.8.0", optional = true }
 rocksdb = { version = "0.25", optional = true, default-features = false, features = ["bindgen-runtime"] }
+slatedb = { version = "0.18", optional = true, default-features = false, features = ["foyer"] }
+# The disk tier of the SlateDB block cache; the version SlateDB builds its caches on.
+foyer = { version = "0.22", optional = true }
 rustyline = { version = "14", default-features = false, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

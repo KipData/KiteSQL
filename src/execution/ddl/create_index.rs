@@ -50,16 +50,17 @@ impl<'a> WriteExecutor<'a> for CreateIndex<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -99,14 +100,16 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             .unzip();
         let index_id_result = {
             let (transaction, table_codec) = arena.transaction_codec_mut();
-            let (table, index_id) = transaction.add_index_meta(
-                table_codec,
-                plan_arena,
-                table_catalog.name(),
-                index_name.clone(),
-                column_ids,
-                *ty,
-            )?;
+            let (table, index_id) = transaction
+                .add_index_meta(
+                    table_codec,
+                    plan_arena,
+                    table_catalog.name(),
+                    index_name.clone(),
+                    column_ids,
+                    *ty,
+                )
+                .await?;
             let table_id = table.id();
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
             Ok((table_id, index_id))
@@ -124,7 +127,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             Err(err) => return Err(err),
         };
 
-        while self.input.next_tuple(arena, plan_arena)? {
+        while self.input.next_tuple(arena, plan_arena).await? {
             if arena.result_tuple().pk().is_none() {
                 continue;
             }
@@ -134,7 +137,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
                 let (tuple, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let tuple_pk = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
                 let index = Index::new(index_id, tuple, *ty);
-                transaction.add_index(table_codec, table_id, index, tuple_pk)?;
+                transaction
+                    .add_index(table_codec, table_id, index, tuple_pk)
+                    .await?;
             }
         }
 

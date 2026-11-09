@@ -270,6 +270,7 @@ pub(crate) fn scan_column(
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::*;
 

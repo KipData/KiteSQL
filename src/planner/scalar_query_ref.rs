@@ -61,10 +61,11 @@ impl ReferenceSerialization for ScalarQueryRef {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::planner::TableArena;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::TestTransaction;
 
     #[test]
     fn decoding_preserves_source_reference() -> Result<(), DatabaseError> {
@@ -73,21 +74,21 @@ mod tests {
         let mut bytes = Vec::new();
         reference.encode(&mut bytes, false, &source)?;
         let mut target = TableArena::default();
-        let mut context = ReferenceDecodeContext::<RocksTransaction>::new();
-        let first = ScalarQueryRef::decode::<RocksTransaction, _, _>(
+        let mut context = ReferenceDecodeContext::<TestTransaction>::new();
+        let first = ScalarQueryRef::decode::<TestTransaction, _, _>(
             &mut bytes.as_slice(),
             Some(&mut context),
             &mut target,
         )?;
-        let repeated = ScalarQueryRef::decode::<RocksTransaction, _, _>(
+        let repeated = ScalarQueryRef::decode::<TestTransaction, _, _>(
             &mut bytes.as_slice(),
             Some(&mut context),
             &mut target,
         )?;
         assert_eq!(first, repeated);
         assert_eq!(first, reference);
-        let mut next_view = ReferenceDecodeContext::<RocksTransaction>::new();
-        let second = ScalarQueryRef::decode::<RocksTransaction, _, _>(
+        let mut next_view = ReferenceDecodeContext::<TestTransaction>::new();
+        let second = ScalarQueryRef::decode::<TestTransaction, _, _>(
             &mut bytes.as_slice(),
             Some(&mut next_view),
             &mut target,

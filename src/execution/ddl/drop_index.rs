@@ -34,8 +34,9 @@ impl<'a> WriteExecutor<'a> for DropIndex<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -43,7 +44,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -56,7 +57,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropIndex<'a> {
 
         let dropped = {
             let (transaction, table_codec) = arena.transaction_codec_mut();
-            transaction.drop_index(table_codec, plan_arena, table_name, index_name, *if_exists)?
+            transaction
+                .drop_index(table_codec, plan_arena, table_name, index_name, *if_exists)
+                .await?
         };
         if let Some((table, index_id)) = dropped {
             let table_id = table.id();

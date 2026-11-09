@@ -70,8 +70,9 @@ impl<'a> ReadExecutor<'a> for StreamAggExecutor<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -80,10 +81,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
         self.in_group = false;
         self.carried = false;
         self.carried_args.clear();
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -97,7 +98,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
             arena.bytes_pool().recycle(&mut self.carried_args);
         }
         loop {
-            if !self.input.next_tuple(arena, plan_arena)? {
+            if !self.input.next_tuple(arena, plan_arena).await? {
                 if !mem::take(&mut self.in_group) {
                     arena.finish();
                     return Ok(());
@@ -150,6 +151,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for StreamAggExecutor<'
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::StreamAggExecutor;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -162,13 +164,12 @@ mod tests {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::memory::MemoryStorage;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
 
     #[test]
-    fn aggregates_sorted_groups() -> Result<(), DatabaseError> {
+    async fn aggregates_sorted_groups() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
@@ -212,7 +213,7 @@ mod tests {
             force_spill: false,
         };
         let table_cache = crate::storage::TableCache::default();
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
 
         let rows = try_collect(execute_input::<_, StreamAggExecutor>(
@@ -220,7 +221,8 @@ mod tests {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         assert_eq!(
             rows.into_iter()
@@ -235,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_input_returns_no_groups() -> Result<(), DatabaseError> {
+    async fn empty_input_returns_no_groups() -> Result<(), DatabaseError> {
         let table_arena = crate::planner::TableArenaCell::default();
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let column = plan_arena.alloc_column(ColumnCatalog::new(
@@ -256,7 +258,7 @@ mod tests {
             force_spill: false,
         };
         let table_cache = crate::storage::TableCache::default();
-        let storage = MemoryStorage::new();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
 
         let rows = try_collect(execute_input::<_, StreamAggExecutor>(
@@ -264,7 +266,8 @@ mod tests {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         assert!(rows.is_empty());
         Ok(())

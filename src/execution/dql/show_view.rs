@@ -38,8 +38,9 @@ impl<'a> ReadExecutor<'a> for ShowViews {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowViews {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -48,7 +49,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowViews {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -56,12 +57,12 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ShowViews {
         if arena.iter_mut(self.metas).is_empty() {
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec();
-            let metas = transaction.views(table_codec)?;
+            let metas = transaction.views(table_codec).await?;
             state.iters[self.metas] = StorageIter::View(metas);
         }
 
         let metas = arena.iter_mut(self.metas).as_view();
-        let Some(name) = metas.try_next(plan_arena)? else {
+        let Some(name) = metas.try_next(plan_arena).await? else {
             arena.finish();
             return Ok(());
         };

@@ -129,6 +129,7 @@ impl NormalizationRule for CollapseGroupByAgg {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use crate::binder::test::build_t1_table;
     use crate::catalog::ColumnCatalog;
@@ -149,8 +150,8 @@ mod tests {
     }
 
     #[test]
-    fn test_combine_filter_keeps_reordered_projection() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_combine_filter_keeps_reordered_projection() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena("select * from t1 c where c.c1 > 1", &mut arena)?;
         let mut filter = plan.childrens.pop_only();
@@ -168,8 +169,8 @@ mod tests {
     }
 
     #[test]
-    fn test_combine_filter() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_combine_filter() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state.plan_with_arena(
             "select * from (select * from t1 where c1 > 1) t where 1 = 1",
@@ -206,8 +207,8 @@ mod tests {
     }
 
     #[test]
-    fn test_collapse_group_by_agg() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_collapse_group_by_agg() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan = table_state
             .plan_with_arena("select distinct c1, c2 from t1 group by c1, c2", &mut arena)?;

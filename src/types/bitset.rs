@@ -63,6 +63,7 @@ impl BitSet {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::BitSet;
 

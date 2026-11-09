@@ -101,9 +101,19 @@
 //! ```
 #![allow(unused_doc_comments)]
 extern crate core;
+// Puts `#[maybe_async]` in scope everywhere in the crate, test modules included.
+#[macro_use]
+extern crate kite_sql_serde_macros;
 
 #[cfg(all(feature = "spill", feature = "wasm", not(clippy)))]
 compile_error!("features `spill` and `wasm` are mutually exclusive");
+#[cfg(all(feature = "async", any(feature = "rocksdb", feature = "lmdb")))]
+compile_error!("feature `async` is mutually exclusive with the sync storages `rocksdb` and `lmdb`");
+#[cfg(all(
+    feature = "async",
+    any(feature = "python", feature = "shell", feature = "wasm")
+))]
+compile_error!("features `python`, `shell` and `wasm` use the sync API and exclude `async`");
 #[cfg(all(feature = "spill", target_arch = "wasm32"))]
 compile_error!("feature `spill` is not supported on wasm32 targets");
 
@@ -117,6 +127,7 @@ mod function;
 pub(crate) mod iter_ext;
 #[cfg(feature = "macros")]
 pub mod macros;
+mod maybe_async;
 mod optimizer;
 #[cfg(feature = "orm")]
 pub mod orm;

@@ -21,6 +21,7 @@ use std::io;
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
+#[cfg(not(feature = "async"))]
 use tempfile::TempDir;
 
 #[derive(Parser, Debug)]
@@ -42,11 +43,27 @@ fn main() {
     let mut file_num = 0;
     let start = Instant::now();
 
+    #[cfg(not(feature = "async"))]
     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    #[cfg(not(feature = "async"))]
     let mut tester = Runner::new(|| {
         let db = DataBaseBuilder::path(temp_dir.path()).build_lmdb();
         std::future::ready(db.map(|db| SQLBase { db }))
     });
+    // The async path runs on SlateDB over an in-memory object store, whose background work needs
+    // a tokio runtime.
+    #[cfg(feature = "async")]
+    let runtime = tokio::runtime::Runtime::new().expect("failed to start tokio");
+    #[cfg(feature = "async")]
+    let _runtime = runtime.enter();
+    #[cfg(feature = "async")]
+    let mut tester = {
+        let storage = open_slatedb(&runtime);
+        Runner::new(move || {
+            let db = DataBaseBuilder::path(".").build_with_storage(storage.clone());
+            std::future::ready(db.map(|db| SQLBase { db }))
+        })
+    };
 
     for slt_file in glob::glob(&args.path).expect("failed to find slt files") {
         let filepath = slt_file.expect("failed to read slt file");
@@ -69,6 +86,26 @@ fn main() {
     } else {
         println!("|- Release mode");
     }
+}
+
+#[cfg(feature = "async")]
+fn open_slatedb(runtime: &tokio::runtime::Runtime) -> kite_sql::storage::slatedb::SlateDbStorage {
+    use slatedb::object_store::memory::InMemory;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let settings = slatedb::Settings {
+        flush_interval: Some(Duration::from_millis(1)),
+        ..Default::default()
+    };
+    let db = runtime
+        .block_on(
+            slatedb::Db::builder("kitesql-slt", Arc::new(InMemory::new()))
+                .with_settings(settings)
+                .build(),
+        )
+        .expect("failed to open slatedb");
+    kite_sql::storage::slatedb::SlateDbStorage::new(Arc::new(db))
 }
 
 fn init_20000_row_csv() -> io::Result<()> {

@@ -1088,6 +1088,7 @@ impl fmt::Display for UnaryOperator {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::test::build_table;
@@ -1108,8 +1109,7 @@ mod test {
     use crate::planner::operator::sort::SortField;
     use crate::planner::{ExprRef, MetaArena, PlanArena, TableArenaCell};
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
-    use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::TestTransaction;
     use crate::storage::{Storage, StorageTransaction};
     use crate::types::evaluator::{binary_create, cast_create, unary_create};
     use crate::types::value::{DataValue, Utf8Type};
@@ -1117,14 +1117,13 @@ mod test {
     use crate::types::LogicalType;
     use std::borrow::Cow;
     use std::io::{Cursor, Seek, SeekFrom};
-    use tempfile::TempDir;
 
     #[test]
-    fn test_serialization() -> Result<(), DatabaseError> {
+    async fn test_serialization() -> Result<(), DatabaseError> {
         fn fn_assert(
             cursor: &mut Cursor<Vec<u8>>,
             expr: ScalarExpression,
-            drive: Option<&mut ReferenceDecodeContext<'_, RocksTransaction>>,
+            drive: Option<&mut ReferenceDecodeContext<'_, TestTransaction>>,
             arena: &mut (dyn MetaArena + '_),
         ) -> Result<(), DatabaseError> {
             let expr = arena.alloc_expression(expr);
@@ -1141,8 +1140,7 @@ mod test {
             Ok(())
         }
 
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -1167,7 +1165,8 @@ mod test {
             &mut table_cache,
             &mut transaction,
             &mut plan_arena,
-        )?;
+        )
+        .await?;
         let mut plan_arena = PlanArena::new(&table_arena);
 
         let mut cursor = Cursor::new(Vec::new());

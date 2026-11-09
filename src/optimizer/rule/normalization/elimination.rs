@@ -838,6 +838,7 @@ pub(crate) fn covers<T>(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::{
         EliminateIndexFilter, EliminateProject, EliminateRedundantSort, ForceSpillAggregate,
@@ -927,8 +928,9 @@ mod tests {
     }
 
     #[test]
-    fn substitutes_through_filter_and_sort_without_cloning_sources() -> Result<(), DatabaseError> {
-        let table = build_t1_table()?;
+    async fn substitutes_through_filter_and_sort_without_cloning_sources(
+    ) -> Result<(), DatabaseError> {
+        let table = build_t1_table().await?;
         let mut arena = PlanArena::new(&table.table_arena);
         let scan = table.plan_with_arena("select c1, c2 from t1", &mut arena)?;
         let (input, replacement) = source(&mut arena, scan);
@@ -995,8 +997,9 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_preserves_input_project_and_separate_output_slots() -> Result<(), DatabaseError> {
-        let table = build_t1_table()?;
+    async fn aggregate_preserves_input_project_and_separate_output_slots(
+    ) -> Result<(), DatabaseError> {
+        let table = build_t1_table().await?;
         let mut arena = PlanArena::new(&table.table_arena);
         let scan = table.plan_with_arena("select c1, c2 from t1", &mut arena)?;
         let (input, replacement) = source(&mut arena, scan);
@@ -1054,9 +1057,9 @@ mod tests {
     }
 
     #[test]
-    fn mapping_transfer_preserves_shared_source_expressions_across_plan_nodes(
+    async fn mapping_transfer_preserves_shared_source_expressions_across_plan_nodes(
     ) -> Result<(), DatabaseError> {
-        let table = build_t1_table()?;
+        let table = build_t1_table().await?;
         let mut arena = PlanArena::new(&table.table_arena);
         let scan = table.plan_with_arena("select c1, c2 from t1", &mut arena)?;
         let (input, replacement) = source(&mut arena, scan);
@@ -1229,9 +1232,9 @@ mod tests {
     }
 
     #[test]
-    fn cross_join_inlines_computed_right_output_without_changing_source(
+    async fn cross_join_inlines_computed_right_output_without_changing_source(
     ) -> Result<(), DatabaseError> {
-        let table = build_t1_table()?;
+        let table = build_t1_table().await?;
         let mut arena = PlanArena::new(&table.table_arena);
         let scan = table.plan_with_arena("select c1, c2 from t1", &mut arena)?;
         let (right, original) = source(&mut arena, scan);
@@ -1258,8 +1261,8 @@ mod tests {
     }
 
     #[test]
-    fn test_collapse_project() -> Result<(), DatabaseError> {
-        let table_state = build_t1_table()?;
+    async fn test_collapse_project() -> Result<(), DatabaseError> {
+        let table_state = build_t1_table().await?;
         let mut arena = PlanArena::new(&table_state.table_arena);
         let plan =
             table_state.plan_with_arena("select c1 from (select c1, c2 from t1) t", &mut arena)?;

@@ -38,7 +38,7 @@ pub(crate) struct DeliveryTest;
 impl TpccTransaction for Delivery {
     type Args = DeliveryArgs;
 
-    fn run<T: BackendTransaction>(
+    async fn run<T: BackendTransaction>(
         tx: &mut T,
         args: &Self::Args,
         statements: &mut [T::PreparedStatement],
@@ -58,7 +58,8 @@ impl TpccTransaction for Delivery {
                     no_o_id = tuple[0].i32().unwrap();
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
 
             if no_o_id == 0 {
                 continue;
@@ -71,7 +72,8 @@ impl TpccTransaction for Delivery {
                     (2, DataValue::Int8(d_id as i8).into()),
                     (3, DataValue::Int16(args.w_id as i16).into()),
                 ],
-            )?;
+            )
+            .await?;
             // "SELECT o_c_id FROM orders WHERE o_id = ? AND o_d_id = ? AND o_w_id = ?"
             let mut c_id = 0;
             tx.with_query_one(
@@ -85,7 +87,8 @@ impl TpccTransaction for Delivery {
                     c_id = tuple[0].i32().unwrap();
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
             // "UPDATE orders SET o_carrier_id = ? WHERE o_id = ? AND o_d_id = ? AND o_w_id = ?"
             tx.execute_drain(
                 &mut statements[3],
@@ -95,7 +98,8 @@ impl TpccTransaction for Delivery {
                     (3, DataValue::Int8(d_id as i8).into()),
                     (4, DataValue::Int16(args.w_id as i16).into()),
                 ],
-            )?;
+            )
+            .await?;
             // "UPDATE order_line SET ol_delivery_d = ? WHERE ol_o_id = ? AND ol_d_id = ? AND ol_w_id = ?"
             tx.execute_drain(
                 &mut statements[4],
@@ -105,7 +109,8 @@ impl TpccTransaction for Delivery {
                     (3, DataValue::Int8(d_id as i8).into()),
                     (4, DataValue::Int16(args.w_id as i16).into()),
                 ],
-            )?;
+            )
+            .await?;
             // "SELECT SUM(ol_amount) FROM order_line WHERE ol_o_id = ? AND ol_d_id = ? AND ol_w_id = ?"
             let mut ol_total = Default::default();
             tx.with_query_one(
@@ -119,7 +124,8 @@ impl TpccTransaction for Delivery {
                     ol_total = tuple[0].decimal().unwrap();
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
             // "UPDATE customer SET c_balance = c_balance + ? , c_delivery_cnt = c_delivery_cnt + 1 WHERE c_id = ? AND c_d_id = ? AND c_w_id = ?"
             tx.execute_drain(
                 &mut statements[6],
@@ -129,7 +135,8 @@ impl TpccTransaction for Delivery {
                     (3, DataValue::Int8(d_id as i8).into()),
                     (4, DataValue::Int16(args.w_id as i16).into()),
                 ],
-            )?;
+            )
+            .await?;
         }
 
         Ok(())
@@ -137,19 +144,19 @@ impl TpccTransaction for Delivery {
 }
 
 impl TpccTest for DeliveryTest {
-    fn do_transaction<T: BackendTransaction>(
+    async fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
         tx: &mut T,
-        num_ware: usize,
-        _: &TpccArgs,
+        _: usize,
+        args: &TpccArgs,
         statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
-        let w_id = rng.gen_range(0..num_ware) + 1;
+        let w_id = args.home_ware;
         let o_carrier_id = rng.gen_range(1..10);
 
         let args = DeliveryArgs::new(w_id, o_carrier_id);
-        Delivery::run(tx, &args, statements)?;
+        Delivery::run(tx, &args, statements).await?;
 
         Ok(())
     }

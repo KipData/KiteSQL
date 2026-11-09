@@ -82,13 +82,14 @@ impl Explain for WindowOperator {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::expression::window::WindowFunctionKind;
     use crate::expression::ScalarExpression;
     use crate::planner::{ExprRef, PlanArena, TableArena, TableArenaCell};
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::TestTransaction;
     use crate::types::LogicalType;
     use std::io::{Cursor, Seek, SeekFrom};
 
@@ -162,7 +163,7 @@ mod tests {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            WindowOperator::decode::<RocksTransaction, _, _>(
+            WindowOperator::decode::<TestTransaction, _, _>(
                 &mut cursor,
                 None,
                 &mut TableArena::default(),

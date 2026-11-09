@@ -184,6 +184,7 @@ float64_binary!(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod test {
     use super::*;
     use crate::types::value::Utf8Type;

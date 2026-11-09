@@ -73,8 +73,9 @@ impl<'a> ReadExecutor<'a> for HashAggExecutor<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -83,10 +84,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
         self.accs.clear();
         self.groups.clear();
         self.output = None;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -97,7 +98,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
             let hasher = FxBuildHasher::default();
             let groups = &mut self.groups;
 
-            while self.input.next_tuple(arena, plan_arena)? {
+            while self.input.next_tuple(arena, plan_arena).await? {
                 let tuple = arena.result_tuple();
                 // Evaluate the key in place, and drop it again if its group exists.
                 let start = self.keys.len();
@@ -159,6 +160,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for HashAggExecutor<'a>
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
@@ -176,18 +178,15 @@ mod test {
     use crate::planner::operator::Operator;
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::{Childrens, LogicalPlan};
-    use crate::storage::rocksdb::RocksStorage;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
-    use tempfile::TempDir;
 
     #[test]
-    fn test_hash_agg() -> Result<(), DatabaseError> {
+    async fn test_hash_agg() -> Result<(), DatabaseError> {
         let table_cache = crate::storage::TableCache::default();
 
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path()).unwrap();
+        let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let desc = ColumnDesc::new(LogicalType::Integer, None, false, None)?;
         let table_arena = crate::planner::TableArenaCell::default();
@@ -266,7 +265,8 @@ mod test {
             &table_cache,
             plan_arena,
             &transaction,
-        ))?;
+        ))
+        .await?;
 
         assert_eq!(tuples.len(), 2);
 

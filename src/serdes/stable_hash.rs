@@ -115,6 +115,7 @@ fn mix64(mut value: u64) -> u64 {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::StableHasher;
     use std::hash::{Hash, Hasher};

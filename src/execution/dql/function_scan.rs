@@ -14,15 +14,14 @@
 
 use crate::errors::DatabaseError;
 use crate::execution::{ExecBuilder, ExecContext, ExecNode, ExecutorNode, ReadExecutor};
-use crate::expression::function::table::TableFunction;
+use crate::expression::function::table::{TableFunction, TableFunctionIter};
 use crate::planner::operator::function_scan::FunctionScanOperator;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::StorageTransaction;
-use crate::types::tuple::Tuple;
 
 pub struct FunctionScan<'a> {
     table_function: &'a TableFunction,
-    iter: Option<Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>>,
+    iter: Option<TableFunctionIter>,
 }
 
 impl<'a> From<&'a FunctionScanOperator> for FunctionScan<'a> {
@@ -47,8 +46,9 @@ impl<'a> ReadExecutor<'a> for FunctionScan<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -57,7 +57,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for FunctionScan<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,

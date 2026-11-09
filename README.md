@@ -32,7 +32,9 @@
 **KiteSQL** is a lightweight embedded relational database written in Rust, inspired by **MyRocks** and **SQLite**. It runs inside your application with no external service: execute SQL directly, or use typed ORM models, migrations, and builder-style queries.
 
 - Most of the SQL 2016 syntax
-- All metadata and data stored in KV storage (RocksDB, LMDB, or in-memory)
+- All metadata and data stored in KV storage: RocksDB, LMDB, in-memory, or [SlateDB](https://slatedb.io) on S3
+- **Zero-copy reads**: on LMDB, strings go from the mmap'd file into your structs as `Cow::Borrowed`, without a copy ([how](https://kitesql.kould2333.org/blog/zero-copy-sql-on-lmdb.html))
+- **Async API on object storage**: the same engine as async, on SlateDB over Amazon S3 or an S3-compatible store such as MinIO or R2, see [Async API on S3](docs/features.md#async-api-on-s3-features--slatedb-s3)
 - Typed ORM with schema migration (`orm` feature), see [`src/orm/README.md`](src/orm/README.md)
 - WebAssembly and Python bindings
 
@@ -87,7 +89,7 @@ fn main() -> Result<(), DatabaseError> {
 }
 ```
 
-More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction.rs), [program](examples/program.rs).
+More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction.rs), [program](examples/program.rs), [borrowed_parse](examples/borrowed_parse.rs) (zero-copy reads against SQLite).
 
 ## Storage Backends
 | Builder | Storage |
@@ -96,6 +98,7 @@ More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction
 | `build_lmdb()` | LMDB (feature `lmdb`), stronger for read-heavy workloads |
 | `build_in_memory()` | In-memory, for tests and temporary data |
 | `build_optimistic()` | RocksDB with optimistic transactions |
+| `build_with_storage(SlateDbStorage::open_s3(..))` | SlateDB on S3 (feature `slatedb-s3`, async API), see [Async API on S3](docs/features.md#async-api-on-s3-features--slatedb-s3) |
 
 Feature flags, checkpoints, and transaction isolation: [docs/features.md](docs/features.md).
 
@@ -133,13 +136,25 @@ print(list(db.run("select * from demo")))
 ## TPC-C
 `make tpcc` runs the benchmark (`--backend kitesql-lmdb|kitesql-rocksdb|sqlite`); `make tpcc-dual` cross-checks every statement against SQLite.
 
-720-second single-thread run on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), every backend pinned to the same P-core and run without fsync on commit. Latencies are p90 in µs, including commit.
+720-second runs on an i9-13900HX (32 GB, KIOXIA EXCERIA PLUS G3), without fsync on commit. Latencies are p90 in µs, including commit. SlateDB runs on a local S3 server ([s3s-fs](https://github.com/Nugine/s3s)) with its block cache in memory and on local disk.
+
+1 thread, 1 warehouse, every backend pinned to the same P-core:
 
 | Backend | TpmC | New-Order | Payment | Order-Status | Delivery | Stock-Level |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| KiteSQL LMDB | 225720 | 240 | 44 | 25 | 326 | 179 |
-| KiteSQL RocksDB | 48746 | 343 | 78 | 140 | 14351 | 587 |
-| SQLite (WAL, `synchronous=OFF`) | 192110 | 270 | 40 | 33 | 342 | 231 |
+| KiteSQL LMDB | 254023 | 211 | 38 | 25 | 293 | 175 |
+| KiteSQL RocksDB | 47488 | 372 | 85 | 415 | 15471 | 389 |
+| KiteSQL SlateDB (S3) | 12016 | 677 | 240 | 399 | 74047 | 1638 |
+| SQLite (WAL, `synchronous=OFF`) | 214001 | 251 | 37 | 32 | 338 | 227 |
+
+4 threads, 4 warehouses (one home warehouse per terminal), pinned to four P-cores:
+
+| Backend | TpmC | New-Order | Payment | Order-Status | Delivery | Stock-Level |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| KiteSQL LMDB | 240584 | 930 | 780 | 29 | 890 | 207 |
+| KiteSQL RocksDB | 212936 | 505 | 109 | 285 | 8991 | 400 |
+| KiteSQL SlateDB (S3) | 19010 | 1749 | 1816 | 2481 | 66495 | 2523 |
+| SQLite (WAL, `synchronous=OFF`) | 205896 | 254 | 41 | 45 | 336 | 380 |
 
 👉 [Details and how to reproduce](tpcc/README.md)
 

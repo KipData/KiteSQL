@@ -70,10 +70,11 @@ impl ReferenceSerialization for Arc<str> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 pub(crate) mod test {
     use crate::errors::DatabaseError;
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::TestTransaction;
     use std::io::{Cursor, Seek, SeekFrom};
 
     #[test]
@@ -86,7 +87,7 @@ pub(crate) mod test {
         ReferenceSerialization::encode(&source, &mut cursor, true, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
         assert_eq!(
-            String::decode::<RocksTransaction, _, _>(&mut cursor, None, &mut arena,)?,
+            String::decode::<TestTransaction, _, _>(&mut cursor, None, &mut arena,)?,
             source
         );
 

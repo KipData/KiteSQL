@@ -38,7 +38,7 @@ pub(crate) struct SlevTest;
 impl TpccTransaction for Slev {
     type Args = SlevArgs;
 
-    fn run<T: BackendTransaction>(
+    async fn run<T: BackendTransaction>(
         tx: &mut T,
         args: &Self::Args,
         statements: &mut [T::PreparedStatement],
@@ -55,7 +55,8 @@ impl TpccTransaction for Slev {
                 d_next_o_id = tuple[0].i32().unwrap();
                 Ok(())
             },
-        )?;
+        )
+        .await?;
         // "SELECT DISTINCT ol_i_id FROM order_line WHERE ol_w_id = ? AND ol_d_id = ? AND ol_o_id < ? AND ol_o_id >= (? - 20)"
         let mut item_ids = Vec::new();
         tx.with_query_all(
@@ -70,7 +71,8 @@ impl TpccTransaction for Slev {
                 item_ids.push(tuple[0].i32().unwrap());
                 Ok(())
             },
-        )?;
+        )
+        .await?;
         // "SELECT count(*) FROM stock WHERE s_w_id = ? AND s_i_id = ? AND s_quantity < ?"
         let mut _low_stock = 0;
         for item_id in item_ids {
@@ -85,27 +87,28 @@ impl TpccTransaction for Slev {
                     _low_stock += tuple[0].i32().unwrap();
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
         }
         Ok(())
     }
 }
 
 impl TpccTest for SlevTest {
-    fn do_transaction<T: BackendTransaction>(
+    async fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
         tx: &mut T,
-        num_ware: usize,
-        _: &TpccArgs,
+        _: usize,
+        args: &TpccArgs,
         statements: &mut [T::PreparedStatement],
     ) -> Result<(), TpccError> {
-        let w_id = rng.gen_range(0..num_ware) + 1;
+        let w_id = args.home_ware;
         let d_id = rng.gen_range(1..=DIST_PER_WARE);
         let level = rng.gen_range(10..20);
 
         let args = SlevArgs::new(w_id, d_id, level);
-        Slev::run(tx, &args, statements)?;
+        Slev::run(tx, &args, statements).await?;
 
         Ok(())
     }

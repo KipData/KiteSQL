@@ -37,8 +37,9 @@ impl<'a> WriteExecutor<'a> for ChangeColumn<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -46,7 +47,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -119,6 +120,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
             new_serializers[column_index] = data_type.serializable();
 
             let mut state = arena.local_state(plan_arena);
+
             let (transaction, table_codec) = state.transaction_codec_mut();
             rewrite_table_in_batches(
                 transaction,
@@ -135,8 +137,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
                     }
                     Ok(())
                 },
-                |_, _, _| Ok(()),
-            )?;
+                async |_, _, _| Ok(()),
+            )
+            .await?;
         } else if needs_not_null_validation {
             let target_column_name = new_column_name.clone();
             let old_serializers = old_serializers();
@@ -154,21 +157,24 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ChangeColumn<'a> {
                     }
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
         }
 
         let apply = {
             let (transaction, table_codec) = arena.transaction_codec_mut();
-            let table = transaction.change_column(
-                table_codec,
-                plan_arena,
-                table_catalog.name(),
-                old_column_name,
-                new_column_name,
-                data_type,
-                default_change,
-                not_null_change,
-            )?;
+            let table = transaction
+                .change_column(
+                    table_codec,
+                    plan_arena,
+                    table_catalog.name(),
+                    old_column_name,
+                    new_column_name,
+                    data_type,
+                    default_change,
+                    not_null_change,
+                )
+                .await?;
             DDLApply::upsert_table(table, true)
         };
         arena.push_ddl_apply(apply);

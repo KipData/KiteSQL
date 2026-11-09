@@ -12,18 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use kite_sql::db::Database;
+use kite_sql::db::{ConsumeMut, Database, TransactionIter};
 use kite_sql::errors::DatabaseError;
-use kite_sql::storage::lmdb::LmdbStorage;
+use kite_sql::planner::PlanArena;
+use kite_sql::storage::Storage;
 use kite_sql::types::value::DataValue;
-use sqllogictest::{DBOutput, DefaultColumnType, DB};
+use kite_sql_serde_macros::maybe_async;
+use sqllogictest::{DBOutput, DefaultColumnType};
 use std::time::Instant;
 
-pub struct SQLBase {
-    pub db: Database<LmdbStorage>,
+pub struct SQLBase<S: Storage> {
+    pub db: Database<S>,
 }
 
-impl DB for SQLBase {
+#[cfg(not(feature = "async"))]
+impl<S: Storage> sqllogictest::DB for SQLBase<S> {
     type Error = DatabaseError;
     type ColumnType = DefaultColumnType;
 
@@ -36,24 +39,57 @@ impl DB for SQLBase {
     }
 }
 
+#[cfg(feature = "async")]
+#[async_trait::async_trait]
+impl<S: Storage> sqllogictest::AsyncDB for SQLBase<S> {
+    type Error = DatabaseError;
+    type ColumnType = DefaultColumnType;
+
+    async fn run(&mut self, sql: &str) -> Result<DBOutput<Self::ColumnType>, Self::Error> {
+        let start = Instant::now();
+        println!("|— Input SQL: {}", sql);
+        let output = run_sql(&mut self.db, sql, |_, value| value.to_string()).await?;
+        println!(" |— time spent: {:?}", start.elapsed());
+        Ok(output)
+    }
+
+    async fn shutdown(&mut self) {}
+}
+
 /// Runs every statement in `sql` and returns the output of the last one, rendering each value of
 /// column `i` with `format(i, value)`.
-pub fn run_sql(
-    db: &mut Database<LmdbStorage>,
+#[maybe_async]
+pub async fn run_sql<S: Storage>(
+    db: &mut Database<S>,
     sql: &str,
-    mut format: impl FnMut(usize, &DataValue) -> String,
+    format: impl FnMut(usize, &DataValue) -> String + Send,
 ) -> Result<DBOutput<DefaultColumnType>, DatabaseError> {
-    db.run_mut(sql, |iter| {
+    db.run_mut(sql, Render(format)).await
+}
+
+struct Render<F>(F);
+
+#[maybe_async]
+impl<S: Storage, F: FnMut(usize, &DataValue) -> String + Send> ConsumeMut<S> for Render<F> {
+    type Output = DBOutput<DefaultColumnType>;
+
+    async fn consume<'a>(
+        mut self,
+        iter: &mut TransactionIter<'a, 'a, S::TransactionType<'a>, PlanArena<'a>>,
+    ) -> Result<Self::Output, DatabaseError> {
         let width = iter.schema(|schema| schema.len());
         let types = vec![DefaultColumnType::Any; width];
         let mut rows = Vec::new();
-        while let Some(row) = iter.next_tuple(|_, tuple| {
-            tuple
-                .iter()
-                .enumerate()
-                .map(|(i, value)| format(i, value))
-                .collect()
-        })? {
+        while let Some(row) = iter
+            .next_tuple(|_, tuple| {
+                tuple
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| (self.0)(i, value))
+                    .collect()
+            })
+            .await?
+        {
             rows.push(row);
         }
         if rows.is_empty() {
@@ -61,5 +97,5 @@ pub fn run_sql(
         } else {
             Ok(DBOutput::Rows { types, rows })
         }
-    })
+    }
 }

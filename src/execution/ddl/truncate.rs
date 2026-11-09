@@ -34,8 +34,9 @@ impl<'a> WriteExecutor<'a> for Truncate<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -43,7 +44,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -51,7 +52,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Truncate<'a> {
         let TruncateOperator { table_id } = *self.op;
         let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec) = state.transaction_codec_mut();
-        transaction.drop_data(table_codec, table_id)?;
+        transaction.drop_data(table_codec, table_id).await?;
 
         arena.finish();
         Ok(())

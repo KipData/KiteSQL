@@ -69,6 +69,7 @@ impl NormalizationRule for MaterializeMarkApply {
 
 // GRCOV_EXCL_START
 #[cfg(test)]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};

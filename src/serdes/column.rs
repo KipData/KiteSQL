@@ -124,6 +124,7 @@ impl ReferenceSerialization for ColumnRelation {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 pub(crate) mod test {
     use crate::catalog::{
         ColumnCatalog, ColumnDesc, ColumnRef, ColumnRelation, ColumnSummary, TableName,
@@ -133,18 +134,15 @@ pub(crate) mod test {
     use crate::expression::ScalarExpression;
     use crate::planner::{MetaArena, PlanArena, TableArenaCell};
     use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
-    use crate::storage::rocksdb::RocksStorage;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::TestTransaction;
     use crate::storage::{Storage, StorageTransaction};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
     use std::io::{Cursor, Seek, SeekFrom};
-    use tempfile::TempDir;
 
     #[test]
-    fn test_column_serialization() -> Result<(), DatabaseError> {
-        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-        let storage = RocksStorage::new(temp_dir.path())?;
+    async fn test_column_serialization() -> Result<(), DatabaseError> {
+        let storage = crate::storage::new_test_storage().await;
         let mut transaction = storage.transaction()?;
         let mut names = crate::storage::NameMapping::default();
         let mut table_cache = crate::storage::TableCache::default();
@@ -157,7 +155,8 @@ pub(crate) mod test {
             &mut table_cache,
             &mut transaction,
             &mut plan_arena,
-        )?;
+        )
+        .await?;
         let mut plan_arena = PlanArena::new(&table_arena);
 
         let mut cursor = Cursor::new(Vec::new());
@@ -173,7 +172,7 @@ pub(crate) mod test {
             assert_eq!(
                 {
                     let mut context = ReferenceDecodeContext::new();
-                    ColumnRef::decode::<RocksTransaction, Cursor<Vec<u8>>, _>(
+                    ColumnRef::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
                         &mut cursor,
                         Some(&mut context),
                         &mut plan_arena,
@@ -184,14 +183,15 @@ pub(crate) mod test {
             cursor.seek(SeekFrom::Start(0))?;
 
             let mut table_codec = crate::storage::table_codec::TableCodec::default();
-            let table =
-                transaction.drop_column(&mut table_codec, &mut plan_arena, &table_name, "c3")?;
+            let table = transaction
+                .drop_column(&mut table_codec, &mut plan_arena, &table_name, "c3")
+                .await?;
             let table = table.transplant_to_table_arena(&plan_arena)?;
             names.insert_table(&mut table_cache, table);
             plan_arena = PlanArena::new(&table_arena);
             let mut context = ReferenceDecodeContext::new();
             assert_eq!(
-                ColumnRef::decode::<RocksTransaction, Cursor<Vec<u8>>, _>(
+                ColumnRef::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
                     &mut cursor,
                     Some(&mut context),
                     &mut plan_arena,
@@ -215,7 +215,7 @@ pub(crate) mod test {
             not_ref_column.encode(&mut cursor, false, &plan_arena)?;
             cursor.seek(SeekFrom::Start(0))?;
 
-            let decoded = ColumnRef::decode::<RocksTransaction, Cursor<Vec<u8>>, _>(
+            let decoded = ColumnRef::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
                 &mut cursor,
                 None,
                 &mut plan_arena,
@@ -250,7 +250,7 @@ pub(crate) mod test {
         cursor.seek(SeekFrom::Start(0))?;
 
         assert_eq!(
-            ColumnSummary::decode::<RocksTransaction, Cursor<Vec<u8>>, _>(
+            ColumnSummary::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
                 &mut cursor,
                 None,
                 &mut arena,
@@ -269,7 +269,7 @@ pub(crate) mod test {
         none_relation.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        let decode_relation = ColumnRelation::decode::<RocksTransaction, Cursor<Vec<u8>>, _>(
+        let decode_relation = ColumnRelation::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
             &mut cursor,
             None,
             &mut arena,
@@ -283,7 +283,7 @@ pub(crate) mod test {
         table_relation.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        let decode_relation = ColumnRelation::decode::<RocksTransaction, Cursor<Vec<u8>>, _>(
+        let decode_relation = ColumnRelation::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
             &mut cursor,
             None,
             &mut arena,
@@ -306,7 +306,7 @@ pub(crate) mod test {
         desc.encode(&mut cursor, false, &arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        let decode_desc = ColumnDesc::decode::<RocksTransaction, Cursor<Vec<u8>>, _>(
+        let decode_desc = ColumnDesc::decode::<TestTransaction, Cursor<Vec<u8>>, _>(
             &mut cursor,
             None,
             &mut arena,

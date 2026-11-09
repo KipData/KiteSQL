@@ -121,6 +121,7 @@ pub(crate) fn eval_tuple_cast(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod test {
     use super::*;
     use crate::types::evaluator::cast_create;

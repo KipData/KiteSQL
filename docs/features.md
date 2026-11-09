@@ -42,6 +42,67 @@ See [the ORM guide](../src/orm/README.md) for the full ORM guide, including:
 - public ORM structs, enums, and traits
 - related `ResultIter::orm::<M>()` integration
 
+### Async API on S3: `features = ["slatedb-s3"]`
+With the `async` feature, the storage traits, the executor and the database API compile as async from the same source; the sync build is unchanged. The `slatedb-s3` feature adds `SlateDbStorage`, which keeps the data in an S3 bucket through [SlateDB](https://slatedb.io), an LSM tree on object storage, and runs on tokio. Any process that opens the bucket path sees the same database.
+
+```rust
+use kite_sql::db::{AsyncIter, DataBaseBuilder};
+use kite_sql::storage::slatedb::{S3Config, SlateDbStorage};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Credentials and region come from the `AWS_*` environment variables.
+    let config = S3Config::new("my-bucket");
+    let storage = SlateDbStorage::open_s3("kitesql/demo", &config, Default::default()).await?;
+    let mut database = DataBaseBuilder::path(".").build_with_storage(storage.clone())?;
+
+    database.migrate::<User>().await?;
+    database.insert(&User { id: 1, name: "Alice".to_string(), age: Some(18) }).await?;
+    let mut users = database.fetch::<User>().await?;
+    while let Some(user) = users.next().await {
+        println!("{:?}", user?);
+    }
+    users.done().await?;
+
+    drop(database);
+    // Flushes what is still in memory to S3.
+    storage.close().await?;
+    Ok(())
+}
+```
+
+`async` excludes the sync storages (`rocksdb`, `lmdb`) and the shell, Python and Wasm bindings: pick one path per build. The full example is [async_s3](../examples/async_s3.rs):
+```bash
+KITESQL_S3_BUCKET=my-bucket AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+cargo run --example async_s3 --no-default-features --features slatedb-s3,orm
+```
+
+A reopened database loads its tables with `database.load(CatalogKind::Table(name))` before
+querying them, as `async_s3` does.
+
+By default a commit waits until its write is durable in S3. `storage.await_durable(false)` makes
+it return once the write is applied in memory; a crash may then lose the latest commits.
+
+Reads that miss the block cache cost an S3 request each, so the cache size decides how fast
+queries run. `SlateDbCacheOptions` sizes the memory cache and adds a local disk tier:
+```rust
+use kite_sql::storage::slatedb::{S3Config, SlateDbCacheOptions, SlateDbDiskCache, SlateDbStorage};
+
+let cache = SlateDbCacheOptions {
+    memory_bytes: Some(4 << 30),
+    disk: Some(SlateDbDiskCache {
+        dir: "./slatedb-cache".into(),
+        // The cache files grow as they fill, so a large capacity costs nothing up front.
+        capacity_bytes: 64 << 30,
+    }),
+    // Keep the blocks compactions write, which otherwise leave the cache.
+    cache_compaction_output: true,
+};
+let storage = SlateDbStorage::open_s3("kitesql/demo", &S3Config::new("my-bucket"), cache).await?;
+```
+`SlateDbScanOptions` sets how scans read SST blocks: 256KiB per request, 4 requests in flight and
+cached blocks by default.
+
 ### Spill-backed Aggregation: `features = ["spill"]`
 
 The native-only `spill` feature bounds memory usage for large grouped
@@ -132,7 +193,7 @@ table_function!(MyTableFunction::test_numbers(LogicalType::Integer) -> [c1: Logi
                 DataValue::Int32(Some(i)),
                 DataValue::Int32(Some(i)),
             ]
-        }))) as Box<dyn Iterator<Item = Result<Tuple, DatabaseError>>>)
+        }))) as TableFunctionIter)
 }));
 let kite_sql = DataBaseBuilder::path("./data")
    .register_table_function(MyTableFunction::new())

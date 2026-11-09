@@ -210,12 +210,13 @@ impl fmt::Display for IndexMetaRef {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, TableCatalog};
     use crate::planner::{PlanArena, TableArena, TableArenaCell};
     use crate::serdes::ReferenceSerialization;
-    use crate::storage::rocksdb::RocksTransaction;
+    use crate::storage::TestTransaction;
     use std::fmt::Debug;
     use std::io::{Cursor, Seek, SeekFrom};
 
@@ -257,7 +258,7 @@ mod tests {
         value.encode(&mut cursor, false, encode_arena)?;
         cursor.seek(SeekFrom::Start(0))?;
 
-        T::decode::<RocksTransaction, _, _>(&mut cursor, None, decode_arena)
+        T::decode::<TestTransaction, _, _>(&mut cursor, None, decode_arena)
     }
 
     #[test]

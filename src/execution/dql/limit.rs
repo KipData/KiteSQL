@@ -47,18 +47,19 @@ impl<'a> ReadExecutor<'a> for Limit<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Limit<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
     ) -> Result<(), DatabaseError> {
         self.skipped = 0;
         self.emitted = 0;
-        self.input.reset(arena, plan_arena)
+        self.input.reset(arena, plan_arena).await
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -72,7 +73,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Limit<'a> {
         }
 
         loop {
-            if !self.input.next_tuple(arena, plan_arena)? {
+            if !self.input.next_tuple(arena, plan_arena).await? {
                 arena.finish();
                 return Ok(());
             }

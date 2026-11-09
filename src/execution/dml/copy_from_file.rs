@@ -40,8 +40,9 @@ impl<'a> WriteExecutor<'a> for CopyFromFile<'a> {
     }
 }
 
+#[maybe_async]
 impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
-    fn reset<A: MetaArena + 'a>(
+    async fn reset<A: MetaArena + 'a>(
         &mut self,
         _arena: &mut ExecContext<'_, 'a, '_, T>,
         _plan_arena: &mut ExecMetaArena<A>,
@@ -49,7 +50,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
         Ok(())
     }
 
-    fn next_tuple<A: MetaArena + 'a>(
+    async fn next_tuple<A: MetaArena + 'a>(
         &mut self,
         arena: &mut ExecContext<'_, 'a, '_, T>,
         plan_arena: &mut ExecMetaArena<A>,
@@ -100,7 +101,9 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
             tuple_builder.build_with_row(chunk.output_mut(), record.iter().take(column_count))?;
             let mut state = arena.local_state(plan_arena);
             let (transaction, table_codec) = state.transaction_codec_mut();
-            transaction.append_tuple(table_codec, table.id(), &chunk, &serializers, false)?;
+            transaction
+                .append_tuple(table_codec, table.id(), &chunk, &serializers, false)
+                .await?;
         }
 
         arena.finish();
@@ -110,6 +113,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CopyFromFile<'a> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::binder::copy::ExtSource;
@@ -123,16 +127,19 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn read_csv() -> Result<(), DatabaseError> {
+    async fn read_csv() -> Result<(), DatabaseError> {
         let csv = "1,1.5,one\n2,2.5,two\n";
 
         let mut file = tempfile::NamedTempFile::new().expect("failed to create temp file");
         write!(file, "{csv}").expect("failed to write file");
 
         let tmp_dir = TempDir::new()?;
-        let mut db = DataBaseBuilder::path(tmp_dir.path()).build_rocksdb()?;
-        db.ddl("create table test_copy (a int primary key, b float, c varchar(10))")?;
-        db.load(CatalogKind::Table("test_copy".to_string()))?;
+        let mut db = DataBaseBuilder::path(tmp_dir.path())
+            .build_in_memory()
+            .await?;
+        db.ddl("create table test_copy (a int primary key, b float, c varchar(10))")
+            .await?;
+        db.load(CatalogKind::Table("test_copy".to_string())).await?;
 
         fn test_column(
             name: &str,
@@ -181,16 +188,17 @@ mod tests {
             &transaction,
         );
 
-        assert!(executor.next_tuple()?.is_none());
+        assert!(executor.next_tuple().await?.is_none());
         drop(executor);
-        transaction.commit()?;
+        transaction.commit().await?;
 
-        let mut iter = db.run("select count(*) from test_copy")?;
+        let mut iter = db.run("select count(*) from test_copy").await?;
         let count = iter
-            .next_tuple(|_, tuple| tuple[0].to_string())?
+            .next_tuple(|_, tuple| tuple[0].to_string())
+            .await?
             .expect("count row");
         assert_eq!(count, "2");
-        iter.done()?;
+        iter.done().await?;
 
         Ok(())
     }

@@ -632,6 +632,7 @@ pub fn walk_mut_operator<'a, V: OperatorVisitorMut<'a>>(
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
 mod tests {
     use super::*;
     use crate::planner::operator::visitor::tests::all_operators;
