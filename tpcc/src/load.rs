@@ -65,7 +65,7 @@ impl<'a, E: SimpleExecutor> SqlBatch<'a, E> {
         }
     }
 
-    fn push(&mut self, statement: &str) -> Result<(), TpccError> {
+    async fn push(&mut self, statement: &str) -> Result<(), TpccError> {
         if self.pending != 0 {
             self.sql.push(';');
         }
@@ -73,20 +73,20 @@ impl<'a, E: SimpleExecutor> SqlBatch<'a, E> {
         self.pending += 1;
 
         if self.pending >= LOAD_BATCH_SIZE {
-            self.flush()?;
+            self.flush().await?;
         }
 
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<(), TpccError> {
+    async fn flush(&mut self) -> Result<(), TpccError> {
         if self.pending == 0 {
             return Ok(());
         }
 
         let sql = std::mem::take(&mut self.sql);
         self.pending = 0;
-        self.exec.execute_batch(&sql)
+        self.exec.execute_batch(&sql).await
     }
 }
 
@@ -149,11 +149,11 @@ impl Load {
     /// i_data varchar(50)
     ///
     /// primary key (i_id)
-    pub fn load_items(
+    pub async fn load_items(
         rng: &mut ThreadRng,
         exec: &mut impl SimpleExecutor,
     ) -> Result<(), TpccError> {
-        exec.execute_batch("drop table if exists item;")?;
+        exec.execute_batch("drop table if exists item;").await?;
         exec.execute_batch(
             "create table item (
                       i_id int not null,
@@ -162,7 +162,8 @@ impl Load {
                       i_price decimal(5,2),
                       i_data varchar(50),
                       PRIMARY KEY(i_id) );",
-        )?;
+        )
+        .await?;
         let pb = ProgressBar::new(MAX_ITEMS as u64);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -189,15 +190,17 @@ impl Load {
                 i_data = format!("{}original{}", prefix, remainder);
             }
 
-            batch.push(&format!(
+            batch
+                .push(&format!(
                 "insert into item values ({i_id}, {i_im_id}, '{i_name}', {i_price}, '{i_data}')"
-            ))?;
+            ))
+                .await?;
             pb.set_position(i_id as u64);
         }
-        batch.flush()?;
+        batch.flush().await?;
         finish_progress(&pb, Some("Items loaded"));
         println!("[Analyze Table: item]");
-        exec.execute_batch("analyze table item")?;
+        exec.execute_batch("analyze table item").await?;
         Ok(())
     }
 
@@ -214,12 +217,13 @@ impl Load {
     /// w_ytd decimal(12, 2)
     ///
     /// primary key (w_id)
-    pub fn load_warehouses(
+    pub async fn load_warehouses(
         rng: &mut ThreadRng,
         exec: &mut impl SimpleExecutor,
         num_ware: usize,
     ) -> Result<(), TpccError> {
-        exec.execute_batch("drop table if exists warehouse;")?;
+        exec.execute_batch("drop table if exists warehouse;")
+            .await?;
         exec.execute_batch(
             "create table warehouse (
                            w_id smallint not null,
@@ -232,8 +236,9 @@ impl Load {
                            w_tax decimal(4,2),
                            w_ytd decimal(12,2),
                            PRIMARY KEY(w_id) );",
-        )?;
-        exec.execute_batch("drop table if exists stock;")?;
+        )
+        .await?;
+        exec.execute_batch("drop table if exists stock;").await?;
         exec.execute_batch(
             "create table stock (
                        s_i_id int not null,
@@ -254,9 +259,11 @@ impl Load {
                        s_remote_cnt smallint,
                        s_data varchar(50),
                        PRIMARY KEY(s_w_id, s_i_id) );",
-        )?;
-        exec.execute_batch("CREATE INDEX fkey_stock_2 ON stock (s_i_id);")?;
-        exec.execute_batch("drop table if exists district;")?;
+        )
+        .await?;
+        exec.execute_batch("CREATE INDEX fkey_stock_2 ON stock (s_i_id);")
+            .await?;
+        exec.execute_batch("drop table if exists district;").await?;
         exec.execute_batch(
             "create table district (
                           d_id tinyint not null,
@@ -271,7 +278,8 @@ impl Load {
                           d_ytd decimal(12,2),
                           d_next_o_id int,
                           primary key (d_w_id, d_id) );",
-        )?;
+        )
+        .await?;
         let pb = ProgressBar::new(num_ware as u64);
         pb.set_style(
             ProgressStyle::default_bar()
@@ -297,17 +305,18 @@ impl Load {
             exec.execute_batch(&format!(
                 "insert into warehouse values({}, '{}', '{}', '{}', '{}', '{}', '{}', {}, {})",
                 w_id, w_name, w_street_1, w_street_2, w_city, w_state, w_zip, w_tax, w_ytd,
-            ))?;
-            Self::stock(rng, exec, w_id)?;
-            Self::district(rng, exec, w_id)?;
+            ))
+            .await?;
+            Self::stock(rng, exec, w_id).await?;
+            Self::district(rng, exec, w_id).await?;
 
             pb.set_position(w_id as u64);
         }
         finish_progress(&pb, Some("Warehouses loaded"));
         println!("[Analyze Table: stock]");
-        exec.execute_batch("analyze table stock")?;
+        exec.execute_batch("analyze table stock").await?;
         println!("[Analyze Table: district]");
-        match exec.execute_batch("analyze table district") {
+        match exec.execute_batch("analyze table district").await {
             Ok(_) | Err(TpccError::Database(DatabaseError::TooManyBuckets(..))) => (),
             err => return err,
         };
@@ -315,12 +324,12 @@ impl Load {
         Ok(())
     }
 
-    pub fn load_custs(
+    pub async fn load_custs(
         rng: &mut ThreadRng,
         exec: &mut impl SimpleExecutor,
         num_ware: usize,
     ) -> Result<(), TpccError> {
-        exec.execute_batch("drop table if exists customer;")?;
+        exec.execute_batch("drop table if exists customer;").await?;
         exec.execute_batch(
             "create table customer (
                           c_id int not null,
@@ -345,11 +354,11 @@ impl Load {
                           c_delivery_cnt smallint,
                           c_data text,
                           PRIMARY KEY(c_w_id, c_d_id, c_id) );",
-        )?;
-        exec.execute_batch(
-            "CREATE INDEX idx_customer ON customer (c_w_id,c_d_id,c_last,c_first);",
-        )?;
-        exec.execute_batch("drop table if exists history;")?;
+        )
+        .await?;
+        exec.execute_batch("CREATE INDEX idx_customer ON customer (c_w_id,c_d_id,c_last,c_first);")
+            .await?;
+        exec.execute_batch("drop table if exists history;").await?;
         exec.execute_batch(
             "create table history (
                          h_c_id int,
@@ -361,7 +370,8 @@ impl Load {
                          h_amount decimal(6,2),
                          h_data varchar(24),
                          PRIMARY KEY(h_c_id, h_c_d_id, h_c_w_id, h_d_id, h_w_id, h_date) );",
-        )?;
+        )
+        .await?;
         for w_id in 1..num_ware + 1 {
             for d_id in 1..DIST_PER_WARE + 1 {
                 log_phase(
@@ -370,21 +380,21 @@ impl Load {
                     DIST_PER_WARE,
                     &format!("Warehouse {}/{}", w_id, num_ware),
                 );
-                Self::load_customers(rng, exec, d_id, w_id)?;
+                Self::load_customers(rng, exec, d_id, w_id).await?;
             }
         }
         println!("[Analyze Table: customer]");
-        exec.execute_batch("analyze table customer")?;
+        exec.execute_batch("analyze table customer").await?;
 
         Ok(())
     }
 
-    pub fn load_ord(
+    pub async fn load_ord(
         rng: &mut ThreadRng,
         exec: &mut impl SimpleExecutor,
         num_ware: usize,
     ) -> Result<(), TpccError> {
-        exec.execute_batch("drop table if exists orders;")?;
+        exec.execute_batch("drop table if exists orders;").await?;
         exec.execute_batch(
             "create table orders (
                         o_id int not null,
@@ -396,17 +406,22 @@ impl Load {
                         o_ol_cnt tinyint,
                         o_all_local tinyint,
                         PRIMARY KEY(o_w_id, o_d_id, o_id) );",
-        )?;
-        exec.execute_batch("CREATE INDEX idx_orders ON orders (o_w_id,o_d_id,o_c_id,o_id);")?;
-        exec.execute_batch("drop table if exists new_orders;")?;
+        )
+        .await?;
+        exec.execute_batch("CREATE INDEX idx_orders ON orders (o_w_id,o_d_id,o_c_id,o_id);")
+            .await?;
+        exec.execute_batch("drop table if exists new_orders;")
+            .await?;
         exec.execute_batch(
             "create table new_orders (
                             no_o_id int not null,
                             no_d_id tinyint not null,
                             no_w_id smallint not null,
                             PRIMARY KEY(no_w_id, no_d_id, no_o_id));",
-        )?;
-        exec.execute_batch("drop table if exists order_line;")?;
+        )
+        .await?;
+        exec.execute_batch("drop table if exists order_line;")
+            .await?;
         exec.execute_batch(
             "create table order_line (
                             ol_o_id int not null,
@@ -420,13 +435,16 @@ impl Load {
                             ol_amount decimal(6,2),
                             ol_dist_info char(24),
                             PRIMARY KEY(ol_w_id, ol_d_id, ol_o_id, ol_number) );",
-        )?;
+        )
+        .await?;
         exec.execute_batch(
             "CREATE INDEX fkey_order_line_1 ON order_line (ol_o_id, ol_d_id, ol_w_id);",
-        )?;
+        )
+        .await?;
         exec.execute_batch(
             "CREATE INDEX fkey_order_line_2 ON order_line (ol_supply_w_id, ol_i_id);",
-        )?;
+        )
+        .await?;
         for w_id in 1..num_ware + 1 {
             for d_id in 1..DIST_PER_WARE + 1 {
                 log_phase(
@@ -435,13 +453,13 @@ impl Load {
                     DIST_PER_WARE,
                     &format!("Warehouse {}/{}", w_id, num_ware),
                 );
-                Self::load_orders(rng, exec, d_id, w_id)?;
+                Self::load_orders(rng, exec, d_id, w_id).await?;
             }
         }
         println!("[Analyze Table: orders & order_line & new_order]");
-        exec.execute_batch("analyze table orders")?;
-        exec.execute_batch("analyze table order_line")?;
-        exec.execute_batch("analyze table new_orders")?;
+        exec.execute_batch("analyze table orders").await?;
+        exec.execute_batch("analyze table order_line").await?;
+        exec.execute_batch("analyze table new_orders").await?;
 
         Ok(())
     }
@@ -467,7 +485,7 @@ impl Load {
     /// s_data varchar(50)
     ///
     /// primary key(s_w_id, s_i_id)
-    pub fn stock(
+    pub async fn stock(
         rng: &mut ThreadRng,
         exec: &mut impl SimpleExecutor,
         w_id: usize,
@@ -521,10 +539,10 @@ impl Load {
                 0,
                 0,
                 s_data,
-            ))?;
+            )).await?;
             pb.set_position(s_i_id as u64);
         }
-        batch.flush()?;
+        batch.flush().await?;
         finish_progress(&pb, None);
 
         Ok(())
@@ -564,7 +582,7 @@ impl Load {
     ///
     ///
     /// primary key (d_w_id, d_id)
-    pub fn district(
+    pub async fn district(
         rng: &mut ThreadRng,
         exec: &mut impl SimpleExecutor,
         w_id: usize,
@@ -607,10 +625,10 @@ impl Load {
                 d_tax,
                 d_ytd,
                 d_next_o_id,
-            ))?;
+            )).await?;
             pb.set_position(d_id as u64);
         }
-        batch.flush()?;
+        batch.flush().await?;
         finish_progress(&pb, None);
 
         Ok(())
@@ -653,7 +671,7 @@ impl Load {
     /// h_date timestamp(6)
     /// h_amount decimal(6, 2)
     /// h_data varchar(24)
-    pub fn load_customers(
+    pub async fn load_customers(
         rng: &mut ThreadRng,
         exec: &mut impl SimpleExecutor,
         d_id: usize,
@@ -729,19 +747,21 @@ impl Load {
                 c_payment_cnt,
                 c_delivery_cnt,
                 c_data,
-            ))?;
+            )).await?;
 
             let h_date = &history_date;
             let h_amount = Decimal::from_f64_retain(10.0).unwrap().round_dp(2);
             let h_data = generate_string(rng, 12, 24);
 
-            batch.push(&format!(
-                "insert into history values({}, {}, {}, {}, {}, '{}', {}, '{}')",
-                c_id, c_d_id, c_w_id, c_d_id, c_w_id, h_date, h_amount, h_data,
-            ))?;
+            batch
+                .push(&format!(
+                    "insert into history values({}, {}, {}, {}, {}, '{}', {}, '{}')",
+                    c_id, c_d_id, c_w_id, c_d_id, c_w_id, h_date, h_amount, h_data,
+                ))
+                .await?;
             pb.set_position(c_id as u64);
         }
-        batch.flush()?;
+        batch.flush().await?;
         finish_progress(&pb, None);
 
         Ok(())
@@ -784,7 +804,7 @@ impl Load {
     /// ol_dist_info char(24)
     ///
     /// primary key(ol_w_id, ol_d_id, ol_o_id, ol_number)
-    pub fn load_orders(
+    pub async fn load_orders(
         rng: &mut ThreadRng,
         exec: &mut impl SimpleExecutor,
         d_id: usize,
@@ -812,18 +832,22 @@ impl Load {
             let date = format!("'{}'", Utc::now().format("%Y-%m-%d %H:%M:%S"));
 
             let o_carrier_id = if o_id > 2100 {
-                batch.push(&format!(
-                    "insert into new_orders values({}, {}, {})",
-                    o_id, o_d_id, o_w_id,
-                ))?;
+                batch
+                    .push(&format!(
+                        "insert into new_orders values({}, {}, {})",
+                        o_id, o_d_id, o_w_id,
+                    ))
+                    .await?;
                 "null".to_string()
             } else {
                 o_carrier_id.to_string()
             };
-            batch.push(&format!(
-                "insert into orders values({}, {}, {}, {}, {}, {}, {}, {})",
-                o_id, o_d_id, o_w_id, o_c_id, date, o_carrier_id, o_ol_cnt, "1",
-            ))?;
+            batch
+                .push(&format!(
+                    "insert into orders values({}, {}, {}, {}, {}, {}, {}, {})",
+                    o_id, o_d_id, o_w_id, o_c_id, date, o_carrier_id, o_ol_cnt, "1",
+                ))
+                .await?;
 
             for ol in 1..o_ol_cnt + 1 {
                 let ol_i_id = rng.gen_range(1..MAX_ITEMS);
@@ -836,23 +860,25 @@ impl Load {
                 } else {
                     (date.as_str(), format!("{:.2}", rng.gen_range(0.1..100.0)))
                 };
-                batch.push(&format!(
-                    "insert into order_line values({}, {}, {}, {}, {}, {}, {}, {}, {}, '{}')",
-                    o_id,
-                    o_d_id,
-                    o_w_id,
-                    ol,
-                    ol_i_id,
-                    ol_supply_w_id,
-                    ol_delivery_d,
-                    ol_quantity,
-                    ol_amount,
-                    ol_dist_info,
-                ))?;
+                batch
+                    .push(&format!(
+                        "insert into order_line values({}, {}, {}, {}, {}, {}, {}, {}, {}, '{}')",
+                        o_id,
+                        o_d_id,
+                        o_w_id,
+                        ol,
+                        ol_i_id,
+                        ol_supply_w_id,
+                        ol_delivery_d,
+                        ol_quantity,
+                        ol_amount,
+                        ol_dist_info,
+                    ))
+                    .await?;
             }
             pb.set_position((o_id - 1) as u64);
         }
-        batch.flush()?;
+        batch.flush().await?;
         finish_progress(&pb, None);
 
         Ok(())
@@ -873,20 +899,20 @@ mod tests {
     }
 
     impl SimpleExecutor for RecordingExecutor {
-        fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
+        async fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
             self.calls.borrow_mut().push(sql.to_string());
             Ok(())
         }
     }
 
-    #[test]
-    fn sql_batch_groups_statements() {
+    #[tokio::test]
+    async fn sql_batch_groups_statements() {
         let mut exec = RecordingExecutor::default();
         let mut batch = SqlBatch::new(&mut exec);
 
-        batch.push("insert 1").unwrap();
-        batch.push("insert 2").unwrap();
-        batch.flush().unwrap();
+        batch.push("insert 1").await.unwrap();
+        batch.push("insert 2").await.unwrap();
+        batch.flush().await.unwrap();
 
         assert_eq!(
             exec.calls.into_inner(),
@@ -894,15 +920,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sql_batch_flushes_at_batch_size() {
+    #[tokio::test]
+    async fn sql_batch_flushes_at_batch_size() {
         let mut exec = RecordingExecutor::default();
         let mut batch = SqlBatch::new(&mut exec);
 
         for i in 0..=LOAD_BATCH_SIZE {
-            batch.push(&format!("insert {i}")).unwrap();
+            batch.push(&format!("insert {i}")).await.unwrap();
         }
-        batch.flush().unwrap();
+        batch.flush().await.unwrap();
 
         let calls = exec.calls.into_inner();
         assert_eq!(calls.len(), 2);

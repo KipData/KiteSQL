@@ -1993,6 +1993,7 @@ dependencies = [
  "comfy-table",
  "criterion",
  "csv",
+ "foyer",
  "hashbrown 0.15.4",
  "indicatif",
  "js-sys",
@@ -4149,6 +4150,7 @@ version = "0.1.1"
 dependencies = [
  "chrono",
  "clap",
+ "futures",
  "hdrhistogram",
  "indicatif",
  "kite_sql",
@@ -4156,6 +4158,7 @@ dependencies = [
  "rand 0.8.5",
  "rust_decimal",
  "sqlite",
+ "tokio",
 ]
 
 [[package]]

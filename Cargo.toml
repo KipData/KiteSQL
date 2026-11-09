@@ -43,7 +43,7 @@ spill   = []
 # and `wasm`; pick it in the final application, not in a library.
 async   = []
 # SlateDB storage, on object storage; needs the async path and a tokio runtime.
-slatedb = ["async", "dep:slatedb"]
+slatedb = ["async", "dep:foyer", "dep:slatedb"]
 # SlateDB on Amazon S3 or an S3-compatible store, configured with `S3Config`.
 slatedb-s3 = ["slatedb", "slatedb/aws"]
 wasm    = [
@@ -106,6 +106,8 @@ lmdb = { version = "0.8.0", optional = true }
 lmdb-sys = { version = "0.8.0", optional = true }
 rocksdb = { version = "0.25", optional = true, default-features = false, features = ["bindgen-runtime"] }
 slatedb = { version = "0.18", optional = true, default-features = false, features = ["foyer"] }
+# The disk tier of the SlateDB block cache; the version SlateDB builds its caches on.
+foyer = { version = "0.22", optional = true }
 rustyline = { version = "14", default-features = false, optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

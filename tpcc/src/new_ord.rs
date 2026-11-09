@@ -67,7 +67,7 @@ pub(crate) struct NewOrdTest;
 impl TpccTransaction for NewOrd {
     type Args = NewOrdArgs;
 
-    fn run<T: BackendTransaction>(
+    async fn run<T: BackendTransaction>(
         tx: &mut T,
         args: &Self::Args,
         statements: &mut [T::PreparedStatement],
@@ -100,7 +100,8 @@ impl TpccTransaction for NewOrd {
                     w_tax = tuple[3].decimal().unwrap();
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
 
             (c_discount, c_last, c_credit, w_tax)
         } else {
@@ -121,7 +122,8 @@ impl TpccTransaction for NewOrd {
                     c_credit = tuple[2].utf8().unwrap().to_string();
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
             // "SELECT w_tax FROM warehouse WHERE w_id = ?"
             let mut w_tax = Decimal::default();
             tx.with_query_one(
@@ -131,7 +133,8 @@ impl TpccTransaction for NewOrd {
                     w_tax = tuple[0].decimal().unwrap();
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
 
             (c_discount, c_last, c_credit, w_tax)
         };
@@ -149,7 +152,8 @@ impl TpccTransaction for NewOrd {
                 d_tax = tuple[1].decimal().unwrap();
                 Ok(())
             },
-        )?;
+        )
+        .await?;
         // "UPDATE district SET d_next_o_id = ? + 1 WHERE d_id = ? AND d_w_id = ?"
         tx.execute_drain(
             &mut statements[4],
@@ -158,7 +162,8 @@ impl TpccTransaction for NewOrd {
                 (2, DataValue::Int8(args.d_id as i8).into()),
                 (3, DataValue::Int16(args.w_id as i16).into()),
             ],
-        )?;
+        )
+        .await?;
         let o_id = d_next_o_id;
         // "INSERT INTO orders (o_id, o_d_id, o_w_id, o_c_id, o_entry_d, o_ol_cnt, o_all_local) VALUES(?, ?, ?, ?, ?, ?, ?)"
         tx.execute_drain(
@@ -172,7 +177,8 @@ impl TpccTransaction for NewOrd {
                 (6, DataValue::Int8(args.o_ol_cnt as i8).into()),
                 (7, DataValue::Int8(args.o_all_local as i8).into()),
             ],
-        )?;
+        )
+        .await?;
         // "INSERT INTO new_orders (no_o_id, no_d_id, no_w_id) VALUES (?,?,?)"
         tx.execute_drain(
             &mut statements[6],
@@ -181,7 +187,8 @@ impl TpccTransaction for NewOrd {
                 (2, DataValue::Int8(args.d_id as i8).into()),
                 (3, DataValue::Int16(args.w_id as i16).into()),
             ],
-        )?;
+        )
+        .await?;
         let mut ol_num_seq = vec![0; MAX_NUM_ITEMS];
 
         for i in 0..args.o_ol_cnt {
@@ -219,7 +226,8 @@ impl TpccTransaction for NewOrd {
                 i_name = tuple[1].utf8().unwrap().to_string();
                 i_data = tuple[2].utf8().unwrap().to_string();
                 Ok(())
-            })?;
+            })
+            .await?;
 
             price[ol_num_seq[ol_number - 1]] = i_price;
             iname[ol_num_seq[ol_number - 1]] = i_name;
@@ -255,7 +263,8 @@ impl TpccTransaction for NewOrd {
                 s_dist_09 = tuple[10].utf8().unwrap().to_string();
                 s_dist_10 = tuple[11].utf8().unwrap().to_string();
                 Ok(())
-            })?;
+            })
+            .await?;
 
             let ol_dist_info = pick_dist_info(
                 args.d_id, &s_dist_01, &s_dist_02, &s_dist_03, &s_dist_04, &s_dist_05, &s_dist_06,
@@ -280,7 +289,7 @@ impl TpccTransaction for NewOrd {
                 (2, DataValue::Int32(ol_i_id as i32).into()),
                 (3, DataValue::Int16(ol_supply_w_id as i16).into()),
             ];
-            tx.execute_drain(&mut statements[9], &params)?;
+            tx.execute_drain(&mut statements[9], &params).await?;
 
             // Tips: Integers always have 7 digits, so divide by 10 here
             let mut ol_amount = Decimal::from(ol_quantity)
@@ -304,7 +313,7 @@ impl TpccTransaction for NewOrd {
                 (8, DataValue::Decimal(ol_amount.round_dp(2)).into()),
                 (9, DataValue::from(ol_dist_info).into()),
             ];
-            tx.execute_drain(&mut statements[10], &params)?;
+            tx.execute_drain(&mut statements[10], &params).await?;
         }
 
         Ok(())
@@ -312,7 +321,7 @@ impl TpccTransaction for NewOrd {
 }
 
 impl TpccTest for NewOrdTest {
-    fn do_transaction<T: BackendTransaction>(
+    async fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
         tx: &mut T,
@@ -353,7 +362,7 @@ impl TpccTest for NewOrdTest {
         let args = NewOrdArgs::new(
             args.joins, w_id, d_id, c_id, ol_cnt, all_local, itemid, supware, qty,
         );
-        NewOrd::run(tx, &args, statements)?;
+        NewOrd::run(tx, &args, statements).await?;
 
         Ok(())
     }

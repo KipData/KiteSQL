@@ -358,6 +358,19 @@ impl From<Infallible> for DatabaseError {
 }
 
 impl DatabaseError {
+    pub fn is_conflict(&self) -> bool {
+        match self {
+            #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
+            Self::RocksDB(err) => matches!(
+                err.kind(),
+                rocksdb::ErrorKind::Busy | rocksdb::ErrorKind::TryAgain
+            ),
+            #[cfg(feature = "slatedb")]
+            Self::SlateDB(err) => err.kind() == slatedb::ErrorKind::Transaction,
+            _ => false,
+        }
+    }
+
     pub fn invalid_column(name: impl Into<String>) -> Self {
         Self::InvalidColumn {
             name: name.into(),

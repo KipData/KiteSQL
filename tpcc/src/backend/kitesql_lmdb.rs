@@ -14,13 +14,12 @@
 
 use super::kitesql_rocksdb::{execute_kitesql_batch, KiteSqlTxnResult};
 use super::{
-    BackendControl, BackendTransaction, DbParam, KiteSqlPreparedStatement, SimpleExecutor,
-    StatementSpec,
+    BackendControl, BackendTransaction, DbParam, KiteSqlPreparedStatement, RowVisitor,
+    SimpleExecutor, StatementSpec,
 };
 use crate::TpccError;
 use kite_sql::db::{DataBaseBuilder, Database, Transaction};
 use kite_sql::storage::lmdb::{LmdbStorage, LmdbTransaction as KiteSqlLmdbTransaction};
-use kite_sql::types::tuple::TupleImpl;
 
 pub struct KiteSqlLmdbBackend {
     database: Database<LmdbStorage>,
@@ -94,7 +93,7 @@ impl BackendControl for KiteSqlLmdbBackend {
 }
 
 impl SimpleExecutor for KiteSqlLmdbBackend {
-    fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
+    async fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
         execute_kitesql_batch(&mut self.database, sql)
     }
 }
@@ -107,7 +106,7 @@ impl<'a> KiteSqlLmdbTransactionWrapper<'a> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
         statement: &'b mut KiteSqlPreparedStatement<'a>,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
     ) -> Result<KiteSqlTxnResult<'b, 'a, KiteSqlLmdbTransaction<'a>>, TpccError> {
         Ok(KiteSqlTxnResult(
             statement.program.execute(&mut self.inner, params)?,
@@ -118,44 +117,44 @@ impl<'a> KiteSqlLmdbTransactionWrapper<'a> {
 impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
     type PreparedStatement = KiteSqlPreparedStatement<'a>;
 
-    fn execute_drain(
+    async fn execute_drain(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         while iter.skip_next_tuple()? {}
         Ok(())
     }
 
-    fn with_query_one(
+    async fn with_query_one(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        params: &[DbParam<'_>],
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         iter.with_next_tuple(|tuple| visitor(tuple))?
             .ok_or(TpccError::EmptyTuples)
     }
 
-    fn with_query_all(
+    async fn with_query_all(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        params: &[DbParam<'_>],
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         while iter.with_next_tuple(|tuple| visitor(tuple))?.is_some() {}
         Ok(())
     }
 
-    fn with_query_nth(
+    async fn with_query_nth(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
         n: usize,
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         for _ in 0..n {
@@ -167,7 +166,7 @@ impl<'a> BackendTransaction for KiteSqlLmdbTransactionWrapper<'a> {
             .ok_or(TpccError::EmptyTuples)
     }
 
-    fn commit(self) -> Result<(), TpccError> {
+    async fn commit(self) -> Result<(), TpccError> {
         self.inner.commit()?;
         Ok(())
     }

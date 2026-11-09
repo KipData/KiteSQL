@@ -16,7 +16,7 @@ use super::kitesql_rocksdb::{KiteSqlRocksDbBackend, KiteSqlRocksDbTransaction, K
 use super::sqlite::{SqliteBackend, SqlitePreparedStatement, SqliteResult, SqliteTransaction};
 use super::{
     BackendControl, BackendTransaction, DbParam, KiteSqlPreparedStatement, PreparedStatement,
-    SimpleExecutor, StatementSpec,
+    RowVisitor, SimpleExecutor, StatementSpec,
 };
 use crate::TpccError;
 use kite_sql::types::tuple::TupleImpl;
@@ -106,10 +106,10 @@ impl BackendControl for DualBackend {
 }
 
 impl SimpleExecutor for DualBackend {
-    fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
-        self.kitesql.execute_batch(sql)?;
+    async fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
+        self.kitesql.execute_batch(sql).await?;
         if let Some(stmt) = normalize_sqlite_sql(sql) {
-            self.sqlite.execute_batch(&stmt)?;
+            self.sqlite.execute_batch(&stmt).await?;
         }
         Ok(())
     }
@@ -123,10 +123,10 @@ pub struct DualTransaction<'a> {
 impl<'a> BackendTransaction for DualTransaction<'a> {
     type PreparedStatement = DualPreparedStatement<'a>;
 
-    fn execute_drain(
+    async fn execute_drain(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
     ) -> Result<(), TpccError> {
         let spec = statement.spec.clone();
 
@@ -141,33 +141,35 @@ impl<'a> BackendTransaction for DualTransaction<'a> {
         }
     }
 
-    fn with_query_one(
+    async fn with_query_one(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        params: &[DbParam<'_>],
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
-        self.with_query_nth(statement, params, 0, visitor)
+        self.with_query_nth(statement, params, 0, visitor).await
     }
 
-    fn with_query_all(
+    async fn with_query_all(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        params: &[DbParam<'_>],
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let mut rows = Vec::new();
         self.kitesql
             .with_query_all(&mut statement.kitesql, params, &mut |tuple| {
                 rows.push(tuple.clone());
                 Ok(())
-            })?;
+            })
+            .await?;
         let mut sqlite_rows = Vec::new();
         self.sqlite
             .with_query_all(&mut statement.sqlite, params, &mut |tuple| {
                 sqlite_rows.push(tuple.clone());
                 Ok(())
-            })?;
+            })
+            .await?;
         // SQL without ORDER BY may return the same rows in different orders.
         for row in &rows {
             let Some(index) = sqlite_rows.iter().position(|values| row.values_eq(values)) else {
@@ -190,12 +192,12 @@ impl<'a> BackendTransaction for DualTransaction<'a> {
         Ok(())
     }
 
-    fn with_query_nth(
+    async fn with_query_nth(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
         n: usize,
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let spec = statement.spec.clone();
 
@@ -210,9 +212,9 @@ impl<'a> BackendTransaction for DualTransaction<'a> {
         with_ordered_nth(kitesql_iter, sqlite_iter, spec.sql, n, visitor)
     }
 
-    fn commit(self) -> Result<(), TpccError> {
-        self.sqlite.commit()?;
-        self.kitesql.commit()
+    async fn commit(self) -> Result<(), TpccError> {
+        self.sqlite.commit().await?;
+        self.kitesql.commit().await
     }
 }
 

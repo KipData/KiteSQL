@@ -97,7 +97,7 @@ mod app {
         let path = env::var("KITESQL_S3_PATH").unwrap_or_else(|_| "kitesql/async_s3".to_string());
         println!("opening {path} with {config:?}");
 
-        let storage = SlateDbStorage::open_s3(path.as_str(), &config).await?;
+        let storage = SlateDbStorage::open_s3(path.as_str(), &config, Default::default()).await?;
         let slatedb = storage.db().clone();
         let database = DataBaseBuilder::path(".").build_with_storage(storage)?;
         // The database and its futures are `Send`, so the work can run on any worker thread.
@@ -108,7 +108,7 @@ mod app {
         slatedb.close().await?;
 
         // A new process, or another machine, can open the same data from the bucket.
-        let storage = SlateDbStorage::open_s3(path.as_str(), &config).await?;
+        let storage = SlateDbStorage::open_s3(path.as_str(), &config, Default::default()).await?;
         let slatedb = storage.db().clone();
         let mut database = DataBaseBuilder::path(".").build_with_storage(storage)?;
         database

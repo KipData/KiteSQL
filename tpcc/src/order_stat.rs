@@ -52,7 +52,7 @@ pub(crate) struct OrderStatTest;
 impl TpccTransaction for OrderStat {
     type Args = OrderStatArgs;
 
-    fn run<T: BackendTransaction>(
+    async fn run<T: BackendTransaction>(
         tx: &mut T,
         args: &Self::Args,
         statements: &mut [T::PreparedStatement],
@@ -71,7 +71,8 @@ impl TpccTransaction for OrderStat {
                     name_cnt = tuple[0].i32().unwrap() as usize;
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
             // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_last = ? ORDER BY c_first"
             let params = [
                 (1, DataValue::Int16(args.w_id as i16).into()),
@@ -92,7 +93,8 @@ impl TpccTransaction for OrderStat {
                 c_middle = tuple[2].utf8().unwrap().to_string();
                 c_last = tuple[3].utf8().unwrap().to_string();
                 Ok(())
-            })?;
+            })
+            .await?;
             (c_balance, c_first, c_middle, c_last)
         } else {
             // "SELECT c_balance, c_first, c_middle, c_last FROM customer WHERE c_w_id = ? AND c_d_id = ? AND c_id = ?"
@@ -114,7 +116,8 @@ impl TpccTransaction for OrderStat {
                     c_last = tuple[3].utf8().unwrap().to_string();
                     Ok(())
                 },
-            )?;
+            )
+            .await?;
             (c_balance, c_first, c_middle, c_last)
         };
         // "SELECT o_id, o_entry_d, COALESCE(o_carrier_id,0) FROM orders WHERE o_w_id = ? AND o_d_id = ? AND o_c_id = ? AND o_id = (SELECT MAX(o_id) FROM orders WHERE o_w_id = ? AND o_d_id = ? AND o_c_id = ?)"
@@ -130,14 +133,16 @@ impl TpccTransaction for OrderStat {
         tx.with_query_one(&mut statements[3], &params, &mut |tuple| {
             o_id = tuple[0].i32().unwrap();
             Ok(())
-        })?;
+        })
+        .await?;
         // "SELECT ol_i_id, ol_supply_w_id, ol_quantity, ol_amount, ol_delivery_d FROM order_line WHERE ol_w_id = ? AND ol_d_id = ? AND ol_o_id = ?"
         let params = [
             (1, DataValue::Int16(args.w_id as i16).into()),
             (2, DataValue::Int8(args.d_id as i8).into()),
             (3, DataValue::Int32(o_id).into()),
         ];
-        tx.with_query_one(&mut statements[4], &params, &mut |_| Ok(()))?;
+        tx.with_query_one(&mut statements[4], &params, &mut |_| Ok(()))
+            .await?;
         // let ol_i_id = tuple[0].i32();
         // let ol_supply_w_id = tuple[1].i16();
         // let ol_quantity = tuple[2].i8();
@@ -149,7 +154,7 @@ impl TpccTransaction for OrderStat {
 }
 
 impl TpccTest for OrderStatTest {
-    fn do_transaction<T: BackendTransaction>(
+    async fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
         tx: &mut T,
@@ -164,7 +169,7 @@ impl TpccTest for OrderStatTest {
         let by_name = rng.gen_range(1..100) <= 60;
 
         let args = OrderStatArgs::new(w_id, d_id, by_name, c_id, c_last);
-        OrderStat::run(tx, &args, statements)?;
+        OrderStat::run(tx, &args, statements).await?;
 
         Ok(())
     }

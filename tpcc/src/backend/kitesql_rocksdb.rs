@@ -13,12 +13,11 @@
 // limitations under the License.
 
 use super::{
-    BackendControl, BackendTransaction, DbParam, KiteSqlPreparedStatement, SimpleExecutor,
-    StatementSpec,
+    BackendControl, BackendTransaction, DbParam, KiteSqlBatch, KiteSqlPreparedStatement,
+    RowVisitor, SimpleExecutor, StatementSpec,
 };
 use crate::TpccError;
-use kite_sql::binder::{command_type, CommandType};
-use kite_sql::db::{DataBaseBuilder, Database, ProgramIter, Statement, Transaction};
+use kite_sql::db::{DataBaseBuilder, Database, ProgramIter, Transaction};
 use kite_sql::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
 use kite_sql::storage::{Storage, StorageTransaction};
 use kite_sql::types::tuple::TupleImpl;
@@ -121,7 +120,7 @@ impl<S: Storage + Sync> BackendControl for KiteSqlRocksBackend<S> {
 }
 
 impl<S: Storage> SimpleExecutor for KiteSqlRocksBackend<S> {
-    fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
+    async fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
         execute_kitesql_batch(&mut self.database, sql)
     }
 }
@@ -130,45 +129,25 @@ pub(crate) fn execute_kitesql_batch<S: Storage>(
     database: &mut Database<S>,
     sql: &str,
 ) -> Result<(), TpccError> {
-    let statements = database.prepare_all(sql)?;
-    let all_ddl = statements.iter().try_fold(true, |all_ddl, statement| {
-        Ok::<_, kite_sql::errors::DatabaseError>(
-            all_ddl && matches!(command_type(statement)?, CommandType::DDL),
-        )
-    })?;
-    if all_ddl {
-        database.ddl(sql)?;
-        return Ok(());
-    }
-
-    if statements
-        .iter()
-        .all(|statement| matches!(statement, Statement::Analyze(_)))
-    {
-        for statement in statements {
-            let Statement::Analyze(analyze) = statement else {
-                unreachable!("checked above")
-            };
-            let table_name = analyze.table_name.ok_or_else(|| {
-                kite_sql::errors::DatabaseError::UnsupportedStmt(
-                    "ANALYZE requires table name".to_string(),
-                )
-            })?;
-            let table_name = table_name.to_string();
-            let start = std::time::Instant::now();
-            println!("[KiteSQL Analyze: {table_name}] started");
-            database.analyze(&table_name)?;
-            println!(
-                "[KiteSQL Analyze: {table_name}] completed in {:.2}s",
-                start.elapsed().as_secs_f64()
-            );
+    match KiteSqlBatch::classify(&database.prepare_all(sql)?)? {
+        KiteSqlBatch::Ddl => database.ddl(sql)?,
+        KiteSqlBatch::Analyze(tables) => {
+            for table_name in tables {
+                let start = std::time::Instant::now();
+                println!("[KiteSQL Analyze: {table_name}] started");
+                database.analyze(&table_name)?;
+                println!(
+                    "[KiteSQL Analyze: {table_name}] completed in {:.2}s",
+                    start.elapsed().as_secs_f64()
+                );
+            }
         }
-        return Ok(());
+        KiteSqlBatch::Statements => {
+            let mut transaction = database.new_transaction(false)?;
+            transaction.run(sql)?.done()?;
+            transaction.commit()?;
+        }
     }
-
-    let mut transaction = database.new_transaction(false)?;
-    transaction.run(sql)?.done()?;
-    transaction.commit()?;
     Ok(())
 }
 
@@ -180,7 +159,7 @@ impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
         statement: &'b mut KiteSqlPreparedStatement<'a>,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
     ) -> Result<KiteSqlTxnResult<'b, 'a, S::TransactionType<'a>>, TpccError> {
         Ok(KiteSqlTxnResult(
             statement.program.execute(&mut self.inner, params)?,
@@ -191,44 +170,44 @@ impl<'a, S: Storage> KiteSqlRocksTransaction<'a, S> {
 impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
     type PreparedStatement = KiteSqlPreparedStatement<'a>;
 
-    fn execute_drain(
+    async fn execute_drain(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         while iter.skip_next_tuple()? {}
         Ok(())
     }
 
-    fn with_query_one(
+    async fn with_query_one(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        params: &[DbParam<'_>],
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         iter.with_next_tuple(|tuple| visitor(tuple))?
             .ok_or(TpccError::EmptyTuples)
     }
 
-    fn with_query_all(
+    async fn with_query_all(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        params: &[DbParam<'_>],
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         while iter.with_next_tuple(|tuple| visitor(tuple))?.is_some() {}
         Ok(())
     }
 
-    fn with_query_nth(
+    async fn with_query_nth(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
         n: usize,
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         for _ in 0..n {
@@ -240,7 +219,7 @@ impl<'a, S: Storage> BackendTransaction for KiteSqlRocksTransaction<'a, S> {
             .ok_or(TpccError::EmptyTuples)
     }
 
-    fn commit(self) -> Result<(), TpccError> {
+    async fn commit(self) -> Result<(), TpccError> {
         self.inner.commit()?;
         Ok(())
     }

@@ -13,12 +13,13 @@
 // limitations under the License.
 
 use super::{
-    BackendControl, BackendTransaction, DbParam, PreparedStatement, SimpleExecutor, StatementSpec,
+    BackendControl, BackendTransaction, DbParam, PreparedStatement, RowVisitor, SimpleExecutor,
+    StatementSpec,
 };
 use crate::TpccError;
 use chrono::{NaiveDateTime, TimeZone, Utc};
 use kite_sql::db::Param;
-use kite_sql::types::tuple::{Tuple, TupleImpl};
+use kite_sql::types::tuple::Tuple;
 use kite_sql::types::value::{DataValue, Utf8Type};
 use kite_sql::types::{CharLengthUnits, LogicalType};
 use rust_decimal::Decimal;
@@ -37,6 +38,7 @@ impl SqliteBackend {
         Ok(Self { connection, path })
     }
 
+    #[cfg_attr(not(feature = "kitesql-sync"), allow(dead_code))]
     pub fn new_memory() -> Result<Self, TpccError> {
         let connection = Connection::open(":memory:")?;
         configure_sqlite(&connection, false)?;
@@ -113,7 +115,7 @@ impl BackendControl for SqliteBackend {
 }
 
 impl SimpleExecutor for SqliteBackend {
-    fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
+    async fn execute_batch(&mut self, sql: &str) -> Result<(), TpccError> {
         if let Some(stmt) = normalize_sqlite_sql(sql) {
             self.connection.execute(&stmt)?;
         }
@@ -141,7 +143,7 @@ impl<'a> SqliteTransaction<'a> {
     pub(crate) fn execute_raw<'b>(
         &'b mut self,
         statement: &'b mut SqlitePreparedStatement<'a>,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
     ) -> Result<SqliteResult<'b, 'a>, TpccError> {
         statement.statement.reset()?;
         bind_params(&mut statement.statement, params)?;
@@ -160,10 +162,10 @@ impl Drop for SqliteTransaction<'_> {
 impl<'a> BackendTransaction for SqliteTransaction<'a> {
     type PreparedStatement = SqlitePreparedStatement<'a>;
 
-    fn execute_drain(
+    async fn execute_drain(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         while let Some(row) = iter.next() {
@@ -172,22 +174,22 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
         Ok(())
     }
 
-    fn with_query_one(
+    async fn with_query_one(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        params: &[DbParam<'_>],
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         let tuple = iter.next().transpose()?.ok_or(TpccError::EmptyTuples)?;
         visitor(&tuple.into())
     }
 
-    fn with_query_all(
+    async fn with_query_all(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        params: &[DbParam<'_>],
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let iter = self.execute_raw(statement, params)?;
         for row in iter {
@@ -196,12 +198,12 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
         Ok(())
     }
 
-    fn with_query_nth(
+    async fn with_query_nth(
         &mut self,
         statement: &mut Self::PreparedStatement,
-        params: &[DbParam],
+        params: &[DbParam<'_>],
         n: usize,
-        visitor: &mut dyn FnMut(&TupleImpl) -> Result<(), TpccError>,
+        visitor: RowVisitor<'_>,
     ) -> Result<(), TpccError> {
         let mut iter = self.execute_raw(statement, params)?;
         for _ in 0..n {
@@ -213,7 +215,7 @@ impl<'a> BackendTransaction for SqliteTransaction<'a> {
         visitor(&tuple.into())
     }
 
-    fn commit(mut self) -> Result<(), TpccError> {
+    async fn commit(mut self) -> Result<(), TpccError> {
         self.connection.execute("COMMIT")?;
         self.finished = true;
         Ok(())

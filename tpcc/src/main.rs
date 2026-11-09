@@ -12,9 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "kitesql-sync")]
 use crate::backend::dual::DualBackend;
+#[cfg(feature = "kitesql-sync")]
 use crate::backend::kitesql_lmdb::KiteSqlLmdbBackend;
+#[cfg(feature = "kitesql-sync")]
 use crate::backend::kitesql_rocksdb::{KiteSqlOptimisticRocksDbBackend, KiteSqlRocksDbBackend};
+#[cfg(feature = "slatedb-s3")]
+use crate::backend::kitesql_slatedb::KiteSqlSlateDbBackend;
 use crate::backend::sqlite::SqliteBackend;
 use crate::backend::{BackendControl, BackendTransaction, StatementSpec};
 use crate::delivery::DeliveryTest;
@@ -28,6 +33,8 @@ use crate::utils::SeqGen;
 use clap::{Parser, ValueEnum};
 use indicatif::{ProgressBar, ProgressStyle};
 use kite_sql::errors::DatabaseError;
+#[cfg(feature = "slatedb-s3")]
+use kite_sql::storage::slatedb::{SlateDbCacheOptions, SlateDbDiskCache};
 use kite_sql::types::LogicalType;
 #[cfg(all(unix, feature = "pprof"))]
 use pprof::ProfilerGuard;
@@ -38,10 +45,11 @@ use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::path::Path;
-#[cfg(any(feature = "pprof", test))]
+#[cfg(any(feature = "pprof", feature = "slatedb-s3", test))]
 use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
+use tokio::runtime::Runtime;
 
 mod backend;
 mod delivery;
@@ -74,7 +82,7 @@ const TX_NAMES: [&str; 5] = [
 pub(crate) trait TpccTransaction {
     type Args;
 
-    fn run<T: BackendTransaction>(
+    async fn run<T: BackendTransaction>(
         tx: &mut T,
         args: &Self::Args,
         statements: &mut [T::PreparedStatement],
@@ -82,7 +90,7 @@ pub(crate) trait TpccTransaction {
 }
 
 pub(crate) trait TpccTest {
-    fn do_transaction<T: BackendTransaction>(
+    async fn do_transaction<T: BackendTransaction>(
         &self,
         rng: &mut ThreadRng,
         tx: &mut T,
@@ -104,7 +112,14 @@ struct Args {
     joins: bool,
     #[clap(long, default_value = "kite_sql_tpcc")]
     path: String,
-    #[clap(long, value_enum, default_value = "kitesql-lmdb")]
+    #[cfg_attr(
+        feature = "kitesql-sync",
+        clap(long, value_enum, default_value = "kitesql-lmdb")
+    )]
+    #[cfg_attr(
+        not(feature = "kitesql-sync"),
+        clap(long, value_enum, default_value = "kitesql-slatedb-s3")
+    )]
     backend: BackendKind,
     #[clap(long, default_value = "5")]
     max_retry: usize,
@@ -112,13 +127,36 @@ struct Args {
     measure_time: u64,
     #[clap(long, default_value = "1")]
     num_ware: usize,
-    /// Concurrent terminals, each on its own connection.
     #[clap(long, default_value = "1")]
     threads: usize,
+    /// Concurrent terminals, `--threads` by default. Thread `t` runs terminals `t`,
+    /// `t + threads`, ...; terminal `i` has home warehouse `i % num_ware + 1`. More terminals than
+    /// threads needs an async storage, whose terminals overlap their waits on one thread.
+    #[clap(long)]
+    terminals: Option<usize>,
     #[clap(long, default_value = "false")]
     rocksdb_stats: bool,
     #[clap(long, default_value = "false")]
     sync: bool,
+    #[cfg(feature = "slatedb-s3")]
+    #[clap(long)]
+    s3_bucket: Option<String>,
+    #[cfg(feature = "slatedb-s3")]
+    #[clap(long)]
+    s3_endpoint: Option<String>,
+    #[cfg(feature = "slatedb-s3")]
+    #[clap(long, default_value = "false")]
+    s3_allow_http: bool,
+    #[cfg(feature = "slatedb-s3")]
+    #[clap(long, default_value = "4096")]
+    slatedb_memory_cache_mb: u64,
+    #[cfg(feature = "slatedb-s3")]
+    #[clap(long, default_value = "kite_sql_tpcc_cache")]
+    slatedb_disk_cache: PathBuf,
+    /// 0 turns the disk cache off. Its files grow as they fill, so a large capacity is cheap.
+    #[cfg(feature = "slatedb-s3")]
+    #[clap(long, default_value = "65536")]
+    slatedb_disk_cache_mb: usize,
     #[cfg(feature = "pprof")]
     #[clap(long)]
     pprof_output: Option<PathBuf>,
@@ -129,46 +167,104 @@ struct Args {
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum BackendKind {
+    #[cfg(feature = "kitesql-sync")]
     KitesqlRocksdb,
+    #[cfg(feature = "kitesql-sync")]
     KitesqlOptimisticRocksdb,
+    #[cfg(feature = "kitesql-sync")]
     KitesqlLmdb,
+    #[cfg(feature = "slatedb-s3")]
+    KitesqlSlatedbS3,
     Sqlite,
+    #[cfg(feature = "kitesql-sync")]
     Dual,
 }
 
 fn main() -> Result<(), TpccError> {
     let args = Args::parse();
     let mut rng = rand::thread_rng();
+    // The workload is async; each terminal thread drives its transactions with `block_on`.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
 
     match args.backend {
+        #[cfg(feature = "kitesql-sync")]
         BackendKind::KitesqlRocksdb => {
             reset_db_path(Path::new(&args.path))?;
             let mut backend =
                 KiteSqlRocksDbBackend::new(&args.path, args.rocksdb_stats, args.sync)?;
-            run_tpcc(&mut backend, &args, &mut rng)
+            run_tpcc(&mut backend, &args, &mut rng, &runtime)
         }
+        #[cfg(feature = "kitesql-sync")]
         BackendKind::KitesqlOptimisticRocksdb => {
             reset_db_path(Path::new(&args.path))?;
             let mut backend =
                 KiteSqlOptimisticRocksDbBackend::new(&args.path, args.rocksdb_stats, args.sync)?;
-            run_tpcc(&mut backend, &args, &mut rng)
+            run_tpcc(&mut backend, &args, &mut rng, &runtime)
         }
+        #[cfg(feature = "kitesql-sync")]
         BackendKind::KitesqlLmdb => {
             reset_db_path(Path::new(&args.path))?;
             let mut backend = KiteSqlLmdbBackend::new(&args.path, args.sync)?;
-            run_tpcc(&mut backend, &args, &mut rng)
+            run_tpcc(&mut backend, &args, &mut rng, &runtime)
+        }
+        #[cfg(feature = "slatedb-s3")]
+        BackendKind::KitesqlSlatedbS3 => {
+            let config =
+                kite_sql::storage::slatedb::S3Config {
+                    endpoint: args.s3_endpoint.clone(),
+                    allow_http: args.s3_allow_http,
+                    ..kite_sql::storage::slatedb::S3Config::new(args.s3_bucket.clone().ok_or_else(
+                        || TpccError::InvalidArgs("--s3-bucket is required".to_string()),
+                    )?)
+                };
+            let run = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|err| TpccError::InvalidArgs(err.to_string()))?
+                .as_millis();
+            let path = format!("{}/{run}", args.path);
+            println!("[SlateDB] s3://{}/{path}", config.bucket);
+            let cache = slatedb_cache_options(&args)?;
+            let mut backend =
+                runtime.block_on(KiteSqlSlateDbBackend::new(&path, &config, args.sync, cache))?;
+            let result = run_tpcc(&mut backend, &args, &mut rng, &runtime);
+            runtime.block_on(backend.close())?;
+            result
         }
         BackendKind::Sqlite => {
             reset_db_path(Path::new(&args.path))?;
             let mut backend = SqliteBackend::new(&args.path, args.sync)?;
-            run_tpcc(&mut backend, &args, &mut rng)
+            run_tpcc(&mut backend, &args, &mut rng, &runtime)
         }
+        #[cfg(feature = "kitesql-sync")]
         BackendKind::Dual => {
             reset_db_path(Path::new(&args.path))?;
             let mut backend = DualBackend::new(&args.path, args.rocksdb_stats)?;
-            run_tpcc(&mut backend, &args, &mut rng)
+            run_tpcc(&mut backend, &args, &mut rng, &runtime)
         }
     }
+}
+
+/// The SlateDB block cache: memory, a local disk tier, and the blocks compactions write, which
+/// would otherwise leave the cache as the load compacts.
+#[cfg(feature = "slatedb-s3")]
+fn slatedb_cache_options(args: &Args) -> Result<SlateDbCacheOptions, TpccError> {
+    let disk = if args.slatedb_disk_cache_mb == 0 {
+        None
+    } else {
+        // What a previous run left belongs to a database no run reads again.
+        reset_db_path(&args.slatedb_disk_cache)?;
+        Some(SlateDbDiskCache {
+            dir: args.slatedb_disk_cache.clone(),
+            capacity_bytes: args.slatedb_disk_cache_mb << 20,
+        })
+    };
+    Ok(SlateDbCacheOptions {
+        memory_bytes: Some(args.slatedb_memory_cache_mb << 20),
+        disk,
+        cache_compaction_output: true,
+    })
 }
 
 fn reset_db_path(path: &Path) -> Result<(), TpccError> {
@@ -189,12 +285,27 @@ fn run_tpcc<B: BackendControl>(
     backend: &mut B,
     args: &Args,
     rng: &mut ThreadRng,
+    runtime: &Runtime,
 ) -> Result<(), TpccError> {
-    Load::load_items(rng, backend)?;
-    Load::load_warehouses(rng, backend, args.num_ware)?;
-    Load::load_custs(rng, backend, args.num_ware)?;
-    Load::load_ord(rng, backend, args.num_ware)?;
+    runtime.block_on(async {
+        Load::load_items(rng, backend).await?;
+        Load::load_warehouses(rng, backend, args.num_ware).await?;
+        Load::load_custs(rng, backend, args.num_ware).await?;
+        Load::load_ord(rng, backend, args.num_ware).await
+    })?;
     let backend = &*backend;
+    let terminals = args.terminals.unwrap_or(args.threads);
+    if terminals < args.threads {
+        return Err(TpccError::InvalidArgs(format!(
+            "--terminals {terminals} is less than --threads {}",
+            args.threads
+        )));
+    }
+    if terminals != args.threads && !backend.is_async() {
+        return Err(TpccError::InvalidArgs(
+            "more terminals than threads needs an async storage".to_string(),
+        ));
+    }
 
     let tpcc_start = Instant::now();
     #[cfg(all(unix, feature = "pprof"))]
@@ -204,25 +315,19 @@ fn run_tpcc<B: BackendControl>(
             .map(|thread_id| {
                 let worker = backend.worker()?;
                 Ok(scope.spawn(move || {
-                    measure(
+                    runtime.block_on(run_terminals(
                         worker.borrow(),
                         args,
                         thread_id,
+                        terminals,
                         tpcc_start,
-                        ProgressBar::hidden(),
-                    )
+                    ))
                 }))
             })
             .collect::<Result<Vec<_>, TpccError>>()?;
-        let mut total = measure(backend, args, 0, tpcc_start, ProgressBar::new_spinner())?;
+        let mut total = runtime.block_on(run_terminals(backend, args, 0, terminals, tpcc_start))?;
         for thread in threads {
-            let (success, late, failure, rt_hist) = thread.join().expect("tpcc thread panicked")?;
-            for i in 0..5 {
-                total.0[i] += success[i];
-                total.1[i] += late[i];
-                total.2[i] += failure[i];
-            }
-            total.3.merge(&rt_hist);
+            total.merge(&thread.join().expect("tpcc thread panicked")?);
         }
         Ok::<_, TpccError>(total)
     })?;
@@ -234,12 +339,58 @@ fn run_tpcc<B: BackendControl>(
     Ok(())
 }
 
-type Counters = ([usize; 5], [usize; 5], [usize; 5], RtHist);
+struct Counters {
+    success: [usize; 5],
+    late: [usize; 5],
+    failure: [usize; 5],
+    conflict: [usize; 5],
+    rt_hist: RtHist,
+}
 
-fn measure<B: BackendControl>(
+impl Counters {
+    fn merge(&mut self, other: &Counters) {
+        for i in 0..5 {
+            self.success[i] += other.success[i];
+            self.late[i] += other.late[i];
+            self.failure[i] += other.failure[i];
+            self.conflict[i] += other.conflict[i];
+        }
+        self.rt_hist.merge(&other.rt_hist);
+    }
+}
+
+async fn run_terminals<B: BackendControl>(
     backend: &B,
     args: &Args,
     thread_id: usize,
+    terminals: usize,
+    tpcc_start: Instant,
+) -> Result<Counters, TpccError> {
+    let runs = (thread_id..terminals)
+        .step_by(args.threads)
+        .map(|terminal_id| {
+            let progress = if terminal_id == 0 {
+                ProgressBar::new_spinner()
+            } else {
+                ProgressBar::hidden()
+            };
+            measure(backend, args, terminal_id, tpcc_start, progress)
+        });
+    let mut counters = futures::future::try_join_all(runs).await?.into_iter();
+    let mut total = counters
+        .next()
+        .expect("a thread runs at least one terminal");
+    for other in counters {
+        total.merge(&other);
+    }
+    Ok(total)
+}
+
+/// Runs terminal `terminal_id`, whose home warehouse is `terminal_id % num_ware + 1`.
+async fn measure<B: BackendControl>(
+    backend: &B,
+    args: &Args,
+    terminal_id: usize,
     tpcc_start: Instant,
     progress: ProgressBar,
 ) -> Result<Counters, TpccError> {
@@ -251,9 +402,10 @@ fn measure<B: BackendControl>(
     let mut success = [0usize; 5];
     let mut late = [0usize; 5];
     let mut failure = [0usize; 5];
+    let mut conflict = [0usize; 5];
     let tpcc_args = TpccArgs {
         joins: args.joins,
-        home_ware: thread_id % args.num_ware + 1,
+        home_ware: terminal_id % args.num_ware + 1,
     };
 
     let duration = Duration::new(args.measure_time, 0);
@@ -274,41 +426,47 @@ fn measure<B: BackendControl>(
         let i = seq_gen.get();
         let statement = &mut test_statements[i];
 
-        let mut is_succeed = false;
-        let mut last_error = None;
-        for _attempt in 0..=args.max_retry {
-            let transaction_start = Instant::now();
+        // The response time covers the retries too.
+        let transaction_start = Instant::now();
+        for attempt in 0..=args.max_retry {
             let mut tx = backend.new_transaction(TX_READ_ONLY[i])?;
 
-            if let Err(err) =
+            let result = async {
                 do_tpcc_transaction::<B>(i, rng, &mut tx, args.num_ware, &tpcc_args, statement)
-                    .and_then(|()| tx.commit())
-            {
-                failure[i] += 1;
-                last_error = Some(err);
-            } else {
-                let rt = transaction_start.elapsed();
-                rt_hist.hist_inc(i, rt);
-                is_succeed = true;
+                    .await?;
+                tx.commit().await
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    let rt = transaction_start.elapsed();
+                    rt_hist.hist_inc(i, rt);
 
-                if rt <= RT_LIMITS[i] {
-                    success[i] += 1;
-                } else {
-                    late[i] += 1;
+                    if rt <= RT_LIMITS[i] {
+                        success[i] += 1;
+                    } else {
+                        late[i] += 1;
+                    }
+                    break;
                 }
-                break;
+                Err(err) if attempt == args.max_retry => {
+                    eprintln!(
+                        "[{}] Error after {} retries: {}",
+                        tpcc_test_name(i),
+                        args.max_retry,
+                        err
+                    );
+                    return Err(TpccError::MaxRetry);
+                }
+                Err(err) if err.is_conflict() => {
+                    conflict[i] += 1;
+                    // Backs off for a random, growing while, so that conflicting terminals
+                    // spread out instead of colliding again.
+                    let max_us = 1000u64 << attempt.min(6);
+                    tokio::time::sleep(Duration::from_micros(rng.gen_range(0..=max_us))).await;
+                }
+                Err(_) => failure[i] += 1,
             }
-        }
-        if !is_succeed {
-            if let Some(err) = last_error {
-                eprintln!(
-                    "[{}] Error after {} retries: {}",
-                    tpcc_test_name(i),
-                    args.max_retry,
-                    err
-                );
-            }
-            return Err(TpccError::MaxRetry);
         }
         update_progress_bar(
             &progress,
@@ -336,16 +494,28 @@ fn measure<B: BackendControl>(
         round_count += 1;
     }
     progress.finish_and_clear();
-    Ok((success, late, failure, rt_hist))
+    Ok(Counters {
+        success,
+        late,
+        failure,
+        conflict,
+        rt_hist,
+    })
 }
 
 fn report<B: BackendControl>(
     backend: &B,
-    (success, late, failure, rt_hist): Counters,
+    Counters {
+        success,
+        late,
+        failure,
+        conflict,
+        rt_hist,
+    }: Counters,
     tpcc_start: Instant,
 ) -> Result<(), TpccError> {
     let actual_tpcc_time = tpcc_start.elapsed();
-    print_summary_table(&success, &late, &failure, actual_tpcc_time);
+    print_summary_table(&success, &late, &failure, &conflict, actual_tpcc_time);
     print_constraint_checks(&success, &late);
     print_response_checks(&success, &late);
     println!();
@@ -365,7 +535,7 @@ fn tpcc_test_name(index: usize) -> &'static str {
     TX_NAMES[index]
 }
 
-fn do_tpcc_transaction<'a, B: BackendControl>(
+async fn do_tpcc_transaction<'a, B: BackendControl>(
     index: usize,
     rng: &mut ThreadRng,
     tx: &mut B::Transaction<'a>,
@@ -374,11 +544,31 @@ fn do_tpcc_transaction<'a, B: BackendControl>(
     statements: &mut [B::PreparedStatement<'a>],
 ) -> Result<(), TpccError> {
     match index {
-        0 => NewOrdTest.do_transaction(rng, tx, num_ware, args, statements),
-        1 => PaymentTest.do_transaction(rng, tx, num_ware, args, statements),
-        2 => OrderStatTest.do_transaction(rng, tx, num_ware, args, statements),
-        3 => DeliveryTest.do_transaction(rng, tx, num_ware, args, statements),
-        4 => SlevTest.do_transaction(rng, tx, num_ware, args, statements),
+        0 => {
+            NewOrdTest
+                .do_transaction(rng, tx, num_ware, args, statements)
+                .await
+        }
+        1 => {
+            PaymentTest
+                .do_transaction(rng, tx, num_ware, args, statements)
+                .await
+        }
+        2 => {
+            OrderStatTest
+                .do_transaction(rng, tx, num_ware, args, statements)
+                .await
+        }
+        3 => {
+            DeliveryTest
+                .do_transaction(rng, tx, num_ware, args, statements)
+                .await
+        }
+        4 => {
+            SlevTest
+                .do_transaction(rng, tx, num_ware, args, statements)
+                .await
+        }
         _ => Err(TpccError::InvalidTransaction),
     }
 }
@@ -704,23 +894,29 @@ fn stmt(
     }
 }
 
-fn print_summary_table(success: &[usize], late: &[usize], failure: &[usize], elapsed: Duration) {
-    println!("---------------------------------------------------");
+fn print_summary_table(
+    success: &[usize],
+    late: &[usize],
+    failure: &[usize],
+    conflict: &[usize],
+    elapsed: Duration,
+) {
+    println!("--------------------------------------------------------------");
     println!(
         "Transaction Summary (elapsed {:.1}s)",
         elapsed.as_secs_f32()
     );
-    println!("+--------------+---------+------+---------+-------+");
-    println!("| Transaction  | Success | Late | Failure | Total |");
-    println!("+--------------+---------+------+---------+-------+");
+    println!("+--------------+---------+------+---------+----------+-------+");
+    println!("| Transaction  | Success | Late | Failure | Conflict | Total |");
+    println!("+--------------+---------+------+---------+----------+-------+");
     for (idx, name) in TX_NAMES.iter().enumerate() {
-        let total = success[idx] + late[idx] + failure[idx];
+        let total = success[idx] + late[idx] + failure[idx] + conflict[idx];
         println!(
-            "| {:<12} | {:>7} | {:>4} | {:>7} | {:>5} |",
-            name, success[idx], late[idx], failure[idx], total
+            "| {:<12} | {:>7} | {:>4} | {:>7} | {:>8} | {:>5} |",
+            name, success[idx], late[idx], failure[idx], conflict[idx], total
         );
     }
-    println!("+--------------+---------+------+---------+-------+");
+    println!("+--------------+---------+------+---------+----------+-------+");
 }
 
 fn print_constraint_checks(success: &[usize], late: &[usize]) {
@@ -855,6 +1051,7 @@ pub enum TpccError {
     InvalidTransaction,
     InvalidParameter,
     InvalidDateTime,
+    InvalidArgs(String),
     BackendMismatch(String),
     Profile(String),
 }
@@ -873,9 +1070,16 @@ impl fmt::Display for TpccError {
             Self::InvalidTransaction => f.write_str("invalid transaction index"),
             Self::InvalidParameter => f.write_str("invalid parameter name"),
             Self::InvalidDateTime => f.write_str("invalid datetime value"),
+            Self::InvalidArgs(value) => write!(f, "invalid arguments: {value}"),
             Self::BackendMismatch(value) => write!(f, "backend mismatch: {value}"),
             Self::Profile(value) => write!(f, "profile error: {value}"),
         }
+    }
+}
+
+impl TpccError {
+    fn is_conflict(&self) -> bool {
+        matches!(self, Self::Database(err) if err.is_conflict())
     }
 }
 
