@@ -53,20 +53,36 @@ fn main() {
             &args.path,
         )
     };
-    // The async path, over a memory storage whose every read suspends once.
+    // The async path, over SlateDB on an in-memory object store. SlateDB runs its background work
+    // on tokio, so the tests run inside a tokio runtime.
     #[cfg(feature = "async")]
     let file_num = {
-        let storage = kite_sql::storage::memory::MemoryStorage::new();
-        let reads = storage.clone();
-        let file_num = run_files(
+        use kite_sql::storage::slatedb::SlateDbStorage;
+        use slatedb::object_store::memory::InMemory;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let runtime = tokio::runtime::Runtime::new().expect("failed to start tokio");
+        let _runtime = runtime.enter();
+        let settings = slatedb::Settings {
+            flush_interval: Some(Duration::from_millis(1)),
+            ..Default::default()
+        };
+        let db = runtime
+            .block_on(
+                slatedb::Db::builder("kitesql-slt", Arc::new(InMemory::new()))
+                    .with_settings(settings)
+                    .build(),
+            )
+            .expect("failed to open slatedb");
+        let storage = SlateDbStorage::new(Arc::new(db));
+        run_files(
             Runner::new(move || {
                 let db = DataBaseBuilder::path(".").build_with_storage(storage.clone());
                 std::future::ready(db.map(|db| SQLBase { db }))
             }),
             &args.path,
-        );
-        println!("|- Suspended reads: {}", reads.suspensions());
-        file_num
+        )
     };
     println!("Passed all tests for a total of {} files!!!", file_num + 1);
     println!("|- Total time spent: {:?}", start.elapsed());

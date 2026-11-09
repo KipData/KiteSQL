@@ -44,7 +44,7 @@ MIRI_FEATURES ?= spill,decimal,lmdb
 MIRI_TESTS ?= types::tuple:: execution::test::
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
-.PHONY: test test-async test-python test-wasm test-slt test-slt-async test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz miri
+.PHONY: test test-async test-slatedb test-python test-wasm test-slt test-slt-async test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz miri
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -53,6 +53,10 @@ test:
 ## Run the same unit tests through the async path (`async` feature, memory storage).
 test-async:
 	$(CARGO) test -p kite_sql --lib --no-default-features --features $(ASYNC_FEATURES)
+
+## Run the SlateDB storage unit tests (async path, in-memory object store, S3 config).
+test-slatedb:
+	$(CARGO) test -p kite_sql --lib --no-default-features --features $(ASYNC_FEATURES),slatedb-s3 storage::slatedb
 
 ## Run Python binding API tests implemented with pyo3.
 test-python:
@@ -78,7 +82,7 @@ test-wasm:
 test-slt:
 	$(CARGO) run -p sqllogictest-test -- --path '$(SQLLOGIC_PATH)'
 
-## Run the sqllogictest suite through the async path.
+## Run the sqllogictest suite through the async path, over SlateDB (in-memory object store).
 test-slt-async:
 	$(CARGO) run -p sqllogictest-test --no-default-features --features async -- --path '$(SQLLOGIC_PATH)'
 
@@ -89,7 +93,7 @@ test-slt-sqlite:
 	$(CARGO) run --release -p sqllogictest-test --bin sqlite -- --path '$(SQLITE_LOGIC_PATH)' $(SQLITE_LOGIC_ARGS)
 
 ## Convenience target to run every suite in sequence.
-test-all: test test-async test-wasm test-slt test-slt-async test-python
+test-all: test test-async test-slatedb test-wasm test-slt test-slt-async test-python
 
 ## Generate an lcov coverage report for Codecov upload.
 codecov:
@@ -138,6 +142,8 @@ fmt:
 clippy:
 	$(CARGO) clippy --all-targets --features $(SYNC_FEATURES) -- -D warnings
 	$(CARGO) clippy --all-targets --no-default-features --features $(ASYNC_FEATURES) -- -D warnings
+	$(CARGO) clippy --all-targets --no-default-features --features $(ASYNC_FEATURES),slatedb-s3 -- -D warnings
+	$(CARGO) clippy -p sqllogictest-test --all-targets --no-default-features --features async -- -D warnings
 
 ## Run formatting (check mode) and clippy linting together.
 check: fmt clippy
@@ -184,4 +190,3 @@ native-examples:
 	$(CARGO) run --example hello_world
 	$(CARGO) run --example transaction
 	$(CARGO) run --example program
-	$(CARGO) run --example async_hello_world --no-default-features --features async,orm

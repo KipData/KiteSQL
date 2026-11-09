@@ -17,6 +17,8 @@ pub mod lmdb;
 pub mod memory;
 #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
 pub mod rocksdb;
+#[cfg(feature = "slatedb")]
+pub mod slatedb;
 pub(crate) mod table_codec;
 
 use crate::catalog::view::View;
