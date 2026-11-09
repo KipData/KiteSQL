@@ -77,7 +77,7 @@ bumpalo               = { version = "3", default-features = false, features = ["
 hashbrown             = { version = "0.15", default-features = false }
 ordered-float         = { version = "4" }
 paste                 = { version = "1" }
-kite_sql_serde_macros = { version = "0.2.6", path = "kite_sql_serde_macros" }
+kite_sql_serde_macros = { version = "0.2.7", path = "kite_sql_serde_macros" }
 
 # Optional dependencies for features
 comfy-table           = { version = "7", default-features = false, optional = true }
