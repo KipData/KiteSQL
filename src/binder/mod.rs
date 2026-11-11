@@ -187,7 +187,7 @@ impl BoundSource<'_> {
 
 #[derive(Clone)]
 pub(crate) struct UsingColumn {
-    join_type: JoinType,
+    _join_type: JoinType,
     left_column: ColumnRef,
     left_position: usize,
     right_column: ColumnRef,
@@ -203,7 +203,7 @@ impl UsingColumn {
         right_position: usize,
     ) -> Self {
         Self {
-            join_type,
+            _join_type: join_type,
             left_column,
             left_position,
             right_column,
@@ -223,31 +223,20 @@ impl UsingColumn {
         &self,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        match self.join_type {
-            JoinType::RightOuter => Ok(self.right_expr()),
-            JoinType::Full => {
-                let left_expr = arena.alloc_expression(self.left_expr());
-                let right_expr = arena.alloc_expression(self.right_expr());
-                let left_ty = left_expr.return_type(arena);
-                let right_ty = right_expr.return_type(arena);
-                let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
+        let left_expr = arena.alloc_expression(self.left_expr());
+        let right_expr = arena.alloc_expression(self.right_expr());
+        let left_ty = left_expr.return_type(arena);
+        let right_ty = right_expr.return_type(arena);
+        let ty = LogicalType::max_logical_type(&left_ty, &right_ty)?.into_owned();
 
-                Ok(ScalarExpression::Coalesce {
-                    exprs: vec![left_expr, right_expr],
-                    ty,
-                })
-            }
-            JoinType::Inner | JoinType::LeftOuter | JoinType::Cross => Ok(self.left_expr()),
-        }
+        Ok(ScalarExpression::Coalesce {
+            exprs: vec![left_expr, right_expr],
+            ty,
+        })
     }
 
     pub(crate) fn hides_column(&self, column: &ColumnRef, arena: &PlanArena) -> bool {
-        let hidden_column = if self.join_type.is_right() {
-            &self.left_column
-        } else {
-            &self.right_column
-        };
-        arena.same_column(*hidden_column, *column)
+        arena.same_column(self.right_column, *column)
     }
 }
 
