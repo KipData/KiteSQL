@@ -116,6 +116,7 @@ pub(crate) fn scan_predicate_holds<A: MetaArena>(
 mod tests {
     use super::*;
     use crate::db::test::build_table;
+    use crate::execution::ExecArena;
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{Storage, TableCache, TupleDeserializers};
@@ -170,7 +171,8 @@ mod tests {
             predicate: None,
         };
         let mut exec_buffer = crate::execution::ExecBuffer::default();
-        let mut exec_arena = crate::execution::ExecArena::new(&tables, &tx);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(&tables, functions, &tx);
         let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut meta = ExecMetaArena::new(meta);
         let mut scan = SeqScan {

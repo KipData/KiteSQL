@@ -52,6 +52,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateTable<'a> {
         let CreateTableOperator {
             table_name,
             columns,
+            composite_unique_keys,
             if_not_exists,
         } = self.op;
 
@@ -62,6 +63,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateTable<'a> {
                 plan_arena,
                 table_name.clone(),
                 columns.clone(),
+                composite_unique_keys,
                 *if_not_exists,
             )
             .await?;

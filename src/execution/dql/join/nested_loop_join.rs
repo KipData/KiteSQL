@@ -352,7 +352,7 @@ mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::db::{CatalogKind, DataBaseBuilder};
     use crate::execution::dql::test::build_integers;
-    use crate::execution::try_collect;
+    use crate::execution::{try_collect, ExecArena};
     use crate::expression::BinaryOperator;
     use crate::iter_ext::Itertools;
     use crate::optimizer::heuristic::batch::HepBatchStrategy;
@@ -559,7 +559,8 @@ mod test {
         plan.populate_output_schema_recursive(&mut plan_arena);
         let context = &table_cache;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
-        let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(context, functions, &transaction);
         let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut root = build_read(&mut arena, &plan_arena, &plan);
         let mut rows = 0;

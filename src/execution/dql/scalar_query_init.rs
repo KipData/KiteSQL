@@ -180,6 +180,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for ScalarQueryInit<'a>
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
+    use crate::execution::ExecArena;
     use crate::expression::ScalarExpression;
     use crate::planner::operator::scalar_subquery::ScalarSubqueryOperator;
     use crate::planner::operator::values::ValuesOperator;
@@ -235,7 +236,8 @@ mod tests {
             first.populate_output_schema_recursive(&mut metadata);
             duplicate.populate_output_schema_recursive(&mut metadata);
             let mut exec_buffer = crate::execution::ExecBuffer::default();
-            let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+            let functions = (&Default::default(), &Default::default());
+            let mut exec_arena = ExecArena::new(cache, functions, &transaction);
             let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
             let mut first_root = build_read(&mut arena, &metadata, &first);
             let mut duplicate_root = build_read(&mut arena, &metadata, &duplicate);

@@ -89,6 +89,18 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 continue;
             };
 
+            // Evaluate and validate against the old row before removing any index entries.
+            for (position, expr) in value_exprs.iter() {
+                let value = plan_arena
+                    .expression(*expr)
+                    .eval(plan_arena, Some(&tuple))?;
+                let column = plan_arena.column(table.columns[*position]);
+                if value.is_null() && (!column.nullable() || column.desc().is_primary()) {
+                    return Err(DatabaseError::not_null_column(column.name().to_string()));
+                }
+                values.push(value.into_owned());
+            }
+
             for (index_meta, exprs) in table.index_exprs.iter() {
                 let index_meta = plan_arena.index(*index_meta);
                 arena.rewrite(exprs, plan_arena, Some(&tuple))?;
@@ -98,13 +110,6 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 transaction
                     .del_index(table_codec, table.table_id, &old_index, &old_pk)
                     .await?;
-            }
-            // Every expression reads the old row, so evaluate them all before writing.
-            for (_, expr) in value_exprs.iter() {
-                let value = plan_arena
-                    .expression(*expr)
-                    .eval(plan_arena, Some(&tuple))?;
-                values.push(value.into_owned());
             }
             for ((position, _), value) in value_exprs.iter().zip(values.drain(..)) {
                 tuple[*position] = value;

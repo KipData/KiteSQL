@@ -25,6 +25,13 @@ use crate::{
     planner::operator::{aggregate::AggregateOperator, sort::SortField},
 };
 
+fn agg_miss(expr: ExprRef, arena: &(impl MetaArena + ?Sized)) -> DatabaseError {
+    DatabaseError::AggMiss(format!(
+        "expression '{}' must appear in the GROUP BY clause or be used in an aggregate function",
+        expr.output_name(arena)
+    ))
+}
+
 struct AggregateCallCollector<'a> {
     agg_calls: &'a mut Vec<ExprRef>,
 }
@@ -130,6 +137,9 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
         exprs: impl IntoIterator<Item = &'c mut ExprRef>,
         arena: &mut crate::planner::PlanArena,
     ) -> Result<(), DatabaseError> {
+        if agg_calls.is_empty() && group_by_exprs.is_empty() {
+            return Ok(());
+        }
         let mut binder = AggregateOutputBinder::new(agg_calls, group_by_exprs);
         for expr in exprs {
             binder.visit(expr, arena)?;
@@ -303,13 +313,6 @@ impl<'a> HavingOrderByValidator<'a> {
             agg_calls,
         }
     }
-
-    fn agg_miss(expr: ExprRef, arena: &dyn MetaArena) -> DatabaseError {
-        DatabaseError::AggMiss(format!(
-            "expression '{}' must appear in the GROUP BY clause or be used in an aggregate function",
-            expr.output_name(arena)
-        ))
-    }
 }
 
 impl ExprVisitor<dyn MetaArena + '_> for HavingOrderByValidator<'_> {
@@ -324,14 +327,14 @@ impl ExprVisitor<dyn MetaArena + '_> for HavingOrderByValidator<'_> {
                 if contains(self.group_by_exprs) || contains(self.agg_calls) {
                     Ok(())
                 } else {
-                    Err(Self::agg_miss(expr, arena))
+                    Err(agg_miss(expr, arena))
                 }
             }
             ScalarExpression::ColumnRef { .. } => {
                 if contains(self.group_by_exprs) {
                     Ok(())
                 } else {
-                    Err(Self::agg_miss(expr, arena))
+                    Err(agg_miss(expr, arena))
                 }
             }
             ScalarExpression::Alias { .. } => {
@@ -408,6 +411,11 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for AggregateOutputBinder<'_> {
         if let Some(output) = self.output_ref(*expr, arena)? {
             *expr = arena.alloc_expression(output);
             return Ok(());
+        }
+
+        // An unmatched input column's position is not valid in the aggregate output.
+        if matches!(arena.expression(*expr), ScalarExpression::ColumnRef { .. }) {
+            return Err(agg_miss(*expr, arena));
         }
 
         walk_mut_expr(self, expr, arena)

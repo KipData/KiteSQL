@@ -81,6 +81,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
         let default_value = column.default_value(plan_arena)?;
 
         let (unique_index_id, apply) = {
+            let mut decode = arena.decode_context();
             let (transaction, table_codec) = arena.transaction_codec_mut();
             let (table, col_id) = transaction
                 .add_column(
@@ -89,6 +90,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
                     table_catalog.name(),
                     column,
                     *if_not_exists,
+                    &mut decode,
                 )
                 .await?;
             let unique_meta = if column.desc().is_unique() {
@@ -110,7 +112,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
         serializers.push(column.datatype().serializable());
 
         let table_id = *table_id;
-        let index_default = default_value.clone();
+        let index_default = default_value.clone().unwrap_or(DataValue::Null);
         let mut state = arena.local_state(plan_arena);
         let (transaction, table_codec) = state.transaction_codec_mut();
         rewrite_table_in_batches(
@@ -129,12 +131,10 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
                 Ok(())
             },
             async move |transaction, table_codec, tuple| {
-                if let (Some(unique_index_id), Some(value), Some(tuple_id)) =
-                    (unique_index_id.as_ref(), index_default.as_ref(), tuple.pk())
-                {
+                if let (Some(unique_index_id), Some(tuple_id)) = (unique_index_id, tuple.pk()) {
                     let index = Index::new(
-                        *unique_index_id,
-                        std::slice::from_ref(value),
+                        unique_index_id,
+                        std::slice::from_ref(&index_default),
                         IndexType::Unique,
                     );
                     transaction

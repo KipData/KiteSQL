@@ -4125,10 +4125,7 @@ mod tests {
                 },
             ])
             .await?;
-        assert!(matches!(
-            database.analyze_model::<OrmUnitUser>().await,
-            Err(DatabaseError::TooManyBuckets(100, 3))
-        ));
+        database.analyze_model::<OrmUnitUser>().await?;
 
         assert_eq!(
             database.get::<OrmUnitUser>(&1).await?,
@@ -4182,10 +4179,7 @@ mod tests {
             },
         ])
         .await?;
-        assert!(matches!(
-            tx.analyze::<OrmUnitUser>().await,
-            Err(DatabaseError::TooManyBuckets(100, 6))
-        ));
+        tx.analyze::<OrmUnitUser>().await?;
 
         assert_eq!(tx.get::<OrmUnitUser>(&4).await?.unwrap().name, "Dora");
         assert_eq!(
@@ -4224,8 +4218,9 @@ mod tests {
             plan,
             concat!(
                 "Projection [orm_unit_users.name] [Project => (Sort Option: Follow)] ",
-                "TableScan orm_unit_users -> [orm_unit_users.id, orm_unit_users.name], ",
-                "Filter: (orm_unit_users.id >= 4) [SeqScan => (Sort Option: None)]"
+                "TableScan orm_unit_users -> [orm_unit_users.id, orm_unit_users.name] ",
+                "[IndexScan By pk_index => [4, +inf) => (Sort Option: OrderBy: ",
+                "(orm_unit_users.id Asc Nulls Last) ignore_prefix_len: 0)]"
             ),
             "{plan}"
         );

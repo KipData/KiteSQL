@@ -143,7 +143,6 @@ pub enum DatabaseError {
     TryFromInt(TryFromIntError),
     TooLong,
     TupleIdNotFound(TupleId),
-    TooManyBuckets(usize, usize),
     UnsupportedUnaryOperator(LogicalType, UnaryOperator),
     UnsupportedBinaryOperator(LogicalType, BinaryOperator),
     UnsupportedStmt(String),
@@ -257,12 +256,6 @@ impl fmt::Display for DatabaseError {
             Self::TryFromInt(err) => write!(f, "try from int: {err}"),
             Self::TooLong => f.write_str("too long"),
             Self::TupleIdNotFound(value) => write!(f, "tuple id: {value} not found"),
-            Self::TooManyBuckets(buckets, elements) => {
-                write!(
-                    f,
-                    "there are more buckets: {buckets} than elements: {elements}"
-                )
-            }
             Self::UnsupportedUnaryOperator(ty, op) => {
                 write!(
                     f,
@@ -722,10 +715,6 @@ mod tests {
             (
                 DatabaseError::TupleIdNotFound(DataValue::Int32(3)),
                 "tuple id: 3 not found",
-            ),
-            (
-                DatabaseError::TooManyBuckets(8, 3),
-                "there are more buckets: 8 than elements: 3",
             ),
             (
                 DatabaseError::UnsupportedUnaryOperator(LogicalType::Integer, UnaryOperator::Not),

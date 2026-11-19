@@ -235,6 +235,7 @@ mod test {
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::errors::DatabaseError;
     use crate::execution::dql::sort::{sort_tuples, NullableVec, SortTuple};
+    use crate::execution::ExecArena;
     use crate::expression::ScalarExpression;
     use crate::planner::operator::sort::SortField;
     use crate::planner::{ExecMetaArena, PlanArena};
@@ -304,7 +305,8 @@ mod test {
             }],
         };
         let mut exec_buffer = crate::execution::ExecBuffer::default();
-        let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(cache, functions, &transaction);
         let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         // Select the memory executor explicitly even when the spill feature is enabled.
         let mut root = <Sort as ReadExecutor>::into_executor((&op, &plan), &mut arena, &metadata);

@@ -184,7 +184,13 @@ pub(crate) mod test {
 
             let mut table_codec = crate::storage::table_codec::TableCodec::default();
             let table = transaction
-                .drop_column(&mut table_codec, &mut plan_arena, &table_name, "c3")
+                .drop_column(
+                    &mut table_codec,
+                    &mut plan_arena,
+                    &table_name,
+                    "c3",
+                    &mut Default::default(),
+                )
                 .await?;
             let table = table.transplant_to_table_arena(&plan_arena)?;
             names.insert_table(&mut table_cache, table);

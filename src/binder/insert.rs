@@ -40,12 +40,11 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
         let table = catalog.dml_table(arena, |_| true)?;
         let mut sources = vec![None; table.columns.len()];
         for (position, target) in targets.iter().enumerate() {
-            let column = arena
-                .column(*target)
-                .id()
-                .and_then(|id| catalog.get_column_by_id(&id));
-            if let Some((index, _)) = column {
-                sources[index] = Some(position);
+            let column = arena.column(*target);
+            if let Some((index, _)) = column.id().and_then(|id| catalog.get_column_by_id(&id)) {
+                if sources[index].replace(position).is_some() {
+                    return Err(DatabaseError::DuplicateColumn(column.name().to_string()));
+                }
             }
         }
         Ok((table, sources))

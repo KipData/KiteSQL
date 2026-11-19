@@ -220,6 +220,10 @@ impl<'a> Analyze<'a> {
                 builder.build(histogram_buckets.unwrap_or(DEFAULT_NUM_OF_BUCKETS))?;
             let meta = IndexStatistics::new(histogram, sketch, top_n);
 
+            // Re-analysis can write fewer buckets than the previous histogram.
+            transaction
+                .remove_index_statistics(table_codec, table_id, index_id)
+                .await?;
             transaction.save_index_statistics(table_codec, table_id, meta.clone(), plan_arena)?;
             applies.push(DDLApply::UpsertIndexStatistics {
                 table_id,
@@ -344,7 +348,6 @@ mod test {
         ] {
             let mut kite_sql = builder.build_in_memory().await?;
             kite_sql.ddl("create table t1 (a int primary key)").await?;
-            // ANALYZE needs at least DEFAULT_NUM_OF_BUCKETS rows.
             let values = (0..DEFAULT_NUM_OF_BUCKETS)
                 .map(|i| format!("({i})"))
                 .join(", ");
@@ -563,9 +566,24 @@ mod test {
         iter.done().await?;
         assert_eq!(rows, [7, 27, 47, 67, 87].map(DataValue::Int32));
 
-        // A missing root must not publish partially reconstructed statistics.
+        // Re-analysis must remove stale buckets when the sample shrinks to zero.
+        reopened.run("delete from t1").await?.done().await?;
+        reopened.analyze("t1").await?;
         let mut codec = TableCodec::default();
         let mut tx = reopened.storage.transaction()?;
+        let stored = tx
+            .index_statistics(
+                &mut codec,
+                table_id,
+                2,
+                reopened.state.table_arena().borrow_mut(),
+            )
+            .await?
+            .unwrap();
+        assert_eq!(stored.histogram().buckets_len(), 0);
+        assert_eq!(stored.histogram().values_len(), 0);
+
+        // A missing root must not publish partially reconstructed statistics.
         codec.with_index_statistics(
             0,
             2,

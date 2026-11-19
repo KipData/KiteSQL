@@ -37,6 +37,7 @@ use crate::optimizer::core::histogram::HistogramMeta;
 use crate::optimizer::core::statistics_meta::IndexStatistics;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::{MetaArena, TableArenaCell};
+use crate::serdes::ReferenceDecodeContext;
 use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
 use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
 use crate::types::mapped::MappedScope;
@@ -296,6 +297,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn add_index_meta(
         &mut self,
         table_codec: &mut TableCodec,
@@ -304,9 +306,10 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         index_name: String,
         column_ids: Vec<ColumnId>,
         ty: IndexType,
+        context: &mut ReferenceDecodeContext<'_, Self>,
     ) -> Result<(TableCatalog, IndexId), DatabaseError> {
         let mut table = self
-            .load_table(table_codec, plan_arena, table_name)
+            .load_table(table_codec, plan_arena, table_name, context)
             .await?
             .ok_or(DatabaseError::TableNotFound)?;
         let index_meta = table.add_index_meta(index_name, column_ids, ty, plan_arena)?;
@@ -335,7 +338,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         }
         table_codec
             .with_index(table_id, &index, Some(tuple_id), async |key, value| {
-                if matches!(index.ty, IndexType::Unique) {
+                if matches!(index.ty, IndexType::Unique) && !index.is_unique_with_null() {
                     if let Some(bytes) = self.get_borrowed(key).await? {
                         return if TableCodec::strip_stamp(bytes.as_ref())?
                             != TableCodec::strip_stamp(value)?
@@ -462,9 +465,10 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         new_data_type: &LogicalType,
         default_change: &DefaultChange,
         not_null_change: &NotNullChange,
+        context: &mut ReferenceDecodeContext<'_, Self>,
     ) -> Result<TableCatalog, DatabaseError> {
         let table = self
-            .load_table(table_codec, plan_arena, table_name)
+            .load_table(table_codec, plan_arena, table_name, context)
             .await?
             .ok_or(DatabaseError::TableNotFound)?;
         let mut column_catalogs = Vec::with_capacity(table.columns_len());
@@ -560,9 +564,10 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         table_name: &str,
         column: &ColumnCatalog,
         if_not_exists: bool,
+        context: &mut ReferenceDecodeContext<'_, Self>,
     ) -> Result<(TableCatalog, ColumnId), DatabaseError> {
         let mut table = self
-            .load_table(table_codec, plan_arena, table_name)
+            .load_table(table_codec, plan_arena, table_name, context)
             .await?
             .ok_or(DatabaseError::TableNotFound)?;
         if !column.nullable() && column.default_value(plan_arena)?.is_none() {
@@ -611,9 +616,10 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         plan_arena: &mut (dyn MetaArena + '_),
         table_name: &str,
         column_name: &str,
+        context: &mut ReferenceDecodeContext<'_, Self>,
     ) -> Result<TableCatalog, DatabaseError> {
         let table_catalog = self
-            .load_table(table_codec, plan_arena, table_name)
+            .load_table(table_codec, plan_arena, table_name, context)
             .await?
             .ok_or(DatabaseError::TableNotFound)?;
         let column_id = {
@@ -647,7 +653,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
             self.remove_index_statistics(table_codec, table_id, index_meta.id)
                 .await?;
         }
-        self.load_table(table_codec, plan_arena, table_name)
+        self.load_table(table_codec, plan_arena, table_name, context)
             .await?
             .ok_or(DatabaseError::TableNotFound)
     }
@@ -679,6 +685,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         plan_arena: &mut (dyn MetaArena + '_),
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
+        composite_unique_keys: &[Vec<usize>],
         if_not_exists: bool,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
         match self
@@ -698,7 +705,12 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         for (_, column) in table_catalog.primary_keys() {
             TableCodec::check_primary_key_type(plan_arena.column(*column).datatype())?;
         }
-        self.create_index_meta_from_column(table_codec, plan_arena, &mut table_catalog)?;
+        self.create_table_indexes(
+            table_codec,
+            plan_arena,
+            &mut table_catalog,
+            composite_unique_keys,
+        )?;
 
         for column in table_catalog
             .columns()
@@ -796,9 +808,10 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         table_name: &str,
         index_name: &str,
         if_exists: bool,
+        context: &mut ReferenceDecodeContext<'_, Self>,
     ) -> Result<Option<(TableCatalog, IndexId)>, DatabaseError> {
         let table = self
-            .load_table(table_codec, plan_arena, table_name)
+            .load_table(table_codec, plan_arena, table_name, context)
             .await?
             .ok_or(DatabaseError::TableNotFound)?;
         let Some(index_meta_ref) = table
@@ -834,7 +847,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         self.remove_index_statistics(table_codec, table.id(), index_id)
             .await?;
 
-        self.load_table(table_codec, plan_arena, table_name)
+        self.load_table(table_codec, plan_arena, table_name, context)
             .await?
             .map(|table| (table, index_id))
             .map(Some)
@@ -985,6 +998,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         table_codec: &mut TableCodec,
         arena: &mut (impl MetaArena + ?Sized),
         table_name: &str,
+        context: &mut ReferenceDecodeContext<'_, Self>,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
         let Some(meta) = self
             .root_table(table_codec, table_name, arena)
@@ -993,7 +1007,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         else {
             return Ok(None);
         };
-        self.table_collect(table_codec, meta.id, arena)
+        self.table_collect(table_codec, meta.id, arena, context)
             .await?
             .map(|(columns, indexes)| {
                 TableCatalog::reload(
@@ -1216,6 +1230,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         table_codec: &mut TableCodec,
         table_id: TableId,
         arena: &mut (impl MetaArena + ?Sized),
+        context: &mut ReferenceDecodeContext<'_, Self>,
     ) -> Result<Option<(Vec<ColumnCatalog>, Vec<IndexMeta>)>, DatabaseError> {
         table_codec
             .with_table_bound(table_id, async |table_min, table_max, pool| {
@@ -1230,7 +1245,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
                 while let Some((key, value)) = column_iter.try_next().await.ok().flatten() {
                     if key.starts_with(table_min) {
                         let mut cursor = Cursor::new(value);
-                        columns.push(TableCodec::decode_column::<Self, _>(&mut cursor, arena)?);
+                        columns.push(TableCodec::decode_column(&mut cursor, arena, context)?);
                     } else {
                         index_metas.push(TableCodec::decode_index_meta::<Self>(value, arena)?);
                     }
@@ -1242,14 +1257,14 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
             .await
     }
 
-    fn create_index_meta_from_column(
+    fn create_table_indexes(
         &mut self,
         table_codec: &mut TableCodec,
         arena: &mut (impl MetaArena + ?Sized),
         table: &mut TableCatalog,
+        composite_unique_keys: &[Vec<usize>],
     ) -> Result<(), DatabaseError> {
         let table_id = table.id();
-        let mut primary_keys = Vec::new();
 
         let mut i = 0;
         while i < table.columns_len() {
@@ -1257,20 +1272,11 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
             i += 1;
             let col = arena.column(column);
             let col_id = col.id().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-            let index_ty = if let Some(primary_key_index) = col.desc().primary() {
-                primary_keys.push((primary_key_index, col_id));
+            if col.desc().is_primary() || !col.desc().is_unique() {
                 continue;
-            } else if col.desc().is_unique() {
-                IndexType::Unique
-            } else {
-                continue;
-            };
+            }
             let index_name = format!("uk_{}_index", col.name());
-            let meta_ref = table.add_index_meta(index_name, vec![col_id], index_ty, arena)?;
-            let meta = arena.index(meta_ref);
-            table_codec.with_index_meta(table_id, meta.id, Some(meta), arena, |key, value| {
-                self.set(key, value)
-            })?;
+            table.add_index_meta(index_name, vec![col_id], IndexType::Unique, arena)?;
         }
         let primary_keys = table
             .primary_keys()
@@ -1280,12 +1286,28 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         let pk_index_ty = IndexType::PrimaryKey {
             is_multiple: primary_keys.len() != 1,
         };
-        let meta_ref =
-            table.add_index_meta("pk_index".to_string(), primary_keys, pk_index_ty, arena)?;
-        let meta = arena.index(meta_ref);
-        table_codec.with_index_meta(table_id, meta.id, Some(meta), arena, |key, value| {
-            self.set(key, value)
-        })?;
+        table.add_index_meta("pk_index".to_string(), primary_keys, pk_index_ty, arena)?;
+
+        for (i, key) in composite_unique_keys.iter().enumerate() {
+            let column_ids = key
+                .iter()
+                .map(|&position| {
+                    table
+                        .column_ref(position)
+                        .and_then(|column| arena.column(column).id())
+                        .ok_or(DatabaseError::InvalidIndex)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let name = format!("uk_composite_index_{}", i + 1);
+            table.add_index_meta(name, column_ids, IndexType::Unique, arena)?;
+        }
+
+        for &meta_ref in table.indexes() {
+            let meta = arena.index(meta_ref);
+            table_codec.with_index_meta(table_id, meta.id, Some(meta), arena, |key, value| {
+                self.set(key, value)
+            })?;
+        }
 
         Ok(())
     }
@@ -1903,10 +1925,23 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
         tuple: &mut Tuple,
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
-        _: &mut Bytes,
-        _: &mut Bytes,
+        encode_min: &mut Bytes,
+        encode_max: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Unique);
+        let meta = params.index_meta();
+        let index = Index::new(meta.id, value.as_slice(), IndexType::Unique);
+        if index.values.len() < meta.column_ids.len() || index.is_unique_with_null() {
+            return eq_to_res_scope(
+                table_codec,
+                tuple,
+                self,
+                value,
+                params,
+                encode_min,
+                encode_max,
+            )
+            .await;
+        }
         let Some(bytes) = table_codec
             .with_index(params.table_id, &index, None, async |key, _| {
                 params.tx.get_borrowed(key).await
@@ -1938,8 +1973,10 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
 
         table_codec
             .with_index(params.table_id, &index, None, async |key, _| {
-                if index.values.len() < params.index_meta().column_ids.len() {
-                    // A partial UNIQUE key bounds a prefix, not one exact index entry.
+                if index.values.len() < params.index_meta().column_ids.len()
+                    || index.is_unique_with_null()
+                {
+                    // Both partial and NULL-containing keys may have multiple entries.
                     encode_bound_key(out, key, is_upper);
                 } else {
                     out.clear();
@@ -3031,7 +3068,12 @@ mod test {
         let mut table_codec = TableCodec::default();
         let table_name = "t1".to_string();
         let table = transaction
-            .load_table(&mut table_codec, table_arena.borrow_mut(), &table_name)
+            .load_table(
+                &mut table_codec,
+                table_arena.borrow_mut(),
+                &table_name,
+                &mut Default::default(),
+            )
             .await?
             .ok_or(DatabaseError::TableNotFound)?;
         reloaded_names.insert_table(&mut reloaded_table_cache, table);
@@ -3232,6 +3274,7 @@ mod test {
                 "i1".to_string(),
                 vec![c3_column_id],
                 IndexType::Normal,
+                &mut Default::default(),
             )
             .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
@@ -3245,6 +3288,7 @@ mod test {
                 "i2".to_string(),
                 vec![c3_column_id, c2_column_id],
                 IndexType::Composite,
+                &mut Default::default(),
             )
             .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
@@ -3280,7 +3324,12 @@ mod test {
         let mut reloaded_table_cache = crate::storage::TableCache::default();
         let table_name = "t1".to_string();
         let table = transaction
-            .load_table(&mut table_codec, table_arena.borrow_mut(), &table_name)
+            .load_table(
+                &mut table_codec,
+                table_arena.borrow_mut(),
+                &table_name,
+                &mut Default::default(),
+            )
             .await?
             .ok_or(DatabaseError::TableNotFound)?;
         reloaded_names.insert_table(&mut reloaded_table_cache, table);
@@ -3304,14 +3353,28 @@ mod test {
             assert!(iter.try_next().await?.is_none());
         }
         match transaction
-            .drop_index(&mut table_codec, &mut plan_arena, "t1", "pk_index", false)
+            .drop_index(
+                &mut table_codec,
+                &mut plan_arena,
+                "t1",
+                "pk_index",
+                false,
+                &mut Default::default(),
+            )
             .await
         {
             Err(DatabaseError::InvalidIndex) => (),
             _ => unreachable!(),
         }
         if let Some((table, _)) = transaction
-            .drop_index(&mut table_codec, &mut plan_arena, "t1", "i1", false)
+            .drop_index(
+                &mut table_codec,
+                &mut plan_arena,
+                "t1",
+                "i1",
+                false,
+                &mut Default::default(),
+            )
             .await?
         {
             let table = table.transplant_to_table_arena(&plan_arena)?;
@@ -3407,6 +3470,7 @@ mod test {
                 "i1".to_string(),
                 vec![c3_column_id],
                 IndexType::Normal,
+                &mut Default::default(),
             )
             .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
@@ -3655,6 +3719,7 @@ mod test {
                 &table_name,
                 &new_column,
                 false,
+                &mut Default::default(),
             )
             .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
@@ -3668,6 +3733,7 @@ mod test {
                     &table_name,
                     &new_column,
                     false,
+                    &mut Default::default(),
                 )
                 .await
                 .is_err());
@@ -3680,6 +3746,7 @@ mod test {
                         &table_name,
                         &new_column,
                         true,
+                        &mut Default::default(),
                     )
                     .await?
                     .1
@@ -3704,7 +3771,13 @@ mod test {
             assert_eq!(table_arena.borrow().column(column), &new_column);
         }
         let table = transaction
-            .drop_column(&mut table_codec, &mut plan_arena, &table_name, "c4")
+            .drop_column(
+                &mut table_codec,
+                &mut plan_arena,
+                &table_name,
+                "c4",
+                &mut Default::default(),
+            )
             .await?;
         let table = table.transplant_to_table_arena(&plan_arena)?;
         names.insert_table(&mut table_cache, table);

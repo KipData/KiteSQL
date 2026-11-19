@@ -28,6 +28,7 @@ use self::ddl::change_column::ChangeColumn;
 use self::dql::join::nested_loop_join::NestedLoopJoin;
 use self::dql::mark_apply::MarkApply;
 use self::dql::scalar_query_init::ScalarQueryInit;
+use crate::db::FunctionRegistries;
 use crate::errors::DatabaseError;
 use crate::execution::ddl::create_index::CreateIndex;
 use crate::execution::ddl::create_table::CreateTable;
@@ -77,6 +78,7 @@ use crate::planner::operator::join::JoinCondition;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl};
 use crate::planner::MetaArena;
 use crate::planner::{ExecMetaArena, ExprRef, LogicalPlan, PlanArena, PlanKeeper};
+use crate::serdes::ReferenceDecodeContext;
 use crate::storage::table_codec::{Bytes, TableCodec};
 use crate::storage::{
     IndexIter, InnerIter, StorageTransaction, TableCache, TableIter, TupleIter, ViewIter,
@@ -723,6 +725,7 @@ impl Drop for SpareIters {
 
 pub(crate) struct ExecArena<'a, 't, T: StorageTransaction + 'a> {
     table_cache: &'a TableCache,
+    functions: FunctionRegistries<'a>,
     transaction: TxnPtr<T>,
     ddl_apply: Vec<DDLApply>,
     recursive_input: Option<RecursiveInput>,
@@ -865,9 +868,14 @@ impl ExecBuffer {
 }
 
 impl<'a, 't, T: StorageTransaction + 'a> ExecArena<'a, 't, T> {
-    pub(crate) fn new(table_cache: &'a TableCache, transaction: &'t T) -> Self {
+    pub(crate) fn new(
+        table_cache: &'a TableCache,
+        functions: FunctionRegistries<'a>,
+        transaction: &'t T,
+    ) -> Self {
         Self {
             table_cache,
+            functions,
             transaction: TxnPtr(transaction as *const T as *mut T),
             ddl_apply: Vec::new(),
             recursive_input: None,
@@ -909,6 +917,11 @@ impl<'c, 'a, 't, T: StorageTransaction + 'a> ExecContext<'c, 'a, 't, T> {
 
     pub(crate) fn table_cache(&self) -> &'a TableCache {
         self.arena.table_cache
+    }
+
+    pub(crate) fn decode_context(&self) -> ReferenceDecodeContext<'a, T> {
+        let (scalar, table) = self.arena.functions;
+        ReferenceDecodeContext::with_functions(scalar, table)
     }
 
     pub(crate) fn iter_mut(&mut self, slot: IterSlot) -> &mut StorageIter<'t, T> {
@@ -1343,6 +1356,11 @@ pub(crate) fn build_write<'a, B: ExecBuilder>(
 #[maybe_async]
 mod test_utils {
     use super::*;
+    use crate::db::{ScalaFunctions, TableFunctions};
+    use std::sync::LazyLock;
+
+    static EMPTY_FUNCTIONS: LazyLock<(ScalaFunctions, TableFunctions)> =
+        LazyLock::new(Default::default);
 
     pub(crate) struct TestExecutor<'a, T: StorageTransaction + 'a> {
         root: ExecNode<'a>,
@@ -1376,7 +1394,8 @@ mod test_utils {
         E: ReadExecutor<'a>,
     {
         let mut buffer = ExecBuffer::default();
-        let mut arena = ExecArena::new(cache, transaction);
+        let functions = (&EMPTY_FUNCTIONS.0, &EMPTY_FUNCTIONS.1);
+        let mut arena = ExecArena::new(cache, functions, transaction);
         let root = <E as ReadExecutor<'a>>::into_executor(
             input,
             &mut ExecContext::new(&mut buffer, &mut arena),
@@ -1402,7 +1421,8 @@ mod test_utils {
         E: WriteExecutor<'a>,
     {
         let mut buffer = ExecBuffer::default();
-        let mut arena = ExecArena::new(cache, transaction);
+        let functions = (&EMPTY_FUNCTIONS.0, &EMPTY_FUNCTIONS.1);
+        let mut arena = ExecArena::new(cache, functions, transaction);
         let root = <E as WriteExecutor<'a>>::into_executor(
             input,
             &mut ExecContext::new(&mut buffer, &mut arena),
@@ -1470,7 +1490,8 @@ mod test {
         let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let mut exec_buffer = ExecBuffer::default();
-        let mut exec_arena = ExecArena::new(&tables, &transaction);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(&tables, functions, &transaction);
         let mut arena = ExecContext::new(&mut exec_buffer, &mut exec_arena);
         for base in [0, 10] {
             arena.buffer.result.tuple = TupleImpl::concat(

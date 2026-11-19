@@ -426,11 +426,10 @@ impl TableCodec {
         f(lower.as_slice(), upper.as_slice(), &mut self.bytes_pool).await
     }
 
-    /// Non-unique index key:
-    /// `{TableName}{INDEX_TAG}{BOUND_MIN_TAG}{IndexID}{BOUND_MIN_TAG}{DataValue...}{TupleId}`
+    /// Secondary index key:
+    /// `{TableId}{INDEX_TAG}{BOUND_MIN_TAG}{IndexID}{BOUND_MIN_TAG}{DataValue...}[{TupleId}]`
     ///
-    /// Unique index key:
-    /// `{TableName}{INDEX_TAG}{BOUND_MIN_TAG}{IndexID}{BOUND_MIN_TAG}{DataValue}`
+    /// Only a fully non-NULL unique key identifies one row without a `TupleId` suffix.
     pub async fn with_index<R, V: TupleLike + ?Sized>(
         &mut self,
         table_id: TableId,
@@ -463,7 +462,9 @@ impl TableCodec {
             }
 
             if let Some(tuple_id) = tuple_id {
-                if matches!(index.ty, IndexType::Normal | IndexType::Composite) {
+                if matches!(index.ty, IndexType::Normal | IndexType::Composite)
+                    || index.is_unique_with_null()
+                {
                     tuple_id.memcomparable_encode(lower)?;
                 }
             }
@@ -977,9 +978,9 @@ impl TableCodec {
     pub fn decode_column<T: StorageTransaction, R: Read>(
         reader: &mut R,
         arena: &mut (impl MetaArena + ?Sized),
+        context: &mut ReferenceDecodeContext<'_, T>,
     ) -> Result<ColumnCatalog, DatabaseError> {
-        // `TableCache` is not theoretically used in `table_collect` because `ColumnCatalog` should not depend on other Column
-        ColumnCatalog::decode::<T, R, _>(reader, None, arena)
+        ColumnCatalog::decode::<T, R, _>(reader, Some(context), arena)
     }
 
     pub fn decode_index_statistics<T: StorageTransaction>(
@@ -1555,8 +1556,11 @@ mod tests {
             })
             .unwrap();
         let mut cursor = Cursor::new(bytes);
-        let decode_col =
-            TableCodec::decode_column::<TestTransaction, _>(&mut cursor, &mut plan_arena)?;
+        let decode_col = TableCodec::decode_column::<TestTransaction, _>(
+            &mut cursor,
+            &mut plan_arena,
+            &mut Default::default(),
+        )?;
 
         assert_eq!(decode_col, expected_col);
 

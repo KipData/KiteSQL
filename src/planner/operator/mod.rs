@@ -1494,6 +1494,7 @@ mod tests {
                     Some(arena.alloc_expression(ScalarExpression::from(2_i32))),
                 )?,
             )],
+            composite_unique_keys: Vec::new(),
             if_not_exists: false,
         });
         assert!(referenced_columns(&create_table, &mut arena)?.is_empty());
@@ -1671,6 +1672,7 @@ mod tests {
                 Operator::CreateTable(CreateTableOperator {
                     table_name: "users".into(),
                     columns: vec![column_catalog("id"), column_catalog("name")],
+                    composite_unique_keys: Vec::new(),
                     if_not_exists: true,
                 }),
                 "Create users -> [id, name], If Not Exists: true",

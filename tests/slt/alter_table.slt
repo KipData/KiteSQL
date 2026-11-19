@@ -58,6 +58,19 @@ select * from t2
 1 1 0
 
 statement ok
+insert into t2 values (2,2,1)
+
+# A new nullable UNIQUE column can backfill NULL for multiple existing rows.
+statement ok
+alter table t2 add column v3 int unique
+
+query I
+select id from t2 where v3 is null order by id
+----
+1
+2
+
+statement ok
 drop table t1
 
 statement ok

@@ -108,9 +108,16 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for DropColumn<'a> {
                 .await?;
             }
             {
+                let mut decode = arena.decode_context();
                 let (transaction, table_codec) = arena.transaction_codec_mut();
                 let table = transaction
-                    .drop_column(table_codec, plan_arena, table_catalog.name(), column_name)
+                    .drop_column(
+                        table_codec,
+                        plan_arena,
+                        table_catalog.name(),
+                        column_name,
+                        &mut decode,
+                    )
                     .await?;
                 arena.push_ddl_apply(DDLApply::upsert_table(table, true));
             }

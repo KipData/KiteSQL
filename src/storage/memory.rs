@@ -277,6 +277,7 @@ mod wasm_tests {
             &mut plan_arena,
             "test".to_string().into(),
             source_columns,
+            &[],
             false,
         )? {
             let table = table.transplant_to_table_arena(&plan_arena)?;
@@ -479,6 +480,7 @@ mod native_tests {
             &mut plan_arena,
             "test".to_string(),
             source_columns,
+            &[],
             false,
         )? {
             let table = table.transplant_to_table_arena(&plan_arena)?;

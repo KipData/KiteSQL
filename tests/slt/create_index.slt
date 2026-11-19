@@ -201,5 +201,42 @@ drop index t.pk_index
 statement ok
 drop index t.index_3
 
+# Building a unique index also accepts existing duplicate keys containing NULL.
+statement ok
+insert into t values (-2,0,2,null), (-1,0,2,null);
+
+statement ok
+create unique index index_3 on t (v2, v3);
+
 statement ok
 drop table t
+
+# DDL reloads column defaults from storage, including registered functions.
+statement ok
+create table t_func_default (id int primary key, ts timestamp default current_timestamp);
+
+statement ok
+create index idx_ts on t_func_default(ts);
+
+statement ok
+alter table t_func_default add column v int;
+
+statement ok
+alter table t_func_default alter column v set default 7;
+
+statement ok
+drop index idx_ts on t_func_default;
+
+statement ok
+alter table t_func_default drop column v;
+
+statement ok
+insert into t_func_default (id) values (1);
+
+query B
+select ts is not null from t_func_default;
+----
+true
+
+statement ok
+drop table t_func_default;

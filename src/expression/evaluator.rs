@@ -25,7 +25,7 @@ use crate::types::tuple::{Input, InputRef};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
 use std::borrow::Cow;
-use std::cmp;
+use std::iter::once;
 
 macro_rules! eval_to_num {
     ($num_expr:expr, $arena:expr, $tuple:expr) => {
@@ -197,23 +197,30 @@ impl ScalarExpression {
                     arena.expression(*expr).eval(arena, tuple)?,
                     &LogicalType::Varchar(None, CharLengthUnits::Characters),
                 )?;
-                if let Some(mut string) = value.utf8().map(String::from) {
+                if let Some(mut string) = value.utf8() {
                     if let Some(from_expr) = from_expr {
-                        let mut from = eval_to_num!(from_expr, arena, tuple).saturating_sub(1);
-                        let len_i = string.len() as i32;
-
-                        while from < 0 {
-                            from += len_i + 1;
-                        }
-                        if from > len_i {
+                        let from = eval_to_num!(from_expr, arena, tuple).saturating_sub(1);
+                        // Keep wrapping negative offsets, counting the end boundary as a position.
+                        let from = if from < 0 {
+                            i64::from(from).rem_euclid(string.chars().count() as i64 + 1) as usize
+                        } else {
+                            from as usize
+                        };
+                        let Some(start) = string
+                            .char_indices()
+                            .map(|(byte, _)| byte)
+                            .chain(once(string.len()))
+                            .nth(from)
+                        else {
                             return Ok(Cow::Owned(DataValue::Null));
-                        }
-                        string = string.split_off(from as usize);
+                        };
+                        string = &string[start..];
                     }
                     if let Some(for_expr) = for_expr {
-                        let for_i =
-                            cmp::min(eval_to_num!(for_expr, arena, tuple) as usize, string.len());
-                        let _ = string.split_off(for_i);
+                        let len = eval_to_num!(for_expr, arena, tuple) as usize;
+                        if let Some((end, _)) = string.char_indices().nth(len) {
+                            string = &string[..end];
+                        }
                     }
 
                     Ok(Cow::Owned(DataValue::Utf8 {
@@ -229,14 +236,13 @@ impl ScalarExpression {
                 let varchar = LogicalType::Varchar(None, CharLengthUnits::Characters);
                 let pattern = cast_cow(arena.expression(*expr).eval(arena, tuple)?, &varchar)?;
                 let string = cast_cow(arena.expression(*in_expr).eval(arena, tuple)?, &varchar)?;
-                Ok(Cow::Owned(DataValue::Int32(
-                    string
-                        .utf8()
-                        .unwrap_or("")
-                        .find(pattern.utf8().unwrap_or(""))
-                        .map(|pos| pos as i32 + 1)
-                        .unwrap_or(0),
-                )))
+                let string = string.utf8().unwrap_or("");
+                let position = match string.find(pattern.utf8().unwrap_or("")) {
+                    Some(byte) => i32::try_from(string[..byte].chars().count() + 1)
+                        .map_err(|_| DatabaseError::OverFlow)?,
+                    None => 0,
+                };
+                Ok(Cow::Owned(DataValue::Int32(position)))
             }
             ScalarExpression::Trim {
                 expr,
@@ -438,6 +444,26 @@ mod tests {
                 binary_create(Cow::Owned(LogicalType::Integer), BinaryOperator::Eq).unwrap(),
             ),
         })
+    }
+
+    #[test]
+    fn substring_start_boundaries() -> Result<(), DatabaseError> {
+        let table_arena = TableArenaCell::default();
+        let mut arena = PlanArena::new(&table_arena);
+        let expr = arena.alloc_expression(ScalarExpression::from("中文abc"));
+        for (start, expected) in [(-10, Some("文abc")), (6, Some("")), (7, None)] {
+            let from_expr = Some(arena.alloc_expression(ScalarExpression::from(start)));
+            let substring = ScalarExpression::SubString {
+                expr,
+                from_expr,
+                for_expr: None,
+            };
+            assert_eq!(
+                substring.eval::<[DataValue]>(&arena, None)?.utf8(),
+                expected
+            );
+        }
+        Ok(())
     }
 
     #[test]
