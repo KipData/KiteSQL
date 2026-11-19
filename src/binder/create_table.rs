@@ -68,6 +68,7 @@ mod tests {
     use crate::binder::BinderContext;
     use crate::catalog::ColumnDesc;
     use crate::storage::Storage;
+    use crate::types::value::DataValue;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
 
@@ -81,7 +82,8 @@ mod tests {
         let scala_functions = Default::default();
         let table_functions = Default::default();
 
-        let sql = "create table t1 (id int primary key, name varchar(10) null, unique (name, id))";
+        let sql = "create table t1 (id int primary key default 5 null, \
+                   name varchar(10) null, unique (name, id))";
         let mut binder = Binder::new(
             BinderContext::new(
                 &names,
@@ -104,12 +106,12 @@ mod tests {
             Operator::CreateTable(op) => {
                 assert_eq!(op.table_name, "t1");
                 assert_eq!(op.composite_unique_keys, vec![vec![1, 0]]);
-                assert_eq!(op.columns[0].name(), "id");
-                assert!(!op.columns[0].nullable());
-                assert_eq!(
-                    op.columns[0].desc(),
-                    &ColumnDesc::new(LogicalType::Integer, Some(0), false, None)?
-                );
+                let id = &op.columns[0];
+                assert_eq!(id.name(), "id");
+                assert!(!id.nullable());
+                assert_eq!(id.desc().primary(), Some(0));
+                assert_eq!(id.datatype(), &LogicalType::Integer);
+                assert_eq!(id.default_value(&plan_arena)?, Some(DataValue::Int32(5)));
                 assert_eq!(op.columns[1].name(), "name");
                 assert!(op.columns[1].nullable());
                 assert_eq!(

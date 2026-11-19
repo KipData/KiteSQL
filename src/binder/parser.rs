@@ -829,6 +829,7 @@ where
             None,
         )?;
         let mut nullable = true;
+        let mut is_primary = false;
 
         for option_def in column_def.options {
             match option_def.option {
@@ -836,8 +837,7 @@ where
                 ColumnOption::NotNull => nullable = false,
                 ColumnOption::PrimaryKey(_) => {
                     column_desc.set_primary(column_index);
-                    nullable = false;
-                    break;
+                    is_primary = true;
                 }
                 ColumnOption::Unique(unique) => {
                     Self::check_unique_nulls_option(unique.nulls_distinct)?;
@@ -866,7 +866,11 @@ where
             }
         }
 
-        Ok(ColumnCatalog::new(column_name, nullable, column_desc))
+        Ok(ColumnCatalog::new(
+            column_name,
+            nullable && !is_primary,
+            column_desc,
+        ))
     }
 
     fn check_unique_nulls_option(option: NullsDistinctOption) -> Result<(), DatabaseError> {

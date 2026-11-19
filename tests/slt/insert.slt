@@ -108,7 +108,7 @@ statement ok
 drop table t_replace
 
 statement ok
-create table t1(id int primary key, v1 bigint default 233)
+create table t1(id int primary key default 6, v1 bigint default 233)
 
 statement ok
 insert into t1 values (0)
@@ -128,6 +128,9 @@ insert into t1 values (4, 0)
 statement ok
 insert into t1 (v1, id) values (DEFAULT, 5)
 
+statement ok
+insert into t1 (v1) values (123)
+
 query III rowsort
 select * from t1
 ----
@@ -137,6 +140,7 @@ select * from t1
 3 233
 4 0
 5 233
+6 123
 
 statement ok
 drop table t1;
