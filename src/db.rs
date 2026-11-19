@@ -199,7 +199,8 @@ impl DataBaseBuilder {
         }
     }
 
-    /// Sets the default histogram bucket count used by `ANALYZE`.
+    /// Sets the maximum histogram bucket count used by `ANALYZE` (default: 10).
+    /// The actual count is limited by the number of non-NULL samples.
     pub fn histogram_buckets(mut self, buckets: usize) -> Self {
         self.histogram_buckets = Some(buckets);
         self

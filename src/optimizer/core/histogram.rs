@@ -202,9 +202,7 @@ impl HistogramBuilder {
         }
 
         let values_len = self.meta.values_len;
-        if number_of_buckets > values_len {
-            return Err(DatabaseError::TooManyBuckets(number_of_buckets, values_len));
-        }
+        let number_of_buckets = number_of_buckets.min(values_len);
 
         let HistogramBuilder {
             index_id,
@@ -491,8 +489,21 @@ impl Histogram {
         top_n: &ColumnTopN,
         buf: &mut Vec<u8>,
     ) -> Result<usize, DatabaseError> {
-        if self.buckets.is_empty() || ranges.is_empty() {
+        if ranges.is_empty() {
             return Ok(0);
+        }
+        if self.buckets.is_empty() {
+            // NULL sorts last and is tracked separately from the buckets.
+            let includes_null = ranges.iter().any(|range| match range {
+                Range::Eq(value) => value.is_null(),
+                Range::Scope { min, max } if !range.has_parameter() => {
+                    !matches!(min, Bound::Excluded(value) if value.is_null())
+                        && (matches!(max, Bound::Unbounded)
+                            || matches!(max, Bound::Included(value) if value.is_null()))
+                }
+                _ => false,
+            });
+            return Ok(if includes_null { self.null_count() } else { 0 });
         }
         if ranges.iter().any(|range| range.has_parameter()) {
             let selectivity = ranges
@@ -915,6 +926,49 @@ mod tests {
     }
 
     #[test]
+    fn histogram_buckets_are_capped_by_non_null_samples() -> Result<(), DatabaseError> {
+        let build = |values: &[DataValue]| {
+            let mut builder = HistogramBuilder::new(
+                &index_meta(),
+                DEFAULT_STATISTICS_RELATIVE_ERROR,
+                DEFAULT_HLL_PRECISION,
+            )?;
+            for value in values {
+                builder.append(value.clone())?;
+            }
+            builder.build(10)
+        };
+        let (histogram, _, _) =
+            build(&[DataValue::Int32(1), DataValue::Int32(2), DataValue::Null])?;
+        assert_eq!(histogram.buckets_len(), 2);
+        assert!(histogram.buckets().iter().all(|bucket| bucket.count == 1));
+
+        for values in [&[][..], &[DataValue::Null, DataValue::Null][..]] {
+            let (histogram, sketch, top_n) = build(values)?;
+            assert!(histogram.buckets().is_empty());
+            assert_eq!(histogram.null_count(), values.len());
+            let count = |range| histogram.collect_count(&[range], &sketch, &top_n, &mut Vec::new());
+            assert_eq!(count(Range::Eq(DataValue::Null.into()))?, values.len());
+            assert_eq!(count(Range::Eq(DataValue::Int32(1).into()))?, 0);
+            assert_eq!(
+                count(Range::Scope {
+                    min: Bound::Unbounded,
+                    max: Bound::Excluded(DataValue::Null.into()),
+                })?,
+                0
+            );
+            assert_eq!(
+                count(Range::Scope {
+                    min: Bound::Unbounded,
+                    max: Bound::Unbounded,
+                })?,
+                values.len()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_sort_tuples_on_histogram() -> Result<(), DatabaseError> {
         let mut builder = HistogramBuilder::new(
             &index_meta(),
@@ -942,8 +996,6 @@ mod tests {
 
         builder.append(DataValue::Null)?;
         builder.append(DataValue::Null)?;
-
-        // assert!(matches!(builder.build(10), Err(DataBaseError::TooManyBuckets)));
 
         let (histogram, _, _) = builder.build(5)?;
 

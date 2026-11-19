@@ -16,7 +16,6 @@ use crate::backend::SimpleExecutor;
 use crate::TpccError;
 use chrono::Utc;
 use indicatif::{ProgressBar, ProgressStyle};
-use kite_sql::errors::DatabaseError;
 use rand::rngs::ThreadRng;
 use rand::seq::SliceRandom;
 use rand::Rng;
@@ -316,10 +315,7 @@ impl Load {
         println!("[Analyze Table: stock]");
         exec.execute_batch("analyze table stock").await?;
         println!("[Analyze Table: district]");
-        match exec.execute_batch("analyze table district").await {
-            Ok(_) | Err(TpccError::Database(DatabaseError::TooManyBuckets(..))) => (),
-            err => return err,
-        };
+        exec.execute_batch("analyze table district").await?;
 
         Ok(())
     }

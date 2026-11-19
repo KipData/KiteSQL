@@ -575,3 +575,43 @@ select count(*) from t_null_or where (c1 = 1 or c1 is null) and (c1 is null or c
 
 statement ok
 drop table t_null_or;
+
+# ANALYZE accepts empty tables and indexes with fewer than ten non-NULL values.
+statement ok
+create table t_analyze_small (id int primary key, v int);
+
+statement ok
+create index idx_analyze_small_v on t_analyze_small(v);
+
+statement ok
+analyze table t_analyze_small;
+
+query I
+select count(*) from t_analyze_small where v >= 1;
+----
+0
+
+statement ok
+insert into t_analyze_small values (1, null), (2, 7), (3, null);
+
+statement ok
+analyze table t_analyze_small;
+
+query I
+select id from t_analyze_small where v = 7;
+----
+2
+
+statement ok
+update t_analyze_small set v = null;
+
+statement ok
+analyze table t_analyze_small;
+
+query I
+select count(*) from t_analyze_small where v is null;
+----
+3
+
+statement ok
+drop table t_analyze_small;
