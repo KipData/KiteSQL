@@ -45,7 +45,6 @@ use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, StorageTransaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
-use sqlparser::ast::NullsDistinctOption;
 pub(super) use sqlparser::ast::{
     AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, BinaryLength,
     BinaryOperator, ColumnDef, ColumnOption, CreateIndex, CreateView, DataType, DescribeAlias,
@@ -59,6 +58,7 @@ pub(super) use sqlparser::ast::{
 };
 #[cfg(feature = "copy")]
 pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
+use sqlparser::ast::{NullsDistinctOption, OnInsert};
 use sqlparser::tokenizer::Span;
 use std::borrow::Cow;
 use std::cmp;
@@ -1075,8 +1075,25 @@ where
             or,
             replace_into,
             source,
+            returning,
+            on,
             ..
         } = insert;
+        if returning.is_some() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "INSERT RETURNING is not supported".to_string(),
+            ));
+        }
+        if let Some(on) = on {
+            let clause = match on {
+                OnInsert::OnConflict(_) => "ON CONFLICT",
+                OnInsert::DuplicateKeyUpdate(_) => "ON DUPLICATE KEY UPDATE",
+                _ => "conflict clause",
+            };
+            return Err(DatabaseError::UnsupportedStmt(format!(
+                "INSERT {clause} is not supported"
+            )));
+        }
         let is_overwrite =
             *overwrite || *replace_into || matches!(or, Some(SqliteOnConflict::Replace));
         let table_name = match table {

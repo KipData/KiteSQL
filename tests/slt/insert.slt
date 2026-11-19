@@ -43,6 +43,19 @@ insert into t(id, v1, v1) values (98, 1, 2)
 statement error column: `v1` already exists
 insert into t(id, v1, V1) select 99, 1, 2
 
+# Unsupported clauses must fail without adding or modifying rows.
+statement error INSERT RETURNING is not supported
+insert into t(id) values (90) returning id
+
+statement error INSERT ON CONFLICT is not supported
+insert into t(id) select 91 as id on conflict do nothing
+
+statement error INSERT ON CONFLICT is not supported
+insert into t(id, v1) values (1, 100) on conflict (id) do update set v1 = 100
+
+statement error INSERT ON DUPLICATE KEY UPDATE is not supported
+insert into t(id, v1) values (92, 100) on duplicate key update v1 = 100
+
 query IIII rowsort
 select * from t
 ----
