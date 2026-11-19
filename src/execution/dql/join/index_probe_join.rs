@@ -98,7 +98,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for IndexProbeJoin<'a> 
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::execution::execute_input;
+    use crate::execution::{execute_input, ExecArena};
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
@@ -204,7 +204,8 @@ mod tests {
         let transaction = storage.transaction()?;
         let cache = &table_cache;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
-        let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(cache, functions, &transaction);
         let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut root = <IndexProbeJoin as ReadExecutor>::into_executor(
             (&op, &left, &right),

@@ -81,6 +81,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
         let default_value = column.default_value(plan_arena)?;
 
         let (unique_index_id, apply) = {
+            let mut decode = arena.decode_context();
             let (transaction, table_codec) = arena.transaction_codec_mut();
             let (table, col_id) = transaction
                 .add_column(
@@ -89,6 +90,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for AddColumn<'a> {
                     table_catalog.name(),
                     column,
                     *if_not_exists,
+                    &mut decode,
                 )
                 .await?;
             let unique_meta = if column.desc().is_unique() {

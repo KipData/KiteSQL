@@ -86,6 +86,7 @@ impl<'p> Program<'p> {
         }
         let arena = start_execution_inner(
             transaction.state.table_cache(),
+            transaction.state.functions(),
             &mut transaction.inner,
             &mut self.executor,
             &mut self.arena,
@@ -273,6 +274,7 @@ mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc};
     use crate::execution::dql::index_scan::IndexScan;
+    use crate::execution::ExecArena;
     use crate::expression::range_detacher::{Range, RangeValue};
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::filter::FilterOperator;
@@ -470,7 +472,8 @@ mod tests {
                 continue;
             }
             let mut exec_buffer = crate::execution::ExecBuffer::default();
-            let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
+            let functions = (&Default::default(), &Default::default());
+            let mut exec_arena = ExecArena::new(context, functions, &transaction);
             let mut execution_arena =
                 crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
             let mut ranges = Cow::Owned(Range::Dummy);
@@ -882,7 +885,8 @@ mod tests {
         let storage = crate::storage::new_test_storage().await;
         let transaction = storage.transaction()?;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
-        let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(context, functions, &transaction);
         let mut execution_arena =
             crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut ranges = Cow::Owned(Range::Dummy);

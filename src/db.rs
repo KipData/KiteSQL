@@ -45,6 +45,7 @@ use crate::optimizer::rule::normalization::NormalizationRuleImpl;
 use crate::orm::{FromQueryRow, FromTxnRow};
 use crate::planner::operator::Operator;
 use crate::planner::{ExecMetaArena, LogicalPlan, MetaArena, PlanArena, TableArenaCell};
+use crate::serdes::ReferenceDecodeContext;
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 use crate::storage::lmdb::{LmdbConfig, LmdbStorage};
 #[cfg(not(feature = "async"))]
@@ -106,6 +107,7 @@ pub(crate) type Execution<'a, 'p, A, T> = (ExecMetaArena<A>, (Executor<'p>, Exec
 
 pub(crate) type ScalaFunctions = HashMap<FunctionSummary, Arc<dyn ScalarFunctionImpl>>;
 pub(crate) type TableFunctions = HashMap<FunctionSummary, TableFunctionCatalog>;
+pub(crate) type FunctionRegistries<'a> = (&'a ScalaFunctions, &'a TableFunctions);
 
 pub enum CatalogKind {
     Table(crate::catalog::TableName),
@@ -653,6 +655,7 @@ fn statement_stamp<T: StorageTransaction>(
 #[maybe_async]
 async fn start_execution<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
     table_cache: &'p TableCache,
+    functions: FunctionRegistries<'p>,
     transaction: &'a mut T,
     mut executor: Executor<'p>,
     plan_arena: A,
@@ -661,8 +664,14 @@ where
     'p: 'a,
 {
     let mut plan_arena = ExecMetaArena::new(plan_arena);
-    let arena =
-        start_execution_inner(table_cache, transaction, &mut executor, &mut plan_arena).await?;
+    let arena = start_execution_inner(
+        table_cache,
+        functions,
+        transaction,
+        &mut executor,
+        &mut plan_arena,
+    )
+    .await?;
 
     Ok((plan_arena, (executor, arena)))
 }
@@ -670,6 +679,7 @@ where
 #[maybe_async]
 async fn start_execution_inner<'a, 'p, T: StorageTransaction + 'p, A: MetaArena + 'p>(
     table_cache: &'p TableCache,
+    functions: FunctionRegistries<'p>,
     transaction: &'a mut T,
     executor: &mut Executor<'p>,
     plan_arena: &mut ExecMetaArena<A>,
@@ -679,7 +689,7 @@ where
 {
     let stamp = statement_stamp(transaction, executor.plan())?;
     let iters = executor.buffer.iter_slots(executor.iters());
-    let mut arena = ExecArena::new(table_cache, transaction).with_iters(iters);
+    let mut arena = ExecArena::new(table_cache, functions, transaction).with_iters(iters);
     executor.buffer.set_statement_stamp(stamp);
     executor.start(&mut arena, plan_arena).await?;
 
@@ -711,6 +721,9 @@ impl<S: Storage> State<S> {
     }
     fn table_functions(&self) -> &TableFunctions {
         &self.table_functions
+    }
+    pub(crate) fn functions(&self) -> FunctionRegistries<'_> {
+        (self.scala_functions(), self.table_functions())
     }
     pub(crate) fn meta_cache(&self) -> &StatisticsMetaCache {
         &self.meta_cache
@@ -841,7 +854,14 @@ impl<S: Storage> State<S> {
         'txn: 'p,
         'p: 'a,
     {
-        start_execution(self.table_cache(), transaction, executor, plan_arena).await
+        start_execution(
+            self.table_cache(),
+            self.functions(),
+            transaction,
+            executor,
+            plan_arena,
+        )
+        .await
     }
 
     pub(crate) async fn execute_mut<'a, 'txn, A, F>(
@@ -904,7 +924,14 @@ impl<S: Storage> State<S> {
 
         plan.populate_output_schema_recursive(&mut plan_arena);
         let executor = Executor::new(plan, &plan_arena);
-        start_execution(table_cache, transaction, executor, plan_arena).await
+        start_execution(
+            table_cache,
+            (scala_functions, table_functions),
+            transaction,
+            executor,
+            plan_arena,
+        )
+        .await
     }
 }
 
@@ -1075,8 +1102,17 @@ impl<S: Storage> Database<S> {
                     true,
                 )?;
                 let mut table_codec = TableCodec::default();
+                let mut decode = ReferenceDecodeContext::with_functions(
+                    &self.state.scala_functions,
+                    &self.state.table_functions,
+                );
                 let table = transaction
-                    .load_table(&mut table_codec, self.state.table_arena.borrow_mut(), &name)
+                    .load_table(
+                        &mut table_codec,
+                        self.state.table_arena.borrow_mut(),
+                        &name,
+                        &mut decode,
+                    )
                     .await?
                     .ok_or(DatabaseError::TableNotFound)?;
                 let mut indexes = Vec::new();
@@ -2132,6 +2168,31 @@ pub(crate) mod test {
         );
         iter.done().await?;
         Ok(())
+    }
+
+    #[cfg(feature = "time")]
+    #[test]
+    async fn function_default_survives_table_reload() -> Result<(), DatabaseError> {
+        let storage = crate::storage::new_test_storage().await;
+        {
+            let mut db = DataBaseBuilder::path(".").build_with_storage(storage.clone())?;
+            db.ddl("create table t (id int primary key, v timestamp default current_timestamp)")
+                .await?;
+        }
+
+        let mut db = DataBaseBuilder::path(".").build_with_storage(storage)?;
+        db.load(CatalogKind::Table("t".into())).await?;
+        db.run("insert into t (id) values (1)")
+            .await?
+            .done()
+            .await?;
+        let mut iter = db.run("select v from t").await?;
+        assert_eq!(
+            iter.next_tuple(|_, row| matches!(row[0], DataValue::Time64(..)))
+                .await?,
+            Some(true),
+        );
+        iter.done().await
     }
 
     pub(crate) async fn build_table<T: StorageTransaction>(

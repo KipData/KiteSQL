@@ -455,7 +455,7 @@ impl<'a> MarkApply<'a> {
 mod tests {
     use super::*;
     use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef};
-    use crate::execution::{execute_input, try_collect};
+    use crate::execution::{execute_input, try_collect, ExecArena};
     use crate::expression::{BinaryOperator, ScalarExpression};
     use crate::planner::operator::values::ValuesOperator;
     use crate::planner::operator::Operator;
@@ -569,7 +569,8 @@ mod tests {
         let transaction = storage.transaction()?;
         let context = &table_cache;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
-        let mut exec_arena = crate::execution::ExecArena::new(context, &transaction);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(context, functions, &transaction);
         let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
         let mut root = <MarkApply as ReadExecutor>::into_executor(
             (&op, &left, &right),
@@ -692,7 +693,8 @@ mod tests {
         let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
-        let mut exec_arena = crate::execution::ExecArena::new(&table_cache, &transaction);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(&table_cache, functions, &transaction);
         let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
 
         let right_root = build_read(&mut arena, &plan_arena, &right);
@@ -748,7 +750,8 @@ mod tests {
         let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
-        let mut exec_arena = crate::execution::ExecArena::new(&table_cache, &transaction);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(&table_cache, functions, &transaction);
         let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
 
         let right_root = build_read(&mut arena, &plan_arena, &right);
@@ -803,7 +806,8 @@ mod tests {
         let (table_cache, _temp_dir, storage) = build_test_storage().await?;
         let transaction = storage.transaction()?;
         let mut exec_buffer = crate::execution::ExecBuffer::default();
-        let mut exec_arena = crate::execution::ExecArena::new(&table_cache, &transaction);
+        let functions = (&Default::default(), &Default::default());
+        let mut exec_arena = ExecArena::new(&table_cache, functions, &transaction);
         let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
 
         let right_root = build_read(&mut arena, &plan_arena, &right);
@@ -941,7 +945,8 @@ mod tests {
                         );
                     }
                     let mut exec_buffer = crate::execution::ExecBuffer::default();
-                    let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+                    let functions = (&Default::default(), &Default::default());
+                    let mut exec_arena = ExecArena::new(cache, functions, &transaction);
                     let mut arena =
                         crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
                     let left_input = build_read(&mut arena, &meta, &left);
@@ -1026,7 +1031,8 @@ mod tests {
             op.materialize = materialize;
             op.guard = Some(meta.alloc_expression(ScalarExpression::column_expr(flag_column, 1)));
             let mut exec_buffer = crate::execution::ExecBuffer::default();
-            let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+            let functions = (&Default::default(), &Default::default());
+            let mut exec_arena = ExecArena::new(cache, functions, &transaction);
             let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
             let left_input = build_read(&mut arena, &meta, &left);
             let right_root = build_read(&mut arena, &meta, &right);
@@ -1098,7 +1104,8 @@ mod tests {
             op.materialize = true;
             let empty = build_values(&mut meta, "empty", vec![]);
             let mut exec_buffer = crate::execution::ExecBuffer::default();
-            let mut exec_arena = crate::execution::ExecArena::new(cache, &transaction);
+            let functions = (&Default::default(), &Default::default());
+            let mut exec_arena = ExecArena::new(cache, functions, &transaction);
             let mut arena = crate::execution::ExecContext::new(&mut exec_buffer, &mut exec_arena);
             let left_input = build_read(&mut arena, &meta, &left);
             let right_root = build_read(&mut arena, &meta, &right);
