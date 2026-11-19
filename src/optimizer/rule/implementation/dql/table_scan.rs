@@ -22,7 +22,7 @@ use crate::optimizer::core::statistics_meta::StatisticMetaLoader;
 use crate::optimizer::rule::implementation::dql::filter::estimate_predicate_rows;
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{LogicalPlan, PlanArena};
-use crate::types::index::{IndexLookup, IndexType};
+use crate::types::index::{IndexLookup, IndexMeta, IndexType};
 use std::sync::LazyLock;
 
 static TABLE_SCAN_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -114,7 +114,7 @@ impl ImplementationRule for IndexScanImplementation {
                 let mut ndv = None;
 
                 let index_meta = arena.index(index_info.meta);
-                // A PK/Unique equality range has an exact row count even without statistics.
+                // A complete, non-NULL unique key can match at most one row.
                 let counted = loader
                     .collect_count(
                         scan_op.table_id,
@@ -122,9 +122,9 @@ impl ImplementationRule for IndexScanImplementation {
                         range,
                         &mut state.histogram_buf,
                     )?
-                    .or_else(|| unique_eq_row_count(index_meta.ty, range).map(|rows| (rows, rows)));
+                    .or_else(|| unique_eq_row_count(index_meta, range).map(|rows| (rows, rows)));
                 if let Some((mut row_count, distinct_count)) = counted {
-                    row_count = adjust_index_row_count(index_meta.ty, range, row_count);
+                    row_count = adjust_index_row_count(index_meta, range, row_count);
                     estimated_rows = Some(row_count);
                     ndv = Some(distinct_count.min(row_count));
                     if !index_info.covered && !matches!(index_meta.ty, IndexType::PrimaryKey { .. })
@@ -188,8 +188,8 @@ impl ImplementationRule for IndexScanImplementation {
     }
 }
 
-fn adjust_index_row_count(index_type: IndexType, range: &Range, row_count: usize) -> usize {
-    let row_count = unique_eq_row_count(index_type, range).unwrap_or(row_count);
+fn adjust_index_row_count(index: &IndexMeta, range: &Range, row_count: usize) -> usize {
+    let row_count = unique_eq_row_count(index, range).unwrap_or(row_count);
     if row_count == 0 && !matches!(range, Range::Dummy) {
         1
     } else {
@@ -197,17 +197,17 @@ fn adjust_index_row_count(index_type: IndexType, range: &Range, row_count: usize
     }
 }
 
-fn unique_eq_row_count(index_type: IndexType, range: &Range) -> Option<usize> {
+fn unique_eq_row_count(index: &IndexMeta, range: &Range) -> Option<usize> {
     match range {
         Range::Dummy => Some(0),
         Range::Eq(value)
-            if !value.is_null()
-                && matches!(index_type, IndexType::PrimaryKey { .. } | IndexType::Unique) =>
+            if matches!(index.ty, IndexType::PrimaryKey { .. } | IndexType::Unique) =>
         {
-            Some(1)
+            let value = value.value().ok()?;
+            (value.as_slice().len() == index.column_ids.len() && !value.has_null()).then_some(1)
         }
         Range::SortedRanges(ranges) => ranges.iter().try_fold(0usize, |count, range| {
-            unique_eq_row_count(index_type, range).map(|row_count| count + row_count)
+            unique_eq_row_count(index, range).map(|row_count| count + row_count)
         }),
         _ => None,
     }

@@ -51,3 +51,85 @@ drop table t_m
 
 statement ok
 drop table t
+
+# A composite UNIQUE checks the entire key, and keys with any NULL can repeat.
+statement ok
+create table t (id int primary key, a int, b int, payload int, unique (a, b));
+
+statement ok
+insert into t values (1,1,1,101), (2,1,2,102), (3,2,1,103),
+    (4,1,null,104), (5,1,null,105), (6,null,1,106), (7,null,1,107),
+    (8,null,null,108), (9,null,null,109);
+
+statement error the column has been declared unique
+insert into t values (10,1,1,110);
+
+statement error the column has been declared unique
+update t set b = 1 where id = 2;
+
+statement ok
+insert into t select cast(number+100 as int), cast(number+100 as int), 0, 0 from table(numbers(100));
+
+statement ok
+analyze table t;
+
+# Exercise both covered and non-covered lookups of a complete NULL-containing key.
+query I
+select id from t where a = 1 and b is null order by id;
+----
+4
+5
+
+query I
+select payload from t where a = 1 and b is null order by payload;
+----
+104
+105
+
+query I
+select id from t where a is null and b is null order by id;
+----
+8
+9
+
+query I
+select id from t where a = 1 and b is not null order by id;
+----
+1
+2
+
+statement ok
+delete from t where id = 4;
+
+statement ok
+update t set b = null where id = 2;
+
+query I
+select payload from t where a = 1 and b is null order by payload;
+----
+102
+105
+
+statement ok
+drop table t;
+
+statement error column: `missing` not found
+create table bad_unique (id int primary key, a int, unique (a, missing));
+
+statement error
+create table bad_unique (id int primary key, a int, unique nulls not distinct (a));
+
+statement ok
+create table single_keys (id int primary key, a int unique, b int, unique (b));
+
+statement ok
+insert into single_keys values (1,null,null), (2,null,null), (3,10,20);
+
+statement error the column has been declared unique
+insert into single_keys values (4,10,21);
+
+statement error the column has been declared unique
+insert into single_keys values (4,11,20);
+
+statement ok
+drop table single_keys;

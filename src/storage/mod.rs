@@ -335,7 +335,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         }
         table_codec
             .with_index(table_id, &index, Some(tuple_id), async |key, value| {
-                if matches!(index.ty, IndexType::Unique) {
+                if matches!(index.ty, IndexType::Unique) && !index.is_unique_with_null() {
                     if let Some(bytes) = self.get_borrowed(key).await? {
                         return if TableCodec::strip_stamp(bytes.as_ref())?
                             != TableCodec::strip_stamp(value)?
@@ -679,6 +679,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         plan_arena: &mut (dyn MetaArena + '_),
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
+        composite_unique_keys: &[Vec<usize>],
         if_not_exists: bool,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
         match self
@@ -698,7 +699,12 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         for (_, column) in table_catalog.primary_keys() {
             TableCodec::check_primary_key_type(plan_arena.column(*column).datatype())?;
         }
-        self.create_index_meta_from_column(table_codec, plan_arena, &mut table_catalog)?;
+        self.create_table_indexes(
+            table_codec,
+            plan_arena,
+            &mut table_catalog,
+            composite_unique_keys,
+        )?;
 
         for column in table_catalog
             .columns()
@@ -1242,14 +1248,14 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
             .await
     }
 
-    fn create_index_meta_from_column(
+    fn create_table_indexes(
         &mut self,
         table_codec: &mut TableCodec,
         arena: &mut (impl MetaArena + ?Sized),
         table: &mut TableCatalog,
+        composite_unique_keys: &[Vec<usize>],
     ) -> Result<(), DatabaseError> {
         let table_id = table.id();
-        let mut primary_keys = Vec::new();
 
         let mut i = 0;
         while i < table.columns_len() {
@@ -1257,20 +1263,11 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
             i += 1;
             let col = arena.column(column);
             let col_id = col.id().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-            let index_ty = if let Some(primary_key_index) = col.desc().primary() {
-                primary_keys.push((primary_key_index, col_id));
+            if col.desc().is_primary() || !col.desc().is_unique() {
                 continue;
-            } else if col.desc().is_unique() {
-                IndexType::Unique
-            } else {
-                continue;
-            };
+            }
             let index_name = format!("uk_{}_index", col.name());
-            let meta_ref = table.add_index_meta(index_name, vec![col_id], index_ty, arena)?;
-            let meta = arena.index(meta_ref);
-            table_codec.with_index_meta(table_id, meta.id, Some(meta), arena, |key, value| {
-                self.set(key, value)
-            })?;
+            table.add_index_meta(index_name, vec![col_id], IndexType::Unique, arena)?;
         }
         let primary_keys = table
             .primary_keys()
@@ -1280,12 +1277,28 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         let pk_index_ty = IndexType::PrimaryKey {
             is_multiple: primary_keys.len() != 1,
         };
-        let meta_ref =
-            table.add_index_meta("pk_index".to_string(), primary_keys, pk_index_ty, arena)?;
-        let meta = arena.index(meta_ref);
-        table_codec.with_index_meta(table_id, meta.id, Some(meta), arena, |key, value| {
-            self.set(key, value)
-        })?;
+        table.add_index_meta("pk_index".to_string(), primary_keys, pk_index_ty, arena)?;
+
+        for (i, key) in composite_unique_keys.iter().enumerate() {
+            let column_ids = key
+                .iter()
+                .map(|&position| {
+                    table
+                        .column_ref(position)
+                        .and_then(|column| arena.column(column).id())
+                        .ok_or(DatabaseError::InvalidIndex)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let name = format!("uk_composite_index_{}", i + 1);
+            table.add_index_meta(name, column_ids, IndexType::Unique, arena)?;
+        }
+
+        for &meta_ref in table.indexes() {
+            let meta = arena.index(meta_ref);
+            table_codec.with_index_meta(table_id, meta.id, Some(meta), arena, |key, value| {
+                self.set(key, value)
+            })?;
+        }
 
         Ok(())
     }
@@ -1903,10 +1916,23 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
         tuple: &mut Tuple,
         value: &DataValue,
         params: &IndexImplParams<'a, T>,
-        _: &mut Bytes,
-        _: &mut Bytes,
+        encode_min: &mut Bytes,
+        encode_max: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
-        let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Unique);
+        let meta = params.index_meta();
+        let index = Index::new(meta.id, value.as_slice(), IndexType::Unique);
+        if index.values.len() < meta.column_ids.len() || index.is_unique_with_null() {
+            return eq_to_res_scope(
+                table_codec,
+                tuple,
+                self,
+                value,
+                params,
+                encode_min,
+                encode_max,
+            )
+            .await;
+        }
         let Some(bytes) = table_codec
             .with_index(params.table_id, &index, None, async |key, _| {
                 params.tx.get_borrowed(key).await
@@ -1938,8 +1964,10 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
 
         table_codec
             .with_index(params.table_id, &index, None, async |key, _| {
-                if index.values.len() < params.index_meta().column_ids.len() {
-                    // A partial UNIQUE key bounds a prefix, not one exact index entry.
+                if index.values.len() < params.index_meta().column_ids.len()
+                    || index.is_unique_with_null()
+                {
+                    // Both partial and NULL-containing keys may have multiple entries.
                     encode_bound_key(out, key, is_upper);
                 } else {
                     out.clear();

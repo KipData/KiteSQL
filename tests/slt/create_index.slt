@@ -201,5 +201,12 @@ drop index t.pk_index
 statement ok
 drop index t.index_3
 
+# Building a unique index also accepts existing duplicate keys containing NULL.
+statement ok
+insert into t values (-2,0,2,null), (-1,0,2,null);
+
+statement ok
+create unique index index_3 on t (v2, v3);
+
 statement ok
 drop table t

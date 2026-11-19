@@ -79,7 +79,7 @@ impl TableCatalog {
     ) -> Option<IndexMetaRef> {
         self.indexes.iter().copied().find(|meta| {
             let meta = arena.index(*meta);
-            matches!(meta.ty, IndexType::Unique) && &meta.column_ids[0] == col_id
+            matches!(meta.ty, IndexType::Unique) && meta.column_ids.as_slice() == [*col_id]
         })
     }
 

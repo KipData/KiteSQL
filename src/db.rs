@@ -2164,6 +2164,7 @@ pub(crate) mod test {
                 plan_arena,
                 "t1".to_string(),
                 columns,
+                &[],
                 false,
             )
             .await?

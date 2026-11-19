@@ -894,6 +894,7 @@ pub mod test {
                         ColumnDesc::new(Integer, None, true, None)?,
                     ),
                 ],
+                &[],
                 false,
             )
             .await?
@@ -920,6 +921,7 @@ pub mod test {
                         ColumnDesc::new(Integer, None, false, None)?,
                     ),
                 ],
+                &[],
                 false,
             )
             .await?

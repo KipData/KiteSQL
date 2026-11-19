@@ -23,11 +23,11 @@ use crate::types::LogicalType;
 use std::collections::HashSet;
 
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
-    // TODO: TableConstraint
     pub(crate) fn bind_create_table(
         &mut self,
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
+        composite_unique_keys: Vec<Vec<usize>>,
         if_not_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut names = HashSet::new();
@@ -52,6 +52,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
             Operator::CreateTable(CreateTableOperator {
                 table_name,
                 columns,
+                composite_unique_keys,
                 if_not_exists,
             }),
             Childrens::None,
@@ -80,7 +81,7 @@ mod tests {
         let scala_functions = Default::default();
         let table_functions = Default::default();
 
-        let sql = "create table t1 (id int primary key, name varchar(10) null)";
+        let sql = "create table t1 (id int primary key, name varchar(10) null, unique (name, id))";
         let mut binder = Binder::new(
             BinderContext::new(
                 &names,
@@ -102,6 +103,7 @@ mod tests {
         match plan1.operator {
             Operator::CreateTable(op) => {
                 assert_eq!(op.table_name, "t1");
+                assert_eq!(op.composite_unique_keys, vec![vec![1, 0]]);
                 assert_eq!(op.columns[0].name(), "id");
                 assert!(!op.columns[0].nullable());
                 assert_eq!(

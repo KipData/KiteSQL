@@ -45,6 +45,7 @@ use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, StorageTransaction};
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
+use sqlparser::ast::NullsDistinctOption;
 pub(super) use sqlparser::ast::{
     AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, BinaryLength,
     BinaryOperator, ColumnDef, ColumnOption, CreateIndex, CreateView, DataType, DescribeAlias,
@@ -781,17 +782,23 @@ where
         for (i, column) in create.columns.into_iter().enumerate() {
             columns.push(self.bind_column(column, Some(i))?);
         }
+        let mut composite_unique_keys = Vec::new();
         for constraint in create.constraints {
             match constraint {
                 TableConstraint::PrimaryKey(primary) => {
-                    self.bind_constraint(&mut columns, primary.columns, |i, desc| {
-                        desc.set_primary(Some(i))
-                    })?;
+                    let positions = Self::constraint_columns(&columns, primary.columns)?;
+                    for (i, position) in positions.into_iter().enumerate() {
+                        columns[position].desc_mut().set_primary(Some(i));
+                    }
                 }
                 TableConstraint::Unique(unique) => {
-                    self.bind_constraint(&mut columns, unique.columns, |_, desc| {
-                        desc.set_unique()
-                    })?;
+                    Self::check_unique_nulls_option(unique.nulls_distinct)?;
+                    let positions = Self::constraint_columns(&columns, unique.columns)?;
+                    match positions.as_slice() {
+                        [] => return Err(DatabaseError::InvalidIndex),
+                        [position] => columns[*position].desc_mut().set_unique(),
+                        _ => composite_unique_keys.push(positions),
+                    }
                 }
                 constraint => {
                     return Err(DatabaseError::UnsupportedStmt(format!(
@@ -801,8 +808,12 @@ where
             }
         }
 
-        self.binder
-            .bind_create_table(table_name, columns, create.if_not_exists)
+        self.binder.bind_create_table(
+            table_name,
+            columns,
+            composite_unique_keys,
+            create.if_not_exists,
+        )
     }
 
     fn bind_column(
@@ -828,7 +839,10 @@ where
                     nullable = false;
                     break;
                 }
-                ColumnOption::Unique(_) => column_desc.set_unique(),
+                ColumnOption::Unique(unique) => {
+                    Self::check_unique_nulls_option(unique.nulls_distinct)?;
+                    column_desc.set_unique();
+                }
                 ColumnOption::Default(expr) => {
                     let mut expr = self
                         .binder
@@ -855,28 +869,39 @@ where
         Ok(ColumnCatalog::new(column_name, nullable, column_desc))
     }
 
-    fn bind_constraint<F: Fn(usize, &mut ColumnDesc)>(
-        &mut self,
-        table_columns: &mut [ColumnCatalog],
-        exprs: Vec<IndexColumn>,
-        fn_constraint: F,
-    ) -> Result<(), DatabaseError> {
-        for (i, index_column) in exprs.into_iter().enumerate() {
+    fn check_unique_nulls_option(option: NullsDistinctOption) -> Result<(), DatabaseError> {
+        if option != NullsDistinctOption::None {
+            return Err(DatabaseError::UnsupportedStmt(
+                "UNIQUE NULLS options".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn constraint_columns(
+        table_columns: &[ColumnCatalog],
+        index_columns: Vec<IndexColumn>,
+    ) -> Result<Vec<usize>, DatabaseError> {
+        let mut positions = Vec::with_capacity(index_columns.len());
+        for index_column in index_columns {
             let Expr::Identifier(ident) = index_column.column.expr else {
                 return Err(DatabaseError::UnsupportedStmt(
                     "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".to_string(),
                 ));
             };
             let column_name = lower_ident(&ident);
-
-            if let Some(column) = table_columns
-                .iter_mut()
-                .find(|column| column.name() == column_name.as_ref())
-            {
-                fn_constraint(i, column.desc_mut())
-            }
+            let position = table_columns
+                .iter()
+                .position(|column| column.name() == column_name.as_ref())
+                .ok_or_else(|| {
+                    attach_span_if_absent(
+                        DatabaseError::column_not_found(column_name.into_owned()),
+                        ident.span,
+                    )
+                })?;
+            positions.push(position);
         }
-        Ok(())
+        Ok(positions)
     }
 
     fn create_index(self, create: CreateIndex) -> Result<LogicalPlan, DatabaseError> {
