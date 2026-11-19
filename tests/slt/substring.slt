@@ -43,3 +43,13 @@ query T
 select substring('abc', 1, 10);
 ----
 abc
+
+query TT
+select substring('中文abc', 2), substring('中😀文', 2, 1);
+----
+文abc 😀
+
+query III
+select position('文' in '中文abc'), position('b' in '😀ab'), position('A' in '中文abc');
+----
+2 3 0
