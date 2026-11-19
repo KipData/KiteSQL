@@ -38,6 +38,24 @@ select max(v1) from t
 ----
 4
 
+# Columns outside an aggregate must come from the GROUP BY output.
+statement error must appear in the GROUP BY clause or be used in an aggregate function
+select id, max(v1) from t;
+
+statement error must appear in the GROUP BY clause or be used in an aggregate function
+select v1 + max(v2) from t;
+
+statement error must appear in the GROUP BY clause or be used in an aggregate function
+select max(v1) from t having v2 > 0;
+
+statement error must appear in the GROUP BY clause or be used in an aggregate function
+select max(v1) from t order by v2;
+
+query II
+select 42, max(v1) + 1 from t;
+----
+42 5
+
 # SimpleMaxTest1
 
 query I
