@@ -2221,6 +2221,39 @@ pub(crate) mod test {
         Ok(value)
     }
 
+    #[cfg(not(feature = "async"))]
+    #[test]
+    async fn rejected_not_null_update_preserves_memory_index() -> Result<(), DatabaseError> {
+        let mut db = DataBaseBuilder::path(".").build_in_memory().await?;
+        db.ddl("create table t(id int primary key, b int not null unique, c int)")
+            .await?;
+        db.run("insert into t values (1, 10, null)")
+            .await?
+            .done()
+            .await?;
+
+        let result = db
+            .run("update t set b = c where id = 1")
+            .await?
+            .done()
+            .await;
+        assert!(
+            matches!(result, Err(DatabaseError::NotNull { column: Some(name), .. }) if name == "b")
+        );
+
+        let query = "select id from t where b = 10";
+        let mut explain = db.run(format!("explain {query}")).await?;
+        assert_eq!(
+            explain
+                .next_tuple(|_, row| row[0].to_string().contains("IndexScan By uk_b_index"))
+                .await?,
+            Some(true),
+        );
+        explain.done().await?;
+        assert_eq!(read_single_i32(db.run(query).await?).await?, 1);
+        Ok(())
+    }
+
     #[test]
     async fn test_run_sql() -> Result<(), DatabaseError> {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");

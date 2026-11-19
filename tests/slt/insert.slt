@@ -37,6 +37,12 @@ insert into t(id, v2) select id + 10, cast(v1 as varchar) from t where id < 2
 statement ok
 insert into t select id + 20, v1, v2, v3 from t where id in (0, 1)
 
+statement error column: `v1` already exists
+insert into t(id, v1, v1) values (98, 1, 2)
+
+statement error column: `v1` already exists
+insert into t(id, v1, V1) select 99, 1, 2
+
 query IIII rowsort
 select * from t
 ----
