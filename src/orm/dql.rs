@@ -1,7 +1,7 @@
 use super::*;
 
 #[maybe_async]
-impl<S: Storage> Database<S> {
+impl<S: Storage, D: SqlDialect> Database<S, D> {
     /// Prepares an ORM-built plan once into a program for repeated execution with
     /// positional parameters. Use `e.param(id)` inside expression closures, then pass
     /// values to `Program::execute`.
@@ -195,7 +195,7 @@ impl<S: Storage> Database<S> {
 }
 
 #[maybe_async]
-impl<'a, S: Storage> Transaction<'a, S> {
+impl<'a, S: Storage, D: SqlDialect> Transaction<'a, S, D> {
     /// Prepares an ORM-built plan into a program, against this transaction's view.
     pub fn program<F>(
         &self,

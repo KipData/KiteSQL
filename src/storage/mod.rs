@@ -2801,10 +2801,10 @@ pub(crate) async fn new_test_storage() -> TestStorage {
 
 // The async path's stand-in for `DataBaseBuilder::build_in_memory` in unit tests.
 #[cfg(all(test, feature = "async"))]
-impl crate::db::DataBaseBuilder {
+impl<D: crate::dialect::SqlDialect> crate::db::DataBaseBuilder<D> {
     pub(crate) async fn build_in_memory(
         self,
-    ) -> Result<crate::db::Database<TestStorage>, DatabaseError> {
+    ) -> Result<crate::db::Database<TestStorage, D>, DatabaseError> {
         self.build_with_storage(new_test_storage().await)
     }
 }
