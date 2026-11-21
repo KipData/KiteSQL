@@ -868,6 +868,7 @@ mod tests {
                 &transaction,
                 &scala_functions,
                 &table_functions,
+                database.state.dialect(),
             ),
             &[],
             None,

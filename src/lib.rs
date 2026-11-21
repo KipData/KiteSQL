@@ -120,6 +120,7 @@ compile_error!("feature `spill` is not supported on wasm32 targets");
 pub mod binder;
 pub mod catalog;
 pub mod db;
+pub mod dialect;
 pub mod errors;
 pub mod execution;
 pub mod expression;
