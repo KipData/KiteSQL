@@ -9,6 +9,7 @@ use crate::db::{
     AsyncIter, BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, ResultRow,
     Transaction, TransactionIter, TxnOrmIter, TxnResultIter, TxnValue,
 };
+use crate::dialect::SqlDialect;
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
 use crate::expression::window::WindowFunctionKind;
@@ -2669,7 +2670,16 @@ where
         Cow::Owned(targets)
     };
 
-    binder.bind_insert_query(table_name, input_plan, &targets, overwrite, arena)
+    binder.bind_insert_query(
+        crate::binder::insert::InsertQueryParams {
+            table_name,
+            input_plan,
+            targets: &targets,
+            is_overwrite: overwrite,
+            on_duplicate_key_update: None,
+        },
+        arena,
+    )
 }
 
 fn bind_orm_insert_model<'bind, 'parent, 'arena, T, A, M>(
@@ -2711,7 +2721,17 @@ where
         row.push(arena.alloc_expression(ScalarExpression::Constant(value)));
     }
 
-    binder.bind_insert_values(table_name, schema_ref, row, 1, false, arena)
+    binder.bind_insert_values(
+        crate::binder::insert::InsertValuesParams {
+            table_name,
+            targets: schema_ref,
+            rows: row,
+            row_count: 1,
+            is_overwrite: false,
+            on_duplicate_key_update: None,
+        },
+        arena,
+    )
 }
 
 fn describe_text_value(value: Option<DataValue>) -> String {

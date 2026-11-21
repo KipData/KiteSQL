@@ -41,7 +41,7 @@ mod drop_table;
 mod drop_view;
 mod explain;
 pub mod expr;
-mod insert;
+pub(crate) mod insert;
 #[cfg(feature = "parser")]
 mod parser;
 mod select;
@@ -260,6 +260,31 @@ pub(crate) struct BoundScalarQuery {
     param_bindings: Vec<(ScalarQueryRef, ExprRef)>,
 }
 
+pub(crate) struct OdkuContext {
+    pub(crate) original_columns: Vec<ColumnRef>,
+    pub(crate) excluded_columns: Vec<ColumnRef>,
+    pub(crate) row_alias: Option<String>,
+}
+
+impl OdkuContext {
+    /// The proposed row's columns follow the existing row's, so column `i` is at `n + i`.
+    pub(crate) fn proposed_column(
+        &self,
+        name: &str,
+        arena: &PlanArena<'_>,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        let position = self
+            .original_columns
+            .iter()
+            .position(|column| arena.column(*column).name() == name)
+            .ok_or_else(|| DatabaseError::column_not_found(name.to_string()))?;
+        Ok(ScalarExpression::column_expr(
+            self.excluded_columns[position],
+            self.original_columns.len() + position,
+        ))
+    }
+}
+
 pub struct BinderContext<'a, T: StorageTransaction> {
     pub(crate) scala_functions: &'a ScalaFunctions,
     pub(crate) table_functions: &'a TableFunctions,
@@ -267,6 +292,7 @@ pub struct BinderContext<'a, T: StorageTransaction> {
     pub(crate) table_cache: &'a TableCache,
     pub(crate) view_cache: &'a ViewCache,
     pub(crate) transaction: &'a T,
+    pub(crate) dialect: &'a dyn crate::dialect::SqlDialect,
     // Tips: retain binding order so wildcard expansion and position derivation
     // follow FROM/JOIN order directly.
     pub(crate) bind_table: Vec<BoundSource<'a>>,
@@ -275,6 +301,7 @@ pub struct BinderContext<'a, T: StorageTransaction> {
     // and do not share the current FROM namespace.
     source_scope_start: usize,
     ctes: Vec<CteBinding>,
+    odku_context: Option<OdkuContext>,
     pub(crate) cte_depth: usize,
     // alias
     expr_aliases: BTreeMap<(Option<String>, String), ExprRef>,
@@ -335,6 +362,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
         transaction: &'a T,
         scala_functions: &'a ScalaFunctions,
         table_functions: &'a TableFunctions,
+        dialect: &'a dyn crate::dialect::SqlDialect,
     ) -> Self {
         BinderContext {
             scala_functions,
@@ -343,6 +371,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             table_cache,
             view_cache,
             transaction,
+            dialect,
             bind_table: Default::default(),
             name_bindings: Vec::new(),
             source_scope_start: 0,
@@ -351,6 +380,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             expr_aliases: Default::default(),
             group_by_exprs: vec![],
             agg_calls: Default::default(),
+            odku_context: None,
             using: Default::default(),
             bind_step: QueryBindStep::From,
             sub_queries: Default::default(),
@@ -374,6 +404,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             table_cache: self.table_cache,
             view_cache: self.view_cache,
             transaction: self.transaction,
+            dialect: self.dialect,
             bind_table: self.bind_table.clone(),
             name_bindings: self.name_bindings.clone(),
             source_scope_start: self.bind_table.len(),
@@ -382,6 +413,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             expr_aliases: self.expr_aliases.clone(),
             group_by_exprs: self.group_by_exprs.clone(),
             agg_calls: self.agg_calls.clone(),
+            odku_context: None,
             using: self.using.clone(),
             bind_step: self.bind_step,
             sub_queries: Default::default(),
@@ -405,6 +437,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             self.transaction,
             self.scala_functions,
             self.table_functions,
+            self.dialect,
         );
         context.ctes = self.ctes.clone();
         context.cte_depth = self.cte_depth;
@@ -469,6 +502,14 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
 
     pub fn has_join_outer_ref(&self) -> bool {
         self.has_join_outer_ref
+    }
+
+    pub(crate) fn set_odku_context(&mut self, context: Option<OdkuContext>) {
+        self.odku_context = context;
+    }
+
+    pub(crate) fn odku_context(&self) -> Option<&OdkuContext> {
+        self.odku_context.as_ref()
     }
 
     pub fn table(&self, table_name: &str) -> Result<Option<&'a TableCatalog>, DatabaseError> {
@@ -852,6 +893,7 @@ pub mod test {
             let table_functions = Default::default();
             let transaction = self.storage.transaction()?;
             let arena = self.table_arena.borrow();
+            let dialect = crate::dialect::GenericSqlDialect::new();
             let mut binder = Binder::new(
                 BinderContext::new(
                     &arena.names,
@@ -860,6 +902,7 @@ pub mod test {
                     &transaction,
                     &scala_functions,
                     &table_functions,
+                    &dialect,
                 ),
                 &[],
                 None,
@@ -967,6 +1010,7 @@ pub mod test {
         let transaction = state.storage.transaction()?;
         let scala_functions = Default::default();
         let table_functions = Default::default();
+        let dialect = crate::dialect::GenericSqlDialect::new();
         let mut context = BinderContext::new(
             &arena.names,
             &arena.tables,
@@ -974,6 +1018,7 @@ pub mod test {
             &transaction,
             &scala_functions,
             &table_functions,
+            &dialect,
         );
         let c1 = state.table.get_column_by_name("c1").unwrap();
         let c2 = state.table.get_column_by_name("c2").unwrap();

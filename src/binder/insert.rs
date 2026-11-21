@@ -17,7 +17,7 @@ use crate::catalog::table::DmlTable;
 use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
-use crate::planner::operator::insert::InsertOperator;
+use crate::planner::operator::insert::{InsertOperator, OnDuplicateKeyUpdate};
 use crate::planner::operator::values::ValuesOperator;
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
@@ -25,6 +25,23 @@ use crate::storage::StorageTransaction;
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
 use crate::types::LogicalType;
+
+pub(crate) struct InsertValuesParams<'a> {
+    pub table_name: &'a str,
+    pub targets: Schema,
+    pub rows: Vec<ExprRef>,
+    pub row_count: usize,
+    pub is_overwrite: bool,
+    pub on_duplicate_key_update: Option<OnDuplicateKeyUpdate>,
+}
+
+pub(crate) struct InsertQueryParams<'a> {
+    pub table_name: &'a str,
+    pub input_plan: LogicalPlan,
+    pub targets: &'a [ColumnRef],
+    pub is_overwrite: bool,
+    pub on_duplicate_key_update: Option<OnDuplicateKeyUpdate>,
+}
 
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
     fn insert_table(
@@ -52,13 +69,17 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
     pub(crate) fn bind_insert_values(
         &mut self,
-        table_name: &str,
-        targets: Schema,
-        rows: Vec<ExprRef>,
-        row_count: usize,
-        is_overwrite: bool,
+        params: InsertValuesParams<'_>,
         arena: &mut PlanArena<'_>,
     ) -> Result<LogicalPlan, DatabaseError> {
+        let InsertValuesParams {
+            table_name,
+            targets,
+            rows,
+            row_count,
+            is_overwrite,
+            on_duplicate_key_update,
+        } = params;
         let (table, sources) = self.insert_table(table_name, &targets, arena)?;
         let mut values = Vec::with_capacity(row_count * table.columns.len());
         for row in rows.chunks(targets.len()) {
@@ -75,6 +96,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
             Operator::Insert(InsertOperator {
                 table,
                 is_overwrite,
+                on_duplicate_key_update,
             }),
             Childrens::Only(Box::new(values_plan)),
         ))
@@ -82,12 +104,16 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
 
     pub(crate) fn bind_insert_query(
         &mut self,
-        table_name: &str,
-        mut input_plan: LogicalPlan,
-        targets: &[ColumnRef],
-        is_overwrite: bool,
+        params: InsertQueryParams<'_>,
         arena: &mut PlanArena<'_>,
     ) -> Result<LogicalPlan, DatabaseError> {
+        let InsertQueryParams {
+            table_name,
+            mut input_plan,
+            targets,
+            is_overwrite,
+            on_duplicate_key_update,
+        } = params;
         let (table, sources) = self.insert_table(table_name, targets, arena)?;
         // Project the input to all columns in table order, filling in defaults.
         let mut projection = Vec::with_capacity(table.columns.len());
@@ -106,6 +132,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
             Operator::Insert(InsertOperator {
                 table,
                 is_overwrite,
+                on_duplicate_key_update,
             }),
             Childrens::Only(Box::new(input_plan)),
         ))

@@ -25,6 +25,7 @@ use crate::db::{
     BindSource, ConsumeMut, Database, DatabaseIter, Executor, OwnedPtr, State, Transaction,
     TransactionIter,
 };
+use crate::dialect::SqlDialect;
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -32,8 +33,9 @@ use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::window::WindowFunctionKind;
 use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::iter_ext::Itertools;
-use crate::parser::parse_sql_with_recursion_limit;
+use crate::parser::parse_sql_with_dialect;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
+use crate::planner::operator::insert::OnDuplicateKeyUpdate;
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::project::ProjectOperator;
@@ -66,6 +68,26 @@ use std::slice;
 
 /// Parsed SQL statement type used by KiteSQL SQL frontend APIs.
 pub type Statement = sqlparser::ast::Statement;
+
+pub(crate) fn convert_data_type(
+    data_type: &DataType,
+    dialect: &dyn crate::dialect::SqlDialect,
+) -> Result<LogicalType, DatabaseError> {
+    if let Some(result) = dialect.map_data_type(data_type) {
+        return result;
+    }
+    LogicalType::try_from(data_type.clone())
+}
+
+pub(crate) fn convert_column_type(
+    data_type: &DataType,
+    dialect: &dyn crate::dialect::SqlDialect,
+) -> Result<LogicalType, DatabaseError> {
+    if let Some(result) = dialect.map_column_type(data_type) {
+        return result.map(|spec| spec.logical);
+    }
+    LogicalType::try_from(data_type.clone())
+}
 
 pub(crate) trait AttachSpanSource {
     fn sql_error_span(self) -> Option<SqlErrorSpan>;
@@ -137,14 +159,19 @@ pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
     }
 }
 
-impl<S: Storage> State<S> {
+impl<S: Storage, D: SqlDialect> State<S, D> {
     pub(crate) fn prepare_all<T: AsRef<str>>(
         &self,
         sql: T,
     ) -> Result<Vec<Statement>, DatabaseError> {
-        let stmts = parse_sql_with_recursion_limit(sql, self.parser_recursion_limit())?;
+        let dialect = self.dialect();
+        let mut stmts =
+            parse_sql_with_dialect(dialect.parser_dialect(), sql, self.parser_recursion_limit())?;
         if stmts.is_empty() {
             return Err(DatabaseError::EmptyStatement);
+        }
+        for stmt in stmts.iter_mut() {
+            dialect.rewrite(stmt)?;
         }
         Ok(stmts)
     }
@@ -173,7 +200,7 @@ fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool
 }
 
 #[maybe_async]
-impl<S: Storage> Database<S> {
+impl<S: Storage, D: SqlDialect> Database<S, D> {
     /// Parses SQL statements using this database's configured parser recursion limit.
     pub fn prepare_all<T: AsRef<str>>(&self, sql: T) -> Result<Vec<Statement>, DatabaseError> {
         self.state.prepare_all(sql)
@@ -320,7 +347,7 @@ impl<S: Storage> Database<S> {
 }
 
 #[maybe_async]
-impl<'txn, S: Storage> Transaction<'txn, S> {
+impl<'txn, S: Storage, D: SqlDialect> Transaction<'txn, S, D> {
     /// Runs SQL inside the current transaction and returns the final result iterator.
     pub async fn run<'a, T: AsRef<str>>(
         &'a mut self,
@@ -579,7 +606,7 @@ where
                             ));
                         }
                         (
-                            LogicalType::try_from(data_type)?,
+                            convert_column_type(&data_type, self.binder.context.dialect)?,
                             DefaultChange::NoChange,
                             NotNullChange::NoChange,
                         )
@@ -645,7 +672,7 @@ where
                         })?;
                 }
                 let old_column_name = old_column_name.into_owned();
-                let data_type = LogicalType::try_from(data_type)?;
+                let data_type = convert_column_type(&data_type, self.binder.context.dialect)?;
                 let (default_change, not_null_change) =
                     self.bind_change_column_options(options, &data_type)?;
 
@@ -690,7 +717,7 @@ where
                         "illegal column naming".to_string(),
                     ));
                 }
-                let data_type = LogicalType::try_from(data_type)?;
+                let data_type = convert_column_type(&data_type, self.binder.context.dialect)?;
                 let (default_change, not_null_change) =
                     self.bind_change_column_options(options, &data_type)?;
 
@@ -823,7 +850,7 @@ where
     ) -> Result<ColumnCatalog, DatabaseError> {
         let column_name = lower_ident(&column_def.name).into_owned();
         let mut column_desc = ColumnDesc::new(
-            LogicalType::try_from(column_def.data_type)?,
+            convert_column_type(&column_def.data_type, self.binder.context.dialect)?,
             None,
             false,
             None,
@@ -1077,6 +1104,7 @@ where
             source,
             returning,
             on,
+            insert_alias,
             ..
         } = insert;
         if returning.is_some() {
@@ -1084,16 +1112,28 @@ where
                 "INSERT RETURNING is not supported".to_string(),
             ));
         }
-        if let Some(on) = on {
-            let clause = match on {
-                OnInsert::OnConflict(_) => "ON CONFLICT",
-                OnInsert::DuplicateKeyUpdate(_) => "ON DUPLICATE KEY UPDATE",
-                _ => "conflict clause",
-            };
-            return Err(DatabaseError::UnsupportedStmt(format!(
-                "INSERT {clause} is not supported"
-            )));
-        }
+        let on_duplicate_key_update = match on {
+            Some(OnInsert::DuplicateKeyUpdate(assignments))
+                if self
+                    .binder
+                    .context
+                    .dialect
+                    .supports_on_duplicate_key_update() =>
+            {
+                Some((assignments.as_slice(), insert_alias.as_ref()))
+            }
+            Some(on) => {
+                let clause = match on {
+                    OnInsert::OnConflict(_) => "ON CONFLICT",
+                    OnInsert::DuplicateKeyUpdate(_) => "ON DUPLICATE KEY UPDATE",
+                    _ => "conflict clause",
+                };
+                return Err(DatabaseError::UnsupportedStmt(format!(
+                    "INSERT {clause} is not supported"
+                )));
+            }
+            None => None,
+        };
         let is_overwrite =
             *overwrite || *replace_into || matches!(or, Some(SqliteOnConflict::Replace));
         let table_name = match table {
@@ -1109,9 +1149,21 @@ where
             DatabaseError::UnsupportedStmt("insert without source is not supported".to_string())
         })?;
         if let SetExpr::Values(values) = source.body.as_ref() {
-            self.insert_values(table_name, columns, &values.rows, is_overwrite)
+            self.insert_values(
+                table_name,
+                columns,
+                &values.rows,
+                is_overwrite,
+                on_duplicate_key_update,
+            )
         } else {
-            self.insert_query(table_name, columns, source, is_overwrite)
+            self.insert_query(
+                table_name,
+                columns,
+                source,
+                is_overwrite,
+                on_duplicate_key_update,
+            )
         }
     }
 
@@ -1121,6 +1173,7 @@ where
         idents: &[Ident],
         expr_rows: &[Vec<Expr>],
         is_overwrite: bool,
+        on_duplicate_key_update: Option<(&[Assignment], Option<&sqlparser::ast::InsertAliases>)>,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.binder.context.allow_default = true;
         let source = self
@@ -1178,14 +1231,139 @@ where
         }
         self.binder.context.allow_default = false;
 
+        let on_duplicate_update_exprs =
+            if let Some((assignments, insert_alias)) = on_duplicate_key_update {
+                let row_alias = insert_alias.map(odku_row_alias).transpose()?;
+                Some(self.bind_on_duplicate_assignments(
+                    assignments,
+                    &table_name,
+                    row_alias.as_deref(),
+                )?)
+            } else {
+                None
+            };
+
         self.binder.bind_insert_values(
-            &table_name,
-            schema_ref,
-            rows,
-            expr_rows.len(),
-            is_overwrite,
+            crate::binder::insert::InsertValuesParams {
+                table_name: &table_name,
+                targets: schema_ref,
+                rows,
+                row_count: expr_rows.len(),
+                is_overwrite,
+                on_duplicate_key_update: on_duplicate_update_exprs,
+            },
             self.arena,
         )
+    }
+
+    fn bind_on_duplicate_assignments(
+        &mut self,
+        assignments: &[Assignment],
+        table_name: &str,
+        row_alias: Option<&str>,
+    ) -> Result<OnDuplicateKeyUpdate, DatabaseError> {
+        let table_name_ref: TableName = table_name.into();
+        let source = self
+            .binder
+            .context
+            .source_and_bind(&table_name_ref, None, None, false, self.arena)?
+            .ok_or(DatabaseError::TableNotFound)?;
+
+        let excluded_source_id = self.arena.alloc_source();
+        let original_schema = source.schema().to_vec();
+        let mut excluded_columns = Vec::with_capacity(original_schema.len());
+
+        for (position, &original_col) in original_schema.iter().enumerate() {
+            let original = self.arena.column(original_col);
+            let mut excluded_col = original.clone();
+            excluded_col.set_source(excluded_source_id, position as u64, true);
+            let excluded_col_ref = self.arena.alloc_column(excluded_col);
+            excluded_columns.push(excluded_col_ref);
+        }
+
+        let odku_context = crate::binder::OdkuContext {
+            original_columns: original_schema.clone(),
+            excluded_columns: excluded_columns.clone(),
+            row_alias: row_alias.map(|s| s.to_string()),
+        };
+        self.binder.context.set_odku_context(Some(odku_context));
+        let assignments = self.bind_on_duplicate_assignment_exprs(
+            assignments,
+            table_name,
+            &original_schema,
+            &excluded_columns,
+        );
+        self.binder.context.set_odku_context(None);
+        let dialect = self.binder.context.dialect;
+        Ok(OnDuplicateKeyUpdate {
+            assignments: assignments?,
+            inserted_rows: dialect.upsert_affected_rows(true, false),
+            updated_rows: dialect.upsert_affected_rows(false, true),
+            unchanged_rows: dialect.upsert_affected_rows(false, false),
+        })
+    }
+
+    fn bind_on_duplicate_assignment_exprs(
+        &mut self,
+        assignments: &[Assignment],
+        table_name: &str,
+        original_columns: &[ColumnRef],
+        excluded_columns: &[ColumnRef],
+    ) -> Result<Vec<(usize, ExprRef)>, DatabaseError> {
+        let mut update_exprs = Vec::with_capacity(assignments.len());
+        for assignment in assignments {
+            let target_ident = match &assignment.target {
+                AssignmentTarget::ColumnName(object_name) => {
+                    if object_name.0.len() != 1 {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "qualified column names in ON DUPLICATE KEY UPDATE".to_string(),
+                        ));
+                    }
+                    match &object_name.0[0] {
+                        ObjectNamePart::Identifier(ident) => ident,
+                        ObjectNamePart::Function(_) => {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "function in column name in ON DUPLICATE KEY UPDATE".to_string(),
+                            ));
+                        }
+                    }
+                }
+                AssignmentTarget::Tuple(_) => {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "tuple assignment in ON DUPLICATE KEY UPDATE".to_string(),
+                    ));
+                }
+            };
+
+            let col_expr = self.binder.bind_column_ref_from_identifiers(
+                slice::from_ref(target_ident),
+                Some(table_name),
+                self.arena,
+            )?;
+
+            let column_index = match col_expr {
+                ScalarExpression::ColumnRef { column, .. } => original_columns
+                    .iter()
+                    .position(|&col| self.arena.same_column(col, column))
+                    .ok_or_else(|| DatabaseError::column_not_found(target_ident.to_string()))?,
+                _ => {
+                    return Err(DatabaseError::UnsupportedStmt(
+                        "non-column target in ON DUPLICATE KEY UPDATE".to_string(),
+                    ))
+                }
+            };
+
+            let value_expr = self.binder.bind_expr(&assignment.value, self.arena)?;
+            let mut value_ref = self.arena.alloc_expression(value_expr);
+            OdkuPositionBinder {
+                original_columns,
+                excluded_columns,
+            }
+            .visit(&mut value_ref, self.arena)?;
+            update_exprs.push((column_index, value_ref));
+        }
+
+        Ok(update_exprs)
     }
 
     fn insert_query(
@@ -1194,6 +1372,7 @@ where
         idents: &[Ident],
         query: &Query,
         is_overwrite: bool,
+        on_duplicate_key_update: Option<(&[Assignment], Option<&sqlparser::ast::InsertAliases>)>,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut input_plan = self.binder.bind_query(query, self.arena)?;
         let input_len = input_plan.output_schema(self.arena).len();
@@ -1227,8 +1406,28 @@ where
             Cow::Owned(targets)
         };
 
-        self.binder
-            .bind_insert_query(&table_name, input_plan, &targets, is_overwrite, self.arena)
+        let on_duplicate_update_exprs =
+            if let Some((assignments, insert_alias)) = on_duplicate_key_update {
+                let row_alias = insert_alias.map(odku_row_alias).transpose()?;
+                Some(self.bind_on_duplicate_assignments(
+                    assignments,
+                    &table_name,
+                    row_alias.as_deref(),
+                )?)
+            } else {
+                None
+            };
+
+        self.binder.bind_insert_query(
+            crate::binder::insert::InsertQueryParams {
+                table_name: &table_name,
+                input_plan,
+                targets: &targets,
+                is_overwrite,
+                on_duplicate_key_update: on_duplicate_update_exprs,
+            },
+            self.arena,
+        )
     }
 
     fn update(self, update: &sqlparser::ast::Update) -> Result<LogicalPlan, DatabaseError> {
@@ -1641,6 +1840,59 @@ where
             .map(|SelectInto { name, .. }| lower_case_name(name))
             .transpose()?;
         self.insert_into(table_name.as_deref())
+    }
+}
+
+fn odku_row_alias(alias: &sqlparser::ast::InsertAliases) -> Result<String, DatabaseError> {
+    if alias
+        .col_aliases
+        .as_ref()
+        .is_some_and(|columns| !columns.is_empty())
+    {
+        return Err(DatabaseError::UnsupportedStmt(
+            "column aliases on the INSERT row alias are not supported".to_string(),
+        ));
+    }
+    match alias.row_alias.0.as_slice() {
+        [ObjectNamePart::Identifier(ident)] => Ok(lower_ident(ident).into_owned()),
+        _ => Err(DatabaseError::UnsupportedStmt(format!(
+            "INSERT row alias `{}`",
+            alias.row_alias
+        ))),
+    }
+}
+
+/// Existing-row column `i` reads slot `i`; proposed-row column `i` reads slot `n + i`.
+struct OdkuPositionBinder<'c> {
+    original_columns: &'c [ColumnRef],
+    excluded_columns: &'c [ColumnRef],
+}
+
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for OdkuPositionBinder<'_> {
+    fn visit_column_ref(
+        &mut self,
+        column: &mut ColumnRef,
+        position: &mut usize,
+        arena: &mut A,
+    ) -> Result<(), DatabaseError> {
+        if let Some(i) = self.excluded_columns.iter().position(|c| c == column) {
+            *position = self.original_columns.len() + i;
+            return Ok(());
+        }
+        match self
+            .original_columns
+            .iter()
+            .position(|c| arena.same_column(*c, *column))
+        {
+            Some(i) => {
+                *position = i;
+                Ok(())
+            }
+            None => Err(DatabaseError::UnsupportedStmt(format!(
+                "ON DUPLICATE KEY UPDATE can only read the target table, not `{}`",
+                arena.column(*column).name()
+            ))),
+        }
     }
 }
 
@@ -2389,13 +2641,14 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             }
             Expr::Cast {
                 expr, data_type, ..
-            } => self
-                .bind_expr(expr, arena)?
-                .type_cast(Cow::Owned(LogicalType::try_from(data_type.clone())?), arena),
+            } => self.bind_expr(expr, arena)?.type_cast(
+                Cow::Owned(convert_data_type(data_type, self.context.dialect)?),
+                arena,
+            ),
             Expr::TypedString(TypedString {
                 data_type, value, ..
             }) => {
-                let logical_type = LogicalType::try_from(data_type.clone())?;
+                let logical_type = convert_data_type(data_type, self.context.dialect)?;
                 let raw = value.clone().into_string().ok_or_else(|| {
                     DatabaseError::InvalidValue("typed string literal must be a string".to_string())
                 })?;
@@ -2643,6 +2896,11 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         bind_table_name: Option<&str>,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
+        if let (Some(odku_ctx), [row_alias, column]) = (self.context.odku_context(), idents) {
+            if odku_ctx.row_alias.as_deref() == Some(lower_ident(row_alias).as_ref()) {
+                return odku_ctx.proposed_column(&lower_ident(column), arena);
+            }
+        }
         let full_name = match idents {
             [column] => (None, lower_ident(column)),
             [table, column] => (Some(lower_ident(table)), lower_ident(column)),
@@ -2700,6 +2958,19 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 ))
             }
         };
+        if let (Some(odku_ctx), [ObjectNamePart::Identifier(func_name)], [arg]) =
+            (self.context.odku_context(), name.0.as_slice(), func_args)
+        {
+            let (FunctionArg::Named { arg, .. }
+            | FunctionArg::ExprNamed { arg, .. }
+            | FunctionArg::Unnamed(arg)) = arg;
+            if let FunctionArgExpr::Expr(Expr::Identifier(column)) = arg {
+                if func_name.value.eq_ignore_ascii_case("values") {
+                    return odku_ctx.proposed_column(&lower_ident(column), arena);
+                }
+            }
+        }
+
         let mut args = Vec::with_capacity(func_args.len());
 
         for arg in func_args {
@@ -3631,6 +3902,7 @@ mod tests {
         let table_functions = Default::default();
         let transaction = tables.storage.transaction()?;
         let arena = tables.table_arena.borrow();
+        let dialect = crate::dialect::GenericSqlDialect::new();
         let mut binder = Binder::new(
             BinderContext::new(
                 &arena.names,
@@ -3639,6 +3911,7 @@ mod tests {
                 &transaction,
                 &scala_functions,
                 &table_functions,
+                &dialect,
             ),
             &[],
             None,
