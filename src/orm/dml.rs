@@ -2,7 +2,7 @@ use super::*;
 use std::borrow::Borrow;
 
 #[maybe_async]
-impl<S: Storage> Database<S> {
+impl<S: Storage, D: SqlDialect> Database<S, D> {
     /// Refreshes optimizer statistics for the model table.
     ///
     /// This runs `ANALYZE TABLE` for the backing table so the optimizer can use
@@ -73,7 +73,7 @@ impl<S: Storage> Database<S> {
 }
 
 #[maybe_async]
-impl<'a, S: Storage> Transaction<'a, S> {
+impl<'a, S: Storage, D: SqlDialect> Transaction<'a, S, D> {
     /// Refreshes optimizer statistics for the model table inside the current transaction.
     pub async fn analyze<M: Model>(&mut self) -> Result<(), DatabaseError> {
         orm_analyze::<_, M>(self).await

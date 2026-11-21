@@ -7,7 +7,7 @@ enum OrmDefaultChange {
 }
 
 #[maybe_async]
-impl<S: Storage> Database<S> {
+impl<S: Storage, D: SqlDialect> Database<S, D> {
     fn table_catalog(&self, table_name: &str) -> Result<Option<TableCatalog>, DatabaseError> {
         let transaction = self.storage.transaction()?;
         transaction
@@ -39,7 +39,7 @@ impl<S: Storage> Database<S> {
     /// database.create_table::<User>().unwrap();
     /// ```
     pub async fn create_table<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        execute_create_table::<_, M>(self, false).await?;
+        execute_create_table::<_, _, M>(self, false).await?;
 
         for index in M::indexes() {
             execute_create_index(self, M::table_name(), index, false).await?;
@@ -54,7 +54,7 @@ impl<S: Storage> Database<S> {
     /// schema initialization should stay idempotent. Secondary indexes declared
     /// with `#[model(index)]` are created with `IF NOT EXISTS` as well.
     pub async fn create_table_if_not_exists<M: Model>(&mut self) -> Result<(), DatabaseError> {
-        execute_create_table::<_, M>(self, true).await?;
+        execute_create_table::<_, _, M>(self, true).await?;
 
         for index in M::indexes() {
             execute_create_index(self, M::table_name(), index, true).await?;
@@ -434,8 +434,8 @@ impl<S: Storage> Database<S> {
 }
 
 #[maybe_async]
-async fn execute_create_table<S: Storage, M: Model>(
-    database: &mut Database<S>,
+async fn execute_create_table<S: Storage, D: SqlDialect, M: Model>(
+    database: &mut Database<S, D>,
     if_not_exists: bool,
 ) -> Result<(), DatabaseError> {
     database
@@ -450,8 +450,8 @@ async fn execute_create_table<S: Storage, M: Model>(
 }
 
 #[maybe_async]
-async fn execute_create_index<S: Storage>(
-    database: &mut Database<S>,
+async fn execute_create_index<S: Storage, D: SqlDialect>(
+    database: &mut Database<S, D>,
     table_name: &'static str,
     index: &(&'static str, &'static [&'static str], bool),
     if_not_exists: bool,
@@ -485,8 +485,8 @@ async fn execute_create_index<S: Storage>(
 }
 
 #[maybe_async]
-async fn execute_create_view<S: Storage, F>(
-    database: &mut Database<S>,
+async fn execute_create_view<S: Storage, D: SqlDialect, F>(
+    database: &mut Database<S, D>,
     view_name: &str,
     build: F,
     or_replace: bool,
@@ -522,8 +522,8 @@ where
 }
 
 #[maybe_async]
-async fn execute_drop_view<S: Storage>(
-    database: &mut Database<S>,
+async fn execute_drop_view<S: Storage, D: SqlDialect>(
+    database: &mut Database<S, D>,
     view_name: &str,
     if_exists: bool,
 ) -> Result<(), DatabaseError> {
@@ -536,8 +536,8 @@ async fn execute_drop_view<S: Storage>(
 }
 
 #[maybe_async]
-async fn execute_change_column<S: Storage>(
-    database: &mut Database<S>,
+async fn execute_change_column<S: Storage, D: SqlDialect>(
+    database: &mut Database<S, D>,
     table_name: &'static str,
     old_column_name: &str,
     new_column_name: &str,
@@ -567,8 +567,8 @@ async fn execute_change_column<S: Storage>(
 }
 
 #[maybe_async]
-async fn execute_drop_column<S: Storage>(
-    database: &mut Database<S>,
+async fn execute_drop_column<S: Storage, D: SqlDialect>(
+    database: &mut Database<S, D>,
     table_name: &'static str,
     column_name: &str,
 ) -> Result<(), DatabaseError> {
@@ -581,8 +581,8 @@ async fn execute_drop_column<S: Storage>(
 }
 
 #[maybe_async]
-async fn execute_add_column<S: Storage>(
-    database: &mut Database<S>,
+async fn execute_add_column<S: Storage, D: SqlDialect>(
+    database: &mut Database<S, D>,
     table_name: &'static str,
     field: &OrmField,
 ) -> Result<(), DatabaseError> {
@@ -595,8 +595,8 @@ async fn execute_add_column<S: Storage>(
 }
 
 #[maybe_async]
-async fn execute_drop_index<S: Storage>(
-    database: &mut Database<S>,
+async fn execute_drop_index<S: Storage, D: SqlDialect>(
+    database: &mut Database<S, D>,
     table_name: &'static str,
     index_name: &str,
     if_exists: bool,
@@ -610,8 +610,8 @@ async fn execute_drop_index<S: Storage>(
 }
 
 #[maybe_async]
-async fn execute_drop_table<S: Storage>(
-    database: &mut Database<S>,
+async fn execute_drop_table<S: Storage, D: SqlDialect>(
+    database: &mut Database<S, D>,
     table_name: &'static str,
     if_exists: bool,
 ) -> Result<(), DatabaseError> {

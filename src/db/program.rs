@@ -69,9 +69,9 @@ pub struct Program<'p> {
 impl<'p> Program<'p> {
     /// Runs the program with `params` in `transaction`. The returned iterator borrows the
     /// program until the execution ends.
-    pub async fn execute<'a, 'txn, 'v, S: Storage>(
+    pub async fn execute<'a, 'txn, 'v, S: Storage, D: SqlDialect>(
         &'a mut self,
-        transaction: &'a mut Transaction<'txn, S>,
+        transaction: &'a mut Transaction<'txn, S, D>,
         params: impl AsRef<[(usize, Param<'v>)]>,
     ) -> Result<ProgramIter<'a, 'p, S::TransactionType<'txn>>, DatabaseError>
     where
@@ -124,7 +124,7 @@ impl<'p> Program<'p> {
     }
 }
 
-impl<S: Storage> Database<S> {
+impl<S: Storage, D: SqlDialect> Database<S, D> {
     /// Prepares SQL with explicit positional parameter types into a program.
     /// Parameter values are supplied separately for each execution.
     #[cfg(feature = "parser")]
@@ -141,7 +141,7 @@ impl<S: Storage> Database<S> {
     }
 }
 
-impl<'db, S: Storage> Transaction<'db, S> {
+impl<'db, S: Storage, D: SqlDialect> Transaction<'db, S, D> {
     #[cfg(feature = "parser")]
     pub fn program_sql(
         &self,
@@ -153,7 +153,7 @@ impl<'db, S: Storage> Transaction<'db, S> {
     }
 }
 
-impl<S: Storage> State<S> {
+impl<S: Storage, D: SqlDialect> State<S, D> {
     #[cfg(feature = "parser")]
     pub(crate) fn prepare_plan<'a, 'txn>(
         &'a self,
