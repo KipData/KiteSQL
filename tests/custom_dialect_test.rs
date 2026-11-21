@@ -71,6 +71,26 @@ impl SqlDialect for TestDialect {
     }
 }
 
+/// Test-only dialect that accepts prefix key parts such as `b(10)`.
+#[derive(Debug, Default)]
+struct PrefixIndexDialect {
+    parser: GenericDialect,
+}
+
+impl SqlDialect for PrefixIndexDialect {
+    fn name(&self) -> &str {
+        "test_prefix_index"
+    }
+
+    fn parser_dialect(&self) -> &dyn SqlParserDialect {
+        &self.parser
+    }
+
+    fn supports_index_prefix_length(&self) -> bool {
+        true
+    }
+}
+
 fn database_with<D: SqlDialect>(
     dialect: D,
 ) -> Result<Database<MemoryStorage, DynDialect>, DatabaseError> {
@@ -172,6 +192,58 @@ fn custom_dialect_rewrites_statements() -> Result<(), DatabaseError> {
 }
 
 #[test]
+fn custom_dialect_accepts_index_prefix_lengths() -> Result<(), DatabaseError> {
+    let prefix_tables = [
+        "create table p1 (id int, b varchar(20), primary key (id), unique (b(10)))",
+        "create table p2 (id varchar(20), primary key (id(4)))",
+    ];
+
+    let mut generic = DataBaseBuilder::path(".").build_in_memory()?;
+    for sql in prefix_tables {
+        assert!(generic.ddl(sql).is_err(), "generic accepted: {sql}");
+    }
+    generic.ddl("create table t1 (id int primary key, b varchar(20))")?;
+    assert!(generic.ddl("create unique index i1 on t1 (b(4))").is_err());
+
+    let mut db = database_with(PrefixIndexDialect::default())?;
+    for sql in prefix_tables {
+        db.ddl(sql)?;
+    }
+    // The length is ignored: uniqueness applies to the whole value.
+    db.run("insert into p1 values (1, 'abcdefghijkl'), (2, 'abcdefghijkm')")?
+        .done()?;
+    assert!(db
+        .run("insert into p1 values (3, 'abcdefghijkl')")?
+        .done()
+        .is_err());
+    db.run("insert into p2 values ('abcde'), ('abcdf')")?
+        .done()?;
+    assert!(db.run("insert into p2 values ('abcde')")?.done().is_err());
+
+    db.ddl("create table t1 (id int primary key, b varchar(20))")?;
+    db.ddl("create unique index i1 on t1 (b(4))")?;
+    db.run("insert into t1 values (1, 'abcde'), (2, 'abcdf')")?
+        .done()?;
+    assert!(db
+        .run("insert into t1 values (3, 'abcde')")?
+        .done()
+        .is_err());
+
+    // Only a positive integer length on a column is a prefix.
+    for sql in [
+        "create table bad1 (id int primary key, b varchar(20), unique (b(0)))",
+        "create table bad2 (id int primary key, b varchar(20), unique (b(id)))",
+        "create table bad3 (id int primary key, b varchar(20), unique (c(4)))",
+        "create index bad4 on t1 (b(-1))",
+        "create index bad5 on t1 (upper(b))",
+    ] {
+        assert!(db.ddl(sql).is_err(), "accepted: {sql}");
+    }
+
+    Ok(())
+}
+
+#[test]
 fn static_dialect_behaves_like_dyn_dialect() -> Result<(), DatabaseError> {
     let mut db = DataBaseBuilder::path(".")
         .dialect(TestDialect::default())
@@ -213,6 +285,7 @@ fn generic_dialect_is_noop() -> Result<(), DatabaseError> {
     assert_eq!(dialect.name(), DIALECT_GENERIC);
     assert!(dialect.map_data_type(&DataType::Integer(None)).is_none());
     assert!(dialect.map_column_type(&DataType::Integer(None)).is_none());
+    assert!(!dialect.supports_index_prefix_length());
 
     let original = sqlparser::parser::Parser::new(dialect.parser_dialect())
         .try_with_sql("select 1 limit 10")?

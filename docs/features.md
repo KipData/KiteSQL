@@ -435,5 +435,6 @@ The `SqlDialect` trait methods:
 - `map_data_type()` — Optional hook to map SQL data types in expressions (`CAST`, typed literals) to KiteSQL's `LogicalType`
 - `map_column_type()` — Optional hook to map the data types of column definitions; defaults to `map_data_type()`
 - `rewrite()` — Optional hook to transform each parsed statement before it is bound
+- `supports_index_prefix_length()` — Optional hook to accept prefix key parts such as `col(10)` in `PRIMARY KEY`, `UNIQUE` and `CREATE INDEX`; the whole value is indexed (default: rejected)
 
 By default, the `GenericSqlDialect` is used, which provides standard SQL behavior with no custom transformations.

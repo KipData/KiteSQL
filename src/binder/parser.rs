@@ -809,17 +809,18 @@ where
             columns.push(self.bind_column(column, Some(i))?);
         }
         let mut composite_unique_keys = Vec::new();
+        let dialect = self.binder.context.dialect;
         for constraint in create.constraints {
             match constraint {
                 TableConstraint::PrimaryKey(primary) => {
-                    let positions = Self::constraint_columns(&columns, primary.columns)?;
+                    let positions = Self::constraint_columns(&columns, primary.columns, dialect)?;
                     for (i, position) in positions.into_iter().enumerate() {
                         columns[position].desc_mut().set_primary(Some(i));
                     }
                 }
                 TableConstraint::Unique(unique) => {
                     Self::check_unique_nulls_option(unique.nulls_distinct)?;
-                    let positions = Self::constraint_columns(&columns, unique.columns)?;
+                    let positions = Self::constraint_columns(&columns, unique.columns, dialect)?;
                     match positions.as_slice() {
                         [] => return Err(DatabaseError::InvalidIndex),
                         [position] => columns[*position].desc_mut().set_unique(),
@@ -911,15 +912,23 @@ where
     fn constraint_columns(
         table_columns: &[ColumnCatalog],
         index_columns: Vec<IndexColumn>,
+        dialect: &dyn crate::dialect::SqlDialect,
     ) -> Result<Vec<usize>, DatabaseError> {
         let mut positions = Vec::with_capacity(index_columns.len());
         for index_column in index_columns {
-            let Expr::Identifier(ident) = index_column.column.expr else {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".to_string(),
-                ));
+            let ident = match &index_column.column.expr {
+                Expr::Identifier(ident) => ident,
+                expr => match prefix_key_part(expr) {
+                    Some(ident) if dialect.supports_index_prefix_length() => ident,
+                    _ => {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "only identifier columns are supported in `PRIMARY KEY/UNIQUE`"
+                                .to_string(),
+                        ))
+                    }
+                },
             };
-            let column_name = lower_ident(&ident);
+            let column_name = lower_ident(ident);
             let position = table_columns
                 .iter()
                 .position(|column| column.name() == column_name.as_ref())
@@ -963,6 +972,7 @@ where
             .binder
             .bind_create_index_source(&table_name, self.arena)?;
         let mut columns = Vec::with_capacity(create.columns.len());
+        let dialect = self.binder.context.dialect;
 
         for index_column in create.columns {
             if index_column.operator_class.is_some()
@@ -974,9 +984,13 @@ where
                     "CREATE INDEX column options".to_string(),
                 ));
             }
-            let expr = self
-                .binder
-                .bind_expr(&index_column.column.expr, self.arena)?;
+            let prefix_column = prefix_key_part(&index_column.column.expr)
+                .filter(|_| dialect.supports_index_prefix_length())
+                .map(|ident| Expr::Identifier(ident.clone()));
+            let expr = self.binder.bind_expr(
+                prefix_column.as_ref().unwrap_or(&index_column.column.expr),
+                self.arena,
+            )?;
             match &expr {
                 ScalarExpression::ColumnRef { column, .. } => columns.push(*column),
                 _ => {
@@ -2001,6 +2015,34 @@ impl TryFrom<DataType> for LogicalType {
 
 fn sql_object_name(name: ObjectName) -> Result<String, DatabaseError> {
     Ok(lower_case_name(&name)?.into_owned())
+}
+
+/// `col` of a prefix key part `col(n)` with a positive integer `n`, which parses as a call.
+fn prefix_key_part(expr: &Expr) -> Option<&Ident> {
+    let Expr::Function(func) = expr else {
+        return None;
+    };
+    let [ObjectNamePart::Identifier(ident)] = func.name.0.as_slice() else {
+        return None;
+    };
+    let FunctionArguments::List(list) = &func.args else {
+        return None;
+    };
+    let is_prefix_length = matches!(
+        list.args.as_slice(),
+        [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))]
+            if matches!(&value.value, Value::Number(length, false)
+                if length.parse::<u32>().is_ok_and(|length| length > 0))
+    );
+    let is_plain_call = !func.uses_odbc_syntax
+        && matches!(func.parameters, FunctionArguments::None)
+        && list.duplicate_treatment.is_none()
+        && list.clauses.is_empty()
+        && func.filter.is_none()
+        && func.null_treatment.is_none()
+        && func.over.is_none()
+        && func.within_group.is_empty();
+    (is_prefix_length && is_plain_call).then_some(ident)
 }
 
 pub(super) fn lower_ident(ident: &Ident) -> Cow<'_, str> {

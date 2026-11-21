@@ -92,6 +92,18 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
         self.map_data_type(data_type)
             .map(|result| result.map(ColumnTypeSpec::new))
     }
+
+    /// Whether index key parts may give a prefix length, as in `col(n)`.
+    ///
+    /// When this returns `true`, a key part `col(n)` with a positive integer `n` in a
+    /// `PRIMARY KEY` or `UNIQUE` constraint or in `CREATE INDEX` is accepted as `col`. The
+    /// length is not stored: the whole value is indexed, and a unique key compares whole
+    /// values.
+    ///
+    /// The default implementation returns `false`, which rejects such key parts.
+    fn supports_index_prefix_length(&self) -> bool {
+        false
+    }
 }
 
 /// Standard SQL behavior with no customizations; the default dialect.
@@ -211,5 +223,9 @@ impl SqlDialect for DynDialect {
         data_type: &sqlparser::ast::DataType,
     ) -> Option<Result<ColumnTypeSpec, DatabaseError>> {
         self.current().map_column_type(data_type)
+    }
+
+    fn supports_index_prefix_length(&self) -> bool {
+        self.current().supports_index_prefix_length()
     }
 }
