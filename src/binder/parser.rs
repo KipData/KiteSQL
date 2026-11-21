@@ -2399,16 +2399,17 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 list,
                 negated,
             } => {
-                let args = list
+                let mut args: Vec<ExprRef> = list
                     .iter()
                     .map(|expr| {
                         self.bind_expr(expr, arena)
                             .map(|expr| arena.alloc_expression(expr))
                     })
                     .try_collect()?;
-                let expr = self
+                let mut expr = self
                     .bind_expr(expr, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
+                self.coerce_comparison_operands(&mut expr, &mut args, arena)?;
                 Ok(ScalarExpression::In {
                     negated: *negated,
                     evaluator: None,
@@ -2418,10 +2419,14 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             }
             Expr::Cast {
                 expr, data_type, ..
-            } => self.bind_expr(expr, arena)?.type_cast(
-                Cow::Owned(convert_data_type(data_type, self.context.dialect)?),
-                arena,
-            ),
+            } => {
+                let expr = self.bind_expr(expr, arena)?;
+                self.bind_cast(
+                    expr,
+                    convert_data_type(data_type, self.context.dialect)?,
+                    arena,
+                )
+            }
             Expr::TypedString(TypedString {
                 data_type, value, ..
             }) => {
@@ -2445,15 +2450,17 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 low,
                 high,
             } => {
-                let expr = self
+                let mut expr = self
                     .bind_expr(expr, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
-                let left_expr = self
-                    .bind_expr(low, arena)
-                    .map(|expr| arena.alloc_expression(expr))?;
-                let right_expr = self
-                    .bind_expr(high, arena)
-                    .map(|expr| arena.alloc_expression(expr))?;
+                let mut bounds = [
+                    self.bind_expr(low, arena)
+                        .map(|expr| arena.alloc_expression(expr))?,
+                    self.bind_expr(high, arena)
+                        .map(|expr| arena.alloc_expression(expr))?,
+                ];
+                self.coerce_comparison_operands(&mut expr, &mut bounds, arena)?;
+                let [left_expr, right_expr] = bounds;
                 Ok(ScalarExpression::Between {
                     negated: *negated,
                     left_evaluator: None,

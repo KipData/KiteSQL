@@ -64,6 +64,31 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
     ) -> Option<Result<crate::types::LogicalType, DatabaseError>> {
         self.map_data_type(data_type)
     }
+
+    /// Returns the type both operands of a comparison are cast to before comparing.
+    ///
+    /// Called by the binder for `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN` lists and `BETWEEN`
+    /// with the operand types. Return `Some(type)` to cast every operand to `type`, or
+    /// `None` to keep the built-in coercion.
+    ///
+    /// The default implementation returns `None` for all types.
+    fn comparison_type(
+        &self,
+        _left: &crate::types::LogicalType,
+        _right: &crate::types::LogicalType,
+    ) -> Option<crate::types::LogicalType> {
+        None
+    }
+
+    /// Returns the text of a boolean in `CAST(.. AS CHAR)` or `CAST(.. AS VARCHAR)`.
+    ///
+    /// Called by the binder, so the text is fixed when the statement is bound. Return `Some(text)` to override the text, or `None` to keep the built-in
+    /// `'true'`/`'false'`.
+    ///
+    /// The default implementation returns `None`.
+    fn boolean_text(&self, _value: bool) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Standard SQL behavior with no customizations; the default dialect.
@@ -184,6 +209,18 @@ impl SqlDialect for DynDialect {
     ) -> Option<Result<crate::types::LogicalType, DatabaseError>> {
         self.current().map_column_type(data_type)
     }
+
+    fn comparison_type(
+        &self,
+        left: &crate::types::LogicalType,
+        right: &crate::types::LogicalType,
+    ) -> Option<crate::types::LogicalType> {
+        self.current().comparison_type(left, right)
+    }
+
+    fn boolean_text(&self, value: bool) -> Option<&'static str> {
+        self.current().boolean_text(value)
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -302,6 +339,58 @@ mod tests {
         assert!(query(&db, sql).await.is_err());
         assert!(db.switch_dialect("test"));
         assert_eq!(query(&db, sql).await?, vec![vec![DataValue::Int32(7)]]);
+
+        Ok(())
+    }
+
+    #[derive(Debug, Default)]
+    struct CoercionDialect {
+        parser: GenericDialect,
+    }
+
+    impl SqlDialect for CoercionDialect {
+        fn name(&self) -> &str {
+            "test_coercion"
+        }
+
+        fn parser_dialect(&self) -> &dyn SqlParserDialect {
+            &self.parser
+        }
+
+        fn comparison_type(&self, left: &LogicalType, right: &LogicalType) -> Option<LogicalType> {
+            let is_text =
+                |ty: &LogicalType| matches!(ty, LogicalType::Char(..) | LogicalType::Varchar(..));
+            ((left.is_numeric() && is_text(right)) || (is_text(left) && right.is_numeric()))
+                .then_some(LogicalType::Double)
+        }
+
+        fn boolean_text(&self, value: bool) -> Option<&'static str> {
+            Some(if value { "1" } else { "0" })
+        }
+    }
+
+    #[test]
+    async fn comparison_type_and_boolean_text() -> Result<(), DatabaseError> {
+        let generic = DataBaseBuilder::path(".").build_in_memory().await?;
+        let custom = DataBaseBuilder::path(".")
+            .dialect(CoercionDialect::default())
+            .build_in_memory()
+            .await?;
+        let sql = "select 10 < '9', 10 = '10.0', 10 in ('9', '10.0'), 10 between '9' and '11', \
+                   cast(true as varchar), cast(1 = 0 as char(5)), \
+                   cast(cast(null as boolean) as varchar) is null";
+        let text = |rows: Vec<Vec<DataValue>>| -> Vec<String> {
+            rows[0].iter().map(ToString::to_string).collect()
+        };
+
+        assert_eq!(
+            text(query(&generic, sql).await?),
+            ["true", "false", "false", "false", "true", "false", "true"]
+        );
+        assert_eq!(
+            text(query(&custom, sql).await?),
+            ["false", "true", "true", "true", "1", "0", "true"]
+        );
 
         Ok(())
     }

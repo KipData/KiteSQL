@@ -28,6 +28,8 @@ use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
+use std::borrow::Cow;
+use std::{iter, slice};
 
 macro_rules! try_default {
     ($table_name:expr, $column_name:expr) => {
@@ -414,11 +416,26 @@ impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_,
 
     pub(crate) fn bind_binary_op_expr(
         &mut self,
-        left_expr: ExprRef,
-        right_expr: ExprRef,
+        mut left_expr: ExprRef,
+        mut right_expr: ExprRef,
         op: expression::BinaryOperator,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
+        if matches!(
+            op,
+            expression::BinaryOperator::Gt
+                | expression::BinaryOperator::Lt
+                | expression::BinaryOperator::GtEq
+                | expression::BinaryOperator::LtEq
+                | expression::BinaryOperator::Eq
+                | expression::BinaryOperator::NotEq
+        ) {
+            self.coerce_comparison_operands(
+                &mut left_expr,
+                slice::from_mut(&mut right_expr),
+                arena,
+            )?;
+        }
         let left_ty = left_expr.return_type(arena);
         let right_ty = right_expr.return_type(arena);
         let ty = match &op {
@@ -462,6 +479,67 @@ impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_,
             evaluator: None,
             ty,
         })
+    }
+
+    pub(crate) fn coerce_comparison_operands(
+        &self,
+        left: &mut ExprRef,
+        rest: &mut [ExprRef],
+        arena: &mut PlanArena,
+    ) -> Result<(), DatabaseError> {
+        let dialect = self.context.dialect;
+        let mut ty = left.return_type(arena).into_owned();
+        let mut coerced = false;
+        for operand in rest.iter() {
+            let operand_ty = operand.return_type(arena);
+            ty = match dialect.comparison_type(&ty, &operand_ty) {
+                Some(dialect_ty) => {
+                    coerced = true;
+                    dialect_ty
+                }
+                None => LogicalType::max_logical_type(&ty, &operand_ty)?.into_owned(),
+            };
+        }
+        if coerced {
+            for operand in iter::once(left).chain(rest.iter_mut()) {
+                *operand = operand.type_cast(Cow::Borrowed(&ty), arena)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_cast(
+        &self,
+        mut expr: ScalarExpression,
+        ty: LogicalType,
+        arena: &mut PlanArena,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        if matches!(ty, LogicalType::Char(..) | LogicalType::Varchar(..))
+            && expr.return_type(arena).as_ref() == &LogicalType::Boolean
+        {
+            let dialect = self.context.dialect;
+            let on_true = dialect.boolean_text(true);
+            let on_false = dialect.boolean_text(false);
+            if on_true.is_some() || on_false.is_some() {
+                let mut branch = |value: bool, text: &str| {
+                    (
+                        arena.alloc_expression(value.into()),
+                        arena.alloc_expression(text.into()),
+                    )
+                };
+                let expr_pairs = vec![
+                    branch(true, on_true.unwrap_or("true")),
+                    branch(false, on_false.unwrap_or("false")),
+                ];
+                expr = ScalarExpression::CaseWhen {
+                    operand_expr: Some(arena.alloc_expression(expr)),
+                    expr_pairs,
+                    else_expr: None,
+                    ty: LogicalType::Varchar(None, CharLengthUnits::Characters),
+                };
+            }
+        }
+        expr.type_cast(Cow::Owned(ty), arena)
     }
 
     pub(crate) fn bind_unary_op_expr(
