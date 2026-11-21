@@ -570,6 +570,7 @@ impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_,
         mut args: Vec<ExprRef>,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
+        let table_function_source = std::mem::take(&mut self.table_function_source);
         match function_name.as_str() {
             "if" => {
                 if args.len() != 3 {
@@ -662,10 +663,11 @@ impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_,
             }));
         }
         if let Some(function) = self.context.table_functions.get(&summary) {
-            if !matches!(self.context.step_now(), QueryBindStep::From) {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "`TableFunction` cannot bind in non-From step".to_string(),
-                ));
+            if !table_function_source || !matches!(self.context.step_now(), QueryBindStep::From) {
+                return Err(DatabaseError::UnsupportedStmt(format!(
+                    "table function `{}` can only be used as a FROM source",
+                    summary.name
+                )));
             }
             return Ok(ScalarExpression::TableFunction(TableFunction {
                 args,

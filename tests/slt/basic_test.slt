@@ -203,3 +203,39 @@ select abs(cast('-9223372036854775808' as bigint));
 
 statement ok
 drop table t_abs;
+
+# A table function can only be the outermost expression of a FROM source. Anywhere else, e.g. as
+# an argument of another call or an operand, it has no scalar type and must be rejected.
+
+statement error
+FROM e(numbers(0))
+
+statement error
+select * from e(numbers(0))
+
+statement error
+select * from numbers(numbers(1))
+
+statement error
+select * from numbers(abs(numbers(1)))
+
+statement error
+select * from table(numbers(numbers(1)))
+
+statement error
+select * from table(numbers(1) + 1)
+
+statement error
+select numbers(1)
+
+query I
+select number from table(numbers(3)) order by number
+----
+0
+1
+2
+
+query I
+select count(*) from table(numbers(5))
+----
+5

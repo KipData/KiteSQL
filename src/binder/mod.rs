@@ -68,6 +68,8 @@ use crate::errors::DatabaseError;
 use crate::expression::{ScalarExpression, TypeCast};
 use crate::planner::operator::join::JoinType;
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
+use crate::planner::operator::table_scan::TableScanOperator;
+use crate::planner::operator::visitor::OperatorVisitor;
 use crate::planner::{ExprRef, LogicalPlan, PlanArena, PlanRef, ScalarQueryRef};
 use crate::storage::{NameMapping, StorageTransaction, TableCache, ViewCache};
 use crate::types::tuple::Schema;
@@ -524,7 +526,13 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
         if let Some(table) = self.table(table_name)? {
             return Ok(Some(Source::Table(table)));
         }
-        Ok(self.view(table_name)?.map(Source::View))
+        let Some(view) = self.view(table_name)? else {
+            return Ok(None);
+        };
+        // A view keeps the plan it was bound to; once a table it scans is dropped, the view
+        // cannot be read.
+        ScannedTablesExist(self.table_cache).visit_plan(&view.plan)?;
+        Ok(Some(Source::View(view)))
     }
 
     /// Rejects a FROM source whose visible name is already bound in the current
@@ -729,6 +737,17 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
     }
 }
 
+struct ScannedTablesExist<'a>(&'a TableCache);
+
+impl OperatorVisitor<'_> for ScannedTablesExist<'_> {
+    fn visit_table_scan(&mut self, op: &TableScanOperator) -> Result<(), DatabaseError> {
+        if !self.0.contains_key(&op.table_id) {
+            return Err(DatabaseError::TableNotFound);
+        }
+        Ok(())
+    }
+}
+
 pub struct Binder<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> {
     pub(crate) context: BinderContext<'a, T>,
     pub(crate) args: &'a A,
@@ -736,6 +755,7 @@ pub struct Binder<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalT
     pub(crate) force_nested_loop: bool,
     with_pk: Option<TableId>,
     pub(crate) parent: Option<&'parent BinderContext<'a, T>>,
+    pub(crate) table_function_source: bool,
 }
 
 impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
@@ -753,6 +773,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             force_nested_loop: false,
             with_pk: None,
             parent,
+            table_function_source: false,
         }
     }
 
