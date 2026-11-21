@@ -439,5 +439,6 @@ The `SqlDialect` trait methods:
 - `rewrite()` — Optional hook to transform each parsed statement before it is bound
 - `comparison_type()` — Optional hook to pick the type both operands of a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `BETWEEN`) are cast to
 - `boolean_text()` — Optional hook to choose the text of a boolean in `CAST(.. AS CHAR)` or `CAST(.. AS VARCHAR)` (default `'true'`/`'false'`)
+- `supports_index_prefix_length()` — Optional hook to accept prefix key parts such as `col(10)` in `PRIMARY KEY`, `UNIQUE` and `CREATE INDEX`; the whole value is indexed (default: rejected)
 
 By default, the `GenericSqlDialect` is used, which provides standard SQL behavior with no custom transformations.
