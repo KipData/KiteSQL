@@ -435,5 +435,7 @@ The `SqlDialect` trait methods:
 - `map_data_type()` — Optional hook to map SQL data types in expressions (`CAST`, typed literals) to KiteSQL's `LogicalType`
 - `map_column_type()` — Optional hook to map the data types of column definitions; defaults to `map_data_type()`
 - `rewrite()` — Optional hook to transform each parsed statement before it is bound
+- `comparison_type()` — Optional hook to pick the type both operands of a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `BETWEEN`) are cast to
+- `boolean_text()` — Optional hook to choose the text of a boolean in `CAST(.. AS CHAR)` or `CAST(.. AS VARCHAR)` (default `'true'`/`'false'`)
 
 By default, the `GenericSqlDialect` is used, which provides standard SQL behavior with no custom transformations.

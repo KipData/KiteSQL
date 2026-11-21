@@ -23,6 +23,7 @@ use kite_sql::db::{DataBaseBuilder, Database};
 use kite_sql::dialect::{DynDialect, GenericSqlDialect, SqlDialect, DIALECT_GENERIC};
 use kite_sql::errors::DatabaseError;
 use kite_sql::storage::memory::MemoryStorage;
+use kite_sql::types::value::DataValue;
 use kite_sql::types::LogicalType;
 use sqlparser::ast::{DataType, Expr, LimitClause, Statement, Value};
 use sqlparser::dialect::{Dialect as SqlParserDialect, GenericDialect};
@@ -86,6 +87,47 @@ fn database_with<D: SqlDialect>(
 
 fn test_database() -> Result<Database<MemoryStorage, DynDialect>, DatabaseError> {
     database_with(TestDialect::default())
+}
+
+/// Test-only dialect: compares numbers with strings as `DOUBLE` and casts booleans to
+/// `'1'`/`'0'`.
+#[derive(Debug, Default)]
+struct CoercionDialect {
+    parser: GenericDialect,
+}
+
+impl SqlDialect for CoercionDialect {
+    fn name(&self) -> &str {
+        "test_coercion"
+    }
+
+    fn parser_dialect(&self) -> &dyn SqlParserDialect {
+        &self.parser
+    }
+
+    fn comparison_type(&self, left: &LogicalType, right: &LogicalType) -> Option<LogicalType> {
+        let is_text =
+            |ty: &LogicalType| matches!(ty, LogicalType::Char(..) | LogicalType::Varchar(..));
+        ((left.is_numeric() && is_text(right)) || (is_text(left) && right.is_numeric()))
+            .then_some(LogicalType::Double)
+    }
+
+    fn boolean_text(&self, value: bool) -> Option<&'static str> {
+        Some(if value { "1" } else { "0" })
+    }
+}
+
+fn first_value<D: SqlDialect>(
+    db: &Database<MemoryStorage, D>,
+    sql: &str,
+) -> Result<DataValue, DatabaseError> {
+    let mut iter = db.run(sql)?;
+    let value = iter
+        .next_tuple(|_, row| row.take_value(0))?
+        .flatten()
+        .expect("query returned no rows");
+    iter.done()?;
+    Ok(value)
 }
 
 fn first_column_type<D: SqlDialect>(
@@ -172,6 +214,93 @@ fn custom_dialect_rewrites_statements() -> Result<(), DatabaseError> {
 }
 
 #[test]
+fn custom_dialect_sets_comparison_type() -> Result<(), DatabaseError> {
+    let generic = DataBaseBuilder::path(".").build_in_memory()?;
+    let custom = database_with(CoercionDialect::default())?;
+
+    // (query, result with the built-in coercion, result with `CoercionDialect`)
+    let cases = [
+        ("select 10 < '9'", true, false),
+        ("select '9' > 10", true, false),
+        ("select 10 = '10.0'", false, true),
+        ("select 10 in ('10.0', '11')", false, true),
+        ("select 10 between '9' and '11'", false, true),
+        ("select 1 = 1", true, true),
+        ("select 'a' < 'b'", true, true),
+    ];
+    for (sql, expected_generic, expected_custom) in cases {
+        assert_eq!(
+            first_value(&generic, sql)?,
+            DataValue::Boolean(expected_generic),
+            "generic: {sql}"
+        );
+        assert_eq!(
+            first_value(&custom, sql)?,
+            DataValue::Boolean(expected_custom),
+            "custom: {sql}"
+        );
+    }
+
+    let mut custom = custom;
+    custom.ddl("create table t1 (id int primary key, v varchar(10))")?;
+    custom
+        .run("insert into t1 values (1, '10'), (2, '9'), (3, '8.5')")?
+        .done()?;
+    assert_eq!(count_rows(&custom, "select id from t1 where v > 9")?, 1);
+    assert_eq!(count_rows(&custom, "select id from t1 where v = 8.5")?, 1);
+    assert_eq!(
+        count_rows(&custom, "select id from t1 where v in (9, 10)")?,
+        2
+    );
+
+    Ok(())
+}
+
+#[test]
+fn custom_dialect_sets_boolean_text() -> Result<(), DatabaseError> {
+    let mut generic = DataBaseBuilder::path(".").build_in_memory()?;
+    let mut custom = database_with(CoercionDialect::default())?;
+
+    let create = "create table t1 (id int primary key, b boolean null)";
+    let insert = "insert into t1 values (1, true), (2, false), (3, null)";
+    generic.ddl(create)?;
+    generic.run(insert)?.done()?;
+    custom.ddl(create)?;
+    custom.run(insert)?.done()?;
+    for (sql, expected_generic, expected_custom) in [
+        ("select cast(true as varchar)", "true", "1"),
+        ("select cast(false as varchar)", "false", "0"),
+        ("select cast(1 = 1 as char(4))", "true", "1"),
+        (
+            "select cast(b as varchar) from t1 where id = 1",
+            "true",
+            "1",
+        ),
+        (
+            "select cast(b as varchar) from t1 where id = 2",
+            "false",
+            "0",
+        ),
+    ] {
+        assert_eq!(
+            first_value(&generic, sql)?.to_string(),
+            expected_generic,
+            "generic: {sql}"
+        );
+        assert_eq!(
+            first_value(&custom, sql)?.to_string(),
+            expected_custom,
+            "custom: {sql}"
+        );
+    }
+    let sql = "select cast(b as varchar) from t1 where id = 3";
+    assert_eq!(first_value(&generic, sql)?, DataValue::Null);
+    assert_eq!(first_value(&custom, sql)?, DataValue::Null);
+
+    Ok(())
+}
+
+#[test]
 fn static_dialect_behaves_like_dyn_dialect() -> Result<(), DatabaseError> {
     let mut db = DataBaseBuilder::path(".")
         .dialect(TestDialect::default())
@@ -213,6 +342,13 @@ fn generic_dialect_is_noop() -> Result<(), DatabaseError> {
     assert_eq!(dialect.name(), DIALECT_GENERIC);
     assert!(dialect.map_data_type(&DataType::Integer(None)).is_none());
     assert!(dialect.map_column_type(&DataType::Integer(None)).is_none());
+    assert!(dialect
+        .comparison_type(
+            &LogicalType::Integer,
+            &LogicalType::Varchar(None, kite_sql::types::CharLengthUnits::Characters)
+        )
+        .is_none());
+    assert!(dialect.boolean_text(true).is_none());
 
     let original = sqlparser::parser::Parser::new(dialect.parser_dialect())
         .try_with_sql("select 1 limit 10")?

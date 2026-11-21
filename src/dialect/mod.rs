@@ -92,6 +92,31 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
         self.map_data_type(data_type)
             .map(|result| result.map(ColumnTypeSpec::new))
     }
+
+    /// Returns the type both operands of a comparison are cast to before comparing.
+    ///
+    /// Called by the binder for `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN` lists and `BETWEEN`
+    /// with the operand types. Return `Some(type)` to cast every operand to `type`, or
+    /// `None` to keep the built-in coercion.
+    ///
+    /// The default implementation returns `None` for all types.
+    fn comparison_type(
+        &self,
+        _left: &crate::types::LogicalType,
+        _right: &crate::types::LogicalType,
+    ) -> Option<crate::types::LogicalType> {
+        None
+    }
+
+    /// Returns the text of a boolean in `CAST(.. AS CHAR)` or `CAST(.. AS VARCHAR)`.
+    ///
+    /// Called by the binder, so the text is fixed when the statement is bound. Return `Some(text)` to override the text, or `None` to keep the built-in
+    /// `'true'`/`'false'`.
+    ///
+    /// The default implementation returns `None`.
+    fn boolean_text(&self, _value: bool) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Standard SQL behavior with no customizations; the default dialect.
@@ -211,5 +236,17 @@ impl SqlDialect for DynDialect {
         data_type: &sqlparser::ast::DataType,
     ) -> Option<Result<ColumnTypeSpec, DatabaseError>> {
         self.current().map_column_type(data_type)
+    }
+
+    fn comparison_type(
+        &self,
+        left: &crate::types::LogicalType,
+        right: &crate::types::LogicalType,
+    ) -> Option<crate::types::LogicalType> {
+        self.current().comparison_type(left, right)
+    }
+
+    fn boolean_text(&self, value: bool) -> Option<&'static str> {
+        self.current().boolean_text(value)
     }
 }

@@ -28,6 +28,7 @@ use crate::planner::{ExprRef, LogicalPlan, MetaArena, PlanArena};
 use crate::storage::StorageTransaction;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, LogicalType};
+use std::borrow::Cow;
 
 macro_rules! try_default {
     ($table_name:expr, $column_name:expr) => {
@@ -419,6 +420,22 @@ impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_,
         op: expression::BinaryOperator,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
+        let (left_expr, right_expr) = if matches!(
+            op,
+            expression::BinaryOperator::Gt
+                | expression::BinaryOperator::Lt
+                | expression::BinaryOperator::GtEq
+                | expression::BinaryOperator::LtEq
+                | expression::BinaryOperator::Eq
+                | expression::BinaryOperator::NotEq
+        ) {
+            let mut operands = [left_expr, right_expr];
+            self.coerce_comparison_operands(&mut operands, arena)?;
+            let [left_expr, right_expr] = operands;
+            (left_expr, right_expr)
+        } else {
+            (left_expr, right_expr)
+        };
         let left_ty = left_expr.return_type(arena);
         let right_ty = right_expr.return_type(arena);
         let ty = match &op {
@@ -462,6 +479,72 @@ impl<'a, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'a, '_,
             evaluator: None,
             ty,
         })
+    }
+
+    /// `operands[0]` is the left-hand side.
+    pub(crate) fn coerce_comparison_operands(
+        &self,
+        operands: &mut [ExprRef],
+        arena: &mut PlanArena,
+    ) -> Result<(), DatabaseError> {
+        let Some((first, rest)) = operands.split_first() else {
+            return Ok(());
+        };
+        let dialect = self.context.dialect;
+        let mut ty = first.return_type(arena).into_owned();
+        let mut coerced = false;
+        for operand in rest {
+            let operand_ty = operand.return_type(arena);
+            ty = match dialect.comparison_type(&ty, &operand_ty) {
+                Some(dialect_ty) => {
+                    coerced = true;
+                    dialect_ty
+                }
+                None => LogicalType::max_logical_type(&ty, &operand_ty)?.into_owned(),
+            };
+        }
+        if coerced {
+            for operand in operands.iter_mut() {
+                *operand = operand.type_cast(Cow::Borrowed(&ty), arena)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_cast(
+        &self,
+        expr: ScalarExpression,
+        ty: LogicalType,
+        arena: &mut PlanArena,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        let dialect = self.context.dialect;
+        if matches!(ty, LogicalType::Char(..) | LogicalType::Varchar(..))
+            && expr.return_type(arena).as_ref() == &LogicalType::Boolean
+            && (dialect.boolean_text(true).is_some() || dialect.boolean_text(false).is_some())
+        {
+            let mut text = |value: bool| {
+                let text = dialect
+                    .boolean_text(value)
+                    .map_or_else(|| value.to_string(), str::to_string);
+                (
+                    arena.alloc_expression(ScalarExpression::Constant(DataValue::Boolean(value))),
+                    arena.alloc_expression(ScalarExpression::Constant(DataValue::Utf8 {
+                        value: text.into(),
+                        ty: Utf8Type::Variable(None),
+                        unit: CharLengthUnits::Characters,
+                    })),
+                )
+            };
+            let expr_pairs = vec![text(true), text(false)];
+            let expr = ScalarExpression::CaseWhen {
+                operand_expr: Some(arena.alloc_expression(expr)),
+                expr_pairs,
+                else_expr: None,
+                ty: LogicalType::Varchar(None, CharLengthUnits::Characters),
+            };
+            return expr.type_cast(Cow::Owned(ty), arena);
+        }
+        expr.type_cast(Cow::Owned(ty), arena)
     }
 
     pub(crate) fn bind_unary_op_expr(

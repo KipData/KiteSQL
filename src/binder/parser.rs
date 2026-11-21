@@ -2393,7 +2393,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 list,
                 negated,
             } => {
-                let args = list
+                let args: Vec<ExprRef> = list
                     .iter()
                     .map(|expr| {
                         self.bind_expr(expr, arena)
@@ -2403,6 +2403,12 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 let expr = self
                     .bind_expr(expr, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
+                let mut operands = Vec::with_capacity(args.len() + 1);
+                operands.push(expr);
+                operands.extend(args);
+                self.coerce_comparison_operands(&mut operands, arena)?;
+                let expr = operands.remove(0);
+                let args = operands;
                 Ok(ScalarExpression::In {
                     negated: *negated,
                     evaluator: None,
@@ -2412,10 +2418,14 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             }
             Expr::Cast {
                 expr, data_type, ..
-            } => self.bind_expr(expr, arena)?.type_cast(
-                Cow::Owned(convert_data_type(data_type, self.context.dialect)?),
-                arena,
-            ),
+            } => {
+                let expr = self.bind_expr(expr, arena)?;
+                self.bind_cast(
+                    expr,
+                    convert_data_type(data_type, self.context.dialect)?,
+                    arena,
+                )
+            }
             Expr::TypedString(TypedString {
                 data_type, value, ..
             }) => {
@@ -2448,6 +2458,9 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 let right_expr = self
                     .bind_expr(high, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
+                let mut operands = [expr, left_expr, right_expr];
+                self.coerce_comparison_operands(&mut operands, arena)?;
+                let [expr, left_expr, right_expr] = operands;
                 Ok(ScalarExpression::Between {
                     negated: *negated,
                     left_evaluator: None,
