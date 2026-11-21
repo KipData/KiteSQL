@@ -540,6 +540,7 @@ mod tests {
         let table_functions = Default::default();
         let transaction = tables.storage.transaction()?;
         let arena = tables.table_arena.borrow();
+        let dialect = crate::dialect::GenericSqlDialect::new();
         let args: [(usize, LogicalType); 0] = [];
         let mut binder = Binder::new(
             BinderContext::new(
@@ -549,6 +550,7 @@ mod tests {
                 &transaction,
                 &scala_functions,
                 &table_functions,
+                &dialect,
             ),
             &args,
             None,

@@ -81,6 +81,7 @@ mod tests {
         let view_cache = crate::storage::ViewCache::default();
         let scala_functions = Default::default();
         let table_functions = Default::default();
+        let dialect = crate::dialect::GenericSqlDialect::new();
 
         let sql = "create table t1 (id int primary key default 5 null, \
                    name varchar(10) null, unique (name, id))";
@@ -92,6 +93,7 @@ mod tests {
                 &transaction,
                 &scala_functions,
                 &table_functions,
+                &dialect,
             ),
             &[],
             None,
