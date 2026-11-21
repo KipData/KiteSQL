@@ -810,7 +810,16 @@ where
                         .ok_or_else(|| DatabaseError::column_not_found(name.to_string()))?,
                 );
             }
-            plan = binder.bind_insert_query(table_name, plan, &targets, false, arena)?;
+            plan = binder.bind_insert_query(
+                crate::binder::insert::InsertQueryParams {
+                    table_name,
+                    input_plan: plan,
+                    targets: &targets,
+                    is_overwrite: false,
+                    on_duplicate_key_update: None,
+                },
+                arena,
+            )?;
         }
 
         Ok(BindPlanComplete { plan })

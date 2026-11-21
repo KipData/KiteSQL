@@ -435,5 +435,7 @@ The `SqlDialect` trait methods:
 - `map_data_type()` — Optional hook to map SQL data types in expressions (`CAST`, typed literals) to KiteSQL's `LogicalType`
 - `map_column_type()` — Optional hook to map the data types of column definitions; defaults to `map_data_type()`
 - `rewrite()` — Optional hook to transform each parsed statement before it is bound
+- `supports_on_duplicate_key_update()` — Optional hook to accept `INSERT ... ON DUPLICATE KEY UPDATE`, which updates the row a primary or unique key conflicts with; assignments read the proposed row through `VALUES(col)` or a row alias (default: rejected)
+- `upsert_affected_rows()` — Optional hook to choose the affected rows an upsert reports for an inserted, changed or unchanged row (default: 1 each)
 
 By default, the `GenericSqlDialect` is used, which provides standard SQL behavior with no custom transformations.

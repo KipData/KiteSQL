@@ -92,6 +92,32 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
         self.map_data_type(data_type)
             .map(|result| result.map(ColumnTypeSpec::new))
     }
+
+    /// Whether `INSERT ... ON DUPLICATE KEY UPDATE` is accepted.
+    ///
+    /// When this returns `true`, a row whose primary key, or a `UNIQUE` key without NULLs,
+    /// matches an existing row updates that row with the assignments instead of being
+    /// inserted; a row of the same statement counts as existing once written. An assignment
+    /// reads the existing row through plain column names and the row the statement tried to
+    /// insert through `VALUES(col)` or a row alias (`INSERT ... AS new ... SET v = new.v`).
+    ///
+    /// The default implementation returns `false`, which rejects the clause.
+    fn supports_on_duplicate_key_update(&self) -> bool {
+        false
+    }
+
+    /// The affected rows `INSERT ... ON DUPLICATE KEY UPDATE` reports for one input row.
+    ///
+    /// `inserted` is set when the row was inserted and `updated` when it changed an existing
+    /// row; neither is set when it matched an existing row that the assignments left
+    /// unchanged. Only used when
+    /// [`supports_on_duplicate_key_update`](Self::supports_on_duplicate_key_update) returns
+    /// `true`.
+    ///
+    /// The default implementation counts every row as 1.
+    fn upsert_affected_rows(&self, _inserted: bool, _updated: bool) -> u64 {
+        1
+    }
 }
 
 /// Standard SQL behavior with no customizations; the default dialect.
@@ -211,5 +237,13 @@ impl SqlDialect for DynDialect {
         data_type: &sqlparser::ast::DataType,
     ) -> Option<Result<ColumnTypeSpec, DatabaseError>> {
         self.current().map_column_type(data_type)
+    }
+
+    fn supports_on_duplicate_key_update(&self) -> bool {
+        self.current().supports_on_duplicate_key_update()
+    }
+
+    fn upsert_affected_rows(&self, inserted: bool, updated: bool) -> u64 {
+        self.current().upsert_affected_rows(inserted, updated)
     }
 }
