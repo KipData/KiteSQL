@@ -290,16 +290,25 @@ impl NormalizationRule for NormalizationRuleImpl {
     }
 }
 
-pub(crate) fn remap_position(position: &mut usize, removed_positions: &[usize]) {
+pub(crate) fn remap_position(
+    position: &mut usize,
+    removed_positions: &[usize],
+) -> Result<(), DatabaseError> {
     match removed_positions.binary_search(position) {
         Ok(_) => {
+            // Pruning must keep every slot that is still referenced. Fail loudly in debug builds
+            // (tests, fuzzing) and refuse the plan in release instead of reading a wrong slot.
             debug_assert!(
                 false,
                 "encountered a reference to pruned output slot {position}"
             );
+            Err(DatabaseError::InvalidPlan(format!(
+                "reference to pruned output slot {position}"
+            )))
         }
         Err(shift) => {
             *position -= shift;
+            Ok(())
         }
     }
 }
@@ -337,8 +346,7 @@ impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for PositionRemapper<'_, '_> {
         position: &mut usize,
         _arena: &mut A,
     ) -> Result<(), DatabaseError> {
-        remap_position(position, self.removed_positions);
-        Ok(())
+        remap_position(position, self.removed_positions)
     }
 }
 
