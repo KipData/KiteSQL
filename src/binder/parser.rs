@@ -25,6 +25,7 @@ use crate::db::{
     BindSource, ConsumeMut, Database, DatabaseIter, Executor, OwnedPtr, State, Transaction,
     TransactionIter,
 };
+use crate::dialect::SqlDialect;
 use crate::errors::{DatabaseError, SqlErrorSpan};
 use crate::expression;
 use crate::expression::agg::AggKind;
@@ -32,7 +33,7 @@ use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::window::WindowFunctionKind;
 use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::iter_ext::Itertools;
-use crate::parser::parse_sql_with_recursion_limit;
+use crate::parser::parse_sql_with_dialect;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
@@ -66,6 +67,26 @@ use std::slice;
 
 /// Parsed SQL statement type used by KiteSQL SQL frontend APIs.
 pub type Statement = sqlparser::ast::Statement;
+
+pub(crate) fn convert_data_type(
+    data_type: &DataType,
+    dialect: &dyn crate::dialect::SqlDialect,
+) -> Result<LogicalType, DatabaseError> {
+    if let Some(result) = dialect.map_data_type(data_type) {
+        return result;
+    }
+    LogicalType::try_from(data_type.clone())
+}
+
+pub(crate) fn convert_column_type(
+    data_type: &DataType,
+    dialect: &dyn crate::dialect::SqlDialect,
+) -> Result<LogicalType, DatabaseError> {
+    if let Some(result) = dialect.map_column_type(data_type) {
+        return result.map(|spec| spec.logical);
+    }
+    LogicalType::try_from(data_type.clone())
+}
 
 pub(crate) trait AttachSpanSource {
     fn sql_error_span(self) -> Option<SqlErrorSpan>;
@@ -137,14 +158,19 @@ pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
     }
 }
 
-impl<S: Storage> State<S> {
+impl<S: Storage, D: SqlDialect> State<S, D> {
     pub(crate) fn prepare_all<T: AsRef<str>>(
         &self,
         sql: T,
     ) -> Result<Vec<Statement>, DatabaseError> {
-        let stmts = parse_sql_with_recursion_limit(sql, self.parser_recursion_limit())?;
+        let dialect = self.dialect();
+        let mut stmts =
+            parse_sql_with_dialect(dialect.parser_dialect(), sql, self.parser_recursion_limit())?;
         if stmts.is_empty() {
             return Err(DatabaseError::EmptyStatement);
+        }
+        for stmt in stmts.iter_mut() {
+            dialect.rewrite(stmt)?;
         }
         Ok(stmts)
     }
@@ -173,7 +199,7 @@ fn statement_mutates_catalog_or_statistics(statement: &Statement) -> Result<bool
 }
 
 #[maybe_async]
-impl<S: Storage> Database<S> {
+impl<S: Storage, D: SqlDialect> Database<S, D> {
     /// Parses SQL statements using this database's configured parser recursion limit.
     pub fn prepare_all<T: AsRef<str>>(&self, sql: T) -> Result<Vec<Statement>, DatabaseError> {
         self.state.prepare_all(sql)
@@ -320,7 +346,7 @@ impl<S: Storage> Database<S> {
 }
 
 #[maybe_async]
-impl<'txn, S: Storage> Transaction<'txn, S> {
+impl<'txn, S: Storage, D: SqlDialect> Transaction<'txn, S, D> {
     /// Runs SQL inside the current transaction and returns the final result iterator.
     pub async fn run<'a, T: AsRef<str>>(
         &'a mut self,
@@ -579,7 +605,7 @@ where
                             ));
                         }
                         (
-                            LogicalType::try_from(data_type)?,
+                            convert_column_type(&data_type, self.binder.context.dialect)?,
                             DefaultChange::NoChange,
                             NotNullChange::NoChange,
                         )
@@ -645,7 +671,7 @@ where
                         })?;
                 }
                 let old_column_name = old_column_name.into_owned();
-                let data_type = LogicalType::try_from(data_type)?;
+                let data_type = convert_column_type(&data_type, self.binder.context.dialect)?;
                 let (default_change, not_null_change) =
                     self.bind_change_column_options(options, &data_type)?;
 
@@ -690,7 +716,7 @@ where
                         "illegal column naming".to_string(),
                     ));
                 }
-                let data_type = LogicalType::try_from(data_type)?;
+                let data_type = convert_column_type(&data_type, self.binder.context.dialect)?;
                 let (default_change, not_null_change) =
                     self.bind_change_column_options(options, &data_type)?;
 
@@ -783,17 +809,18 @@ where
             columns.push(self.bind_column(column, Some(i))?);
         }
         let mut composite_unique_keys = Vec::new();
+        let dialect = self.binder.context.dialect;
         for constraint in create.constraints {
             match constraint {
                 TableConstraint::PrimaryKey(primary) => {
-                    let positions = Self::constraint_columns(&columns, primary.columns)?;
+                    let positions = Self::constraint_columns(&columns, primary.columns, dialect)?;
                     for (i, position) in positions.into_iter().enumerate() {
                         columns[position].desc_mut().set_primary(Some(i));
                     }
                 }
                 TableConstraint::Unique(unique) => {
                     Self::check_unique_nulls_option(unique.nulls_distinct)?;
-                    let positions = Self::constraint_columns(&columns, unique.columns)?;
+                    let positions = Self::constraint_columns(&columns, unique.columns, dialect)?;
                     match positions.as_slice() {
                         [] => return Err(DatabaseError::InvalidIndex),
                         [position] => columns[*position].desc_mut().set_unique(),
@@ -823,7 +850,7 @@ where
     ) -> Result<ColumnCatalog, DatabaseError> {
         let column_name = lower_ident(&column_def.name).into_owned();
         let mut column_desc = ColumnDesc::new(
-            LogicalType::try_from(column_def.data_type)?,
+            convert_column_type(&column_def.data_type, self.binder.context.dialect)?,
             None,
             false,
             None,
@@ -885,15 +912,23 @@ where
     fn constraint_columns(
         table_columns: &[ColumnCatalog],
         index_columns: Vec<IndexColumn>,
+        dialect: &dyn crate::dialect::SqlDialect,
     ) -> Result<Vec<usize>, DatabaseError> {
         let mut positions = Vec::with_capacity(index_columns.len());
         for index_column in index_columns {
-            let Expr::Identifier(ident) = index_column.column.expr else {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".to_string(),
-                ));
+            let ident = match &index_column.column.expr {
+                Expr::Identifier(ident) => ident,
+                expr => match prefix_key_part(expr) {
+                    Some(ident) if dialect.supports_index_prefix_length() => ident,
+                    _ => {
+                        return Err(DatabaseError::UnsupportedStmt(
+                            "only identifier columns are supported in `PRIMARY KEY/UNIQUE`"
+                                .to_string(),
+                        ))
+                    }
+                },
             };
-            let column_name = lower_ident(&ident);
+            let column_name = lower_ident(ident);
             let position = table_columns
                 .iter()
                 .position(|column| column.name() == column_name.as_ref())
@@ -937,6 +972,7 @@ where
             .binder
             .bind_create_index_source(&table_name, self.arena)?;
         let mut columns = Vec::with_capacity(create.columns.len());
+        let dialect = self.binder.context.dialect;
 
         for index_column in create.columns {
             if index_column.operator_class.is_some()
@@ -948,9 +984,13 @@ where
                     "CREATE INDEX column options".to_string(),
                 ));
             }
-            let expr = self
-                .binder
-                .bind_expr(&index_column.column.expr, self.arena)?;
+            let prefix_column = prefix_key_part(&index_column.column.expr)
+                .filter(|_| dialect.supports_index_prefix_length())
+                .map(|ident| Expr::Identifier(ident.clone()));
+            let expr = self.binder.bind_expr(
+                prefix_column.as_ref().unwrap_or(&index_column.column.expr),
+                self.arena,
+            )?;
             match &expr {
                 ScalarExpression::ColumnRef { column, .. } => columns.push(*column),
                 _ => {
@@ -1977,6 +2017,34 @@ fn sql_object_name(name: ObjectName) -> Result<String, DatabaseError> {
     Ok(lower_case_name(&name)?.into_owned())
 }
 
+/// `col` of a prefix key part `col(n)` with a positive integer `n`, which parses as a call.
+fn prefix_key_part(expr: &Expr) -> Option<&Ident> {
+    let Expr::Function(func) = expr else {
+        return None;
+    };
+    let [ObjectNamePart::Identifier(ident)] = func.name.0.as_slice() else {
+        return None;
+    };
+    let FunctionArguments::List(list) = &func.args else {
+        return None;
+    };
+    let is_prefix_length = matches!(
+        list.args.as_slice(),
+        [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))]
+            if matches!(&value.value, Value::Number(length, false)
+                if length.parse::<u32>().is_ok_and(|length| length > 0))
+    );
+    let is_plain_call = !func.uses_odbc_syntax
+        && matches!(func.parameters, FunctionArguments::None)
+        && list.duplicate_treatment.is_none()
+        && list.clauses.is_empty()
+        && func.filter.is_none()
+        && func.null_treatment.is_none()
+        && func.over.is_none()
+        && func.within_group.is_empty();
+    (is_prefix_length && is_plain_call).then_some(ident)
+}
+
 pub(super) fn lower_ident(ident: &Ident) -> Cow<'_, str> {
     let value = &ident.value;
 
@@ -2389,13 +2457,14 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             }
             Expr::Cast {
                 expr, data_type, ..
-            } => self
-                .bind_expr(expr, arena)?
-                .type_cast(Cow::Owned(LogicalType::try_from(data_type.clone())?), arena),
+            } => self.bind_expr(expr, arena)?.type_cast(
+                Cow::Owned(convert_data_type(data_type, self.context.dialect)?),
+                arena,
+            ),
             Expr::TypedString(TypedString {
                 data_type, value, ..
             }) => {
-                let logical_type = LogicalType::try_from(data_type.clone())?;
+                let logical_type = convert_data_type(data_type, self.context.dialect)?;
                 let raw = value.clone().into_string().ok_or_else(|| {
                     DatabaseError::InvalidValue("typed string literal must be a string".to_string())
                 })?;
@@ -3631,6 +3700,7 @@ mod tests {
         let table_functions = Default::default();
         let transaction = tables.storage.transaction()?;
         let arena = tables.table_arena.borrow();
+        let dialect = crate::dialect::GenericSqlDialect::new();
         let mut binder = Binder::new(
             BinderContext::new(
                 &arena.names,
@@ -3639,6 +3709,7 @@ mod tests {
                 &transaction,
                 &scala_functions,
                 &table_functions,
+                &dialect,
             ),
             &[],
             None,

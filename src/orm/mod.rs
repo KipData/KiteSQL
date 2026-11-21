@@ -9,6 +9,7 @@ use crate::db::{
     AsyncIter, BindSource, Database, DatabaseIter, Executor, OrmIter, ResultIter, ResultRow,
     Transaction, TransactionIter, TxnOrmIter, TxnResultIter, TxnValue,
 };
+use crate::dialect::SqlDialect;
 use crate::errors::DatabaseError;
 pub use crate::expression::agg::AggKind;
 use crate::expression::window::WindowFunctionKind;
