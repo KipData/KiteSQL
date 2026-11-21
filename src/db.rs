@@ -14,8 +14,11 @@
 
 mod program;
 #[cfg(feature = "parser")]
+mod session;
+#[cfg(feature = "parser")]
 pub use crate::binder::Statement;
 use crate::binder::{Binder, BinderContext};
+use crate::dialect::{GenericSqlDialect, SqlDialect};
 use crate::errors::DatabaseError;
 pub use crate::execution::Executor;
 use crate::execution::{DDLApply, ExecArena, ExecBuffer, TxnPtr};
@@ -62,6 +65,8 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ordered_float::OrderedFloat;
 pub use program::{Param, Program, ProgramIter};
+#[cfg(feature = "parser")]
+pub use session::{Session, SessionIter};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
@@ -122,13 +127,14 @@ pub(crate) trait BindSource {
     type Transaction: StorageTransaction;
 
     type Storage: Storage;
+    type Dialect: SqlDialect;
 
     /// `read_only` lets a fresh transaction use the storage's read path; executors
     /// that already hold a transaction ignore it.
     async fn execute<F>(self, read_only: bool, build: F) -> Result<Self::Iter, DatabaseError>
     where
         F: for<'s> FnOnce(
-                &'s State<Self::Storage>,
+                &'s State<Self::Storage, Self::Dialect>,
                 &Self::Transaction,
             ) -> Result<(Executor<'s>, PlanArena<'s>), DatabaseError>
             + MaybeSend;
@@ -147,7 +153,7 @@ pub(crate) trait BindSource {
 ///
 /// The builder wires together storage, built-in functions and optional runtime
 /// features before the database is opened.
-pub struct DataBaseBuilder {
+pub struct DataBaseBuilder<D: SqlDialect = GenericSqlDialect> {
     #[cfg(all(
         not(target_arch = "wasm32"),
         any(feature = "rocksdb", feature = "lmdb")
@@ -158,6 +164,7 @@ pub struct DataBaseBuilder {
     statistics_relative_error: Option<f64>,
     parser_recursion_limit: Option<usize>,
     transaction_isolation: Option<TransactionIsolationLevel>,
+    dialect: D,
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     storage_config: StorageConfig,
     #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
@@ -192,13 +199,16 @@ impl DataBaseBuilder {
             statistics_relative_error: None,
             parser_recursion_limit: None,
             transaction_isolation: None,
+            dialect: GenericSqlDialect::new(),
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
             storage_config: Default::default(),
             #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
             lmdb_config: Default::default(),
         }
     }
+}
 
+impl<D: SqlDialect> DataBaseBuilder<D> {
     /// Sets the maximum histogram bucket count used by `ANALYZE` (default: 10).
     /// The actual count is limited by the number of non-NULL samples.
     pub fn histogram_buckets(mut self, buckets: usize) -> Self {
@@ -238,6 +248,27 @@ impl DataBaseBuilder {
     pub fn transaction_isolation(mut self, isolation: TransactionIsolationLevel) -> Self {
         self.transaction_isolation = Some(isolation);
         self
+    }
+
+    /// Sets the SQL dialect used to parse and bind statements, [`GenericSqlDialect`] by default.
+    pub fn dialect<T: SqlDialect>(self, dialect: T) -> DataBaseBuilder<T> {
+        DataBaseBuilder {
+            #[cfg(all(
+                not(target_arch = "wasm32"),
+                any(feature = "rocksdb", feature = "lmdb")
+            ))]
+            path: self.path,
+            histogram_buckets: self.histogram_buckets,
+            hll_precision: self.hll_precision,
+            statistics_relative_error: self.statistics_relative_error,
+            parser_recursion_limit: self.parser_recursion_limit,
+            transaction_isolation: self.transaction_isolation,
+            dialect,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
+            storage_config: self.storage_config,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
+            lmdb_config: self.lmdb_config,
+        }
     }
 
     /// Enables or disables RocksDB statistics collection.
@@ -313,7 +344,10 @@ impl DataBaseBuilder {
     }
 
     /// Builds a database using a custom storage implementation.
-    pub fn build_with_storage<T: Storage>(self, storage: T) -> Result<Database<T>, DatabaseError> {
+    pub fn build_with_storage<T: Storage>(
+        self,
+        storage: T,
+    ) -> Result<Database<T, D>, DatabaseError> {
         Self::_build::<T>(
             storage,
             self.histogram_buckets,
@@ -321,12 +355,13 @@ impl DataBaseBuilder {
             self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
+            self.dialect,
         )
     }
 
     /// Builds a database for the current target platform.
     #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-    pub fn build(self) -> Result<Database<MemoryStorage>, DatabaseError> {
+    pub fn build(self) -> Result<Database<MemoryStorage, D>, DatabaseError> {
         let storage = MemoryStorage::new();
 
         Self::_build::<MemoryStorage>(
@@ -336,12 +371,13 @@ impl DataBaseBuilder {
             self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
+            self.dialect,
         )
     }
 
     /// Builds a RocksDB-backed database.
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
-    pub fn build_rocksdb(self) -> Result<Database<RocksStorage>, DatabaseError> {
+    pub fn build_rocksdb(self) -> Result<Database<RocksStorage, D>, DatabaseError> {
         let storage = RocksStorage::with_config(self.path, self.storage_config)?;
 
         Self::_build::<RocksStorage>(
@@ -351,6 +387,7 @@ impl DataBaseBuilder {
             self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
+            self.dialect,
         )
     }
 
@@ -358,7 +395,7 @@ impl DataBaseBuilder {
     ///
     /// This is convenient for tests, examples and temporary workloads.
     #[cfg(not(feature = "async"))]
-    pub fn build_in_memory(self) -> Result<Database<MemoryStorage>, DatabaseError> {
+    pub fn build_in_memory(self) -> Result<Database<MemoryStorage, D>, DatabaseError> {
         let storage = MemoryStorage::new();
 
         Self::_build::<MemoryStorage>(
@@ -368,12 +405,13 @@ impl DataBaseBuilder {
             self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
+            self.dialect,
         )
     }
 
     /// Builds a LMDB-backed database.
     #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
-    pub fn build_lmdb(self) -> Result<Database<LmdbStorage>, DatabaseError> {
+    pub fn build_lmdb(self) -> Result<Database<LmdbStorage, D>, DatabaseError> {
         let storage = LmdbStorage::with_config(self.path, self.lmdb_config)?;
 
         Self::_build::<LmdbStorage>(
@@ -383,13 +421,14 @@ impl DataBaseBuilder {
             self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
+            self.dialect,
         )
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
     /// Builds a RocksDB-backed database that uses optimistic transactions.
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
-    pub fn build_optimistic(self) -> Result<Database<OptimisticRocksStorage>, DatabaseError> {
+    pub fn build_optimistic(self) -> Result<Database<OptimisticRocksStorage, D>, DatabaseError> {
         let storage = OptimisticRocksStorage::with_config(self.path, self.storage_config)?;
 
         Self::_build::<OptimisticRocksStorage>(
@@ -399,6 +438,7 @@ impl DataBaseBuilder {
             self.statistics_relative_error,
             self.parser_recursion_limit,
             self.transaction_isolation,
+            self.dialect,
         )
     }
 
@@ -409,7 +449,8 @@ impl DataBaseBuilder {
         statistics_relative_error: Option<f64>,
         parser_recursion_limit: Option<usize>,
         transaction_isolation: Option<TransactionIsolationLevel>,
-    ) -> Result<Database<T>, DatabaseError> {
+        dialect: D,
+    ) -> Result<Database<T, D>, DatabaseError> {
         if matches!(histogram_buckets, Some(0)) {
             return Err(DatabaseError::InvalidValue(
                 "histogram buckets must be >= 1".to_string(),
@@ -453,6 +494,7 @@ impl DataBaseBuilder {
             hll_precision,
             statistics_relative_error: statistics_relative_error.map(OrderedFloat),
             parser_recursion_limit,
+            dialect,
             _p: Default::default(),
         };
 
@@ -697,7 +739,7 @@ where
     Ok(arena)
 }
 
-pub(crate) struct State<S> {
+pub(crate) struct State<S, D> {
     scala_functions: ScalaFunctions,
     table_functions: TableFunctions,
     meta_cache: StatisticsMetaCache,
@@ -708,13 +750,18 @@ pub(crate) struct State<S> {
     statistics_relative_error: Option<OrderedFloat<f64>>,
     #[cfg_attr(not(feature = "parser"), allow(dead_code))]
     parser_recursion_limit: Option<usize>,
+    dialect: D,
     _p: PhantomData<S>,
 }
 
-impl<S: Storage> State<S> {
+impl<S: Storage, D: SqlDialect> State<S, D> {
     #[cfg(feature = "parser")]
     pub(crate) fn parser_recursion_limit(&self) -> Option<usize> {
         self.parser_recursion_limit
+    }
+
+    pub(crate) fn dialect(&self) -> &D {
+        &self.dialect
     }
 
     fn scala_functions(&self) -> &ScalaFunctions {
@@ -814,6 +861,7 @@ impl<S: Storage> State<S> {
                 transaction,
                 self.scala_functions(),
                 self.table_functions(),
+                self.dialect(),
             ),
             &params,
             None,
@@ -843,7 +891,7 @@ impl<S: Storage> State<S> {
 }
 
 #[maybe_async]
-impl<S: Storage> State<S> {
+impl<S: Storage, D: SqlDialect> State<S, D> {
     pub(crate) async fn execute<'a, 'p, 'txn, A: MetaArena + 'p>(
         &'p self,
         transaction: &'a mut S::TransactionType<'txn>,
@@ -888,6 +936,7 @@ impl<S: Storage> State<S> {
             histogram_buckets,
             hll_precision,
             statistics_relative_error,
+            dialect,
             ..
         } = self;
         let arena = table_arena.borrow();
@@ -901,6 +950,7 @@ impl<S: Storage> State<S> {
                 transaction,
                 scala_functions,
                 table_functions,
+                dialect,
             ),
             &params,
             None,
@@ -937,16 +987,16 @@ impl<S: Storage> State<S> {
 }
 
 /// Main database handle for executing SQL and creating transactions.
-pub struct Database<S: Storage> {
+pub struct Database<S: Storage, D: SqlDialect = GenericSqlDialect> {
     pub(crate) storage: S,
     pub(crate) transaction_isolation: TransactionIsolationLevel,
-    pub(crate) state: State<S>,
+    pub(crate) state: State<S, D>,
 }
 
 impl DDLApply {
-    fn apply_to<S: Storage>(
+    fn apply_to<S: Storage, D: SqlDialect>(
         self,
-        state: &mut State<S>,
+        state: &mut State<S, D>,
         plan_arena: &mut PlanArena,
     ) -> Result<bool, DatabaseError> {
         let mut catalog_changed = false;
@@ -1005,7 +1055,7 @@ impl DDLApply {
 }
 
 #[maybe_async]
-impl<S: Storage> Database<S> {
+impl<S: Storage, D: SqlDialect> Database<S, D> {
     pub(crate) async fn execute_mut<A, F>(
         &mut self,
         context: &str,
@@ -1198,7 +1248,7 @@ impl<S: Storage> Database<S> {
     /// transactional context until [`Transaction::commit`] is called.
     /// A `read_only` transaction rejects statements that write; on LMDB it runs
     /// alongside the single writer instead of waiting for it.
-    pub fn new_transaction(&self, read_only: bool) -> Result<Transaction<'_, S>, DatabaseError> {
+    pub fn new_transaction(&self, read_only: bool) -> Result<Transaction<'_, S, D>, DatabaseError> {
         let transaction = self
             .storage
             .transaction_with_isolation(self.transaction_isolation, read_only)?;
@@ -1250,16 +1300,17 @@ impl<S: Storage> ConsumeMut<S> for () {
 }
 
 #[maybe_async]
-impl<'a, S: Storage> BindSource for &'a Database<S> {
+impl<'a, S: Storage, D: SqlDialect> BindSource for &'a Database<S, D> {
     type Iter = DatabaseIter<'a, S>;
     type Transaction = S::TransactionType<'a>;
 
     type Storage = S;
+    type Dialect = D;
 
     async fn execute<F>(self, read_only: bool, build: F) -> Result<Self::Iter, DatabaseError>
     where
         F: for<'s> FnOnce(
-                &'s State<S>,
+                &'s State<S, D>,
                 &Self::Transaction,
             ) -> Result<(Executor<'s>, PlanArena<'s>), DatabaseError>
             + MaybeSend,
@@ -1295,9 +1346,10 @@ impl<'a, S: Storage> BindSource for &'a Database<S> {
     }
 }
 
-impl<S> Database<S>
+impl<S, D> Database<S, D>
 where
     S: CheckpointableStorage,
+    D: SqlDialect,
 {
     /// Creates an online consistent checkpoint in `path`.
     ///
@@ -1694,14 +1746,14 @@ impl<S: Storage> ResultIter for DatabaseIter<'_, S> {
 }
 
 /// Explicit transaction handle created by [`Database::new_transaction`].
-pub struct Transaction<'a, S: Storage + 'a> {
+pub struct Transaction<'a, S: Storage + 'a, D: SqlDialect = GenericSqlDialect> {
     pub(crate) inner: S::TransactionType<'a>,
-    pub(crate) state: &'a State<S>,
+    pub(crate) state: &'a State<S, D>,
     read_only: bool,
 }
 
 #[maybe_async]
-impl<'txn, S: Storage> Transaction<'txn, S> {
+impl<'txn, S: Storage, D: SqlDialect> Transaction<'txn, S, D> {
     /// Commits the current transaction.
     pub async fn commit(self) -> Result<(), DatabaseError> {
         self.inner.commit().await?;
@@ -1711,16 +1763,17 @@ impl<'txn, S: Storage> Transaction<'txn, S> {
 }
 
 #[maybe_async]
-impl<'a, 'txn, S: Storage> BindSource for &'a mut Transaction<'txn, S> {
+impl<'a, 'txn, S: Storage, D: SqlDialect> BindSource for &'a mut Transaction<'txn, S, D> {
     type Iter = TransactionIter<'a, 'a, S::TransactionType<'txn>>;
     type Transaction = S::TransactionType<'txn>;
 
     type Storage = S;
+    type Dialect = D;
 
     async fn execute<F>(self, _read_only: bool, build: F) -> Result<Self::Iter, DatabaseError>
     where
         F: for<'s> FnOnce(
-                &'s State<S>,
+                &'s State<S, D>,
                 &Self::Transaction,
             ) -> Result<(Executor<'s>, PlanArena<'s>), DatabaseError>
             + MaybeSend,
@@ -2419,6 +2472,7 @@ pub(crate) mod test {
                 &transaction,
                 kite_sql.state.scala_functions(),
                 kite_sql.state.table_functions(),
+                kite_sql.state.dialect(),
             ),
             &[],
             None,
@@ -2509,6 +2563,7 @@ pub(crate) mod test {
                 &transaction,
                 kite_sql.state.scala_functions(),
                 kite_sql.state.table_functions(),
+                kite_sql.state.dialect(),
             ),
             &[],
             None,

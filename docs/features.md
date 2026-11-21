@@ -211,6 +211,7 @@ let kite_sql = DataBaseBuilder::path("./data")
 - Pessimistic (Default)
 - Optimistic
 - Isolation level: repeatable read; every statement in a transaction reads the snapshot taken when it began
+- SQL transaction control through `Database::session()`: `BEGIN`/`START TRANSACTION`, `COMMIT` and `ROLLBACK` as statements; nested `BEGIN` and `SET autocommit` follow the dialect
 
 ### Checkpoint
 KiteSQL exposes checkpoint as a storage capability rather than a full backup workflow. A checkpoint only creates a consistent local snapshot directory; compressing, uploading, retaining, and pruning backups should stay in application code.
@@ -350,3 +351,92 @@ If `unsafe_txdb_checkpoint` is not enabled, `build_rocksdb()` returns an explici
 - Time
 - TimeStamp
 - Tuple
+
+### Custom SQL Dialects
+
+KiteSQL supports pluggable SQL dialects through the `SqlDialect` trait. This allows you to customize parsing, data type mapping, and SQL rewriting. A `Database` holds one dialect, set when it is built, and every statement it runs is parsed and bound with it. Without one, it uses `GenericSqlDialect`, the standard behaviour.
+
+#### Using a Custom Dialect
+
+Pass a dialect type to the builder when it is fixed at compile time:
+
+```rust
+use kite_sql::db::DataBaseBuilder;
+
+let db = DataBaseBuilder::path("./my_db")
+    .dialect(MyDialect::new())
+    .build_rocksdb()?;
+```
+
+To pick the dialect at runtime, for example from configuration, opt in to `DynDialect`. It starts with the generic dialect registered and current, and forwards every hook to the current one:
+
+```rust
+use kite_sql::db::DataBaseBuilder;
+use kite_sql::dialect::DynDialect;
+
+let mut dialect = DynDialect::new();
+dialect.register(MyDialect::new());
+assert!(dialect.switch("my_dialect"));
+
+let db = DataBaseBuilder::path("./my_db")
+    .dialect(dialect)
+    .build_rocksdb()?;
+```
+
+#### Implementing a Custom Dialect
+
+Implement the `SqlDialect` trait to customize behavior:
+
+```rust
+use kite_sql::dialect::SqlDialect;
+use kite_sql::errors::DatabaseError;
+use kite_sql::types::LogicalType;
+use sqlparser::ast::{DataType, Statement};
+use sqlparser::dialect::{Dialect as SqlParserDialect, GenericDialect};
+
+#[derive(Debug)]
+struct MyDialect {
+    parser: GenericDialect,
+}
+
+impl SqlDialect for MyDialect {
+    fn name(&self) -> &str {
+        "my_dialect"
+    }
+
+    fn parser_dialect(&self) -> &dyn SqlParserDialect {
+        &self.parser
+    }
+
+    // Optional: map custom data types
+    fn map_data_type(
+        &self,
+        data_type: &DataType,
+    ) -> Option<Result<LogicalType, DatabaseError>> {
+        match data_type {
+            DataType::Custom(name, _) if name.to_string() == "MY_TYPE" => {
+                Some(Ok(LogicalType::Integer))
+            }
+            _ => None,
+        }
+    }
+
+    // Optional: rewrite SQL statements before execution
+    fn rewrite(&self, stmt: &mut Statement) -> Result<(), DatabaseError> {
+        // Modify the statement if needed
+        Ok(())
+    }
+}
+```
+
+The `SqlDialect` trait methods:
+
+- `name()` — Returns the dialect's unique identifier
+- `parser_dialect()` — Returns the sqlparser dialect for parsing SQL
+- `map_data_type()` — Optional hook to map SQL data types in expressions (`CAST`, typed literals) to KiteSQL's `LogicalType`
+- `map_column_type()` — Optional hook to map the data types of column definitions; defaults to `map_data_type()`
+- `rewrite()` — Optional hook to transform each parsed statement before it is bound
+- `begin_commits_active_transaction()` — Optional hook to make `BEGIN` in a `Session` commit the open transaction and start a new one (default: rejected)
+- `supports_set_autocommit()` — Optional hook to accept `SET autocommit = 0 | 1` in a `Session`; with autocommit off, statements run in a transaction that stays open until `COMMIT` or `ROLLBACK` (default: rejected)
+
+By default, the `GenericSqlDialect` is used, which provides standard SQL behavior with no custom transformations.
