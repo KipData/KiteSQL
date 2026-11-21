@@ -92,6 +92,27 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
         self.map_data_type(data_type)
             .map(|result| result.map(ColumnTypeSpec::new))
     }
+
+    /// Whether `BEGIN` in a [`Session`](crate::db::Session) that already has a transaction
+    /// open commits that transaction and opens a new one.
+    ///
+    /// The default implementation returns `false`, which rejects such a `BEGIN` and leaves the
+    /// open transaction as it was.
+    fn begin_commits_active_transaction(&self) -> bool {
+        false
+    }
+
+    /// Whether a [`Session`](crate::db::Session) accepts `SET autocommit = 0 | 1`.
+    ///
+    /// When this returns `true`, turning autocommit off makes a statement outside a
+    /// transaction open one, which stays open until `COMMIT` or `ROLLBACK`; turning it back
+    /// on commits the open transaction. `ON`/`OFF` and `TRUE`/`FALSE` are accepted too.
+    ///
+    /// The default implementation returns `false`, which leaves `SET autocommit` rejected like
+    /// any other `SET`.
+    fn supports_set_autocommit(&self) -> bool {
+        false
+    }
 }
 
 /// Standard SQL behavior with no customizations; the default dialect.
@@ -211,5 +232,13 @@ impl SqlDialect for DynDialect {
         data_type: &sqlparser::ast::DataType,
     ) -> Option<Result<ColumnTypeSpec, DatabaseError>> {
         self.current().map_column_type(data_type)
+    }
+
+    fn begin_commits_active_transaction(&self) -> bool {
+        self.current().begin_commits_active_transaction()
+    }
+
+    fn supports_set_autocommit(&self) -> bool {
+        self.current().supports_set_autocommit()
     }
 }

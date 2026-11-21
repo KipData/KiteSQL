@@ -211,6 +211,7 @@ let kite_sql = DataBaseBuilder::path("./data")
 - Pessimistic (Default)
 - Optimistic
 - Isolation level: repeatable read; every statement in a transaction reads the snapshot taken when it began
+- SQL transaction control through `Database::session()`: `BEGIN`/`START TRANSACTION`, `COMMIT` and `ROLLBACK` as statements; nested `BEGIN` and `SET autocommit` follow the dialect
 
 ### Checkpoint
 KiteSQL exposes checkpoint as a storage capability rather than a full backup workflow. A checkpoint only creates a consistent local snapshot directory; compressing, uploading, retaining, and pruning backups should stay in application code.
@@ -435,5 +436,7 @@ The `SqlDialect` trait methods:
 - `map_data_type()` — Optional hook to map SQL data types in expressions (`CAST`, typed literals) to KiteSQL's `LogicalType`
 - `map_column_type()` — Optional hook to map the data types of column definitions; defaults to `map_data_type()`
 - `rewrite()` — Optional hook to transform each parsed statement before it is bound
+- `begin_commits_active_transaction()` — Optional hook to make `BEGIN` in a `Session` commit the open transaction and start a new one (default: rejected)
+- `supports_set_autocommit()` — Optional hook to accept `SET autocommit = 0 | 1` in a `Session`; with autocommit off, statements run in a transaction that stays open until `COMMIT` or `ROLLBACK` (default: rejected)
 
 By default, the `GenericSqlDialect` is used, which provides standard SQL behavior with no custom transformations.

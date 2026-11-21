@@ -285,6 +285,14 @@ impl<S: Storage, D: SqlDialect> Database<S, D> {
             .state
             .prepare_all(sql)
             .map_err(|err| err.with_sql_context(sql))?;
+        self.run_statements(sql, statements).await
+    }
+
+    pub(crate) async fn run_statements(
+        &self,
+        sql: &str,
+        statements: Vec<Statement>,
+    ) -> Result<DatabaseIter<'_, S>, DatabaseError> {
         let has_catalog_mutation = statements
             .iter()
             .try_fold(false, |has_mutation, stmt| {
@@ -353,10 +361,18 @@ impl<'txn, S: Storage, D: SqlDialect> Transaction<'txn, S, D> {
         sql: T,
     ) -> Result<TransactionIter<'a, 'a, S::TransactionType<'txn>>, DatabaseError> {
         let sql = sql.as_ref();
-        let mut statements = self
+        let statements = self
             .state
             .prepare_all(sql)
             .map_err(|err| err.with_sql_context(sql))?;
+        self.run_statements(sql, statements).await
+    }
+
+    pub(crate) async fn run_statements<'a>(
+        &'a mut self,
+        sql: &str,
+        mut statements: Vec<Statement>,
+    ) -> Result<TransactionIter<'a, 'a, S::TransactionType<'txn>>, DatabaseError> {
         for statement in &statements {
             if statement_mutates_catalog_or_statistics(statement)? {
                 return Err(DatabaseError::UnsupportedStmt(
