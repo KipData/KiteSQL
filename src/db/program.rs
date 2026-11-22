@@ -127,7 +127,6 @@ impl<'p> Program<'p> {
 impl<S: Storage, D: SqlDialect> Database<S, D> {
     /// Prepares SQL with explicit positional parameter types into a program.
     /// Parameter values are supplied separately for each execution.
-    #[cfg(feature = "parser")]
     pub fn program_sql(
         &self,
         sql: &str,
@@ -142,7 +141,6 @@ impl<S: Storage, D: SqlDialect> Database<S, D> {
 }
 
 impl<'db, S: Storage, D: SqlDialect> Transaction<'db, S, D> {
-    #[cfg(feature = "parser")]
     pub fn program_sql(
         &self,
         sql: &str,
@@ -154,7 +152,6 @@ impl<'db, S: Storage, D: SqlDialect> Transaction<'db, S, D> {
 }
 
 impl<S: Storage, D: SqlDialect> State<S, D> {
-    #[cfg(feature = "parser")]
     pub(crate) fn prepare_plan<'a, 'txn>(
         &'a self,
         statement: &Statement,

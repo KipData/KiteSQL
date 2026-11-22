@@ -19,6 +19,16 @@ use super::select::{
 };
 use super::{is_valid_identifier, Binder, CteBinding, QueryBindStep, SetOperatorKind};
 #[cfg(feature = "copy")]
+use crate::ast::CopySource;
+use crate::ast::{
+    attach_span_if_absent, AlterColumnOperation, AlterTable, AlterTableOperation, Assignment,
+    AssignmentTarget, ChangeColumnOption, ColumnDef, ColumnOption, Copy, CreateIndex, CreateTable,
+    CreateView, Cte, Delete, Expr, Function, FunctionArg, Ident, Insert, Join, JoinConstraint,
+    JoinOperator, KeyColumn, Limit, ObjectName, ObjectType, OrderByExpr, Query, Select, SelectItem,
+    SetExpr, SetOperator, Statement, TableAlias, TableConstraint, TableFactor, TableWithJoins,
+    Update, Value, ValueWithSpan, WindowSpec,
+};
+#[cfg(feature = "copy")]
 use crate::binder::copy::{ExtSource, FileFormat};
 use crate::catalog::{ColumnCatalog, ColumnDesc, ColumnRef, TableName};
 use crate::db::{
@@ -26,14 +36,13 @@ use crate::db::{
     TransactionIter,
 };
 use crate::dialect::SqlDialect;
-use crate::errors::{DatabaseError, SqlErrorSpan};
+use crate::errors::DatabaseError;
 use crate::expression;
 use crate::expression::agg::AggKind;
 use crate::expression::visitor_mut::ExprVisitorMut;
 use crate::expression::window::WindowFunctionKind;
 use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::iter_ext::Itertools;
-use crate::parser::parse_sql_with_recursion_limit;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::operator::create_table::UniqueKey;
@@ -49,116 +58,29 @@ use crate::storage::{Storage, StorageTransaction};
 use crate::types::index::IndexValType;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
-pub(super) use sqlparser::ast::{
-    AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, BinaryLength,
-    BinaryOperator, ColumnDef, ColumnOption, CreateIndex, CreateView, DataType, DescribeAlias,
-    Distinct, DuplicateTreatment, Expr, FromTable, Function, FunctionArg, FunctionArgExpr,
-    FunctionArguments, GroupByExpr, Ident, IndexColumn, IndexOption, IndexType, Join,
-    JoinConstraint, JoinOperator, LimitClause, ObjectName, ObjectNamePart, ObjectType, OrderByExpr,
-    OrderByKind, Query, Select, SelectInto, SelectItem, SelectItemQualifiedWildcardKind, SetExpr,
-    SetOperator, SetQuantifier, Spanned, SqliteOnConflict, TableAlias, TableConstraint,
-    TableFactor, TableObject, TableWithJoins, TypedString, UnaryOperator, Value, ValueWithSpan,
-    WindowType,
-};
-#[cfg(feature = "copy")]
-pub(super) use sqlparser::ast::{CopyOption, CopySource, CopyTarget};
-use sqlparser::ast::{NullsDistinctOption, OnInsert};
-use sqlparser::tokenizer::Span;
 use std::borrow::Cow;
-use std::cmp;
 use std::slice;
 
-/// Parsed SQL statement type used by KiteSQL SQL frontend APIs.
-pub type Statement = sqlparser::ast::Statement;
-
-pub(crate) fn convert_data_type(
-    data_type: &DataType,
-    dialect: &dyn crate::dialect::SqlDialect,
-) -> Result<LogicalType, DatabaseError> {
-    if let Some(result) = dialect.map_data_type(data_type) {
-        return result;
-    }
-    LogicalType::try_from(data_type.clone())
-}
-
-pub(crate) fn convert_column_type(
-    data_type: &DataType,
-    dialect: &dyn crate::dialect::SqlDialect,
-) -> Result<LogicalType, DatabaseError> {
-    if let Some(result) = dialect.map_column_type(data_type) {
-        return result;
-    }
-    LogicalType::try_from(data_type.clone())
-}
-
-pub(crate) trait AttachSpanSource {
-    fn sql_error_span(self) -> Option<SqlErrorSpan>;
-}
-
-impl<T: Spanned + ?Sized> AttachSpanSource for &T {
-    fn sql_error_span(self) -> Option<SqlErrorSpan> {
-        self.span().sql_error_span()
-    }
-}
-
-impl AttachSpanSource for Span {
-    fn sql_error_span(self) -> Option<SqlErrorSpan> {
-        if self == Span::empty() {
-            return None;
-        }
-
-        let start = self.start.column as usize;
-        let mut end = self.end.column as usize;
-        if end <= start {
-            end = start.saturating_add(1);
-        }
-
-        Some(SqlErrorSpan {
-            start,
-            end,
-            line: self.start.line as usize,
-            highlight: None,
-        })
-    }
-}
-
-pub(crate) fn attach_span_if_absent<T: AttachSpanSource>(
-    err: DatabaseError,
-    source: T,
-) -> DatabaseError {
-    if err.sql_error_span().is_some() {
-        return err;
-    }
-
-    match source.sql_error_span() {
-        Some(span) => err.with_span(span),
-        None => err,
-    }
-}
-
 pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
-    match stmt {
+    Ok(match stmt {
         Statement::CreateTable(_)
         | Statement::CreateIndex(_)
         | Statement::CreateView(_)
         | Statement::AlterTable(_)
-        | Statement::Drop { .. } => Ok(CommandType::DDL),
+        | Statement::Drop { .. } => CommandType::DDL,
         Statement::Query(_)
-        | Statement::Explain { .. }
-        | Statement::ExplainTable { .. }
-        | Statement::ShowTables { .. }
-        | Statement::ShowViews { .. } => Ok(CommandType::DQL),
-        Statement::Analyze(_) => Ok(CommandType::Analyze),
-        Statement::Truncate(_)
+        | Statement::Explain(_)
+        | Statement::Describe { .. }
+        | Statement::ShowTables
+        | Statement::ShowViews => CommandType::DQL,
+        Statement::Analyze { .. } => CommandType::Analyze,
+        Statement::Truncate { .. }
         | Statement::Update(_)
         | Statement::Delete(_)
-        | Statement::Insert(_) => Ok(CommandType::DML),
-        #[cfg(feature = "copy")]
-        Statement::Copy { to: true, .. } => Ok(CommandType::DQL),
-        #[cfg(feature = "copy")]
-        Statement::Copy { .. } => Ok(CommandType::DML),
-        stmt => Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
-    }
+        | Statement::Insert(_) => CommandType::DML,
+        Statement::Copy(copy) if copy.to => CommandType::DQL,
+        Statement::Copy(_) => CommandType::DML,
+    })
 }
 
 impl<S: Storage, D: SqlDialect> State<S, D> {
@@ -166,17 +88,9 @@ impl<S: Storage, D: SqlDialect> State<S, D> {
         &self,
         sql: T,
     ) -> Result<Vec<Statement>, DatabaseError> {
-        let dialect = self.dialect();
-        let mut stmts = parse_sql_with_recursion_limit(
-            dialect.parser_dialect(),
-            sql,
-            self.parser_recursion_limit(),
-        )?;
+        let stmts = self.dialect().parse(sql.as_ref())?;
         if stmts.is_empty() {
             return Err(DatabaseError::EmptyStatement);
-        }
-        for stmt in stmts.iter_mut() {
-            dialect.rewrite(stmt)?;
         }
         Ok(stmts)
     }
@@ -192,7 +106,7 @@ impl<S: Storage, D: SqlDialect> State<S, D> {
 fn statement_is_read_only(statement: &Statement) -> Result<bool, DatabaseError> {
     Ok(match statement {
         // Locking reads (`FOR UPDATE`) are treated as writes.
-        Statement::Query(query) => query.locks.is_empty(),
+        Statement::Query(query) => !query.for_update,
         _ => command_type(statement)?.is_read_only(),
     })
 }
@@ -443,72 +357,47 @@ where
     A: AsRef<[(usize, LogicalType)]>,
 {
     fn statement(self, stmt: &Statement) -> Result<BindStatementComplete, DatabaseError> {
-        let span = stmt.span();
-        (|| {
-            let plan = match stmt {
-                Statement::Query(query) => self.binder.bind_query(query, self.arena)?,
-                Statement::AlterTable(alter) => self.alter_table(alter.clone())?,
-                Statement::CreateTable(create) => self.create_table(create.clone())?,
-                Statement::Drop {
-                    object_type,
-                    names,
-                    if_exists,
-                    table,
-                    ..
-                } => self.drop_object(*object_type, names.clone(), *if_exists, table.clone())?,
-                Statement::Insert(insert) => self.insert(insert)?,
-                Statement::Update(update) => self.update(update)?,
-                Statement::Delete(delete) => self.delete(delete)?,
-                Statement::Analyze(analyze) => self.analyze(analyze.clone())?,
-                Statement::Truncate(truncate) => self.truncate(truncate.clone())?,
-                Statement::ShowTables { .. } => self.binder.bind_show_tables()?,
-                Statement::ShowViews { .. } => self.binder.bind_show_views()?,
-                #[cfg(feature = "copy")]
-                Statement::Copy {
-                    source,
-                    to,
-                    target,
-                    options,
-                    ..
-                } => self.copy(source.clone(), *to, target.clone(), options.clone())?,
-                #[cfg(not(feature = "copy"))]
-                Statement::Copy { .. } => {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "COPY requires the `copy` feature".to_string(),
-                    ))
-                }
-                Statement::Explain { statement, .. } => self.explain(statement)?,
-                Statement::ExplainTable {
-                    describe_alias: DescribeAlias::Describe | DescribeAlias::Desc,
-                    table_name,
-                    ..
-                } => self
-                    .binder
-                    .bind_describe(&sql_table_name(table_name.clone())?)?,
-                Statement::CreateIndex(create) => self.create_index(create.clone())?,
-                Statement::CreateView(create) => self.create_view(create.clone())?,
-                _ => return Err(DatabaseError::UnsupportedStmt(stmt.to_string())),
-            };
+        let plan = match stmt {
+            Statement::Query(query) => self.binder.bind_query(query, self.arena)?,
+            Statement::AlterTable(alter) => self.alter_table(alter)?,
+            Statement::CreateTable(create) => self.create_table(create)?,
+            Statement::Drop {
+                object_type,
+                name,
+                if_exists,
+                table,
+            } => self.drop_object(*object_type, name, *if_exists, table.as_ref())?,
+            Statement::Insert(insert) => self.insert(insert)?,
+            Statement::Update(update) => self.update(update)?,
+            Statement::Delete(delete) => self.delete(delete)?,
+            Statement::Analyze { table_name } => self
+                .binder
+                .bind_analyze(&sql_table_name(table_name)?, self.arena)?,
+            Statement::Truncate { table_name } => {
+                self.binder.bind_truncate(&sql_table_name(table_name)?)?
+            }
+            Statement::ShowTables => self.binder.bind_show_tables()?,
+            Statement::ShowViews => self.binder.bind_show_views()?,
+            Statement::Copy(copy) => self.copy(copy)?,
+            Statement::Explain(statement) => self.explain(statement)?,
+            Statement::Describe { table_name } => {
+                self.binder.bind_describe(&sql_table_name(table_name)?)?
+            }
+            Statement::CreateIndex(create) => self.create_index(create)?,
+            Statement::CreateView(create) => self.create_view(create)?,
+        };
 
-            Ok(BindStatementComplete { plan })
-        })()
-        .map_err(|err| attach_span_if_absent(err, span))
+        Ok(BindStatementComplete { plan })
     }
 
-    fn alter_table(self, alter: sqlparser::ast::AlterTable) -> Result<LogicalPlan, DatabaseError> {
-        if alter.operations.len() != 1 {
-            return Err(DatabaseError::UnsupportedStmt(
-                "only a single ALTER TABLE operation is supported".to_string(),
-            ));
-        }
-        let operation = alter.operations.into_iter().next().unwrap();
-        self.alter_table_operation(sql_table_name(alter.name)?, operation)
+    fn alter_table(self, alter: &AlterTable) -> Result<LogicalPlan, DatabaseError> {
+        self.alter_table_operation(sql_table_name(&alter.name)?, &alter.operation)
     }
 
     fn alter_table_operation(
         mut self,
         table_name: TableName,
-        operation: AlterTableOperation,
+        operation: &AlterTableOperation,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.binder
             .context
@@ -517,58 +406,34 @@ where
 
         match operation {
             AlterTableOperation::AddColumn {
-                column_keyword: _,
                 if_not_exists,
                 column_def,
-                ..
             } => {
-                let column_span = column_def.name.span;
                 let column = self.bind_column(column_def, None)?;
 
                 if !is_valid_identifier(column.name()) {
                     return Err(attach_span_if_absent(
                         DatabaseError::invalid_column("illegal column naming".to_string()),
-                        column_span,
+                        column_def.name.span,
                     ));
                 }
 
                 self.binder
-                    .bind_add_column(&table_name, column, if_not_exists)
+                    .bind_add_column(&table_name, column, *if_not_exists)
             }
             AlterTableOperation::DropColumn {
-                column_names,
+                column_name,
                 if_exists,
-                ..
-            } => {
-                if column_names.len() != 1 {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "only dropping a single column is supported".to_string(),
-                    ));
-                }
-                let column_name = column_names[0].value.clone();
-
-                self.binder
-                    .bind_drop_column(&table_name, column_name, if_exists)
-            }
+            } => self
+                .binder
+                .bind_drop_column(&table_name, column_name.value.clone(), *if_exists),
             AlterTableOperation::RenameColumn {
                 old_column_name,
                 new_column_name,
             } => {
-                let old_column_name = lower_ident(&old_column_name);
-                let new_column_name = lower_ident(&new_column_name).into_owned();
-                let data_type = {
-                    let table = self
-                        .binder
-                        .context
-                        .table(&table_name)?
-                        .ok_or(DatabaseError::TableNotFound)?;
-                    table
-                        .get_column_by_name(old_column_name.as_ref())
-                        .map(|column| self.arena.column(column).datatype().clone())
-                        .ok_or_else(|| {
-                            DatabaseError::column_not_found(old_column_name.to_string())
-                        })?
-                };
+                let old_column_name = lower_ident(old_column_name);
+                let new_column_name = lower_ident(new_column_name).into_owned();
+                let data_type = self.column_type(&table_name, &old_column_name)?;
 
                 if !is_valid_identifier(&new_column_name) {
                     return Err(DatabaseError::invalid_column(
@@ -586,60 +451,31 @@ where
                 )
             }
             AlterTableOperation::AlterColumn { column_name, op } => {
-                let old_column_name = lower_ident(&column_name);
-                let old_data_type = {
-                    let table = self
-                        .binder
-                        .context
-                        .table(&table_name)?
-                        .ok_or(DatabaseError::TableNotFound)?;
-                    table
-                        .get_column_by_name(old_column_name.as_ref())
-                        .map(|column| self.arena.column(column).datatype().clone())
-                        .ok_or_else(|| {
-                            DatabaseError::column_not_found(old_column_name.to_string())
-                        })?
-                };
+                let old_column_name = lower_ident(column_name);
+                let old_data_type = self.column_type(&table_name, &old_column_name)?;
 
                 let (data_type, default_change, not_null_change) = match op {
-                    AlterColumnOperation::SetDataType {
-                        data_type, using, ..
-                    } => {
-                        if using.is_some() {
-                            return Err(DatabaseError::UnsupportedStmt(
-                                "ALTER COLUMN TYPE USING is not supported".to_string(),
-                            ));
-                        }
+                    AlterColumnOperation::SetDataType(data_type) => (
+                        data_type.clone(),
+                        DefaultChange::NoChange,
+                        NotNullChange::NoChange,
+                    ),
+                    AlterColumnOperation::SetDefault(value) => {
+                        let default = self.bind_alter_default_expr(value, &old_data_type)?;
                         (
-                            convert_column_type(&data_type, self.binder.context.dialect)?,
-                            DefaultChange::NoChange,
+                            old_data_type,
+                            DefaultChange::Set(default),
                             NotNullChange::NoChange,
                         )
                     }
-                    AlterColumnOperation::SetDefault { value } => (
-                        old_data_type.clone(),
-                        DefaultChange::Set(self.bind_alter_default_expr(value, &old_data_type)?),
-                        NotNullChange::NoChange,
-                    ),
-                    AlterColumnOperation::DropDefault => (
-                        old_data_type.clone(),
-                        DefaultChange::Drop,
-                        NotNullChange::NoChange,
-                    ),
-                    AlterColumnOperation::SetNotNull => (
-                        old_data_type.clone(),
-                        DefaultChange::NoChange,
-                        NotNullChange::Set,
-                    ),
-                    AlterColumnOperation::DropNotNull => (
-                        old_data_type.clone(),
-                        DefaultChange::NoChange,
-                        NotNullChange::Drop,
-                    ),
-                    _ => {
-                        return Err(DatabaseError::UnsupportedStmt(format!(
-                            "unsupported alter column operation: {op:?}"
-                        )))
+                    AlterColumnOperation::DropDefault => {
+                        (old_data_type, DefaultChange::Drop, NotNullChange::NoChange)
+                    }
+                    AlterColumnOperation::SetNotNull => {
+                        (old_data_type, DefaultChange::NoChange, NotNullChange::Set)
+                    }
+                    AlterColumnOperation::DropNotNull => {
+                        (old_data_type, DefaultChange::NoChange, NotNullChange::Drop)
                     }
                 };
 
@@ -653,39 +489,20 @@ where
                 )
             }
             AlterTableOperation::ModifyColumn {
-                col_name,
+                column_name,
                 data_type,
                 options,
-                column_position,
             } => {
-                if column_position.is_some() {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "MODIFY COLUMN does not currently support column positions".to_string(),
-                    ));
-                }
-                let old_column_name = lower_ident(&col_name);
-                {
-                    let table = self
-                        .binder
-                        .context
-                        .table(&table_name)?
-                        .ok_or(DatabaseError::TableNotFound)?;
-                    let _ = table
-                        .get_column_by_name(old_column_name.as_ref())
-                        .ok_or_else(|| {
-                            DatabaseError::column_not_found(old_column_name.to_string())
-                        })?;
-                }
-                let old_column_name = old_column_name.into_owned();
-                let data_type = convert_column_type(&data_type, self.binder.context.dialect)?;
+                let old_column_name = lower_ident(column_name).into_owned();
+                self.column_type(&table_name, &old_column_name)?;
                 let (default_change, not_null_change) =
-                    self.bind_change_column_options(options, &data_type)?;
+                    self.bind_change_column_options(options, data_type)?;
 
                 self.binder.bind_change_column(
                     &table_name,
                     old_column_name.clone(),
                     old_column_name,
-                    data_type,
+                    data_type.clone(),
                     default_change,
                     not_null_change,
                 )
@@ -695,60 +512,56 @@ where
                 new_name,
                 data_type,
                 options,
-                column_position,
             } => {
-                if column_position.is_some() {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "CHANGE COLUMN does not currently support column positions".to_string(),
-                    ));
-                }
-                let old_column_name = lower_ident(&old_name);
-                let new_column_name = lower_ident(&new_name).into_owned();
-                {
-                    let table = self
-                        .binder
-                        .context
-                        .table(&table_name)?
-                        .ok_or(DatabaseError::TableNotFound)?;
-                    let _ = table
-                        .get_column_by_name(old_column_name.as_ref())
-                        .ok_or_else(|| {
-                            DatabaseError::column_not_found(old_column_name.to_string())
-                        })?;
-                }
+                let old_column_name = lower_ident(old_name);
+                let new_column_name = lower_ident(new_name).into_owned();
+                self.column_type(&table_name, &old_column_name)?;
 
                 if !is_valid_identifier(&new_column_name) {
                     return Err(DatabaseError::invalid_column(
                         "illegal column naming".to_string(),
                     ));
                 }
-                let data_type = convert_column_type(&data_type, self.binder.context.dialect)?;
                 let (default_change, not_null_change) =
-                    self.bind_change_column_options(options, &data_type)?;
+                    self.bind_change_column_options(options, data_type)?;
 
                 self.binder.bind_change_column(
                     &table_name,
                     old_column_name.into_owned(),
                     new_column_name,
-                    data_type,
+                    data_type.clone(),
                     default_change,
                     not_null_change,
                 )
             }
-            op => Err(DatabaseError::UnsupportedStmt(format!(
-                "AlertOperation: {op:?}"
-            ))),
         }
+    }
+
+    /// The type of an existing column of `table_name`.
+    fn column_type(
+        &self,
+        table_name: &TableName,
+        column_name: &str,
+    ) -> Result<LogicalType, DatabaseError> {
+        let table = self
+            .binder
+            .context
+            .table(table_name)?
+            .ok_or(DatabaseError::TableNotFound)?;
+        table
+            .get_column_by_name(column_name)
+            .map(|column| self.arena.column(column).datatype().clone())
+            .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))
     }
 
     fn bind_alter_default_expr(
         &mut self,
-        expr: Expr,
+        expr: &Expr,
         ty: &LogicalType,
     ) -> Result<ExprRef, DatabaseError> {
         let mut expr = self
             .binder
-            .bind_expr(&expr, self.arena)
+            .bind_expr(expr, self.arena)
             .map(|expr| self.arena.alloc_expression(expr))?;
 
         if expr.any_referenced_column(self.arena, |_, _| true)? {
@@ -763,7 +576,7 @@ where
 
     fn bind_change_column_options(
         &mut self,
-        options: Vec<ColumnOption>,
+        options: &[ChangeColumnOption],
         data_type: &LogicalType,
     ) -> Result<(DefaultChange, NotNullChange), DatabaseError> {
         let mut default_change = DefaultChange::NoChange;
@@ -771,16 +584,11 @@ where
 
         for option in options {
             match option {
-                ColumnOption::Null => not_null_change = NotNullChange::Drop,
-                ColumnOption::NotNull => not_null_change = NotNullChange::Set,
-                ColumnOption::Default(expr) => {
+                ChangeColumnOption::Null => not_null_change = NotNullChange::Drop,
+                ChangeColumnOption::NotNull => not_null_change = NotNullChange::Set,
+                ChangeColumnOption::Default(expr) => {
                     default_change =
                         DefaultChange::Set(self.bind_alter_default_expr(expr, data_type)?);
-                }
-                option => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "CHANGE/MODIFY COLUMN does not currently support this option: {option:?}"
-                    )))
                 }
             }
         }
@@ -788,78 +596,65 @@ where
         Ok((default_change, not_null_change))
     }
 
-    fn create_table(
-        mut self,
-        create: sqlparser::ast::CreateTable,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = sql_table_name(create.name.clone())?;
+    fn create_table(mut self, create: &CreateTable) -> Result<LogicalPlan, DatabaseError> {
+        let table_name = sql_table_name(&create.name)?;
 
         if !is_valid_identifier(&table_name) {
             return Err(attach_span_if_absent(
                 DatabaseError::invalid_table("illegal table naming".to_string()),
-                &create.name,
+                create.name.span(),
             ));
         }
         for col in create.columns.iter() {
-            let col_name = &col.name.value;
-            if !is_valid_identifier(col_name) {
+            if !is_valid_identifier(&col.name.value) {
                 return Err(attach_span_if_absent(
                     DatabaseError::invalid_column("illegal column naming".to_string()),
-                    col,
+                    col.span,
                 ));
             }
         }
 
         let mut columns = Vec::with_capacity(create.columns.len());
-        for (i, column) in create.columns.into_iter().enumerate() {
+        for (i, column) in create.columns.iter().enumerate() {
             columns.push(self.bind_column(column, Some(i))?);
         }
         let mut composite_unique_keys = Vec::new();
-        for constraint in create.constraints {
+        for constraint in &create.constraints {
             match constraint {
-                TableConstraint::PrimaryKey(primary) => {
-                    for (i, part) in primary.columns.iter().enumerate() {
-                        let (position, prefix_len) = Self::constraint_column(&columns, part)?;
-                        if prefix_len.is_some() {
+                TableConstraint::PrimaryKey(parts) => {
+                    for (i, part) in parts.iter().enumerate() {
+                        if part.prefix_len.is_some() {
                             return Err(DatabaseError::UnsupportedStmt(
                                 "PRIMARY KEY index prefixes".into(),
                             ));
                         }
+                        let position = Self::constraint_column(&columns, part)?;
                         columns[position].desc_mut().set_primary(Some(i));
                     }
                 }
-                TableConstraint::Unique(unique) => {
-                    Self::check_unique_nulls_option(unique.nulls_distinct)?;
-                    match unique.columns.as_slice() {
-                        [] => return Err(DatabaseError::InvalidIndex),
-                        [part] if matches!(part.column.expr, Expr::Identifier(_)) => {
-                            let (position, _) = Self::constraint_column(&columns, part)?;
-                            columns[position].desc_mut().set_unique();
-                        }
-                        parts => {
-                            let mut column_positions = Vec::with_capacity(parts.len());
-                            let mut index_val_ty = Vec::with_capacity(parts.len());
-                            for part in parts {
-                                let (position, prefix_len) =
-                                    Self::constraint_column(&columns, part)?;
-                                column_positions.push(position);
-                                index_val_ty.push(IndexValType::new(
-                                    columns[position].datatype().clone(),
-                                    prefix_len,
-                                )?);
-                            }
-                            composite_unique_keys.push(UniqueKey {
-                                column_positions,
-                                index_val_ty,
-                            });
-                        }
+                TableConstraint::Unique(parts) => match parts.as_slice() {
+                    [] => return Err(DatabaseError::InvalidIndex),
+                    [part] if part.prefix_len.is_none() => {
+                        let position = Self::constraint_column(&columns, part)?;
+                        columns[position].desc_mut().set_unique();
                     }
-                }
-                constraint => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "`CreateTable` does not currently support this constraint: {constraint:?}"
-                    )))
-                }
+                    parts => {
+                        let mut column_positions = Vec::with_capacity(parts.len());
+                        let mut index_val_ty = Vec::with_capacity(parts.len());
+                        for part in parts {
+                            let position = Self::constraint_column(&columns, part)?;
+                            column_positions.push(position);
+                            index_val_ty.push(IndexValType::new(
+                                columns[position].datatype().clone(),
+                                part.prefix_len,
+                            )?);
+                        }
+                        composite_unique_keys.push(UniqueKey {
+                            column_positions,
+                            index_val_ty,
+                        });
+                    }
+                },
             }
         }
 
@@ -873,35 +668,27 @@ where
 
     fn bind_column(
         &mut self,
-        column_def: ColumnDef,
+        column_def: &ColumnDef,
         column_index: Option<usize>,
     ) -> Result<ColumnCatalog, DatabaseError> {
         let column_name = lower_ident(&column_def.name).into_owned();
-        let mut column_desc = ColumnDesc::new(
-            convert_column_type(&column_def.data_type, self.binder.context.dialect)?,
-            None,
-            false,
-            None,
-        )?;
+        let mut column_desc = ColumnDesc::new(column_def.data_type.clone(), None, false, None)?;
         let mut nullable = true;
         let mut is_primary = false;
 
-        for option_def in column_def.options {
-            match option_def.option {
+        for option in &column_def.options {
+            match option {
                 ColumnOption::Null => nullable = true,
                 ColumnOption::NotNull => nullable = false,
-                ColumnOption::PrimaryKey(_) => {
+                ColumnOption::PrimaryKey => {
                     column_desc.set_primary(column_index);
                     is_primary = true;
                 }
-                ColumnOption::Unique(unique) => {
-                    Self::check_unique_nulls_option(unique.nulls_distinct)?;
-                    column_desc.set_unique();
-                }
+                ColumnOption::Unique => column_desc.set_unique(),
                 ColumnOption::Default(expr) => {
                     let mut expr = self
                         .binder
-                        .bind_expr(&expr, self.arena)
+                        .bind_expr(expr, self.arena)
                         .map(|expr| self.arena.alloc_expression(expr))?;
 
                     if expr.any_referenced_column(self.arena, |_, _| true)? {
@@ -913,11 +700,6 @@ where
                         expr.type_cast(Cow::Borrowed(&column_desc.column_datatype), self.arena)?;
                     column_desc.default = Some(expr);
                 }
-                option => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "`Column` does not currently support this option: {option:?}"
-                    )))
-                }
             }
         }
 
@@ -928,97 +710,40 @@ where
         ))
     }
 
-    fn check_unique_nulls_option(option: NullsDistinctOption) -> Result<(), DatabaseError> {
-        if option != NullsDistinctOption::None {
-            return Err(DatabaseError::UnsupportedStmt(
-                "UNIQUE NULLS options".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     fn constraint_column(
         table_columns: &[ColumnCatalog],
-        index_column: &IndexColumn,
-    ) -> Result<(usize, Option<u32>), DatabaseError> {
-        let expr = &index_column.column.expr;
-        let part = match expr {
-            Expr::Identifier(ident) => Some((ident, None)),
-            _ => prefix_key_part(expr).map(|(ident, len)| (ident, Some(len))),
-        };
-        let (ident, prefix_len) = part.ok_or_else(|| {
-            DatabaseError::UnsupportedStmt(
-                "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".into(),
-            )
-        })?;
-        let column_name = lower_ident(ident);
-        let position = table_columns
+        part: &KeyColumn,
+    ) -> Result<usize, DatabaseError> {
+        let column_name = lower_ident(&part.name);
+        table_columns
             .iter()
             .position(|column| column.name() == column_name.as_ref())
             .ok_or_else(|| {
                 attach_span_if_absent(
                     DatabaseError::column_not_found(column_name.into_owned()),
-                    ident.span,
+                    part.name.span,
                 )
-            })?;
-        Ok((position, prefix_len))
+            })
     }
 
-    fn create_index(self, create: CreateIndex) -> Result<LogicalPlan, DatabaseError> {
-        if create.concurrently
-            || !create.include.is_empty()
-            || create.nulls_distinct.is_some()
-            || !create.with.is_empty()
-            || create.predicate.is_some()
-            || !create.alter_options.is_empty()
-            || create
-                .using
-                .as_ref()
-                .is_some_and(|ty| !matches!(ty, IndexType::BTree))
-            || create
-                .index_options
-                .iter()
-                .any(|option| !matches!(option, IndexOption::Using(IndexType::BTree)))
-        {
-            return Err(DatabaseError::UnsupportedStmt(
-                "CREATE INDEX options".to_string(),
-            ));
-        }
-        let table_name = sql_table_name(create.table_name)?;
-        let index_name = create
-            .name
-            .ok_or(DatabaseError::InvalidIndex)
-            .and_then(sql_object_name)?;
+    fn create_index(self, create: &CreateIndex) -> Result<LogicalPlan, DatabaseError> {
+        let table_name = sql_table_name(&create.table_name)?;
+        let index_name = sql_object_name(&create.name)?;
         let input = self
             .binder
             .bind_create_index_source(&table_name, self.arena)?;
         let table_id = self.binder.context.table_id(&table_name)?;
-        let key_parts = create.columns.into_iter().map(|index_column| {
-            if index_column.operator_class.is_some()
-                || index_column.column.options.asc == Some(false)
-                || index_column.column.options.nulls_first.is_some()
-                || index_column.column.with_fill.is_some()
-            {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "CREATE INDEX column options".to_string(),
-                ));
-            }
-            let ast = &index_column.column.expr;
-            let (expr, prefix_len) = match prefix_key_part(ast) {
-                Some((ident, len)) => (
-                    self.binder
-                        .bind_expr(&Expr::Identifier(ident.clone()), self.arena)?,
-                    Some(len),
-                ),
-                None => (self.binder.bind_expr(ast, self.arena)?, None),
-            };
+        let key_parts = create.columns.iter().map(|index_column| {
+            let expr = self.binder.bind_expr(&index_column.expr, self.arena)?;
             let ScalarExpression::ColumnRef { column, .. } = expr else {
                 return Err(DatabaseError::UnsupportedStmt(format!(
                     "'CREATE INDEX' by {expr:?}"
                 )));
             };
-            let key_ty =
-                IndexValType::new(self.arena.column(column).datatype().clone(), prefix_len)?;
+            let key_ty = IndexValType::new(
+                self.arena.column(column).datatype().clone(),
+                index_column.prefix_len,
+            )?;
             Ok((column, key_ty))
         });
 
@@ -1032,25 +757,19 @@ where
         )
     }
 
-    fn create_view(self, create: CreateView) -> Result<LogicalPlan, DatabaseError> {
-        let CreateView {
-            or_replace,
-            name,
-            columns,
-            query,
-            ..
-        } = create;
-        let output_aliases = query_output_aliases(&query);
-        let view_name = sql_table_name(name)?;
-        let column_names = columns
-            .into_iter()
-            .map(|column| lower_ident(&column.name).into_owned())
+    fn create_view(self, create: &CreateView) -> Result<LogicalPlan, DatabaseError> {
+        let output_aliases = query_output_aliases(&create.query);
+        let view_name = sql_table_name(&create.name)?;
+        let column_names = create
+            .columns
+            .iter()
+            .map(|column| lower_ident(column).into_owned())
             .collect();
-        let plan = self.binder.bind_query(query.as_ref(), self.arena)?;
+        let plan = self.binder.bind_query(&create.query, self.arena)?;
 
         self.binder.bind_create_view(
             view_name,
-            or_replace,
+            create.or_replace,
             plan,
             column_names,
             output_aliases,
@@ -1061,118 +780,75 @@ where
     fn drop_object(
         self,
         object_type: ObjectType,
-        mut names: Vec<ObjectName>,
+        name: &ObjectName,
         if_exists: bool,
-        table: Option<ObjectName>,
+        table: Option<&ObjectName>,
     ) -> Result<LogicalPlan, DatabaseError> {
-        if names.len() != 1 {
-            return Err(DatabaseError::UnsupportedStmt(
-                "only Drop a single `Table`, `View` or `Index` is allowed".to_string(),
-            ));
-        }
-        if table.is_some() && object_type != ObjectType::Index {
-            return Err(DatabaseError::UnsupportedStmt(
-                "DROP ON is only supported for INDEX".to_string(),
-            ));
-        }
-
         match object_type {
             ObjectType::Table => self
                 .binder
-                .bind_drop_table(sql_table_name(names.remove(0))?, if_exists),
-            ObjectType::View => self
-                .binder
-                .bind_drop_view(sql_table_name(names.remove(0))?, if_exists),
+                .bind_drop_table(sql_table_name(name)?, if_exists),
+            ObjectType::View => self.binder.bind_drop_view(sql_table_name(name)?, if_exists),
             ObjectType::Index => {
-                let name = names.remove(0);
-                let (table_name, index_name) = if let Some(table) = table {
-                    (sql_table_name(table)?, sql_object_name(name)?)
-                } else {
-                    sql_index_name(name)?
+                let (table_name, index_name) = match table {
+                    Some(table) => (sql_table_name(table)?, sql_object_name(name)?),
+                    None => sql_index_name(name)?,
                 };
                 self.binder
                     .bind_drop_index(table_name, index_name, if_exists)
             }
-            _ => Err(DatabaseError::UnsupportedStmt(
-                "only `Table`, `View` and `Index` are allowed to be Dropped".to_string(),
-            )),
         }
     }
 
     #[cfg(feature = "copy")]
-    fn copy(
-        self,
-        source: CopySource,
-        to: bool,
-        target: CopyTarget,
-        options: Vec<CopyOption>,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        let ext_source = copy_ext_source(target, options)?;
+    fn copy(self, copy: &Copy) -> Result<LogicalPlan, DatabaseError> {
+        let ext_source = ExtSource {
+            path: copy.path.clone().into(),
+            format: FileFormat::Csv {
+                delimiter: copy.format.delimiter,
+                quote: copy.format.quote,
+                escape: copy.format.escape,
+                header: copy.format.header,
+            },
+        };
 
-        match source {
-            CopySource::Table { table_name, .. } => self.binder.bind_copy_table(
+        match &copy.source {
+            CopySource::Table(table_name) => self.binder.bind_copy_table(
                 &sql_table_name(table_name)?,
-                to,
+                copy.to,
                 ext_source,
                 self.arena,
             ),
             CopySource::Query(query) => {
-                if !to {
+                if !copy.to {
                     return Err(DatabaseError::UnsupportedStmt(
                         "'COPY FROM query'".to_string(),
                     ));
                 }
-                let input_plan = self.binder.bind_query(query.as_ref(), self.arena)?;
+                let input_plan = self.binder.bind_query(query, self.arena)?;
                 self.binder.bind_copy_to_file(ext_source, input_plan)
             }
         }
     }
 
-    fn insert(mut self, insert: &sqlparser::ast::Insert) -> Result<LogicalPlan, DatabaseError> {
-        let sqlparser::ast::Insert {
-            table,
-            columns,
-            overwrite,
-            or,
-            replace_into,
-            source,
-            returning,
-            on,
-            ..
-        } = insert;
-        if returning.is_some() {
-            return Err(DatabaseError::UnsupportedStmt(
-                "INSERT RETURNING is not supported".to_string(),
-            ));
-        }
-        if let Some(on) = on {
-            let clause = match on {
-                OnInsert::OnConflict(_) => "ON CONFLICT",
-                OnInsert::DuplicateKeyUpdate(_) => "ON DUPLICATE KEY UPDATE",
-                _ => "conflict clause",
-            };
-            return Err(DatabaseError::UnsupportedStmt(format!(
-                "INSERT {clause} is not supported"
-            )));
-        }
-        let is_overwrite =
-            *overwrite || *replace_into || matches!(or, Some(SqliteOnConflict::Replace));
-        let table_name = match table {
-            TableObject::TableName(table_name) => table_name.clone(),
-            TableObject::TableFunction(_) => {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "insert into table function is not supported".to_string(),
-                ))
-            }
-        };
-        let table_name = sql_table_name(table_name)?;
-        let source = source.as_ref().ok_or_else(|| {
-            DatabaseError::UnsupportedStmt("insert without source is not supported".to_string())
-        })?;
-        if let SetExpr::Values(values) = source.body.as_ref() {
-            self.insert_values(table_name, columns, &values.rows, is_overwrite)
+    #[cfg(not(feature = "copy"))]
+    fn copy(self, _: &Copy) -> Result<LogicalPlan, DatabaseError> {
+        Err(DatabaseError::UnsupportedStmt(
+            "COPY requires the `copy` feature".to_string(),
+        ))
+    }
+
+    fn insert(mut self, insert: &Insert) -> Result<LogicalPlan, DatabaseError> {
+        let table_name = sql_table_name(&insert.table_name)?;
+        if let SetExpr::Values(rows) = insert.source.body.as_ref() {
+            self.insert_values(table_name, &insert.columns, rows, insert.overwrite)
         } else {
-            self.insert_query(table_name, columns, source, is_overwrite)
+            self.insert_query(
+                table_name,
+                &insert.columns,
+                &insert.source,
+                insert.overwrite,
+            )
         }
     }
 
@@ -1292,12 +968,12 @@ where
             .bind_insert_query(&table_name, input_plan, &targets, is_overwrite, self.arena)
     }
 
-    fn update(self, update: &sqlparser::ast::Update) -> Result<LogicalPlan, DatabaseError> {
+    fn update(self, update: &Update) -> Result<LogicalPlan, DatabaseError> {
         self.binder.context.allow_default = true;
         let to = &update.table;
         if let TableFactor::Table { name, .. } = &to.relation {
             let is_joined_update = !to.joins.is_empty();
-            let table_name = sql_table_name(name.clone())?;
+            let table_name = sql_table_name(name)?;
             let table_id = self.binder.context.table_id(&table_name)?;
             self.binder.with_pk(table_id);
 
@@ -1329,7 +1005,7 @@ where
 
                     let column = {
                         let expr = binder.bind_column_ref_from_identifiers(
-                            slice::from_ref(&ident),
+                            slice::from_ref(ident),
                             Some(table_name.as_ref()),
                             arena,
                         )?;
@@ -1421,67 +1097,38 @@ where
             self.binder
                 .bind_update(&table_name, value_exprs, plan, self.arena)
         } else {
-            Err(DatabaseError::UnsupportedStmt(format!(
-                "UPDATE target must be a table: {:?}",
-                to.relation
-            )))
+            Err(DatabaseError::UnsupportedStmt(
+                "UPDATE target must be a table".to_string(),
+            ))
         }
     }
 
-    fn delete(self, delete: &sqlparser::ast::Delete) -> Result<LogicalPlan, DatabaseError> {
-        let from = match &delete.from {
-            FromTable::WithFromKeyword(from) | FromTable::WithoutKeyword(from) => from,
-        };
-        let table = from
-            .iter()
-            .next()
-            .ok_or_else(|| DatabaseError::invalid_table("DELETE without FROM"))?;
-
-        if let TableFactor::Table { name, .. } = &table.relation {
-            let table_name = sql_table_name(name.clone())?;
-            let target = self
-                .binder
-                .context
-                .table(&table_name)?
-                .ok_or(DatabaseError::TableNotFound)?;
-            let primary_keys = target
-                .primary_keys()
-                .iter()
-                .map(|(_, column)| *column)
-                .collect();
-            self.binder.with_pk(target.id());
-            let mut plan = self.binder.bind_table_ref_sql(table, self.arena)?;
-
-            if let Some(predicate) = delete.selection.as_ref() {
-                plan = self.binder.bind_where(plan, predicate, self.arena)?;
-            }
-
-            self.binder.bind_delete(&table_name, primary_keys, plan)
-        } else {
-            Err(DatabaseError::UnsupportedStmt(format!(
-                "DELETE target must be a table: {:?}",
-                table.relation
-            )))
-        }
-    }
-
-    fn analyze(self, analyze: sqlparser::ast::Analyze) -> Result<LogicalPlan, DatabaseError> {
-        let table_name = analyze.table_name.ok_or_else(|| {
-            DatabaseError::UnsupportedStmt("ANALYZE without table is not supported".to_string())
-        })?;
-        self.binder
-            .bind_analyze(&sql_table_name(table_name)?, self.arena)
-    }
-
-    fn truncate(self, truncate: sqlparser::ast::Truncate) -> Result<LogicalPlan, DatabaseError> {
-        if truncate.table_names.len() != 1 {
+    fn delete(self, delete: &Delete) -> Result<LogicalPlan, DatabaseError> {
+        let table = &delete.table;
+        let TableFactor::Table { name, .. } = &table.relation else {
             return Err(DatabaseError::UnsupportedStmt(
-                "only truncate a single table is supported".to_string(),
+                "DELETE target must be a table".to_string(),
             ));
+        };
+        let table_name = sql_table_name(name)?;
+        let target = self
+            .binder
+            .context
+            .table(&table_name)?
+            .ok_or(DatabaseError::TableNotFound)?;
+        let primary_keys = target
+            .primary_keys()
+            .iter()
+            .map(|(_, column)| *column)
+            .collect();
+        self.binder.with_pk(target.id());
+        let mut plan = self.binder.bind_table_ref_sql(table, self.arena)?;
+
+        if let Some(predicate) = delete.selection.as_ref() {
+            plan = self.binder.bind_where(plan, predicate, self.arena)?;
         }
-        self.binder.bind_truncate(&sql_table_name(
-            truncate.table_names.into_iter().next().unwrap().name,
-        )?)
+
+        self.binder.bind_delete(&table_name, primary_keys, plan)
     }
 
     fn explain(self, statement: &Statement) -> Result<LogicalPlan, DatabaseError> {
@@ -1576,33 +1223,19 @@ where
 {
     pub(crate) fn aggregate_sql(
         self,
-        group_by: &GroupByExpr,
+        group_by: &[Expr],
         having: Option<&Expr>,
         orderby: Option<&[OrderByExpr]>,
     ) -> Result<BindPlanAggregated<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
         let group_by = with_query_bind_step!(self.binder, QueryBindStep::Agg, {
-            match group_by {
-                GroupByExpr::Expressions(group_by_exprs, modifiers) => {
-                    if !modifiers.is_empty() {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "GROUP BY modifiers are not supported".to_string(),
-                        ));
-                    }
-                    group_by_exprs
-                        .iter()
-                        .map(|expr| {
-                            self.binder
-                                .bind_expr(expr, self.arena)
-                                .map(|expr| self.arena.alloc_expression(expr))
-                        })
-                        .collect::<Result<Vec<_>, DatabaseError>>()?
-                }
-                GroupByExpr::All(_) => {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "GROUP BY ALL is not supported".to_string(),
-                    ))
-                }
-            }
+            group_by
+                .iter()
+                .map(|expr| {
+                    self.binder
+                        .bind_expr(expr, self.arena)
+                        .map(|expr| self.arena.alloc_expression(expr))
+                })
+                .collect::<Result<Vec<_>, DatabaseError>>()?
         })?;
         let having = having
             .map(|having| {
@@ -1617,11 +1250,15 @@ where
             having,
             orderby,
             |binder, arena, select_list, orderby| {
-                let OrderByExpr { expr, options, .. } = orderby;
+                let OrderByExpr {
+                    expr,
+                    asc,
+                    nulls_first,
+                } = orderby;
                 with_query_bind_step!(binder, QueryBindStep::Sort, {
                     let expr = match expr {
                         Expr::Value(ValueWithSpan {
-                            value: Value::Number(n, _),
+                            value: Value::Number(n),
                             ..
                         }) => {
                             let position = n.parse::<usize>().map_err(|_| {
@@ -1667,8 +1304,8 @@ where
                     };
                     SortField::new(
                         expr,
-                        options.asc.is_none_or(|asc| asc),
-                        options.nulls_first.unwrap_or(false),
+                        asc.is_none_or(|asc| asc),
+                        nulls_first.unwrap_or(false),
                     )
                 })
             },
@@ -1683,9 +1320,9 @@ where
 {
     pub(crate) fn distinct_sql(
         self,
-        distinct: Option<&Distinct>,
+        distinct: bool,
     ) -> Result<BindPlanDistinct<'s, 'a, 'b, 'arena, T, A>, DatabaseError> {
-        self.distinct(matches!(distinct, Some(Distinct::Distinct)))
+        self.distinct(distinct)
     }
 }
 
@@ -1696,89 +1333,30 @@ where
 {
     pub(crate) fn select_into_sql(
         self,
-        into: Option<&SelectInto>,
+        into: Option<&ObjectName>,
     ) -> Result<BindPlanComplete, DatabaseError> {
-        let table_name = into
-            .map(|SelectInto { name, .. }| lower_case_name(name))
-            .transpose()?;
+        let table_name = into.map(lower_case_name).transpose()?;
         self.insert_into(table_name.as_deref())
     }
 }
 
-fn sql_table_name(name: ObjectName) -> Result<TableName, DatabaseError> {
-    Ok(lower_case_name(&name)?.into())
+fn sql_table_name(name: &ObjectName) -> Result<TableName, DatabaseError> {
+    Ok(lower_case_name(name)?.into())
 }
 
-fn sql_table_alias(alias: TableAlias) -> TableAliasInput {
+fn sql_table_alias(alias: &TableAlias) -> TableAliasInput {
     TableAliasInput {
         name: lower_ident(&alias.name).into(),
         columns: alias
             .columns
-            .into_iter()
-            .map(|column| lower_ident(&column.name).into_owned())
+            .iter()
+            .map(|column| lower_ident(column).into_owned())
             .collect(),
     }
 }
 
-fn sql_optional_table_alias(alias: Option<TableAlias>) -> Option<TableAliasInput> {
+fn sql_optional_table_alias(alias: Option<&TableAlias>) -> Option<TableAliasInput> {
     alias.map(sql_table_alias)
-}
-
-impl From<sqlparser::ast::CharLengthUnits> for CharLengthUnits {
-    fn from(value: sqlparser::ast::CharLengthUnits) -> Self {
-        match value {
-            sqlparser::ast::CharLengthUnits::Characters => Self::Characters,
-            sqlparser::ast::CharLengthUnits::Octets => Self::Octets,
-        }
-    }
-}
-
-impl From<sqlparser::ast::TrimWhereField> for expression::TrimWhereField {
-    fn from(value: sqlparser::ast::TrimWhereField) -> Self {
-        match value {
-            sqlparser::ast::TrimWhereField::Both => Self::Both,
-            sqlparser::ast::TrimWhereField::Leading => Self::Leading,
-            sqlparser::ast::TrimWhereField::Trailing => Self::Trailing,
-        }
-    }
-}
-
-impl TryFrom<UnaryOperator> for expression::UnaryOperator {
-    type Error = DatabaseError;
-
-    fn try_from(value: UnaryOperator) -> Result<Self, Self::Error> {
-        match value {
-            UnaryOperator::Plus => Ok(Self::Plus),
-            UnaryOperator::Minus => Ok(Self::Minus),
-            UnaryOperator::Not => Ok(Self::Not),
-            op => Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
-        }
-    }
-}
-
-impl TryFrom<BinaryOperator> for expression::BinaryOperator {
-    type Error = DatabaseError;
-
-    fn try_from(value: BinaryOperator) -> Result<Self, Self::Error> {
-        match value {
-            BinaryOperator::Plus => Ok(Self::Plus),
-            BinaryOperator::Minus => Ok(Self::Minus),
-            BinaryOperator::Multiply => Ok(Self::Multiply),
-            BinaryOperator::Divide => Ok(Self::Divide),
-            BinaryOperator::Modulo => Ok(Self::Modulo),
-            BinaryOperator::StringConcat => Ok(Self::StringConcat),
-            BinaryOperator::Gt => Ok(Self::Gt),
-            BinaryOperator::Lt => Ok(Self::Lt),
-            BinaryOperator::GtEq => Ok(Self::GtEq),
-            BinaryOperator::LtEq => Ok(Self::LtEq),
-            BinaryOperator::Spaceship => Ok(Self::Spaceship),
-            BinaryOperator::Eq => Ok(Self::Eq),
-            BinaryOperator::NotEq => Ok(Self::NotEq),
-            BinaryOperator::And => Ok(Self::And),
-            BinaryOperator::Or => Ok(Self::Or),
-            op => Err(DatabaseError::UnsupportedStmt(format!("{op}"))),
-        }
-    }
 }
 
 impl TryFrom<&Value> for DataValue {
@@ -1786,7 +1364,7 @@ impl TryFrom<&Value> for DataValue {
 
     fn try_from(value: &Value) -> Result<Self, Self::Error> {
         Ok(match value {
-            Value::Number(n, _) => {
+            Value::Number(n) => {
                 // use i32 to handle most cases
                 if let Ok(v) = n.parse::<i32>() {
                     v.into()
@@ -1800,8 +1378,8 @@ impl TryFrom<&Value> for DataValue {
                     return Err(DatabaseError::InvalidValue(n.to_string()));
                 }
             }
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => s.clone().into(),
-            Value::HexStringLiteral(hex) => {
+            Value::String(s) => s.clone().into(),
+            Value::HexString(hex) => {
                 if hex.len() % 2 != 0 {
                     return Err(DatabaseError::InvalidValue(
                         "hex literal must contain pairs of digits".to_string(),
@@ -1821,251 +1399,17 @@ impl TryFrom<&Value> for DataValue {
             }
             Value::Boolean(b) => (*b).into(),
             Value::Null => Self::Null,
-            v => return Err(DatabaseError::UnsupportedStmt(format!("{v:?}"))),
+            Value::Placeholder(placeholder) => {
+                return Err(DatabaseError::InvalidValue(format!(
+                    "unbound parameter: {placeholder}"
+                )))
+            }
         })
     }
 }
 
-impl TryFrom<DataType> for LogicalType {
-    type Error = DatabaseError;
-
-    fn try_from(value: DataType) -> Result<Self, Self::Error> {
-        match value {
-            DataType::Char(char_len) | DataType::Character(char_len) => {
-                let mut len = 1;
-                let mut char_unit = None;
-                if let Some(char_len) = char_len {
-                    match char_len {
-                        sqlparser::ast::CharacterLength::IntegerLength { length, unit } => {
-                            len = cmp::max(len, length);
-                            char_unit = unit;
-                        }
-                        sqlparser::ast::CharacterLength::Max => {
-                            return Err(DatabaseError::UnsupportedStmt(
-                                "CHAR(MAX) is not supported".to_string(),
-                            ));
-                        }
-                    }
-                }
-                Ok(Self::Char(
-                    len as u32,
-                    char_unit
-                        .map(Into::into)
-                        .unwrap_or(CharLengthUnits::Characters),
-                ))
-            }
-            DataType::CharVarying(varchar_len)
-            | DataType::CharacterVarying(varchar_len)
-            | DataType::Varchar(varchar_len) => {
-                let mut len = None;
-                let mut char_unit = None;
-                if let Some(varchar_len) = varchar_len {
-                    match varchar_len {
-                        sqlparser::ast::CharacterLength::IntegerLength { length, unit } => {
-                            len = Some(length as u32);
-                            char_unit = unit;
-                        }
-                        sqlparser::ast::CharacterLength::Max => {
-                            return Err(DatabaseError::UnsupportedStmt(
-                                "VARCHAR(MAX) is not supported".to_string(),
-                            ));
-                        }
-                    }
-                }
-                Ok(Self::Varchar(
-                    len,
-                    char_unit
-                        .map(Into::into)
-                        .unwrap_or(CharLengthUnits::Characters),
-                ))
-            }
-            DataType::Varbinary(length) => {
-                let len = match length {
-                    Some(BinaryLength::IntegerLength { length }) => Some(u32::try_from(length)?),
-                    None | Some(BinaryLength::Max) => None,
-                };
-                Ok(Self::Varbinary(len))
-            }
-            DataType::Blob(length) | DataType::Bytes(length) => {
-                Ok(Self::Varbinary(length.map(u32::try_from).transpose()?))
-            }
-            DataType::Bytea => Ok(Self::Varbinary(None)),
-            DataType::String(_) | DataType::Text => {
-                Ok(Self::Varchar(None, CharLengthUnits::Characters))
-            }
-            DataType::Float(_) | DataType::Float4 | DataType::Float32 | DataType::Real => {
-                Ok(Self::Float)
-            }
-            DataType::Double(_)
-            | DataType::DoublePrecision
-            | DataType::Float8
-            | DataType::Float64 => Ok(Self::Double),
-            DataType::TinyInt(_) => Ok(Self::Tinyint),
-            DataType::TinyIntUnsigned(_) | DataType::UTinyInt => Ok(Self::UTinyint),
-            DataType::SmallInt(_) | DataType::Int2(_) => Ok(Self::Smallint),
-            DataType::SmallIntUnsigned(_) | DataType::Int2Unsigned(_) | DataType::USmallInt => {
-                Ok(Self::USmallint)
-            }
-            DataType::Int(_) | DataType::Integer(_) | DataType::Int4(_) | DataType::Int32 => {
-                Ok(Self::Integer)
-            }
-            DataType::IntUnsigned(_)
-            | DataType::IntegerUnsigned(_)
-            | DataType::Int4Unsigned(_)
-            | DataType::Unsigned
-            | DataType::UnsignedInteger
-            | DataType::UInt32 => Ok(Self::UInteger),
-            DataType::BigInt(_) | DataType::Int8(_) | DataType::Int64 => Ok(Self::Bigint),
-            DataType::BigIntUnsigned(_)
-            | DataType::Int8Unsigned(_)
-            | DataType::UBigInt
-            | DataType::UInt64 => Ok(Self::UBigint),
-            DataType::Boolean => Ok(Self::Boolean),
-            DataType::Date => {
-                #[cfg(feature = "time")]
-                {
-                    Ok(Self::Date)
-                }
-                #[cfg(not(feature = "time"))]
-                {
-                    Err(DatabaseError::UnsupportedStmt(
-                        "time types require the `time` feature".to_string(),
-                    ))
-                }
-            }
-            DataType::Datetime(precision) => {
-                #[cfg(feature = "time")]
-                {
-                    if precision.is_some() {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "time's precision".to_string(),
-                        ));
-                    }
-                    Ok(Self::DateTime)
-                }
-                #[cfg(not(feature = "time"))]
-                {
-                    let _ = precision;
-                    Err(DatabaseError::UnsupportedStmt(
-                        "time types require the `time` feature".to_string(),
-                    ))
-                }
-            }
-            DataType::Time(precision, info) => {
-                #[cfg(feature = "time")]
-                {
-                    match precision {
-                        Some(0..5) | None => (),
-                        _ => {
-                            return Err(DatabaseError::UnsupportedStmt(
-                                "time's precision must be less than 5".to_string(),
-                            ))
-                        }
-                    }
-                    if !matches!(info, sqlparser::ast::TimezoneInfo::None) {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "time's zone is not supported".to_string(),
-                        ));
-                    }
-                    Ok(Self::Time(precision))
-                }
-                #[cfg(not(feature = "time"))]
-                {
-                    let _ = (precision, info);
-                    Err(DatabaseError::UnsupportedStmt(
-                        "time types require the `time` feature".to_string(),
-                    ))
-                }
-            }
-            DataType::Timestamp(precision, info) => {
-                #[cfg(feature = "time")]
-                {
-                    let mut zone = false;
-                    match precision {
-                        Some(3 | 6 | 9) | None => (),
-                        _ => {
-                            return Err(DatabaseError::UnsupportedStmt(
-                                "timestamp's precision must be 3,6,9".to_string(),
-                            ))
-                        }
-                    }
-                    if matches!(info, sqlparser::ast::TimezoneInfo::WithTimeZone) {
-                        zone = true;
-                    }
-                    Ok(Self::TimeStamp(precision, zone))
-                }
-                #[cfg(not(feature = "time"))]
-                {
-                    let _ = (precision, info);
-                    Err(DatabaseError::UnsupportedStmt(
-                        "time types require the `time` feature".to_string(),
-                    ))
-                }
-            }
-            DataType::Decimal(info)
-            | DataType::DecimalUnsigned(info)
-            | DataType::Dec(info)
-            | DataType::DecUnsigned(info)
-            | DataType::Numeric(info) => {
-                #[cfg(feature = "decimal")]
-                {
-                    match info {
-                        sqlparser::ast::ExactNumberInfo::None => Ok(Self::Decimal(None, None)),
-                        sqlparser::ast::ExactNumberInfo::Precision(p) => {
-                            Ok(Self::Decimal(Some(p as u8), None))
-                        }
-                        sqlparser::ast::ExactNumberInfo::PrecisionAndScale(p, s) => {
-                            Ok(Self::Decimal(Some(p as u8), Some(s as u8)))
-                        }
-                    }
-                }
-                #[cfg(not(feature = "decimal"))]
-                {
-                    let _ = info;
-                    Err(DatabaseError::UnsupportedStmt(
-                        "DECIMAL requires the `decimal` feature".to_string(),
-                    ))
-                }
-            }
-            other => Err(DatabaseError::UnsupportedStmt(format!(
-                "unsupported data type: {other}"
-            ))),
-        }
-    }
-}
-
-fn sql_object_name(name: ObjectName) -> Result<String, DatabaseError> {
-    Ok(lower_case_name(&name)?.into_owned())
-}
-
-/// A prefix key part `col(n)` parses as a call.
-fn prefix_key_part(expr: &Expr) -> Option<(&Ident, u32)> {
-    let Expr::Function(func) = expr else {
-        return None;
-    };
-    let [ObjectNamePart::Identifier(ident)] = func.name.0.as_slice() else {
-        return None;
-    };
-    let FunctionArguments::List(list) = &func.args else {
-        return None;
-    };
-    let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))] = list.args.as_slice()
-    else {
-        return None;
-    };
-    let Value::Number(length, false) = &value.value else {
-        return None;
-    };
-    let length = length.parse::<u32>().ok().filter(|len| *len > 0)?;
-    let is_plain_call = !func.uses_odbc_syntax
-        && matches!(func.parameters, FunctionArguments::None)
-        && list.duplicate_treatment.is_none()
-        && list.clauses.is_empty()
-        && func.filter.is_none()
-        && func.null_treatment.is_none()
-        && func.over.is_none()
-        && func.within_group.is_empty();
-    is_plain_call.then_some((ident, length))
+fn sql_object_name(name: &ObjectName) -> Result<String, DatabaseError> {
+    Ok(lower_case_name(name)?.into_owned())
 }
 
 pub(super) fn lower_ident(ident: &Ident) -> Cow<'_, str> {
@@ -2078,45 +1422,35 @@ pub(super) fn lower_ident(ident: &Ident) -> Cow<'_, str> {
     }
 }
 
-fn lower_name_part(part: &ObjectNamePart) -> Result<Cow<'_, str>, DatabaseError> {
-    part.as_ident()
-        .map(lower_ident)
-        .ok_or_else(|| attach_span_if_absent(DatabaseError::invalid_table(part.to_string()), part))
-}
-
 /// Convert an object name into lower case.
 pub(super) fn lower_case_name(name: &ObjectName) -> Result<Cow<'_, str>, DatabaseError> {
-    if name.0.len() == 1 {
-        return lower_name_part(&name.0[0]);
+    match name.0.as_slice() {
+        [ident] => Ok(lower_ident(ident)),
+        _ => Err(attach_span_if_absent(
+            DatabaseError::invalid_table(name.to_string()),
+            name.span(),
+        )),
     }
-    Err(attach_span_if_absent(
-        DatabaseError::invalid_table(name.to_string()),
-        name,
-    ))
 }
 
-fn single_ident_from_object_name(name: &ObjectName) -> Result<Ident, DatabaseError> {
-    if name.0.len() != 1 {
-        return Err(attach_span_if_absent(
+fn single_ident_from_object_name(name: &ObjectName) -> Result<&Ident, DatabaseError> {
+    match name.0.as_slice() {
+        [ident] => Ok(ident),
+        _ => Err(attach_span_if_absent(
             DatabaseError::invalid_column(name.to_string()),
-            name,
-        ));
-    }
-    match name.0.first() {
-        Some(ObjectNamePart::Identifier(ident)) => Ok(ident.clone()),
-        Some(part) => Err(DatabaseError::invalid_column(part.to_string())),
-        None => Err(DatabaseError::invalid_column(String::new())),
+            name.span(),
+        )),
     }
 }
 
-fn sql_index_name(name: ObjectName) -> Result<(TableName, String), DatabaseError> {
+fn sql_index_name(name: &ObjectName) -> Result<(TableName, String), DatabaseError> {
     let [table_name, index_name] = name.0.as_slice() else {
         return Err(DatabaseError::InvalidIndex);
     };
 
     Ok((
-        lower_name_part(table_name)?.into(),
-        lower_name_part(index_name)?.into_owned(),
+        lower_ident(table_name).into(),
+        lower_ident(index_name).into_owned(),
     ))
 }
 
@@ -2133,54 +1467,6 @@ fn query_output_aliases(query: &Query) -> Vec<Option<String>> {
             _ => None,
         })
         .collect()
-}
-
-#[cfg(feature = "copy")]
-fn copy_ext_source(
-    target: CopyTarget,
-    options: Vec<CopyOption>,
-) -> Result<ExtSource, DatabaseError> {
-    Ok(ExtSource {
-        path: match target {
-            CopyTarget::File { filename } => filename.into(),
-            t => {
-                return Err(DatabaseError::UnsupportedStmt(format!(
-                    "copy target: {t:?}"
-                )))
-            }
-        },
-        format: copy_file_format(options)?,
-    })
-}
-
-#[cfg(feature = "copy")]
-fn copy_file_format(options: Vec<CopyOption>) -> Result<FileFormat, DatabaseError> {
-    let mut delimiter = ',';
-    let mut quote = '"';
-    let mut escape = None;
-    let mut header = false;
-    for opt in options {
-        match opt {
-            CopyOption::Format(fmt) => {
-                debug_assert_eq!(fmt.value.to_lowercase(), "csv", "only support CSV format")
-            }
-            CopyOption::Delimiter(c) => delimiter = c,
-            CopyOption::Header(b) => header = b,
-            CopyOption::Quote(c) => quote = c,
-            CopyOption::Escape(c) => escape = Some(c),
-            o => {
-                return Err(DatabaseError::UnsupportedStmt(format!(
-                    "copy option: {o:?}"
-                )))
-            }
-        }
-    }
-    Ok(FileFormat::Csv {
-        delimiter,
-        quote,
-        escape,
-        header,
-    })
 }
 
 impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
@@ -2209,25 +1495,20 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
         match table {
-            TableFactor::Table { name, alias, .. } => self.bind_base_table_ref(
+            TableFactor::Table { name, alias } => self.bind_base_table_ref(
                 joint_type,
-                sql_table_name(name.clone())?,
-                sql_optional_table_alias(alias.clone()),
+                sql_table_name(name)?,
+                sql_optional_table_alias(alias.as_ref()),
                 arena,
             ),
-            TableFactor::Derived { lateral: true, .. } => Err(DatabaseError::UnsupportedStmt(
-                "LATERAL derived tables are not supported".to_string(),
-            )),
-            TableFactor::Derived {
-                subquery, alias, ..
-            } => {
+            TableFactor::Derived { subquery, alias } => {
                 // A non-LATERAL derived table cannot see the sources bound before
                 // it in the same FROM clause.
                 let mut binder = Binder::new(self.context.fork_empty(), self.args, None);
                 let plan = binder.bind_query(subquery, arena)?;
                 self.bind_derived_source(
                     plan,
-                    sql_optional_table_alias(alias.clone()),
+                    sql_optional_table_alias(alias.as_ref()),
                     joint_type,
                     arena,
                 )
@@ -2239,12 +1520,11 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 let expr = expr?;
                 self.bind_table_function_source(
                     expr,
-                    sql_optional_table_alias(alias.clone()),
+                    sql_optional_table_alias(alias.as_ref()),
                     joint_type,
                     arena,
                 )
             }
-            table => Err(DatabaseError::UnsupportedStmt(format!("{table:#?}"))),
         }
     }
 
@@ -2254,47 +1534,21 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         join: &Join,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let Join {
-            relation,
-            join_operator,
-            ..
-        } = join;
-
-        let (join_type, joint_condition) = match join_operator {
-            JoinOperator::Join(constraint)
-            | JoinOperator::Inner(constraint)
-            | JoinOperator::StraightJoin(constraint) => (JoinType::Inner, Some(constraint)),
-            JoinOperator::Left(constraint) | JoinOperator::LeftOuter(constraint) => {
-                (JoinType::LeftOuter, Some(constraint))
-            }
-            JoinOperator::Right(constraint) | JoinOperator::RightOuter(constraint) => {
-                (JoinType::RightOuter, Some(constraint))
-            }
-            JoinOperator::FullOuter(constraint) => (JoinType::Full, Some(constraint)),
-            JoinOperator::CrossJoin(constraint) => (JoinType::Cross, Some(constraint)),
-            JoinOperator::Semi(_)
-            | JoinOperator::LeftSemi(_)
-            | JoinOperator::Anti(_)
-            | JoinOperator::LeftAnti(_)
-            | JoinOperator::RightSemi(_)
-            | JoinOperator::RightAnti(_)
-            | JoinOperator::CrossApply
-            | JoinOperator::OuterApply
-            | JoinOperator::AsOf { .. } => {
-                return Err(DatabaseError::UnsupportedStmt(format!("{join_operator:?}")))
-            }
+        let join_type = match join.join_operator {
+            JoinOperator::Inner => JoinType::Inner,
+            JoinOperator::LeftOuter => JoinType::LeftOuter,
+            JoinOperator::RightOuter => JoinType::RightOuter,
+            JoinOperator::FullOuter => JoinType::Full,
+            JoinOperator::Cross => JoinType::Cross,
         };
         let (right, context) = {
             let mut binder = Binder::new(self.context.fork_empty(), self.args, Some(&self.context));
-            let right = binder.bind_single_table_ref_sql(relation, Some(join_type), arena)?;
+            let right = binder.bind_single_table_ref_sql(&join.relation, Some(join_type), arena)?;
             (right, binder.context)
         };
         self.extend(context, arena)?;
 
-        let constraint = match joint_condition {
-            Some(constraint) => self.bind_join_constraint_sql(constraint, arena)?,
-            None => JoinConstraintInput::None,
-        };
+        let constraint = self.bind_join_constraint_sql(&join.constraint, arena)?;
 
         self.bind_join_plans(left, right, join_type, constraint, arena)
     }
@@ -2320,35 +1574,11 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         }
     }
 
-    fn parse_like_escape_char(escape_char: &Option<Value>) -> Result<Option<char>, DatabaseError> {
-        match escape_char {
-            None => Ok(None),
-            Some(value) => match value {
-                Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-                    let mut chars = s.chars();
-                    let ch = chars.next().ok_or(DatabaseError::InvalidValue(
-                        "escape character must not be empty".to_string(),
-                    ))?;
-                    if chars.next().is_some() {
-                        return Err(DatabaseError::InvalidValue(
-                            "escape character must be a single character".to_string(),
-                        ));
-                    }
-                    Ok(Some(ch))
-                }
-                _ => Err(DatabaseError::InvalidValue(
-                    "escape character must be a quoted string".to_string(),
-                )),
-            },
-        }
-    }
-
     pub(crate) fn bind_expr(
         &mut self,
         expr: &Expr,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
-        let expr_span = expr.span();
         match expr {
             Expr::Identifier(ident) => {
                 self.bind_column_ref_from_identifiers(slice::from_ref(ident), None, arena)
@@ -2363,7 +1593,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 let right_expr = self
                     .bind_expr(right, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
-                self.bind_binary_op_expr(left_expr, right_expr, op.clone().try_into()?, arena)
+                self.bind_binary_op_expr(left_expr, right_expr, *op, arena)
             }
             Expr::Value(v) => {
                 let value = if let Value::Placeholder(placeholder) = &v.value {
@@ -2372,7 +1602,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                             DatabaseError::InvalidValue(format!(
                                 "parameter must use the $<positive integer> form: {placeholder}"
                             )),
-                            v,
+                            v.span,
                         )
                     })?;
                     let ty = self
@@ -2383,14 +1613,14 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                         .ok_or_else(|| {
                             attach_span_if_absent(
                                 DatabaseError::parameter_not_found(format!("${id}")),
-                                v,
+                                v.span,
                             )
                         })?;
                     DataValue::Parameter { id, ty: ty.clone() }
                 } else {
                     (&v.value)
                         .try_into()
-                        .map_err(|err| attach_span_if_absent(err, v))?
+                        .map_err(|err| attach_span_if_absent(err, v.span))?
                 };
                 Ok(ScalarExpression::Constant(value))
             }
@@ -2400,23 +1630,22 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 // Fold `-<number>` into one literal, as PostgreSQL does: parsing
                 // the number first cannot express a type's minimum, e.g.
                 // `-9223372036854775808` (9223372036854775808 overflows bigint).
-                if let (UnaryOperator::Minus, Expr::Value(v)) = (op, expr.as_ref()) {
-                    if let Value::Number(n, long) = &v.value {
-                        let value = DataValue::try_from(&Value::Number(format!("-{n}"), *long))?;
+                if let (expression::UnaryOperator::Minus, Expr::Value(v)) = (op, expr.as_ref()) {
+                    if let Value::Number(n) = &v.value {
+                        let value = DataValue::try_from(&Value::Number(format!("-{n}")))?;
                         return Ok(ScalarExpression::Constant(value));
                     }
                 }
                 let expr = self
                     .bind_expr(expr, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
-                self.bind_unary_op_expr(expr, (*op).try_into()?, arena)
+                self.bind_unary_op_expr(expr, *op, arena)
             }
             Expr::Like {
                 negated,
                 expr,
                 pattern,
                 escape_char,
-                any: _,
             } => {
                 let left_expr = self
                     .bind_expr(expr, arena)
@@ -2424,11 +1653,10 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 let right_expr = self
                     .bind_expr(pattern, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
-                let escape_char = Self::parse_like_escape_char(escape_char)?;
                 let op = if *negated {
-                    expression::BinaryOperator::NotLike(escape_char)
+                    expression::BinaryOperator::NotLike(*escape_char)
                 } else {
-                    expression::BinaryOperator::Like(escape_char)
+                    expression::BinaryOperator::Like(*escape_char)
                 };
                 Ok(ScalarExpression::Binary {
                     op,
@@ -2479,30 +1707,22 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                     args,
                 })
             }
-            Expr::Cast {
-                expr, data_type, ..
-            } => {
+            Expr::Cast { expr, data_type } => {
                 let expr = self.bind_expr(expr, arena)?;
-                self.bind_cast(
-                    expr,
-                    convert_data_type(data_type, self.context.dialect)?,
-                    arena,
-                )
+                self.bind_cast(expr, data_type.clone(), arena)
             }
-            Expr::TypedString(TypedString {
-                data_type, value, ..
-            }) => {
-                let logical_type = convert_data_type(data_type, self.context.dialect)?;
-                let raw = value.clone().into_string().ok_or_else(|| {
-                    DatabaseError::InvalidValue("typed string literal must be a string".to_string())
-                })?;
+            Expr::TypedString {
+                data_type,
+                value,
+                span,
+            } => {
                 let value = DataValue::Utf8 {
-                    value: raw.into(),
+                    value: value.as_str().into(),
                     ty: Utf8Type::Variable(None),
                     unit: CharLengthUnits::Characters,
                 }
-                .cast(&logical_type)
-                .map_err(|err| attach_span_if_absent(err, expr_span))?;
+                .cast(data_type)
+                .map_err(|err| attach_span_if_absent(err, *span))?;
 
                 Ok(ScalarExpression::Constant(value))
             }
@@ -2534,9 +1754,8 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             }
             Expr::Substring {
                 expr,
-                substring_for,
-                substring_from,
-                ..
+                from: substring_from,
+                r#for: substring_for,
             } => {
                 let mut for_expr = None;
                 let mut from_expr = None;
@@ -2572,7 +1791,6 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 expr,
                 trim_what,
                 trim_where,
-                ..
             } => {
                 let mut trim_what_expr = None;
                 if let Some(trim_what) = trim_what {
@@ -2585,7 +1803,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 Ok(ScalarExpression::Trim {
                     expr,
                     trim_what_expr,
-                    trim_where: (*trim_where).map(Into::into),
+                    trim_where: *trim_where,
                 })
             }
             Expr::Exists { subquery, negated } => {
@@ -2604,7 +1822,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 MarkApplyQuantifier::Any,
                 *negated,
                 expr,
-                &BinaryOperator::Eq,
+                expression::BinaryOperator::Eq,
                 subquery,
                 arena,
             ),
@@ -2621,7 +1839,6 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 operand,
                 conditions,
                 else_result,
-                ..
             } => {
                 // Branches of different types are unified like `l = r` (e.g.
                 // `then bigint else int` => bigint), as in PostgreSQL.
@@ -2643,15 +1860,15 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                     operand_expr = Some(arena.alloc_expression(expr));
                 }
                 let mut expr_pairs = Vec::with_capacity(conditions.len());
-                for when in conditions {
+                for (condition, result) in conditions {
                     let result = self
-                        .bind_expr(&when.result, arena)
+                        .bind_expr(result, arena)
                         .map(|expr| arena.alloc_expression(expr))?;
                     let result_ty = result.return_type(arena).into_owned();
 
                     fn_check_ty(&mut ty, result_ty)?;
                     let condition = self
-                        .bind_expr(&when.condition, arena)
+                        .bind_expr(condition, arena)
                         .map(|expr| arena.alloc_expression(expr))?;
                     expr_pairs.push((condition, result))
                 }
@@ -2685,33 +1902,28 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             Expr::AnyOp {
                 left,
                 compare_op,
-                right,
-                ..
-            } => self.bind_quantified_op(MarkApplyQuantifier::Any, left, compare_op, right, arena),
+                subquery,
+            } => self.bind_quantified_subquery(
+                MarkApplyQuantifier::Any,
+                false,
+                left,
+                *compare_op,
+                subquery,
+                arena,
+            ),
             Expr::AllOp {
                 left,
                 compare_op,
-                right,
-            } => self.bind_quantified_op(MarkApplyQuantifier::All, left, compare_op, right, arena),
-            expr => Err(DatabaseError::UnsupportedStmt(expr.to_string())),
+                subquery,
+            } => self.bind_quantified_subquery(
+                MarkApplyQuantifier::All,
+                false,
+                left,
+                *compare_op,
+                subquery,
+                arena,
+            ),
         }
-    }
-
-    fn bind_quantified_op(
-        &mut self,
-        quantifier: MarkApplyQuantifier,
-        left: &Expr,
-        compare_op: &BinaryOperator,
-        right: &Expr,
-        arena: &mut PlanArena,
-    ) -> Result<ScalarExpression, DatabaseError> {
-        let Expr::Subquery(subquery) = right else {
-            return Err(DatabaseError::UnsupportedStmt(format!(
-                "{quantifier:?} only supports subquery operands"
-            )));
-        };
-
-        self.bind_quantified_subquery(quantifier, false, left, compare_op, subquery, arena)
     }
 
     fn bind_quantified_subquery(
@@ -2719,7 +1931,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         quantifier: MarkApplyQuantifier,
         negated: bool,
         expr: &Expr,
-        compare_op: &BinaryOperator,
+        compare_op: expression::BinaryOperator,
         subquery: &Query,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
@@ -2730,7 +1942,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             quantifier,
             negated,
             left_expr,
-            compare_op.clone().try_into()?,
+            compare_op,
             arena,
             |binder, arena| binder.bind_query(subquery, arena),
         )
@@ -2777,43 +1989,17 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
     ) -> Result<ScalarExpression, DatabaseError> {
         // Only this call may be a FROM-clause table function, not the calls in its arguments.
         let table_function_source = std::mem::take(&mut self.table_function_source);
-        let func_span = func.span();
-        let Function {
-            name,
-            args,
-            over,
-            filter,
-            null_treatment,
-            within_group,
-            ..
-        } = func;
-        let (func_args, is_distinct) = match args {
-            FunctionArguments::List(args) => (
-                args.args.as_slice(),
-                matches!(args.duplicate_treatment, Some(DuplicateTreatment::Distinct)),
-            ),
-            FunctionArguments::None => (&[][..], false),
-            FunctionArguments::Subquery(_) => {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "subquery function args are not supported".to_string(),
-                ))
-            }
-        };
-        let mut args = Vec::with_capacity(func_args.len());
+        let func_span = func.span;
+        let mut args = Vec::with_capacity(func.args.len());
 
-        for arg in func_args {
-            let arg_expr = match arg {
-                FunctionArg::Named { arg, .. } => arg,
-                FunctionArg::ExprNamed { arg, .. } => arg,
-                FunctionArg::Unnamed(arg) => arg,
-            };
-            match arg_expr {
-                FunctionArgExpr::Expr(expr) => {
+        for arg in &func.args {
+            match arg {
+                FunctionArg::Expr(expr) => {
                     let expr = self.bind_expr(expr, arena)?;
                     args.push(arena.alloc_expression(expr))
                 }
-                FunctionArgExpr::Wildcard => {
-                    if is_distinct {
+                FunctionArg::Wildcard => {
+                    if func.distinct {
                         return Err(attach_span_if_absent(
                             DatabaseError::UnsupportedStmt(
                                 "DISTINCT cannot be used with *".to_string(),
@@ -2823,22 +2009,11 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                     }
                     args.push(arena.alloc_expression(Self::wildcard_expr()))
                 }
-                expr => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "function arg: {expr:#?}"
-                    )))
-                }
             }
         }
-        let function_name = name.to_string().to_lowercase();
+        let function_name = func.name.to_string().to_lowercase();
 
-        if let Some(over) = over {
-            if filter.is_some() || null_treatment.is_some() || !within_group.is_empty() {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "FILTER, NULL treatment, and WITHIN GROUP are not supported for window functions"
-                        .to_string(),
-                ));
-            }
+        if let Some(over) = &func.over {
             let Some(kind) = WindowFunctionKind::from_name(&function_name) else {
                 return Err(attach_span_if_absent(
                     DatabaseError::UnsupportedStmt(format!(
@@ -2848,12 +2023,12 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 ));
             };
             return self
-                .bind_window_call(kind, args, is_distinct, over, arena)
+                .bind_window_call(kind, args, func.distinct, over, arena)
                 .map_err(|err| attach_span_if_absent(err, func_span));
         }
 
         let result = if let Some(kind) = AggKind::from_name(&function_name) {
-            self.bind_aggregate_function(kind, args, is_distinct, arena)
+            self.bind_aggregate_function(kind, args, func.distinct, arena)
         } else {
             self.table_function_source = table_function_source;
             self.bind_function_call(function_name, args, arena)
@@ -2866,7 +2041,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         kind: WindowFunctionKind,
         args: Vec<ExprRef>,
         is_distinct: bool,
-        over: &WindowType,
+        spec: &WindowSpec,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         if !matches!(
@@ -2882,21 +2057,6 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 "DISTINCT window aggregates are not supported".to_string(),
             ));
         }
-        let WindowType::WindowSpec(spec) = over else {
-            return Err(DatabaseError::UnsupportedStmt(
-                "named windows are not supported".to_string(),
-            ));
-        };
-        if spec.window_name.is_some() {
-            return Err(DatabaseError::UnsupportedStmt(
-                "inherited named windows are not supported".to_string(),
-            ));
-        }
-        if spec.window_frame.is_some() {
-            return Err(DatabaseError::UnsupportedStmt(
-                "explicit window frames are not supported".to_string(),
-            ));
-        }
 
         let partition_by = spec
             .partition_by
@@ -2909,12 +2069,12 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         let order_by = spec
             .order_by
             .iter()
-            .map(|OrderByExpr { expr, options, .. }| {
-                let expr = self.bind_expr(expr, arena)?;
+            .map(|order_by| {
+                let expr = self.bind_expr(&order_by.expr, arena)?;
                 Ok(SortField::new(
                     arena.alloc_expression(expr),
-                    options.asc.unwrap_or(true),
-                    options.nulls_first.unwrap_or(false),
+                    order_by.asc.unwrap_or(true),
+                    order_by.nulls_first.unwrap_or(false),
                 ))
             })
             .collect::<Result<Vec<_>, DatabaseError>>()?;
@@ -2931,42 +2091,28 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             SetExpr::Query(query) => self.bind_query(query, arena),
             SetExpr::SetOperation {
                 op,
-                set_quantifier,
+                all,
                 left,
                 right,
-            } => self.bind_set_operation(op, set_quantifier, left, right, arena),
-            expr => Err(DatabaseError::UnsupportedStmt(format!(
-                "set expression: {expr:?}"
-            ))),
+            } => self.bind_set_operation(*op, *all, left, right, arena),
+            SetExpr::Values(_) => Err(DatabaseError::UnsupportedStmt(
+                "VALUES is not supported in a set operation".to_string(),
+            )),
         }
     }
 
     fn bind_set_operation(
         &mut self,
-        op: &SetOperator,
-        set_quantifier: &SetQuantifier,
+        op: SetOperator,
+        is_all: bool,
         left: &SetExpr,
         right: &SetExpr,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let is_all = match set_quantifier {
-            SetQuantifier::All => true,
-            SetQuantifier::Distinct | SetQuantifier::None => false,
-            SetQuantifier::ByName | SetQuantifier::AllByName | SetQuantifier::DistinctByName => {
-                return Err(DatabaseError::UnsupportedStmt(
-                    "set quantifier BY NAME is not supported".to_string(),
-                ))
-            }
-        };
         let op = match op {
             SetOperator::Union => SetOperatorKind::Union,
             SetOperator::Except => SetOperatorKind::Except,
             SetOperator::Intersect => SetOperatorKind::Intersect,
-            op => {
-                return Err(DatabaseError::UnsupportedStmt(format!(
-                    "set operator: {op:?}"
-                )))
-            }
         };
         let left_plan = {
             let mut left_binder = Binder::new(self.context.fork(), self.args, self.parent);
@@ -2997,31 +2143,17 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
     ) -> Result<LogicalPlan, DatabaseError> {
         let Select {
             optimizer_hint,
+            distinct,
             projection,
+            into,
             from,
             selection,
             group_by,
             having,
-            distinct,
-            into,
-            named_window,
-            qualify,
-            ..
         } = select;
-        if !named_window.is_empty() {
-            return Err(DatabaseError::UnsupportedStmt(
-                "named windows are not supported".to_string(),
-            ));
-        }
-        if qualify.is_some() {
-            return Err(DatabaseError::UnsupportedStmt(
-                "QUALIFY is not supported".to_string(),
-            ));
-        }
         let has_hint = |expected: &str| {
             optimizer_hint.as_ref().is_some_and(|hint| {
-                hint.text
-                    .split(|char: char| char.is_ascii_whitespace() || char == ',')
+                hint.split(|char: char| char.is_ascii_whitespace() || char == ',')
                     .any(|hint| hint.eq_ignore_ascii_case(expected))
             })
         };
@@ -3044,7 +2176,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 .aggregate_sql(group_by, having.as_ref(), orderby)?
                 .having()?
                 .window()?
-                .distinct_sql(distinct.as_ref())?
+                .distinct_sql(*distinct)?
                 .order_by()?
                 .project()?
                 .select_into_sql(into.as_ref())?
@@ -3123,12 +2255,11 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 None,
                 Some(orderbys),
                 |binder, orderby, arena| {
-                    let OrderByExpr { expr, options, .. } = orderby;
-                    let expr = binder.bind_expr(expr, arena)?;
+                    let expr = binder.bind_expr(&orderby.expr, arena)?;
                     Ok(SortField::new(
                         arena.alloc_expression(expr),
-                        options.asc.is_none_or(|asc| asc),
-                        options.nulls_first.unwrap_or(false),
+                        orderby.asc.is_none_or(|asc| asc),
+                        orderby.nulls_first.unwrap_or(false),
                     ))
                 },
                 arena,
@@ -3182,7 +2313,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                         alias: AliasType::Name(alias_name),
                     }));
                 }
-                SelectItem::Wildcard(_) => {
+                SelectItem::Wildcard => {
                     if self.context.bind_table.is_empty() {
                         return Err(DatabaseError::UnsupportedStmt(
                             "SELECT * with no tables specified is not valid".to_string(),
@@ -3205,15 +2336,8 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                         )?;
                     }
                 }
-                SelectItem::QualifiedWildcard(table_name, _) => {
-                    let table_name = match table_name {
-                        SelectItemQualifiedWildcardKind::ObjectName(name) => lower_case_name(name)?,
-                        SelectItemQualifiedWildcardKind::Expr(expr) => {
-                            return Err(DatabaseError::UnsupportedStmt(format!(
-                                "qualified wildcard expr: {expr}"
-                            )))
-                        }
-                    };
+                SelectItem::QualifiedWildcard(name) => {
+                    let table_name = lower_case_name(name)?;
                     Self::bind_table_column_refs(
                         &self.context,
                         arena,
@@ -3230,7 +2354,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
 
     fn bind_cte_plan(
         &mut self,
-        cte: &sqlparser::ast::Cte,
+        cte: &Cte,
         alias: &TableAliasInput,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
@@ -3261,14 +2385,11 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
 
     fn bind_recursive_cte_plan(
         &mut self,
-        cte: &sqlparser::ast::Cte,
+        cte: &Cte,
         alias: &TableAliasInput,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        if cte.query.with.is_some()
-            || cte.query.order_by.is_some()
-            || cte.query.limit_clause.is_some()
-        {
+        if cte.query.with.is_some() || cte.query.order_by.is_some() || cte.query.limit.is_some() {
             return Err(DatabaseError::UnsupportedStmt(
                 "recursive CTE query clauses are not supported".to_string(),
             ));
@@ -3276,7 +2397,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
 
         let SetExpr::SetOperation {
             op: SetOperator::Union,
-            set_quantifier: SetQuantifier::All,
+            all: true,
             left,
             right,
         } = cte.query.body.as_ref()
@@ -3375,21 +2496,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
 
             self.context.cte_depth += 1;
             for cte in &with.cte_tables {
-                if cte.from.is_some() {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "CTE FROM clauses are not supported".to_string(),
-                    ));
-                }
-                if matches!(
-                    cte.materialized,
-                    Some(sqlparser::ast::CteAsMaterialized::Materialized)
-                ) {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "materialized CTEs are not supported".to_string(),
-                    ));
-                }
-
-                let alias = sql_table_alias(cte.alias.clone());
+                let alias = sql_table_alias(&cte.alias);
                 let plan = if with.recursive {
                     self.bind_recursive_cte_plan(cte, &alias, arena)?
                 } else {
@@ -3399,18 +2506,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             }
         }
 
-        let order_by_exprs = if let Some(order_by) = &query.order_by {
-            match &order_by.kind {
-                OrderByKind::Expressions(exprs) => Some(exprs.as_slice()),
-                OrderByKind::All(_) => {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "ORDER BY ALL is not supported".to_string(),
-                    ))
-                }
-            }
-        } else {
-            None
-        };
+        let order_by_exprs = query.order_by.as_deref();
         if order_by_exprs.is_some() {
             let mut body = query.body.as_ref();
             while let SetExpr::Query(inner) = body {
@@ -3428,16 +2524,11 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             SetExpr::Query(query) => self.bind_query(query, arena),
             SetExpr::SetOperation {
                 op,
-                set_quantifier,
+                all,
                 left,
                 right,
-            } => self.bind_set_operation(op, set_quantifier, left, right, arena),
-            SetExpr::Values(values) => self.bind_temp_values(&values.rows, arena),
-            expr => {
-                return Err(DatabaseError::UnsupportedStmt(format!(
-                    "query body: {expr:?}"
-                )))
-            }
+            } => self.bind_set_operation(*op, *all, left, right, arena),
+            SetExpr::Values(rows) => self.bind_temp_values(rows, arena),
         }?;
 
         if !is_plain_select {
@@ -3446,8 +2537,8 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
             }
         }
 
-        if let Some(limit_clause) = &query.limit_clause {
-            plan = self.bind_limit(plan, limit_clause, arena)?;
+        if let Some(limit) = &query.limit {
+            plan = self.bind_limit(plan, limit, arena)?;
         }
 
         self.context.restore_ctes(cte_checkpoint);
@@ -3478,40 +2569,19 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
     fn bind_limit(
         &mut self,
         children: LogicalPlan,
-        limit: &LimitClause,
+        limit: &Limit,
         arena: &mut PlanArena,
     ) -> Result<LogicalPlan, DatabaseError> {
-        let mut limit_value = None;
-        let mut offset_value = None;
-        match limit {
-            LimitClause::LimitOffset {
-                limit: limit_expr,
-                offset: offset_expr,
-                limit_by,
-            } => {
-                if !limit_by.is_empty() {
-                    return Err(DatabaseError::UnsupportedStmt(
-                        "LIMIT BY is not supported".to_string(),
-                    ));
-                }
-
-                if let Some(limit_ast) = limit_expr {
-                    limit_value = Some(self.bind_non_negative_limit_value(limit_ast, arena)?);
-                }
-
-                if let Some(offset_ast) = offset_expr {
-                    offset_value =
-                        Some(self.bind_non_negative_limit_value(&offset_ast.value, arena)?);
-                }
-            }
-            LimitClause::OffsetCommaLimit {
-                offset: offset_expr,
-                limit: limit_expr,
-            } => {
-                limit_value = Some(self.bind_non_negative_limit_value(limit_expr, arena)?);
-                offset_value = Some(self.bind_non_negative_limit_value(offset_expr, arena)?);
-            }
-        }
+        let limit_value = limit
+            .limit
+            .as_ref()
+            .map(|expr| self.bind_non_negative_limit_value(expr, arena))
+            .transpose()?;
+        let offset_value = limit
+            .offset
+            .as_ref()
+            .map(|expr| self.bind_non_negative_limit_value(expr, arena))
+            .transpose()?;
 
         self.bind_limit_values(children, offset_value, limit_value)
     }
@@ -3542,12 +2612,7 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
 mod tests {
     use super::*;
     use crate::binder::test::build_t1_table;
-    use crate::binder::BinderContext;
     use crate::db::DataBaseBuilder;
-    use crate::errors::SqlErrorSpan;
-    use crate::parser::parse_sql;
-    use crate::storage::Storage;
-    use sqlparser::tokenizer::Location;
 
     fn assert_unsupported(err: DatabaseError, expected: &str) {
         let DatabaseError::UnsupportedStmt(message) = err else {
@@ -3634,9 +2699,10 @@ mod tests {
             );
         }
 
-        let err =
-            command_type(&database.prepare_all("start transaction")?.pop().unwrap()).unwrap_err();
-        assert_unsupported(err, "START TRANSACTION");
+        assert_unsupported(
+            database.prepare_all("start transaction").unwrap_err(),
+            "START TRANSACTION",
+        );
 
         Ok(())
     }
@@ -3670,36 +2736,6 @@ mod tests {
     }
 
     #[test]
-    fn test_attach_span_if_absent() {
-        let span = Span::new(Location::new(3, 5), Location::new(3, 5));
-        let err = attach_span_if_absent(DatabaseError::invalid_column("bad"), span);
-        assert_eq!(
-            err.sql_error_span(),
-            Some(&SqlErrorSpan {
-                start: 5,
-                end: 6,
-                line: 3,
-                highlight: None,
-            })
-        );
-
-        let existing = SqlErrorSpan {
-            start: 1,
-            end: 2,
-            line: 1,
-            highlight: None,
-        };
-        let err = attach_span_if_absent(
-            DatabaseError::invalid_column("bad").with_span(existing.clone()),
-            Span::new(Location::new(4, 8), Location::new(4, 9)),
-        );
-        assert_eq!(err.sql_error_span(), Some(&existing));
-
-        let err = attach_span_if_absent(DatabaseError::invalid_column("bad"), Span::empty());
-        assert_eq!(err.sql_error_span(), None);
-    }
-
-    #[test]
     async fn test_alter_table_parser_errors() -> Result<(), DatabaseError> {
         let tables = build_t1_table().await?;
 
@@ -3716,40 +2752,6 @@ mod tests {
             "only a single ALTER TABLE operation",
         );
 
-        let mut stmt = parse_sql("alter table t1 drop column c1")?.pop().unwrap();
-        let Statement::AlterTable(alter) = &mut stmt else {
-            unreachable!("expected alter table statement")
-        };
-        alter.operations = vec![AlterTableOperation::DropColumn {
-            has_column_keyword: true,
-            column_names: vec![Ident::new("c1"), Ident::new("c2")],
-            if_exists: false,
-            drop_behavior: None,
-        }];
-        let scala_functions = Default::default();
-        let table_functions = Default::default();
-        let transaction = tables.storage.transaction()?;
-        let arena = tables.table_arena.borrow();
-        let dialect = crate::dialect::GenericSqlDialect::new();
-        let mut binder = Binder::new(
-            BinderContext::new(
-                &arena.names,
-                &arena.tables,
-                &arena.views,
-                &transaction,
-                &scala_functions,
-                &table_functions,
-                &dialect,
-            ),
-            &[],
-            None,
-        );
-        let mut plan_arena = PlanArena::new(&tables.table_arena);
-        assert_unsupported(
-            binder.bind(&stmt, &mut plan_arena).unwrap_err(),
-            "only dropping a single column",
-        );
-
         assert!(matches!(
             tables
                 .plan("alter table t1 rename column c1 to \"bad-name\"")
@@ -3757,63 +2759,6 @@ mod tests {
             DatabaseError::InvalidColumn { .. }
         ));
 
-        Ok(())
-    }
-
-    #[test]
-    fn sql_type_binding_preserves_unsigned_widths_and_validates_precision(
-    ) -> Result<(), DatabaseError> {
-        use sqlparser::ast::{CharacterLength, ExactNumberInfo, TimezoneInfo};
-        for (sql, expected) in [
-            (DataType::TinyIntUnsigned(None), LogicalType::UTinyint),
-            (DataType::SmallIntUnsigned(None), LogicalType::USmallint),
-            (DataType::UnsignedInteger, LogicalType::UInteger),
-            (DataType::UInt64, LogicalType::UBigint),
-        ] {
-            assert_eq!(LogicalType::try_from(sql)?, expected);
-        }
-        for sql in [
-            DataType::Char(Some(CharacterLength::Max)),
-            DataType::Varchar(Some(CharacterLength::Max)),
-        ] {
-            assert!(matches!(
-                LogicalType::try_from(sql),
-                Err(DatabaseError::UnsupportedStmt(_))
-            ));
-        }
-        #[cfg(feature = "time")]
-        {
-            assert_eq!(
-                LogicalType::try_from(DataType::Time(Some(4), TimezoneInfo::None))?,
-                LogicalType::Time(Some(4))
-            );
-            assert_eq!(
-                LogicalType::try_from(DataType::Timestamp(Some(6), TimezoneInfo::WithTimeZone))?,
-                LogicalType::TimeStamp(Some(6), true)
-            );
-            for sql in [
-                DataType::Time(Some(5), TimezoneInfo::None),
-                DataType::Time(None, TimezoneInfo::WithTimeZone),
-                DataType::Timestamp(Some(2), TimezoneInfo::None),
-                DataType::Datetime(Some(3)),
-            ] {
-                assert!(matches!(
-                    LogicalType::try_from(sql),
-                    Err(DatabaseError::UnsupportedStmt(_))
-                ));
-            }
-        }
-        #[cfg(feature = "decimal")]
-        {
-            assert_eq!(
-                LogicalType::try_from(DataType::Numeric(ExactNumberInfo::Precision(12)))?,
-                LogicalType::Decimal(Some(12), None)
-            );
-            assert_eq!(
-                LogicalType::try_from(DataType::Dec(ExactNumberInfo::PrecisionAndScale(12, 3)))?,
-                LogicalType::Decimal(Some(12), Some(3))
-            );
-        }
         Ok(())
     }
 
@@ -3913,38 +2858,6 @@ mod tests {
 
         assert!(aggregate.force_spill);
         assert!(join.force_nested_loop);
-        Ok(())
-    }
-
-    #[cfg(feature = "copy")]
-    #[test]
-    fn test_copy_file_format_options() -> Result<(), DatabaseError> {
-        let format = copy_file_format(vec![
-            CopyOption::Delimiter('|'),
-            CopyOption::Header(true),
-            CopyOption::Quote('\''),
-            CopyOption::Escape('\\'),
-        ])?;
-        assert_eq!(
-            format,
-            FileFormat::Csv {
-                delimiter: '|',
-                quote: '\'',
-                escape: Some('\\'),
-                header: true,
-            }
-        );
-
-        let source = copy_ext_source(
-            CopyTarget::File {
-                filename: "in.csv".to_string(),
-            },
-            vec![],
-        )?;
-        assert_eq!(source.path, std::path::PathBuf::from("in.csv"));
-        assert!(copy_ext_source(CopyTarget::Stdout, vec![]).is_err());
-        assert!(copy_file_format(vec![CopyOption::Null("NULL".to_string())]).is_err());
-
         Ok(())
     }
 }

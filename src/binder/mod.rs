@@ -42,7 +42,6 @@ mod drop_view;
 mod explain;
 pub mod expr;
 mod insert;
-#[cfg(feature = "parser")]
 mod parser;
 mod select;
 mod show_table;
@@ -52,8 +51,7 @@ mod update;
 mod window;
 
 pub use crate::planner::operator::CommandType;
-#[cfg(feature = "parser")]
-pub use parser::{command_type, Statement};
+pub use parser::command_type;
 #[cfg(feature = "orm")]
 pub use select::{BindPlanFrom, BindPlanSelectList};
 #[cfg(feature = "orm")]
@@ -871,7 +869,7 @@ pub mod test {
                 &[],
                 None,
             );
-            let stmt = crate::parser::parse_sql(sql)?;
+            let stmt = crate::parser::generic::parse_sql(sql)?;
             let stmt = stmt.into_iter().next().unwrap();
 
             binder.bind(&stmt, plan_arena)
