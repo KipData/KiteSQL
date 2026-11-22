@@ -54,7 +54,9 @@ impl TableScanOperator {
         let mut index_infos = Vec::with_capacity(table_catalog.indexes.len());
 
         for index_ref in table_catalog.indexes.iter().copied() {
-            let column_ids = arena.index(index_ref).column_ids.clone();
+            let index = arena.index(index_ref);
+            let has_prefix = index.has_prefix();
+            let column_ids = index.column_ids.clone();
             let mut sort_fields = Vec::with_capacity(column_ids.len());
             for (position, col_id) in column_ids.iter().enumerate() {
                 let (_, column_ref) = table_catalog.get_column_by_id(col_id).ok_or_else(|| {
@@ -70,9 +72,13 @@ impl TableScanOperator {
 
             index_infos.push(IndexInfo {
                 meta: index_ref,
-                sort_option: SortOption::OrderBy {
-                    fields: sort_fields,
-                    ignore_prefix_len: 0,
+                sort_option: if has_prefix {
+                    SortOption::None
+                } else {
+                    SortOption::OrderBy {
+                        fields: sort_fields,
+                        ignore_prefix_len: 0,
+                    }
                 },
                 lookup: None,
                 residual_predicate: None,

@@ -23,6 +23,7 @@ use crate::optimizer::rule::implementation::dql::filter::estimate_predicate_rows
 use crate::planner::operator::{Operator, PhysicalOption, PlanImpl, RowCountOption, SortOption};
 use crate::planner::{LogicalPlan, PlanArena};
 use crate::types::index::{IndexLookup, IndexMeta, IndexType};
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
 static TABLE_SCAN_PATTERN: LazyLock<Pattern> = LazyLock::new(|| Pattern {
@@ -114,14 +115,30 @@ impl ImplementationRule for IndexScanImplementation {
                 let mut ndv = None;
 
                 let index_meta = arena.index(index_info.meta);
-                // A complete, non-NULL unique key can match at most one row.
-                let counted = loader
-                    .collect_count(
-                        scan_op.table_id,
-                        index_meta.id,
-                        range,
-                        &mut state.histogram_buf,
-                    )?
+                let stats_range = match (index_meta.has_prefix(), range) {
+                    (false, range) => Some(Cow::Borrowed(range)),
+                    (true, Range::Eq(value)) if !value.has_parameter() => {
+                        Some(Cow::Owned(Range::Eq(
+                            index_meta
+                                .truncate_key(Cow::Borrowed(value.value()?))?
+                                .into(),
+                        )))
+                    }
+                    _ => None,
+                };
+                let counted = stats_range
+                    .as_deref()
+                    .map(|range| {
+                        loader.collect_count(
+                            scan_op.table_id,
+                            index_meta.id,
+                            range,
+                            &mut state.histogram_buf,
+                        )
+                    })
+                    .transpose()?
+                    .flatten()
+                    // A complete, non-NULL unique key can match at most one row.
                     .or_else(|| unique_eq_row_count(index_meta, range).map(|rows| (rows, rows)));
                 if let Some((mut row_count, distinct_count)) = counted {
                     row_count = adjust_index_row_count(index_meta, range, row_count);

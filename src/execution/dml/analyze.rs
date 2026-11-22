@@ -28,11 +28,12 @@ use crate::planner::operator::analyze::AnalyzeOperator;
 use crate::planner::LogicalPlan;
 use crate::planner::{ExecMetaArena, MetaArena};
 use crate::storage::{table_codec::TableCodec, StorageTransaction};
-use crate::types::index::IndexId;
+use crate::types::index::{IndexId, IndexMetaRef};
 use crate::types::tuple::TupleLike;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId};
 use ordered_float::OrderedFloat;
+use std::borrow::Cow;
 use std::fmt::{self, Formatter};
 use std::mem;
 
@@ -125,13 +126,14 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
                 .collect::<Result<Vec<_>, DatabaseError>>()?;
             let indexes = table
                 .indexes()
-                .map(|index| {
-                    let index = plan_arena.index(*index);
+                .map(|&index_ref| {
+                    let index = plan_arena.index(index_ref);
                     let index_id = index.id;
                     let builder = HistogramBuilder::new(index, relative_error, hll_precision)?;
                     let exprs = index.column_exprs(table).collect::<Result<Vec<_>, _>>()?;
                     Ok(State {
                         index_id,
+                        prefix_index: index.has_prefix().then_some(index_ref),
                         exprs,
                         builder,
                         histogram_buckets: self.histogram_buckets,
@@ -146,15 +148,25 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
             for (_, position, builder) in &mut columns {
                 builder.append(tuple.value_at(*position));
             }
-            for State { exprs, builder, .. } in builders.iter_mut() {
+            for State {
+                exprs,
+                builder,
+                prefix_index,
+                ..
+            } in builders.iter_mut()
+            {
                 let value = match exprs.as_slice() {
-                    [expr] => expr.eval(plan_arena, Some(&tuple))?.into_owned(),
+                    [expr] => expr.eval(plan_arena, Some(&tuple))?,
                     _ => {
                         arena.rewrite(exprs, plan_arena, Some(&tuple))?;
-                        DataValue::Tuple(arena.result_mut().take_values())
+                        Cow::Owned(DataValue::Tuple(arena.result_mut().take_values()))
                     }
                 };
-                builder.append(value)?;
+                let key = match prefix_index {
+                    Some(index) => plan_arena.index(*index).truncate_key(value)?,
+                    None => value.into_owned(),
+                };
+                builder.append(key)?;
             }
         }
         let mut state = arena.local_state(plan_arena);
@@ -178,6 +190,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Analyze<'a> {
 
 struct State {
     index_id: IndexId,
+    prefix_index: Option<IndexMetaRef>,
     exprs: Vec<ScalarExpression>,
     builder: HistogramBuilder,
     histogram_buckets: Option<usize>,

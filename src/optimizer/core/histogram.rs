@@ -155,10 +155,8 @@ impl HistogramBuilder {
         hll_precision: u8,
     ) -> Result<Self, DatabaseError> {
         let mut meta = HistogramMetaBuilder::new(hll_precision)?;
-        if let LogicalType::Tuple(fields) = &index_meta.value_ty {
-            for _ in 1..fields.len() {
-                meta.hlls.push(HyperLogLog::with_precision(hll_precision)?);
-            }
+        for _ in 1..index_meta.value_ty.len() {
+            meta.hlls.push(HyperLogLog::with_precision(hll_precision)?);
         }
         Ok(Self {
             index_id: index_meta.id,
@@ -911,7 +909,7 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "pk_c1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
         }
@@ -919,7 +917,7 @@ mod tests {
 
     fn tuple_index_meta(len: usize) -> IndexMeta {
         IndexMeta {
-            value_ty: LogicalType::Tuple(vec![LogicalType::Integer; len]),
+            value_ty: vec![LogicalType::Integer.into(); len],
             ty: IndexType::PrimaryKey { is_multiple: true },
             ..index_meta()
         }

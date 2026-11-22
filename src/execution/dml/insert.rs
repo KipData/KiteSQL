@@ -114,7 +114,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Insert<'a> {
                 arena.rewrite(exprs, plan_arena, Some(&*tuple))?;
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
-                let index = Index::new(index_meta.id, values, index_meta.ty);
+                let index = Index::from_meta(index_meta, values);
                 transaction
                     .add_index(table_codec, table.table_id, index, tuple_id)
                     .await?;

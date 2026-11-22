@@ -36,10 +36,11 @@ use crate::optimizer::core::cm_sketch::{
 use crate::optimizer::core::histogram::HistogramMeta;
 use crate::optimizer::core::statistics_meta::IndexStatistics;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
+use crate::planner::operator::create_table::UniqueKey;
 use crate::planner::{MetaArena, TableArenaCell};
 use crate::serdes::ReferenceDecodeContext;
 use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
-use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType};
+use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType, IndexValType};
 use crate::types::mapped::MappedScope;
 use crate::types::serialize::{BytesPool, TupleValueSerializableImpl};
 use crate::types::tuple::{Tuple, TupleId, TupleImpl, TupleLike};
@@ -128,29 +129,6 @@ impl Display for TransactionIsolationLevel {
             TransactionIsolationLevel::RepeatableRead => f.write_str("repeatable read"),
         }
     }
-}
-
-pub(crate) fn index_value_type(
-    table: &TableCatalog,
-    arena: &(impl MetaArena + ?Sized),
-    column_ids: &[ColumnId],
-) -> Result<LogicalType, DatabaseError> {
-    let mut value_types = Vec::with_capacity(column_ids.len());
-    for column_id in column_ids {
-        let value_type = table
-            .get_column_by_id(column_id)
-            .map(|(_, column)| arena.column(column))
-            .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?
-            .datatype()
-            .clone();
-        value_types.push(value_type);
-    }
-
-    Ok(if value_types.len() == 1 {
-        value_types.pop().unwrap()
-    } else {
-        LogicalType::Tuple(value_types)
-    })
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -305,15 +283,16 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         table_name: &str,
         index_name: String,
         column_ids: Vec<ColumnId>,
+        value_ty: Vec<IndexValType>,
         ty: IndexType,
         context: &mut ReferenceDecodeContext<'_, Self>,
-    ) -> Result<(TableCatalog, IndexId), DatabaseError> {
+    ) -> Result<(TableCatalog, IndexMetaRef), DatabaseError> {
         let mut table = self
             .load_table(table_codec, plan_arena, table_name, context)
             .await?
             .ok_or(DatabaseError::TableNotFound)?;
-        let index_meta = table.add_index_meta(index_name, column_ids, ty, plan_arena)?;
-        let index_meta = plan_arena.index(index_meta);
+        let index_ref = table.add_index_meta(index_name, column_ids, value_ty, ty, plan_arena)?;
+        let index_meta = plan_arena.index(index_ref);
         let index_id = index_meta.id;
         table_codec.with_index_meta(
             table.id(),
@@ -323,7 +302,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
             |key, value| self.set(key, value),
         )?;
 
-        Ok((table, index_id))
+        Ok((table, index_ref))
     }
 
     async fn add_index<V: TupleLike + ?Sized + MaybeSync>(
@@ -532,7 +511,8 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
                     column_ids: index_meta.column_ids.clone(),
                     table_id: index_meta.table_id,
                     pk_ty: temp_table.primary_keys_type().clone(),
-                    value_ty: index_value_type(&temp_table, plan_arena, &index_meta.column_ids)?,
+                    // Indexed column types cannot change during this metadata rewrite.
+                    value_ty: index_meta.value_ty.clone(),
                     name: index_meta.name.clone(),
                     ty: index_meta.ty,
                 })
@@ -589,6 +569,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
             let meta_ref = table.add_index_meta(
                 format!("uk_{}", column.name()),
                 vec![col_id],
+                vec![column.datatype().clone().into()],
                 IndexType::Unique,
                 plan_arena,
             )?;
@@ -685,7 +666,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         plan_arena: &mut (dyn MetaArena + '_),
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
-        composite_unique_keys: &[Vec<usize>],
+        composite_unique_keys: &[UniqueKey],
         if_not_exists: bool,
     ) -> Result<Option<TableCatalog>, DatabaseError> {
         match self
@@ -1262,7 +1243,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         table_codec: &mut TableCodec,
         arena: &mut (impl MetaArena + ?Sized),
         table: &mut TableCatalog,
-        composite_unique_keys: &[Vec<usize>],
+        composite_unique_keys: &[UniqueKey],
     ) -> Result<(), DatabaseError> {
         let table_id = table.id();
 
@@ -1276,7 +1257,8 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
                 continue;
             }
             let index_name = format!("uk_{}_index", col.name());
-            table.add_index_meta(index_name, vec![col_id], IndexType::Unique, arena)?;
+            let value_ty = vec![col.datatype().clone().into()];
+            table.add_index_meta(index_name, vec![col_id], value_ty, IndexType::Unique, arena)?;
         }
         let primary_keys = table
             .primary_keys()
@@ -1286,10 +1268,24 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         let pk_index_ty = IndexType::PrimaryKey {
             is_multiple: primary_keys.len() != 1,
         };
-        table.add_index_meta("pk_index".to_string(), primary_keys, pk_index_ty, arena)?;
+        let pk_value_ty = table
+            .primary_keys_type()
+            .as_slice()
+            .iter()
+            .cloned()
+            .map(IndexValType::from)
+            .collect();
+        table.add_index_meta(
+            "pk_index".to_string(),
+            primary_keys,
+            pk_value_ty,
+            pk_index_ty,
+            arena,
+        )?;
 
         for (i, key) in composite_unique_keys.iter().enumerate() {
             let column_ids = key
+                .column_positions
                 .iter()
                 .map(|&position| {
                     table
@@ -1297,9 +1293,10 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
                         .and_then(|column| arena.column(column).id())
                         .ok_or(DatabaseError::InvalidIndex)
                 })
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<_, _>>()?;
             let name = format!("uk_composite_index_{}", i + 1);
-            table.add_index_meta(name, column_ids, IndexType::Unique, arena)?;
+            let value_ty = key.index_val_ty.clone();
+            table.add_index_meta(name, column_ids, value_ty, IndexType::Unique, arena)?;
         }
 
         for &meta_ref in table.indexes() {
@@ -1547,10 +1544,7 @@ impl TupleMapping {
         if matches!(meta.ty, IndexType::PrimaryKey { .. }) {
             return None;
         }
-        let tuple_len = match &meta.value_ty {
-            LogicalType::Tuple(tys) => tys.len(),
-            _ => 1,
-        };
+        let tuple_len = meta.value_ty.len();
         let columns_len = deserializers.read_columns().count();
         match indices {
             Some(slots) => Some(TupleMapping::new(slots.iter().copied(), tuple_len)),
@@ -1602,11 +1596,6 @@ impl<T: StorageTransaction> IndexImplParams<'_, T> {
     #[inline]
     pub(crate) fn index_meta(&self) -> &IndexMeta {
         self.meta_arena.index(self.index_meta)
-    }
-
-    #[inline]
-    pub(crate) fn value_ty(&self) -> &LogicalType {
-        &self.index_meta().value_ty
     }
 
     #[inline]
@@ -1929,7 +1918,7 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
         encode_max: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         let meta = params.index_meta();
-        let index = Index::new(meta.id, value.as_slice(), IndexType::Unique);
+        let index = Index::from_meta(meta, value.as_slice());
         if index.values.len() < meta.column_ids.len() || index.is_unique_with_null() {
             return eq_to_res_scope(
                 table_codec,
@@ -1969,7 +1958,7 @@ impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Unique);
+        let index = Index::from_meta(params.index_meta(), value.as_slice());
 
         table_codec
             .with_index(params.table_id, &index, None, async |key, _| {
@@ -2031,7 +2020,7 @@ impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(params.index_meta().id, value.as_slice(), IndexType::Normal);
+        let index = Index::from_meta(params.index_meta(), value.as_slice());
         table_codec
             .with_index(params.table_id, &index, None, async |key, _| {
                 encode_bound_key(out, key, is_upper);
@@ -2084,11 +2073,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(
-            params.index_meta().id,
-            value.as_slice(),
-            IndexType::Composite,
-        );
+        let index = Index::from_meta(params.index_meta(), value.as_slice());
         table_codec
             .with_index(params.table_id, &index, None, async |key, _| {
                 encode_bound_key(out, key, is_upper);
@@ -2109,13 +2094,13 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
         params: &IndexImplParams<'_, T>,
         cover_mapping: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
-        let ty = params.value_ty();
+        let types = &params.index_meta().value_ty;
         match cover_mapping {
             Some(mapping) => TableCodec::decode_index_into(
                 tuple,
                 key,
                 value,
-                ty,
+                types,
                 &mapping.as_ref(),
                 params.with_pk,
             ),
@@ -2123,7 +2108,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
                 tuple,
                 key,
                 value,
-                ty,
+                types,
                 &OrderedMapping,
                 params.with_pk,
             ),
@@ -2159,11 +2144,7 @@ impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
         is_upper: bool,
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
-        let index = Index::new(
-            params.index_meta().id,
-            value.as_slice(),
-            params.index_meta().ty,
-        );
+        let index = Index::from_meta(params.index_meta(), value.as_slice());
         table_codec
             .with_index(params.table_id, &index, None, async |key, _| {
                 encode_bound_key(out, key, is_upper);
@@ -3273,6 +3254,7 @@ mod test {
                 "t1",
                 "i1".to_string(),
                 vec![c3_column_id],
+                vec![LogicalType::Integer.into()],
                 IndexType::Normal,
                 &mut Default::default(),
             )
@@ -3287,6 +3269,7 @@ mod test {
                 "t1",
                 "i2".to_string(),
                 vec![c3_column_id, c2_column_id],
+                vec![LogicalType::Integer.into(), LogicalType::Boolean.into()],
                 IndexType::Composite,
                 &mut Default::default(),
             )
@@ -3306,6 +3289,7 @@ mod test {
             assert_eq!(i1_meta.column_ids, vec![c3_column_id]);
             assert_eq!(i1_meta.table_id, 0);
             assert_eq!(i1_meta.pk_ty, LogicalType::Integer);
+            assert_eq!(i1_meta.value_ty, vec![LogicalType::Integer.into()]);
             assert_eq!(i1_meta.name, "i1".to_string());
             assert_eq!(i1_meta.ty, IndexType::Normal);
 
@@ -3314,6 +3298,10 @@ mod test {
             assert_eq!(i2_meta.column_ids, vec![c3_column_id, c2_column_id]);
             assert_eq!(i2_meta.table_id, 0);
             assert_eq!(i2_meta.pk_ty, LogicalType::Integer);
+            assert_eq!(
+                i2_meta.value_ty,
+                vec![LogicalType::Integer.into(), LogicalType::Boolean.into()]
+            );
             assert_eq!(i2_meta.name, "i2".to_string());
             assert_eq!(i2_meta.ty, IndexType::Composite);
 
@@ -3469,6 +3457,7 @@ mod test {
                 "t1",
                 "i1".to_string(),
                 vec![c3_column_id],
+                vec![LogicalType::Integer.into()],
                 IndexType::Normal,
                 &mut Default::default(),
             )

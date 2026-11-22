@@ -24,6 +24,7 @@ use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::borrow::Cow;
 use std::collections::Bound;
 use std::fmt;
 use std::fmt::Formatter;
@@ -120,12 +121,63 @@ pub struct IndexMeta {
     pub column_ids: Vec<ColumnId>,
     pub table_id: TableId,
     pub pk_ty: LogicalType,
-    pub value_ty: LogicalType,
+    /// One entry per indexed column, in key order.
+    pub value_ty: Vec<IndexValType>,
     pub name: String,
     pub ty: IndexType,
 }
 
+/// An index key part: the column's own type and an optional prefix length.
+/// A string prefix counts characters, a binary prefix counts bytes.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
+pub struct IndexValType {
+    pub ty: LogicalType,
+    pub prefix_len: Option<u32>,
+}
+
+impl IndexValType {
+    pub(crate) fn new(ty: LogicalType, prefix_len: Option<u32>) -> Result<Self, DatabaseError> {
+        if prefix_len.is_some()
+            && !matches!(
+                ty,
+                LogicalType::Char(..) | LogicalType::Varchar(..) | LogicalType::Varbinary(_)
+            )
+        {
+            return Err(DatabaseError::UnsupportedStmt(format!(
+                "index prefix length requires a string or binary column, got {ty}"
+            )));
+        }
+        Ok(Self { ty, prefix_len })
+    }
+}
+
+impl From<LogicalType> for IndexValType {
+    fn from(ty: LogicalType) -> Self {
+        Self {
+            ty,
+            prefix_len: None,
+        }
+    }
+}
+
 impl IndexMeta {
+    pub(crate) fn has_prefix(&self) -> bool {
+        self.value_ty.iter().any(|ty| ty.prefix_len.is_some())
+    }
+
+    pub(crate) fn truncate_key(
+        &self,
+        value: Cow<'_, DataValue>,
+    ) -> Result<DataValue, DatabaseError> {
+        let mut value = value.into_owned();
+        for (part, ty) in value.as_mut_slice().iter_mut().zip(&self.value_ty) {
+            if let Some(truncated) = part.truncate_index_key(ty.prefix_len)? {
+                *part = truncated;
+            }
+        }
+        Ok(value)
+    }
+
     pub(crate) fn column_exprs<'a>(
         &'a self,
         table: &'a TableCatalog,
@@ -144,6 +196,7 @@ pub struct Index<'a, V: TupleLike + ?Sized = [DataValue]> {
     pub id: IndexId,
     pub values: &'a V,
     pub ty: IndexType,
+    pub(crate) key_types: &'a [IndexValType],
 }
 
 impl<V: TupleLike + ?Sized> Clone for Index<'_, V> {
@@ -156,7 +209,21 @@ impl<V: TupleLike + ?Sized> Copy for Index<'_, V> {}
 
 impl<'a, V: TupleLike + ?Sized> Index<'a, V> {
     pub fn new(id: IndexId, values: &'a V, ty: IndexType) -> Self {
-        Index { id, values, ty }
+        Index {
+            id,
+            values,
+            ty,
+            key_types: &[],
+        }
+    }
+
+    pub(crate) fn from_meta(meta: &'a IndexMeta, values: &'a V) -> Self {
+        Self {
+            id: meta.id,
+            values,
+            ty: meta.ty,
+            key_types: &meta.value_ty,
+        }
     }
 
     pub(crate) fn is_unique_with_null(&self) -> bool {
@@ -244,7 +311,7 @@ mod tests {
             column_ids: vec![10],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "idx_t".to_string(),
             ty: IndexType::Normal,
         }
@@ -443,7 +510,7 @@ mod tests {
             column_ids: vec![id_column],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "idx_id".to_string(),
             ty: IndexType::Normal,
         };

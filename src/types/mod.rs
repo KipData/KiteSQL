@@ -76,6 +76,23 @@ pub enum LogicalType {
 }
 
 impl LogicalType {
+    pub(crate) fn from_key_types(
+        mut key_types: impl ExactSizeIterator<Item = Result<Self, DatabaseError>>,
+    ) -> Result<Self, DatabaseError> {
+        if key_types.len() == 1 {
+            key_types.next().ok_or(DatabaseError::InvalidIndex)?
+        } else {
+            key_types.collect::<Result<_, _>>().map(Self::Tuple)
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[Self] {
+        match self {
+            Self::Tuple(types) => types,
+            ty => std::slice::from_ref(ty),
+        }
+    }
+
     pub fn type_trans<T: 'static>() -> Option<LogicalType> {
         let type_id = TypeId::of::<T>();
 

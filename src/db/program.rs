@@ -343,7 +343,7 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "pk".into(),
             ty: IndexType::PrimaryKey { is_multiple: false },
         });
@@ -422,7 +422,7 @@ mod tests {
                 column_ids: vec![1],
                 table_id: 0,
                 pk_ty: LogicalType::Integer,
-                value_ty: LogicalType::Integer,
+                value_ty: vec![LogicalType::Integer.into()],
                 name: "other".into(),
                 ty: IndexType::Normal,
             });

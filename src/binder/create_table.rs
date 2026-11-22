@@ -15,7 +15,7 @@
 use super::{is_valid_identifier, Binder};
 use crate::catalog::{ColumnCatalog, TableName};
 use crate::errors::DatabaseError;
-use crate::planner::operator::create_table::CreateTableOperator;
+use crate::planner::operator::create_table::{CreateTableOperator, UniqueKey};
 use crate::planner::operator::Operator;
 use crate::planner::{Childrens, LogicalPlan};
 use crate::storage::StorageTransaction;
@@ -27,7 +27,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
         &mut self,
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
-        composite_unique_keys: Vec<Vec<usize>>,
+        composite_unique_keys: Vec<UniqueKey>,
         if_not_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut names = HashSet::new();
@@ -68,6 +68,7 @@ mod tests {
     use crate::binder::BinderContext;
     use crate::catalog::ColumnDesc;
     use crate::storage::Storage;
+    use crate::types::index::IndexValType;
     use crate::types::value::DataValue;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
@@ -84,7 +85,7 @@ mod tests {
         let dialect = crate::dialect::GenericSqlDialect::new();
 
         let sql = "create table t1 (id int primary key default 5 null, \
-                   name varchar(10) null, unique (name, id))";
+                   name varchar(10) null, unique (name, id), unique (name(3)))";
         let mut binder = Binder::new(
             BinderContext::new(
                 &names,
@@ -104,10 +105,23 @@ mod tests {
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let plan1 = binder.bind(&stmt, &mut plan_arena).unwrap();
 
+        let name_ty = LogicalType::Varchar(Some(10), CharLengthUnits::Characters);
         match plan1.operator {
             Operator::CreateTable(op) => {
                 assert_eq!(op.table_name, "t1");
-                assert_eq!(op.composite_unique_keys, vec![vec![1, 0]]);
+                assert_eq!(
+                    op.composite_unique_keys,
+                    vec![
+                        UniqueKey {
+                            column_positions: vec![1, 0],
+                            index_val_ty: vec![name_ty.clone().into(), LogicalType::Integer.into()],
+                        },
+                        UniqueKey {
+                            column_positions: vec![1],
+                            index_val_ty: vec![IndexValType::new(name_ty, Some(3))?],
+                        },
+                    ]
+                );
                 let id = &op.columns[0];
                 assert_eq!(id.name(), "id");
                 assert!(!id.nullable());

@@ -17,7 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::{ExprRef, MetaArena, PlanArena};
-use crate::types::index::{IndexMeta, IndexMetaRef, IndexType};
+use crate::types::index::{IndexMeta, IndexMetaRef, IndexType, IndexValType};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
@@ -205,6 +205,7 @@ impl TableCatalog {
         &mut self,
         name: String,
         column_ids: Vec<ColumnId>,
+        value_ty: Vec<IndexValType>,
         ty: IndexType,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<IndexMetaRef, DatabaseError> {
@@ -219,29 +220,11 @@ impl TableCatalog {
             .last()
             .map(|index| arena.index(*index).id + 1)
             .unwrap_or(0);
-        let pk_ty = self.primary_key_type.clone();
-
-        let mut val_tys = Vec::with_capacity(column_ids.len());
-        for column_id in column_ids.iter() {
-            let val_ty = self
-                .get_column_by_id(column_id)
-                .map(|(_, column)| arena.column(column))
-                .ok_or_else(|| DatabaseError::column_not_found(column_id.to_string()))?
-                .datatype()
-                .clone();
-            val_tys.push(val_ty)
-        }
-        let value_ty = if val_tys.len() == 1 {
-            val_tys.pop().unwrap()
-        } else {
-            LogicalType::Tuple(val_tys)
-        };
-
         let index = IndexMeta {
             id: index_id,
             column_ids,
             table_id: self.id,
-            pk_ty,
+            pk_ty: self.primary_key_type.clone(),
             value_ty,
             name,
             ty,
@@ -277,7 +260,7 @@ impl TableCatalog {
         let (primary_keys, primary_key_indices) =
             Self::build_primary_keys(&table_catalog.column_refs, arena);
 
-        table_catalog.primary_key_type = Self::build_primary_key_type(&primary_keys, arena);
+        table_catalog.primary_key_type = Self::build_primary_key_type(&primary_keys, arena)?;
         table_catalog.primary_keys = primary_keys;
         table_catalog.primary_key_indices = primary_key_indices;
 
@@ -287,17 +270,12 @@ impl TableCatalog {
     fn build_primary_key_type(
         primary_keys: &[(usize, ColumnRef)],
         arena: &(impl MetaArena + ?Sized),
-    ) -> LogicalType {
-        if primary_keys.len() == 1 {
-            arena.column(primary_keys[0].1).datatype().clone()
-        } else {
-            LogicalType::Tuple(
-                primary_keys
-                    .iter()
-                    .map(|(_, column)| arena.column(*column).datatype().clone())
-                    .collect_vec(),
-            )
-        }
+    ) -> Result<LogicalType, DatabaseError> {
+        LogicalType::from_key_types(
+            primary_keys
+                .iter()
+                .map(|(_, column)| Ok(arena.column(*column).datatype().clone())),
+        )
     }
 
     pub(crate) fn reload<I, I2>(
@@ -327,7 +305,7 @@ impl TableCatalog {
         }
         let indexes = indexes.map(|index| arena.alloc_index(index)).collect();
         let (primary_keys, primary_key_indices) = Self::build_primary_keys(&column_refs, arena);
-        let primary_key_type = Self::build_primary_key_type(&primary_keys, arena);
+        let primary_key_type = Self::build_primary_key_type(&primary_keys, arena)?;
 
         Ok(TableCatalog {
             id,

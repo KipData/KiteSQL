@@ -24,7 +24,6 @@ use crate::storage::StorageTransaction;
 use crate::types::index::Index;
 use crate::types::tuple::Schema;
 use crate::types::value::DataValue;
-use crate::types::ColumnId;
 
 pub struct CreateIndex<'a> {
     op: &'a CreateIndexOperator,
@@ -69,6 +68,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             table_id,
             index_name,
             columns,
+            index_val_ty,
             if_not_exists,
             ty,
         } = self.op;
@@ -86,37 +86,41 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             return Ok(());
         }
 
-        let (column_ids, column_exprs): (Vec<ColumnId>, Vec<ScalarExpression>) = columns
-            .iter()
-            .copied()
-            .filter_map(|column| {
-                plan_arena.column(column).id().and_then(|id| {
-                    self.input_schema
-                        .iter()
-                        .position(|schema_column| schema_column == &column)
-                        .map(|position| (id, ScalarExpression::column_expr(column, position)))
-                })
-            })
-            .unzip();
+        let mut column_ids = Vec::with_capacity(columns.len());
+        let mut column_exprs = Vec::with_capacity(columns.len());
+        for &column in columns {
+            let id = plan_arena
+                .column(column)
+                .id()
+                .ok_or(DatabaseError::InvalidIndex)?;
+            let position = self
+                .input_schema
+                .iter()
+                .position(|c| *c == column)
+                .ok_or(DatabaseError::InvalidIndex)?;
+            column_ids.push(id);
+            column_exprs.push(ScalarExpression::column_expr(column, position));
+        }
         let index_id_result = {
             let mut decode = arena.decode_context();
             let (transaction, table_codec) = arena.transaction_codec_mut();
-            let (table, index_id) = transaction
+            let (table, index_meta) = transaction
                 .add_index_meta(
                     table_codec,
                     plan_arena,
                     table_catalog.name(),
                     index_name.clone(),
                     column_ids,
+                    index_val_ty.clone(),
                     *ty,
                     &mut decode,
                 )
                 .await?;
             let table_id = table.id();
             arena.push_ddl_apply(DDLApply::upsert_table(table, false));
-            Ok((table_id, index_id))
+            Ok((table_id, index_meta))
         };
-        let (table_id, index_id) = match index_id_result {
+        let (table_id, index_meta) = match index_id_result {
             Ok(ids) => ids,
             Err(DatabaseError::DuplicateIndex(index_name)) => {
                 if *if_not_exists {
@@ -138,7 +142,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
                 let mut state = arena.local_state(plan_arena);
                 let (tuple, transaction, table_codec) = state.tuple_transaction_codec_mut();
                 let tuple_pk = tuple.pk().ok_or(DatabaseError::PrimaryKeyNotFound)?;
-                let index = Index::new(index_id, tuple, *ty);
+                let index = Index::from_meta(plan_arena.index(index_meta), tuple);
                 transaction
                     .add_index(table_codec, table_id, index, tuple_pk)
                     .await?;

@@ -1159,7 +1159,7 @@ mod tests {
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::ExprRef;
     use crate::planner::{Childrens, LogicalPlan, TableArenaCell};
-    use crate::types::index::{IndexInfo, IndexMeta, IndexMetaRef, IndexType};
+    use crate::types::index::{IndexInfo, IndexMeta, IndexMetaRef, IndexType, IndexValType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
 
@@ -1348,7 +1348,7 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "idx_users_id".to_string(),
             ty: IndexType::Normal,
         });
@@ -1681,11 +1681,18 @@ mod tests {
                 Operator::CreateIndex(CreateIndexOperator {
                     table_id: 0,
                     columns: vec![id, name],
+                    index_val_ty: vec![
+                        LogicalType::Integer.into(),
+                        IndexValType {
+                            ty: LogicalType::Varbinary(None),
+                            prefix_len: Some(2),
+                        },
+                    ],
                     index_name: "idx_users_name".to_string(),
                     if_not_exists: false,
-                    ty: IndexType::Normal,
+                    ty: IndexType::Composite,
                 }),
-                "Create Index On users -> [id, name], If Not Exists: false",
+                "Create Index On users -> [id, name(2)], If Not Exists: false",
             ),
             (
                 Operator::CreateView(CreateViewOperator {
@@ -1756,7 +1763,7 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "idx_users_id".to_string(),
             ty: IndexType::Normal,
         });

@@ -240,3 +240,84 @@ true
 
 statement ok
 drop table t_func_default;
+
+# String prefixes count characters, not bytes.
+statement ok
+create table prefix_text (id int primary key, b varchar(20), unique (b(2)));
+
+statement error index prefix length requires a string or binary column
+create index bad on prefix_text (id(2));
+
+statement error index prefix length requires a string or binary column
+create table bad_prefix (id int primary key, unique (id(2)));
+
+statement error PRIMARY KEY index prefixes
+create table bad_prefix (b varchar(20), primary key (b(2)));
+
+statement error
+create index bad on prefix_text (b(0));
+
+statement ok
+insert into prefix_text values (1, '你好A'), (2, '你们B');
+
+statement error the column has been declared unique
+insert into prefix_text values (3, '你好B');
+
+statement ok
+drop table prefix_text;
+
+# The prefix scan rechecks full values before applying LIMIT/OFFSET.
+statement ok
+create table prefix_scan (id int primary key, b char(8));
+
+statement ok
+create index b_prefix on prefix_scan (b(2));
+
+statement ok
+insert into prefix_scan values (1, 'abA'), (2, 'abB'), (3, 'abB'), (4, 'ac'), (5, 'ad'), (6, 'ae'), (7, 'af'), (8, 'ag');
+
+statement ok
+analyze table prefix_scan;
+
+query T
+explain select id, b from prefix_scan where b = 'abB' limit 1 offset 1;
+----
+Projection [prefix_scan.id, prefix_scan.b] [Project => (Sort Option: Follow)] Limit 1, Offset 1 [Limit => (Sort Option: Follow)] TableScan prefix_scan -> [prefix_scan.id, prefix_scan.b], Filter: (cast (prefix_scan.b as Varchar(None, CHARACTERS)) = abB) [IndexScan By b_prefix => abB => (Sort Option: None)]
+
+query IT
+select id, b from prefix_scan where b = 'abB' limit 1 offset 1;
+----
+3 abB
+
+statement ok
+drop table prefix_scan;
+
+# Binary prefixes enforce byte-based uniqueness during backfill and writes.
+statement ok
+create table prefix_binary (id int primary key, b varbinary(10), g int);
+
+statement ok
+insert into prefix_binary values (1, x'00ff01', 10), (2, x'00ff02', 20), (4, x'008001', 10);
+
+statement error the column has been declared unique
+create unique index bad on prefix_binary (b(2));
+
+statement ok
+create unique index b_group on prefix_binary (b(2), g);
+
+statement error the column has been declared unique
+insert into prefix_binary values (3, x'00ff03', 10);
+
+statement ok
+update prefix_binary set b = x'00aa01' where id = 1;
+
+statement ok
+insert into prefix_binary values (3, x'00ff03', 10);
+
+query T
+select b from prefix_binary where b = x'00ff03' and g = 10;
+----
+X'00FF03'
+
+statement ok
+drop table prefix_binary;

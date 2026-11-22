@@ -251,6 +251,7 @@ If `unsafe_txdb_checkpoint` is not enabled, `build_rocksdb()` returns an explici
 - Unique
 - Normal
 - Composite
+- Prefix: `col(n)` in `UNIQUE` constraints and `CREATE INDEX` indexes the first `n` characters of a string or the first `n` bytes of a binary value. Other types and primary key prefixes are rejected. Prefix indexes cannot cover queries; equality candidates are checked against the full row.
 
 ### Supports multiple primary key types
 - Tinyint
