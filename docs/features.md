@@ -354,9 +354,11 @@ If `unsafe_txdb_checkpoint` is not enabled, `build_rocksdb()` returns an explici
 
 ### Custom SQL Dialects
 
-KiteSQL supports pluggable SQL dialects through the `SqlDialect` trait. This allows you to customize parsing, data type mapping, and SQL rewriting. A `Database` parses and binds statements with its current dialect. The default is `GenericSqlDialect`, the standard behaviour.
+KiteSQL supports pluggable SQL dialects through the `SqlDialect` trait. A dialect parses SQL text into KiteSQL's own syntax tree (`kite_sql::ast`), so it may use any parser, and customizes how statements are typed. A `Database` parses and binds statements with its current dialect. The default is `GenericSqlDialect`, the standard behaviour, which parses with sqlparser and needs the `parser` feature.
 
 #### Using a Custom Dialect
+
+With the `sqlite-parser` feature, `SqliteDialect` parses SQLite syntax with SQLite's own grammar (`sqlite3-parser`); statements still run with KiteSQL's semantics, and SQLite syntax KiteSQL does not support is rejected.
 
 Pass a dialect type to the builder when it is fixed at compile time:
 
@@ -387,34 +389,23 @@ After opening a database with `DynDialect`, use `db.switch_dialect(name)` with m
 
 #### Implementing a Custom Dialect
 
-Implement the `SqlDialect` trait to customize behavior:
+Implement the `SqlDialect` trait to customize behavior. A dialect built on sqlparser can parse with `kite_sql::parser::generic::SqlParser`, map its own data types through `DataTypeMapper`, and rewrite the returned statements:
 
 ```rust
+use kite_sql::ast::Statement;
 use kite_sql::dialect::SqlDialect;
 use kite_sql::errors::DatabaseError;
+use kite_sql::parser::generic::{DataTypeMapper, SqlParser};
 use kite_sql::types::LogicalType;
-use sqlparser::ast::{DataType, Statement};
-use sqlparser::dialect::{Dialect as SqlParserDialect, GenericDialect};
+use sqlparser::ast::DataType;
+use sqlparser::dialect::GenericDialect;
 
 #[derive(Debug)]
-struct MyDialect {
-    parser: GenericDialect,
-}
+struct MyDialect;
 
-impl SqlDialect for MyDialect {
-    fn name(&self) -> &str {
-        "my_dialect"
-    }
-
-    fn parser_dialect(&self) -> &dyn SqlParserDialect {
-        &self.parser
-    }
-
-    // Optional: map custom data types
-    fn map_data_type(
-        &self,
-        data_type: &DataType,
-    ) -> Option<Result<LogicalType, DatabaseError>> {
+// Optional: map custom data types
+impl DataTypeMapper for MyDialect {
+    fn map_data_type(&self, data_type: &DataType) -> Option<Result<LogicalType, DatabaseError>> {
         match data_type {
             DataType::Custom(name, _) if name.to_string() == "MY_TYPE" => {
                 Some(Ok(LogicalType::Integer))
@@ -422,11 +413,19 @@ impl SqlDialect for MyDialect {
             _ => None,
         }
     }
+}
 
-    // Optional: rewrite SQL statements before execution
-    fn rewrite(&self, stmt: &mut Statement) -> Result<(), DatabaseError> {
-        // Modify the statement if needed
-        Ok(())
+impl SqlDialect for MyDialect {
+    fn name(&self) -> &str {
+        "my_dialect"
+    }
+
+    fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
+        let statements = SqlParser::new(&GenericDialect {})
+            .with_type_mapper(self)
+            .parse(sql)?;
+        // Optional: rewrite the statements before they are bound
+        Ok(statements)
     }
 }
 ```
@@ -434,11 +433,10 @@ impl SqlDialect for MyDialect {
 The `SqlDialect` trait methods:
 
 - `name()` — Returns the dialect's unique identifier
-- `parser_dialect()` — Returns the sqlparser dialect for parsing SQL
-- `map_data_type()` — Optional hook to map SQL data types in expressions (`CAST`, typed literals) to KiteSQL's `LogicalType`
-- `map_column_type()` — Optional hook to map the data types of column definitions; defaults to `map_data_type()`
-- `rewrite()` — Optional hook to transform each parsed statement before it is bound
+- `parse()` — Parses SQL text into KiteSQL statements; the dialect rejects syntax it does not support and may rewrite the statements
 - `comparison_type()` — Optional hook to pick the type both operands of a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `BETWEEN`) are cast to
 - `boolean_text()` — Optional hook to choose the text of a boolean in `CAST(.. AS CHAR)` or `CAST(.. AS VARCHAR)` (default `'true'`/`'false'`)
+
+`DataTypeMapper::map_data_type()` maps types inside expressions (`CAST`, typed literals); `map_column_type()` maps the types of column definitions and defaults to `map_data_type()`.
 
 By default, the `GenericSqlDialect` is used, which provides standard SQL behavior with no custom transformations.

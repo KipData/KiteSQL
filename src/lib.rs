@@ -117,6 +117,7 @@ compile_error!("features `python`, `shell` and `wasm` use the sync API and exclu
 #[cfg(all(feature = "spill", target_arch = "wasm32"))]
 compile_error!("feature `spill` is not supported on wasm32 targets");
 
+pub mod ast;
 pub mod binder;
 pub mod catalog;
 pub mod db;
@@ -132,7 +133,6 @@ mod maybe_async;
 mod optimizer;
 #[cfg(feature = "orm")]
 pub mod orm;
-#[cfg(feature = "parser")]
 pub mod parser;
 pub mod planner;
 #[cfg(all(not(target_arch = "wasm32"), feature = "python"))]

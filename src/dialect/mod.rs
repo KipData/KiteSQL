@@ -12,58 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::ast::Statement;
 use crate::errors::DatabaseError;
-use sqlparser::ast::Statement;
-use sqlparser::dialect::{Dialect as SqlParserDialect, GenericDialect};
+#[cfg(feature = "parser")]
+use crate::parser::generic::SqlParser;
+#[cfg(feature = "sqlite-parser")]
+use crate::parser::sqlite;
+use crate::types::LogicalType;
+#[cfg(feature = "parser")]
+use sqlparser::dialect::GenericDialect;
 use std::fmt::Debug;
 
 pub const DIALECT_GENERIC: &str = "generic";
+pub const DIALECT_SQLITE: &str = "sqlite";
 
-/// SQL dialect trait for customizing parsing, type mapping, and statement rewriting.
+/// SQL dialect trait: how SQL text becomes KiteSQL statements, and how they are typed.
 ///
-/// Implement this trait to provide dialect-specific behavior. All methods have
-/// default implementations that preserve standard SQL behavior.
+/// [`parse`](Self::parse) owns the syntax: a dialect may use any parser and rewrite the
+/// statements before returning them. The other methods customize binding and have
+/// default implementations that keep the built-in behavior.
 pub trait SqlDialect: Debug + Send + Sync + 'static {
     /// Returns the unique name of this dialect.
     fn name(&self) -> &str;
 
-    /// Returns the sqlparser dialect used for parsing SQL statements.
-    fn parser_dialect(&self) -> &dyn SqlParserDialect;
-
-    /// Rewrites a parsed SQL statement before it is bound.
+    /// Parses SQL text into KiteSQL statements.
     ///
-    /// Called once for every statement parsed with this dialect. The default
-    /// implementation performs no rewriting.
-    fn rewrite(&self, _stmt: &mut Statement) -> Result<(), DatabaseError> {
-        Ok(())
-    }
-
-    /// Maps a SQL data type to KiteSQL's internal logical type.
-    ///
-    /// Used for data types inside expressions, such as `CAST(.. AS type)` and typed
-    /// string literals. Return `Some(Ok(type))` to override the default type mapping, `Some(Err(...))`
-    /// to reject the type, or `None` to use the default mapping.
-    ///
-    /// The default implementation returns `None` for all types.
-    fn map_data_type(
-        &self,
-        _data_type: &sqlparser::ast::DataType,
-    ) -> Option<Result<crate::types::LogicalType, DatabaseError>> {
-        None
-    }
-
-    /// Maps the data type of a column definition to KiteSQL's internal logical type.
-    ///
-    /// Used by `CREATE TABLE`, `ALTER TABLE .. ADD COLUMN` and column type changes; the
-    /// return value follows the same convention as [`map_data_type`](Self::map_data_type).
-    ///
-    /// The default implementation delegates to [`map_data_type`](Self::map_data_type).
-    fn map_column_type(
-        &self,
-        data_type: &sqlparser::ast::DataType,
-    ) -> Option<Result<crate::types::LogicalType, DatabaseError>> {
-        self.map_data_type(data_type)
-    }
+    /// A dialect built on sqlparser can delegate to [`SqlParser`].
+    fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError>;
 
     /// Returns the type both operands of a comparison are cast to before comparing.
     ///
@@ -72,18 +47,14 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
     /// `None` to keep the built-in coercion.
     ///
     /// The default implementation returns `None` for all types.
-    fn comparison_type(
-        &self,
-        _left: &crate::types::LogicalType,
-        _right: &crate::types::LogicalType,
-    ) -> Option<crate::types::LogicalType> {
+    fn comparison_type(&self, _left: &LogicalType, _right: &LogicalType) -> Option<LogicalType> {
         None
     }
 
     /// Returns the text of a boolean in `CAST(.. AS CHAR)` or `CAST(.. AS VARCHAR)`.
     ///
-    /// Called by the binder, so the text is fixed when the statement is bound. Return `Some(text)` to override the text, or `None` to keep the built-in
-    /// `'true'`/`'false'`.
+    /// Called by the binder, so the text is fixed when the statement is bound. Return
+    /// `Some(text)` to override the text, or `None` to keep the built-in `'true'`/`'false'`.
     ///
     /// The default implementation returns `None`.
     fn boolean_text(&self, _value: bool) -> Option<&'static str> {
@@ -92,22 +63,23 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
 }
 
 /// Standard SQL behavior with no customizations; the default dialect.
-#[derive(Debug)]
+///
+/// Parses with sqlparser's generic dialect, so it needs the `parser` feature.
+#[derive(Debug, Default)]
 pub struct GenericSqlDialect {
-    parser: GenericDialect,
+    recursion_limit: Option<usize>,
 }
 
 impl GenericSqlDialect {
     pub fn new() -> Self {
-        Self {
-            parser: GenericDialect {},
-        }
+        Self::default()
     }
-}
 
-impl Default for GenericSqlDialect {
-    fn default() -> Self {
-        Self::new()
+    /// Limits how deeply nested the parsed SQL may be; unset uses sqlparser's default.
+    /// Higher limits may require a larger thread stack for deeply nested SQL.
+    pub fn with_recursion_limit(mut self, limit: usize) -> Self {
+        self.recursion_limit = Some(limit);
+        self
     }
 }
 
@@ -116,8 +88,43 @@ impl SqlDialect for GenericSqlDialect {
         DIALECT_GENERIC
     }
 
-    fn parser_dialect(&self) -> &dyn SqlParserDialect {
-        &self.parser
+    #[cfg(feature = "parser")]
+    fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
+        let mut parser = SqlParser::new(&GenericDialect {});
+        if let Some(limit) = self.recursion_limit {
+            if limit == 0 {
+                return Err(DatabaseError::InvalidValue(
+                    "parser recursion limit must be >= 1".to_string(),
+                ));
+            }
+            parser = parser.with_recursion_limit(limit);
+        }
+        parser.parse(sql)
+    }
+
+    #[cfg(not(feature = "parser"))]
+    fn parse(&self, _: &str) -> Result<Vec<Statement>, DatabaseError> {
+        Err(DatabaseError::UnsupportedStmt(
+            "parsing SQL with `GenericSqlDialect` requires the `parser` feature".to_string(),
+        ))
+    }
+}
+
+/// SQLite syntax, parsed with SQLite's own grammar (`sqlite3-parser`).
+///
+/// Statements are typed and run with KiteSQL's semantics.
+#[cfg(feature = "sqlite-parser")]
+#[derive(Debug, Default)]
+pub struct SqliteDialect;
+
+#[cfg(feature = "sqlite-parser")]
+impl SqlDialect for SqliteDialect {
+    fn name(&self) -> &str {
+        DIALECT_SQLITE
+    }
+
+    fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
+        sqlite::parse_sql(sql)
     }
 }
 
@@ -188,33 +195,11 @@ impl SqlDialect for DynDialect {
         self.current().name()
     }
 
-    fn parser_dialect(&self) -> &dyn SqlParserDialect {
-        self.current().parser_dialect()
+    fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
+        self.current().parse(sql)
     }
 
-    fn rewrite(&self, stmt: &mut Statement) -> Result<(), DatabaseError> {
-        self.current().rewrite(stmt)
-    }
-
-    fn map_data_type(
-        &self,
-        data_type: &sqlparser::ast::DataType,
-    ) -> Option<Result<crate::types::LogicalType, DatabaseError>> {
-        self.current().map_data_type(data_type)
-    }
-
-    fn map_column_type(
-        &self,
-        data_type: &sqlparser::ast::DataType,
-    ) -> Option<Result<crate::types::LogicalType, DatabaseError>> {
-        self.current().map_column_type(data_type)
-    }
-
-    fn comparison_type(
-        &self,
-        left: &crate::types::LogicalType,
-        right: &crate::types::LogicalType,
-    ) -> Option<crate::types::LogicalType> {
+    fn comparison_type(&self, left: &LogicalType, right: &LogicalType) -> Option<LogicalType> {
         self.current().comparison_type(left, right)
     }
 
@@ -223,30 +208,21 @@ impl SqlDialect for DynDialect {
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, feature = "parser", not(target_arch = "wasm32")))]
 #[maybe_async]
 mod tests {
     use super::*;
+    use crate::ast::{Expr, Value, ValueWithSpan};
     use crate::db::{DataBaseBuilder, Database};
+    use crate::parser::generic::DataTypeMapper;
     use crate::storage::Storage;
     use crate::types::value::DataValue;
-    use crate::types::LogicalType;
-    use sqlparser::ast::{DataType, Expr, LimitClause, Value};
+    use sqlparser::ast::DataType;
 
-    #[derive(Debug, Default)]
-    struct TestDialect {
-        parser: GenericDialect,
-    }
+    #[derive(Debug)]
+    struct TestDialect;
 
-    impl SqlDialect for TestDialect {
-        fn name(&self) -> &str {
-            "test"
-        }
-
-        fn parser_dialect(&self) -> &dyn SqlParserDialect {
-            &self.parser
-        }
-
+    impl DataTypeMapper for TestDialect {
         fn map_data_type(
             &self,
             data_type: &DataType,
@@ -254,17 +230,30 @@ mod tests {
             matches!(data_type, DataType::Custom(name, _) if name.to_string() == "test_int")
                 .then_some(Ok(LogicalType::Integer))
         }
+    }
 
-        fn rewrite(&self, stmt: &mut Statement) -> Result<(), DatabaseError> {
-            if let Statement::Query(query) = stmt {
-                if let Some(LimitClause::LimitOffset {
-                    limit: Some(limit), ..
-                }) = &mut query.limit_clause
-                {
-                    *limit = Expr::Value(Value::Number("1".to_string(), false).into());
+    impl SqlDialect for TestDialect {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
+            let mut statements = SqlParser::new(&GenericDialect {})
+                .with_type_mapper(self)
+                .parse(sql)?;
+            // Rewrites every `LIMIT n` to `LIMIT 1`.
+            for statement in statements.iter_mut() {
+                if let Statement::Query(query) = statement {
+                    if let Some(limit) = query.limit.as_mut().and_then(|limit| limit.limit.as_mut())
+                    {
+                        *limit = Expr::Value(ValueWithSpan {
+                            value: Value::Number("1".to_string()),
+                            span: Default::default(),
+                        });
+                    }
                 }
             }
-            Ok(())
+            Ok(statements)
         }
     }
 
@@ -290,7 +279,7 @@ mod tests {
             .is_err());
 
         let mut db = DataBaseBuilder::path(".")
-            .dialect(TestDialect::default())
+            .dialect(TestDialect)
             .build_in_memory()
             .await?;
         db.ddl("create table t1 (id test_int primary key)").await?;
@@ -311,7 +300,7 @@ mod tests {
         let mut dialect = DynDialect::new();
         assert_eq!(dialect.name(), DIALECT_GENERIC);
         assert!(!dialect.switch("test"));
-        dialect.register(TestDialect::default());
+        dialect.register(TestDialect);
         assert!(dialect.switch("test"));
 
         let db = DataBaseBuilder::path(".")
@@ -329,7 +318,7 @@ mod tests {
     #[test]
     async fn database_switches_dialect_after_build() -> Result<(), DatabaseError> {
         let mut dialect = DynDialect::new();
-        dialect.register(TestDialect::default());
+        dialect.register(TestDialect);
         let mut db = DataBaseBuilder::path(".")
             .dialect(dialect)
             .build_in_memory()
@@ -343,18 +332,16 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Debug, Default)]
-    struct CoercionDialect {
-        parser: GenericDialect,
-    }
+    #[derive(Debug)]
+    struct CoercionDialect;
 
     impl SqlDialect for CoercionDialect {
         fn name(&self) -> &str {
             "test_coercion"
         }
 
-        fn parser_dialect(&self) -> &dyn SqlParserDialect {
-            &self.parser
+        fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
+            GenericSqlDialect::new().parse(sql)
         }
 
         fn comparison_type(&self, left: &LogicalType, right: &LogicalType) -> Option<LogicalType> {
@@ -373,7 +360,7 @@ mod tests {
     async fn comparison_type_and_boolean_text() -> Result<(), DatabaseError> {
         let generic = DataBaseBuilder::path(".").build_in_memory().await?;
         let custom = DataBaseBuilder::path(".")
-            .dialect(CoercionDialect::default())
+            .dialect(CoercionDialect)
             .build_in_memory()
             .await?;
         let sql = "select 10 < '9', 10 = '10.0', 10 in ('9', '10.0'), 10 between '9' and '11', \
@@ -391,6 +378,143 @@ mod tests {
             text(query(&custom, sql).await?),
             ["false", "true", "true", "true", "1", "0", "true"]
         );
+
+        Ok(())
+    }
+
+    /// Each statement in SQLite syntax, and the same statement in the generic dialect's.
+    #[cfg(feature = "sqlite-parser")]
+    const SQLITE_CASES: &[(&str, &str)] = &[
+        (
+            "create table t (id integer primary key, v varchar(10), n int)",
+            "",
+        ),
+        ("create index t_n on t (n)", ""),
+        (
+            "insert into t values (1, 'a''b', 10), (2, 'b', null), (3, 'c', 30)",
+            "",
+        ),
+        (
+            "insert or replace into t values (3, 'c', 31)",
+            "insert overwrite t values (3, 'c', 31)",
+        ),
+        ("update t set n = n + 1 where id = 1", ""),
+        (
+            "select id, v from t where n is not null order by id desc",
+            "",
+        ),
+        (
+            "select v, count(*) from t group by v having count(*) > 0 order by 1",
+            "",
+        ),
+        (
+            "select substr(v, 1, 1), trim(v, 'a'), ltrim('  x') from t order by id",
+            "select substring(v from 1 for 1), trim('a' from v), trim(leading ' ' from '  x') \
+             from t order by id",
+        ),
+        (
+            "select id from t where n between 10 and 40 or v like 'b%' order by id",
+            "",
+        ),
+        ("select id from t where n is null", ""),
+        (
+            "select a.id, b.v from t a join t b using (id) \
+             where not exists (select 1 from t c where c.id > a.id)",
+            "",
+        ),
+        (
+            "select t.id from t, t as u where t.id = u.id order by 1",
+            "",
+        ),
+        (
+            "with c(x) as (select id from t) select x from c order by x limit 2 offset 1",
+            "",
+        ),
+        (
+            "select id, row_number() over (order by id desc) from t order by id",
+            "",
+        ),
+        (
+            "select cast(n as bigint) from t where id in (select id from t where n > 10)",
+            "",
+        ),
+        ("select id from t union all select n from t order by 1", ""),
+        ("select x'0a', true, 1 = 1", ""),
+        ("alter table t add column m int", ""),
+        ("alter table t rename column m to k", ""),
+        ("alter table t drop column k", ""),
+        ("delete from t where id = 2", ""),
+        ("select * from t order by id", ""),
+    ];
+
+    #[cfg(feature = "sqlite-parser")]
+    #[test]
+    async fn sqlite_dialect_matches_generic() -> Result<(), DatabaseError> {
+        let mut generic = DataBaseBuilder::path(".").build_in_memory().await?;
+        let mut sqlite = DataBaseBuilder::path(".")
+            .dialect(SqliteDialect)
+            .build_in_memory()
+            .await?;
+        for (sqlite_sql, generic_sql) in SQLITE_CASES {
+            let generic_sql = if generic_sql.is_empty() {
+                sqlite_sql
+            } else {
+                generic_sql
+            };
+            if sqlite_sql.starts_with("create") || sqlite_sql.starts_with("alter") {
+                generic.ddl(generic_sql).await?;
+                sqlite.ddl(sqlite_sql).await?;
+            } else {
+                let expected = query(&generic, generic_sql).await?;
+                assert_eq!(query(&sqlite, sqlite_sql).await?, expected, "{sqlite_sql}");
+            }
+        }
+        // SQLite syntax KiteSQL does not support is rejected instead of misread.
+        for sql in [
+            "create table typeless (x)",
+            "select 1 collate nocase",
+            "pragma foo",
+        ] {
+            assert!(sqlite.run(sql).await.is_err(), "{sql}");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite-parser")]
+    #[test]
+    async fn database_switches_between_generic_and_sqlite() -> Result<(), DatabaseError> {
+        let mut dialect = DynDialect::new();
+        dialect.register(SqliteDialect);
+        let mut db = DataBaseBuilder::path(".")
+            .dialect(dialect)
+            .build_in_memory()
+            .await?;
+        let one = vec![vec![DataValue::Int32(1)]];
+        // Only the generic grammar has `SUBSTRING(.. FROM .. FOR ..)`;
+        // only SQLite's has `[..]` quoting and postfix `NOTNULL`.
+        let generic_sql = "select id from t where substring(v from 2 for 1) = 'y'";
+        let sqlite_sql = "select [id] from t where substr(v, 2, 1) = 'y' and v notnull";
+
+        // Both dialects share one catalog, so a table created in one is visible in the other.
+        db.ddl("create table t (id int primary key, v varchar)")
+            .await?;
+        db.run("insert into t values (1, 'abc')")
+            .await?
+            .done()
+            .await?;
+        assert!(query(&db, generic_sql).await?.is_empty());
+        assert!(db.run(sqlite_sql).await.is_err());
+
+        assert!(db.switch_dialect(DIALECT_SQLITE));
+        assert!(db.run(generic_sql).await.is_err());
+        db.run("insert or replace into t values (1, 'xyz')")
+            .await?
+            .done()
+            .await?;
+        assert_eq!(query(&db, sqlite_sql).await?, one);
+
+        assert!(db.switch_dialect(DIALECT_GENERIC));
+        assert_eq!(query(&db, generic_sql).await?, one);
 
         Ok(())
     }

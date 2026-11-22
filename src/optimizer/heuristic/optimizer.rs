@@ -873,7 +873,7 @@ mod tests {
             &[],
             None,
         );
-        let stmt = crate::parser::parse_sql(
+        let stmt = crate::parser::generic::parse_sql(
             "select c1, c3 from t1 inner join t2 on c1 = c3 where (c1 > 40 or c1 = 2) and c3 > 22",
         )?;
         let stmt = stmt.into_iter().next().unwrap();

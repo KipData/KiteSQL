@@ -152,10 +152,8 @@ fn run_one(db: &mut Database<LmdbStorage>, sql: &str) {
             let _ = db.ddl(sql);
         }
         CommandType::Analyze => {
-            if let Statement::Analyze(analyze) = statement {
-                if let Some(table_name) = analyze.table_name.as_ref() {
-                    let _ = db.analyze(table_name.to_string());
-                }
+            if let Statement::Analyze { table_name } = statement {
+                let _ = db.analyze(table_name.to_string());
             }
         }
         _ => {

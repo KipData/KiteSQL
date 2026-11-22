@@ -13,8 +13,7 @@
 // limitations under the License.
 
 mod program;
-#[cfg(feature = "parser")]
-pub use crate::binder::Statement;
+pub use crate::ast::Statement;
 use crate::binder::{Binder, BinderContext};
 use crate::dialect::{DynDialect, GenericSqlDialect, SqlDialect};
 use crate::errors::DatabaseError;
@@ -158,7 +157,6 @@ pub struct DataBaseBuilder<D: SqlDialect = GenericSqlDialect> {
     histogram_buckets: Option<usize>,
     hll_precision: Option<u8>,
     statistics_relative_error: Option<f64>,
-    parser_recursion_limit: Option<usize>,
     transaction_isolation: Option<TransactionIsolationLevel>,
     dialect: D,
     #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -193,7 +191,6 @@ impl DataBaseBuilder {
             histogram_buckets: None,
             hll_precision: None,
             statistics_relative_error: None,
-            parser_recursion_limit: None,
             transaction_isolation: None,
             dialect: GenericSqlDialect::new(),
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -201,6 +198,16 @@ impl DataBaseBuilder {
             #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
             lmdb_config: Default::default(),
         }
+    }
+}
+
+impl DataBaseBuilder {
+    /// Sets the SQL parser recursion limit of the default [`GenericSqlDialect`]. Unset uses
+    /// the parser's default limit. Higher limits may require a larger thread stack for
+    /// deeply nested SQL.
+    pub fn parser_recursion_limit(mut self, limit: usize) -> Self {
+        self.dialect = GenericSqlDialect::new().with_recursion_limit(limit);
+        self
     }
 }
 
@@ -232,14 +239,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
         self
     }
 
-    /// Sets the SQL parser recursion limit. Unset uses the parser's default limit.
-    /// Higher limits may require a larger thread stack for deeply nested SQL.
-    #[cfg(feature = "parser")]
-    pub fn parser_recursion_limit(mut self, limit: usize) -> Self {
-        self.parser_recursion_limit = Some(limit);
-        self
-    }
-
     /// Sets the transaction isolation level used by database-created transactions.
     pub fn transaction_isolation(mut self, isolation: TransactionIsolationLevel) -> Self {
         self.transaction_isolation = Some(isolation);
@@ -257,7 +256,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
             histogram_buckets: self.histogram_buckets,
             hll_precision: self.hll_precision,
             statistics_relative_error: self.statistics_relative_error,
-            parser_recursion_limit: self.parser_recursion_limit,
             transaction_isolation: self.transaction_isolation,
             dialect,
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -349,7 +347,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
             self.histogram_buckets,
             self.hll_precision,
             self.statistics_relative_error,
-            self.parser_recursion_limit,
             self.transaction_isolation,
             self.dialect,
         )
@@ -365,7 +362,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
             self.histogram_buckets,
             self.hll_precision,
             self.statistics_relative_error,
-            self.parser_recursion_limit,
             self.transaction_isolation,
             self.dialect,
         )
@@ -381,7 +377,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
             self.histogram_buckets,
             self.hll_precision,
             self.statistics_relative_error,
-            self.parser_recursion_limit,
             self.transaction_isolation,
             self.dialect,
         )
@@ -399,7 +394,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
             self.histogram_buckets,
             self.hll_precision,
             self.statistics_relative_error,
-            self.parser_recursion_limit,
             self.transaction_isolation,
             self.dialect,
         )
@@ -415,7 +409,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
             self.histogram_buckets,
             self.hll_precision,
             self.statistics_relative_error,
-            self.parser_recursion_limit,
             self.transaction_isolation,
             self.dialect,
         )
@@ -432,7 +425,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
             self.histogram_buckets,
             self.hll_precision,
             self.statistics_relative_error,
-            self.parser_recursion_limit,
             self.transaction_isolation,
             self.dialect,
         )
@@ -443,7 +435,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
         histogram_buckets: Option<usize>,
         hll_precision: Option<u8>,
         statistics_relative_error: Option<f64>,
-        parser_recursion_limit: Option<usize>,
         transaction_isolation: Option<TransactionIsolationLevel>,
         dialect: D,
     ) -> Result<Database<T, D>, DatabaseError> {
@@ -469,11 +460,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
                 )));
             }
         }
-        if matches!(parser_recursion_limit, Some(0)) {
-            return Err(DatabaseError::InvalidValue(
-                "parser recursion limit must be >= 1".to_string(),
-            ));
-        }
         let transaction_isolation =
             transaction_isolation.unwrap_or_else(|| storage.default_transaction_isolation());
         storage.validate_transaction_isolation(transaction_isolation)?;
@@ -489,7 +475,6 @@ impl<D: SqlDialect> DataBaseBuilder<D> {
             histogram_buckets,
             hll_precision,
             statistics_relative_error: statistics_relative_error.map(OrderedFloat),
-            parser_recursion_limit,
             dialect,
             _p: Default::default(),
         };
@@ -744,18 +729,11 @@ pub(crate) struct State<S, D> {
     histogram_buckets: Option<usize>,
     hll_precision: Option<u8>,
     statistics_relative_error: Option<OrderedFloat<f64>>,
-    #[cfg_attr(not(feature = "parser"), allow(dead_code))]
-    parser_recursion_limit: Option<usize>,
     dialect: D,
     _p: PhantomData<S>,
 }
 
 impl<S: Storage, D: SqlDialect> State<S, D> {
-    #[cfg(feature = "parser")]
-    pub(crate) fn parser_recursion_limit(&self) -> Option<usize> {
-        self.parser_recursion_limit
-    }
-
     pub(crate) fn dialect(&self) -> &D {
         &self.dialect
     }
@@ -3323,8 +3301,12 @@ pub(crate) mod test {
             .unwrap()
             .to_string()
             .contains("recursion limit exceeded"));
+        let zero = DataBaseBuilder::path(".")
+            .parser_recursion_limit(0)
+            .build_in_memory()
+            .await?;
         assert!(matches!(
-            DataBaseBuilder::path(".").parser_recursion_limit(0).build_in_memory().await,
+            zero.prepare_all("select 1"),
             Err(DatabaseError::InvalidValue(message)) if message == "parser recursion limit must be >= 1"
         ));
         Ok(())

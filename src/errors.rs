@@ -121,8 +121,8 @@ pub enum DatabaseError {
     ParseDate(ParseError),
     ParseFloat(ParseFloatError),
     ParseInt(ParseIntError),
-    #[cfg(feature = "parser")]
-    ParserSql(ParserError),
+    /// The SQL text could not be parsed; the message comes from the dialect's parser.
+    ParserSql(String),
     PrimaryKeyNotFound,
     PrimaryKeyTooManyLayers,
     #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
@@ -230,7 +230,6 @@ impl fmt::Display for DatabaseError {
             Self::ParseDate(err) => write!(f, "parser date: {err}"),
             Self::ParseFloat(err) => write!(f, "parser float: {err}"),
             Self::ParseInt(err) => write!(f, "parser int: {err}"),
-            #[cfg(feature = "parser")]
             Self::ParserSql(err) => write!(f, "parser sql: {err}"),
             Self::PrimaryKeyNotFound => f.write_str("must contain primary key!"),
             Self::PrimaryKeyTooManyLayers => {
@@ -291,8 +290,6 @@ impl Error for DatabaseError {
             Self::ParseDate(err) => Some(err),
             Self::ParseFloat(err) => Some(err),
             Self::ParseInt(err) => Some(err),
-            #[cfg(feature = "parser")]
-            Self::ParserSql(err) => Some(err),
             #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
             Self::Lmdb(err) => Some(err),
             #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -330,7 +327,11 @@ impl_from_database_error!(ParseError, ParseDate);
 impl_from_database_error!(ParseFloatError, ParseFloat);
 impl_from_database_error!(ParseIntError, ParseInt);
 #[cfg(feature = "parser")]
-impl_from_database_error!(ParserError, ParserSql);
+impl From<ParserError> for DatabaseError {
+    fn from(value: ParserError) -> Self {
+        Self::ParserSql(value.to_string())
+    }
+}
 #[cfg(all(not(target_arch = "wasm32"), feature = "lmdb"))]
 impl_from_database_error!(lmdb::Error, Lmdb);
 #[cfg(all(not(target_arch = "wasm32"), feature = "rocksdb"))]
@@ -862,7 +863,6 @@ mod tests {
                 .unwrap_err()
                 .into();
             assert!(err.to_string().starts_with("parser sql:"));
-            assert!(Error::source(&err).is_some());
         }
 
         #[cfg(feature = "decimal")]

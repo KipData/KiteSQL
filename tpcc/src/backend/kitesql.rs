@@ -201,20 +201,15 @@ impl KiteSqlBatch {
         }
         if !statements
             .iter()
-            .all(|statement| matches!(statement, Statement::Analyze(_)))
+            .all(|statement| matches!(statement, Statement::Analyze { .. }))
         {
             return Ok(Self::Statements);
         }
         let mut tables = Vec::with_capacity(statements.len());
         for statement in statements {
-            let Statement::Analyze(analyze) = statement else {
+            let Statement::Analyze { table_name } = statement else {
                 unreachable!("checked above")
             };
-            let table_name = analyze.table_name.as_ref().ok_or_else(|| {
-                kite_sql::errors::DatabaseError::UnsupportedStmt(
-                    "ANALYZE requires table name".to_string(),
-                )
-            })?;
             tables.push(table_name.to_string());
         }
         Ok(Self::Analyze(tables))
