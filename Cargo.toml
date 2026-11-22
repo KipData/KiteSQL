@@ -31,6 +31,7 @@ decimal = ["dep:rust_decimal"]
 macros  = []
 orm     = ["macros"]
 parser  = ["dep:sqlparser"]
+sqlite-parser = ["dep:sqlite3-parser"]
 rocksdb = ["dep:rocksdb"]
 unsafe_txdb_checkpoint = ["rocksdb"]
 lmdb    = ["dep:lmdb", "dep:lmdb-sys"]
@@ -86,6 +87,7 @@ csv                   = { version = "1", optional = true }
 pyo3                  = { version = "0.23", features = ["auto-initialize"], optional = true }
 rust_decimal          = { version = "1", default-features = false, features = ["std"], optional = true }
 sqlparser             = { version = "0.61", default-features = false, features = ["std"], optional = true }
+sqlite3-parser        = { version = "0.17", optional = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 pprof = { version = "0.15", features = ["flamegraph", "criterion"] }

@@ -16,3 +16,5 @@
 
 #[cfg(feature = "parser")]
 pub mod generic;
+#[cfg(feature = "sqlite-parser")]
+pub mod sqlite;

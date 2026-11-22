@@ -358,6 +358,8 @@ KiteSQL supports pluggable SQL dialects through the `SqlDialect` trait. A dialec
 
 #### Using a Custom Dialect
 
+With the `sqlite-parser` feature, `SqliteDialect` parses SQLite syntax with SQLite's own grammar (`sqlite3-parser`); statements still run with KiteSQL's semantics, and SQLite syntax KiteSQL does not support is rejected.
+
 Pass a dialect type to the builder when it is fixed at compile time:
 
 ```rust

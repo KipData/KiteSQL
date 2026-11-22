@@ -5,9 +5,9 @@ WASM_PACK ?= wasm-pack
 SQLLOGIC_PATH ?= tests/slt/**/*.slt
 SQLITE_LOGIC_PATH ?= tests/kitesql-testing/data/sqlite/**/*.slt
 # Every feature except `async`, which excludes the sync storages and bindings.
-SYNC_FEATURES ?= time,copy,decimal,macros,orm,parser,rocksdb,unsafe_txdb_checkpoint,lmdb,pprof,python,shell,spill,wasm
+SYNC_FEATURES ?= time,copy,decimal,macros,orm,parser,sqlite-parser,rocksdb,unsafe_txdb_checkpoint,lmdb,pprof,python,shell,spill,wasm
 # The async path with every feature it supports.
-ASYNC_FEATURES ?= async,time,copy,decimal,macros,orm,parser,spill
+ASYNC_FEATURES ?= async,time,copy,decimal,macros,orm,parser,sqlite-parser,spill
 SQLITE_LOGIC_ARGS ?=
 PYO3_PYTHON ?= /usr/bin/python3.12
 TPCC_MEASURE_TIME ?= 15
@@ -48,7 +48,7 @@ COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --igno
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
-	$(CARGO) test --all --features spill
+	$(CARGO) test --all --features spill,sqlite-parser
 
 ## Run the same unit tests through the async path (`async` feature, SlateDB on an in-memory object store).
 test-async:

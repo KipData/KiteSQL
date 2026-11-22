@@ -16,12 +16,15 @@ use crate::ast::Statement;
 use crate::errors::DatabaseError;
 #[cfg(feature = "parser")]
 use crate::parser::generic::SqlParser;
+#[cfg(feature = "sqlite-parser")]
+use crate::parser::sqlite;
 use crate::types::LogicalType;
 #[cfg(feature = "parser")]
 use sqlparser::dialect::GenericDialect;
 use std::fmt::Debug;
 
 pub const DIALECT_GENERIC: &str = "generic";
+pub const DIALECT_SQLITE: &str = "sqlite";
 
 /// SQL dialect trait: how SQL text becomes KiteSQL statements, and how they are typed.
 ///
@@ -104,6 +107,24 @@ impl SqlDialect for GenericSqlDialect {
         Err(DatabaseError::UnsupportedStmt(
             "parsing SQL with `GenericSqlDialect` requires the `parser` feature".to_string(),
         ))
+    }
+}
+
+/// SQLite syntax, parsed with SQLite's own grammar (`sqlite3-parser`).
+///
+/// Statements are typed and run with KiteSQL's semantics.
+#[cfg(feature = "sqlite-parser")]
+#[derive(Debug, Default)]
+pub struct SqliteDialect;
+
+#[cfg(feature = "sqlite-parser")]
+impl SqlDialect for SqliteDialect {
+    fn name(&self) -> &str {
+        DIALECT_SQLITE
+    }
+
+    fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
+        sqlite::parse_sql(sql)
     }
 }
 
@@ -357,6 +378,143 @@ mod tests {
             text(query(&custom, sql).await?),
             ["false", "true", "true", "true", "1", "0", "true"]
         );
+
+        Ok(())
+    }
+
+    /// Each statement in SQLite syntax, and the same statement in the generic dialect's.
+    #[cfg(feature = "sqlite-parser")]
+    const SQLITE_CASES: &[(&str, &str)] = &[
+        (
+            "create table t (id integer primary key, v varchar(10), n int)",
+            "",
+        ),
+        ("create index t_n on t (n)", ""),
+        (
+            "insert into t values (1, 'a''b', 10), (2, 'b', null), (3, 'c', 30)",
+            "",
+        ),
+        (
+            "insert or replace into t values (3, 'c', 31)",
+            "insert overwrite t values (3, 'c', 31)",
+        ),
+        ("update t set n = n + 1 where id = 1", ""),
+        (
+            "select id, v from t where n is not null order by id desc",
+            "",
+        ),
+        (
+            "select v, count(*) from t group by v having count(*) > 0 order by 1",
+            "",
+        ),
+        (
+            "select substr(v, 1, 1), trim(v, 'a'), ltrim('  x') from t order by id",
+            "select substring(v from 1 for 1), trim('a' from v), trim(leading ' ' from '  x') \
+             from t order by id",
+        ),
+        (
+            "select id from t where n between 10 and 40 or v like 'b%' order by id",
+            "",
+        ),
+        ("select id from t where n is null", ""),
+        (
+            "select a.id, b.v from t a join t b using (id) \
+             where not exists (select 1 from t c where c.id > a.id)",
+            "",
+        ),
+        (
+            "select t.id from t, t as u where t.id = u.id order by 1",
+            "",
+        ),
+        (
+            "with c(x) as (select id from t) select x from c order by x limit 2 offset 1",
+            "",
+        ),
+        (
+            "select id, row_number() over (order by id desc) from t order by id",
+            "",
+        ),
+        (
+            "select cast(n as bigint) from t where id in (select id from t where n > 10)",
+            "",
+        ),
+        ("select id from t union all select n from t order by 1", ""),
+        ("select x'0a', true, 1 = 1", ""),
+        ("alter table t add column m int", ""),
+        ("alter table t rename column m to k", ""),
+        ("alter table t drop column k", ""),
+        ("delete from t where id = 2", ""),
+        ("select * from t order by id", ""),
+    ];
+
+    #[cfg(feature = "sqlite-parser")]
+    #[test]
+    async fn sqlite_dialect_matches_generic() -> Result<(), DatabaseError> {
+        let mut generic = DataBaseBuilder::path(".").build_in_memory().await?;
+        let mut sqlite = DataBaseBuilder::path(".")
+            .dialect(SqliteDialect)
+            .build_in_memory()
+            .await?;
+        for (sqlite_sql, generic_sql) in SQLITE_CASES {
+            let generic_sql = if generic_sql.is_empty() {
+                sqlite_sql
+            } else {
+                generic_sql
+            };
+            if sqlite_sql.starts_with("create") || sqlite_sql.starts_with("alter") {
+                generic.ddl(generic_sql).await?;
+                sqlite.ddl(sqlite_sql).await?;
+            } else {
+                let expected = query(&generic, generic_sql).await?;
+                assert_eq!(query(&sqlite, sqlite_sql).await?, expected, "{sqlite_sql}");
+            }
+        }
+        // SQLite syntax KiteSQL does not support is rejected instead of misread.
+        for sql in [
+            "create table typeless (x)",
+            "select 1 collate nocase",
+            "pragma foo",
+        ] {
+            assert!(sqlite.run(sql).await.is_err(), "{sql}");
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlite-parser")]
+    #[test]
+    async fn database_switches_between_generic_and_sqlite() -> Result<(), DatabaseError> {
+        let mut dialect = DynDialect::new();
+        dialect.register(SqliteDialect);
+        let mut db = DataBaseBuilder::path(".")
+            .dialect(dialect)
+            .build_in_memory()
+            .await?;
+        let one = vec![vec![DataValue::Int32(1)]];
+        // Only the generic grammar has `SUBSTRING(.. FROM .. FOR ..)`;
+        // only SQLite's has `[..]` quoting and postfix `NOTNULL`.
+        let generic_sql = "select id from t where substring(v from 2 for 1) = 'y'";
+        let sqlite_sql = "select [id] from t where substr(v, 2, 1) = 'y' and v notnull";
+
+        // Both dialects share one catalog, so a table created in one is visible in the other.
+        db.ddl("create table t (id int primary key, v varchar)")
+            .await?;
+        db.run("insert into t values (1, 'abc')")
+            .await?
+            .done()
+            .await?;
+        assert!(query(&db, generic_sql).await?.is_empty());
+        assert!(db.run(sqlite_sql).await.is_err());
+
+        assert!(db.switch_dialect(DIALECT_SQLITE));
+        assert!(db.run(generic_sql).await.is_err());
+        db.run("insert or replace into t values (1, 'xyz')")
+            .await?
+            .done()
+            .await?;
+        assert_eq!(query(&db, sqlite_sql).await?, one);
+
+        assert!(db.switch_dialect(DIALECT_GENERIC));
+        assert_eq!(query(&db, generic_sql).await?, one);
 
         Ok(())
     }
