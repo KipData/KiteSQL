@@ -1523,26 +1523,29 @@ impl IndexImpl {
         value_ty: &LogicalType,
         columns: impl ExactSizeIterator<Item = Result<&'a ColumnCatalog, DatabaseError>>,
     ) -> Result<(Vec<ColumnId>, Self), DatabaseError> {
+        let can_cover = !matches!(ty, IndexType::PrimaryKey { .. }) && !ty.has_prefix(value_ty);
         let mut column_ids = Vec::with_capacity(columns.len());
-        let columns = columns.map(|column| -> Result<_, DatabaseError> {
+        let mut cover_types = Vec::with_capacity(if can_cover { columns.len() } else { 0 });
+        for column in columns {
             let column = column?;
             column_ids.push(column.id().ok_or(DatabaseError::InvalidIndex)?);
-            Ok(column)
-        });
-        let index_impl = if matches!(ty, IndexType::PrimaryKey { .. }) || ty.has_prefix(value_ty) {
-            for column in columns {
-                column?;
+            if can_cover {
+                cover_types.push(column.datatype().clone());
             }
+        }
+
+        let index_impl = if can_cover {
+            Self::covered(match <[LogicalType; 1]>::try_from(cover_types) {
+                Ok([cover_ty]) => cover_ty,
+                Err(cover_types) => LogicalType::Tuple(cover_types),
+            })
+        } else {
             match ty {
                 IndexType::PrimaryKey { .. } => Self::PrimaryKey,
                 IndexType::Unique => Self::Unique,
                 IndexType::Normal => Self::Normal,
                 IndexType::Composite => Self::Composite,
             }
-        } else {
-            Self::covered(LogicalType::from_key_types(
-                columns.map(|column| Ok(column?.datatype().clone())),
-            )?)
         };
         Ok((column_ids, index_impl))
     }
