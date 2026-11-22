@@ -17,10 +17,10 @@ use crate::ast;
 use crate::errors::DatabaseError;
 use sqlparser::ast::{
     AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, ColumnDef,
-    ColumnOption, CopyOption, CopySource, CopyTarget, CreateIndex, CreateTable, DescribeAlias,
-    Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, IndexColumn,
-    IndexOption, IndexType, Insert, NullsDistinctOption, ObjectNamePart, ObjectType, OnInsert,
-    Spanned, SqliteOnConflict, Statement, TableConstraint, TableFactor, TableObject,
+    ColumnOption, ContextModifier, CopyOption, CopySource, CopyTarget, CreateIndex, CreateTable,
+    DescribeAlias, Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+    IndexColumn, IndexOption, IndexType, Insert, NullsDistinctOption, ObjectNamePart, ObjectType,
+    OnInsert, Set, Spanned, SqliteOnConflict, Statement, TableConstraint, TableFactor, TableObject,
     TableWithJoins, Value,
 };
 
@@ -167,6 +167,32 @@ impl Lower<'_> {
             },
             Statement::ShowTables { .. } => ast::Statement::ShowTables,
             Statement::ShowViews { .. } => ast::Statement::ShowViews,
+            Statement::StartTransaction {
+                modes,
+                modifier: None,
+                statements,
+                exception: None,
+                ..
+            } if modes.is_empty() && statements.is_empty() => ast::Statement::StartTransaction,
+            Statement::Commit {
+                chain: false,
+                end: false,
+                modifier: None,
+            } => ast::Statement::Commit,
+            Statement::Rollback {
+                chain: false,
+                savepoint: None,
+            } => ast::Statement::Rollback,
+            Statement::Set(Set::SingleAssignment {
+                scope: None | Some(ContextModifier::Session),
+                hivevar: false,
+                variable,
+                values,
+            }) if self.set_autocommit
+                && variable.to_string().eq_ignore_ascii_case("autocommit") =>
+            {
+                ast::Statement::SetAutocommit(autocommit_value(&values)?)
+            }
             statement => return Err(unsupported(statement.to_string())),
         })
     }
@@ -556,6 +582,21 @@ fn copy_format(options: Vec<CopyOption>) -> Result<ast::CopyFormat, DatabaseErro
     Ok(format)
 }
 
+fn autocommit_value(values: &[Expr]) -> Result<bool, DatabaseError> {
+    match values {
+        [Expr::Value(value)] => match &value.value {
+            Value::Number(n, _) if n == "0" => Some(false),
+            Value::Number(n, _) if n == "1" => Some(true),
+            Value::Boolean(value) => Some(*value),
+            _ => None,
+        },
+        [Expr::Identifier(ident)] if ident.value.eq_ignore_ascii_case("on") => Some(true),
+        [Expr::Identifier(ident)] if ident.value.eq_ignore_ascii_case("off") => Some(false),
+        _ => None,
+    }
+    .ok_or_else(|| unsupported("autocommit must be 0, 1, ON or OFF"))
+}
+
 // GRCOV_EXCL_START
 #[cfg(test)]
 mod tests {
@@ -607,9 +648,12 @@ mod tests {
             drop_behavior: None,
         };
         assert_unsupported(
-            Lower { types: &() }
-                .alter_table_operation(operation)
-                .unwrap_err(),
+            Lower {
+                types: &(),
+                set_autocommit: false,
+            }
+            .alter_table_operation(operation)
+            .unwrap_err(),
             "only dropping a single column",
         );
     }

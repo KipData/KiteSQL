@@ -37,6 +37,7 @@ pub struct SqlParser<'a> {
     dialect: &'a dyn SqlParserDialect,
     recursion_limit: Option<usize>,
     types: &'a dyn DataTypeMapper,
+    set_autocommit: bool,
 }
 
 impl<'a> SqlParser<'a> {
@@ -46,6 +47,7 @@ impl<'a> SqlParser<'a> {
             dialect,
             recursion_limit: None,
             types: &(),
+            set_autocommit: false,
         }
     }
 
@@ -61,12 +63,22 @@ impl<'a> SqlParser<'a> {
         self
     }
 
+    /// Accepts `SET autocommit = 0 | 1` (or `ON`/`OFF`, `TRUE`/`FALSE`), which is rejected by
+    /// default like any other `SET`.
+    pub fn with_set_autocommit(mut self) -> Self {
+        self.set_autocommit = true;
+        self
+    }
+
     pub fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
         let mut parser = Parser::new(self.dialect);
         if let Some(limit) = self.recursion_limit {
             parser = parser.with_recursion_limit(limit);
         }
-        let lower = Lower { types: self.types };
+        let lower = Lower {
+            types: self.types,
+            set_autocommit: self.set_autocommit,
+        };
         parser
             .try_with_sql(sql)?
             .parse_statements()?
@@ -95,6 +107,7 @@ pub fn parse_sql<S: AsRef<str>>(sql: S) -> Result<Vec<Statement>, DatabaseError>
 /// Converts sqlparser statements into KiteSQL statements.
 struct Lower<'a> {
     types: &'a dyn DataTypeMapper,
+    set_autocommit: bool,
 }
 
 impl Lower<'_> {

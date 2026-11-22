@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod program;
+mod session;
 pub use crate::ast::Statement;
 use crate::binder::{Binder, BinderContext};
 use crate::dialect::{DynDialect, GenericSqlDialect, SqlDialect};
@@ -62,6 +63,7 @@ use crate::types::value::DataValue;
 use crate::types::LogicalType;
 use ordered_float::OrderedFloat;
 pub use program::{Param, Program, ProgramIter};
+pub use session::{Session, SessionIter};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;

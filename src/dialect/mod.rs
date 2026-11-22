@@ -60,6 +60,15 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
     fn boolean_text(&self, _value: bool) -> Option<&'static str> {
         None
     }
+
+    /// Whether `BEGIN` in a [`Session`](crate::db::Session) that already has a transaction
+    /// open commits that transaction and opens a new one.
+    ///
+    /// The default implementation returns `false`, which rejects such a `BEGIN` and leaves the
+    /// open transaction as it was.
+    fn begin_commits_active_transaction(&self) -> bool {
+        false
+    }
 }
 
 /// Standard SQL behavior with no customizations; the default dialect.
@@ -205,6 +214,10 @@ impl SqlDialect for DynDialect {
 
     fn boolean_text(&self, value: bool) -> Option<&'static str> {
         self.current().boolean_text(value)
+    }
+
+    fn begin_commits_active_transaction(&self) -> bool {
+        self.current().begin_commits_active_transaction()
     }
 }
 

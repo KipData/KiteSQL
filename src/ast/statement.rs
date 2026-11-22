@@ -46,6 +46,12 @@ pub enum Statement {
     },
     ShowTables,
     ShowViews,
+    /// `BEGIN` or `START TRANSACTION`; run through [`Session`](crate::db::Session).
+    StartTransaction,
+    Commit,
+    Rollback,
+    /// `SET autocommit = ..`
+    SetAutocommit(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
