@@ -2399,22 +2399,17 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 list,
                 negated,
             } => {
-                let args: Vec<ExprRef> = list
+                let mut args: Vec<ExprRef> = list
                     .iter()
                     .map(|expr| {
                         self.bind_expr(expr, arena)
                             .map(|expr| arena.alloc_expression(expr))
                     })
                     .try_collect()?;
-                let expr = self
+                let mut expr = self
                     .bind_expr(expr, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
-                let mut operands = Vec::with_capacity(args.len() + 1);
-                operands.push(expr);
-                operands.extend(args);
-                self.coerce_comparison_operands(&mut operands, arena)?;
-                let expr = operands.remove(0);
-                let args = operands;
+                self.coerce_comparison_operands(&mut expr, &mut args, arena)?;
                 Ok(ScalarExpression::In {
                     negated: *negated,
                     evaluator: None,
@@ -2455,18 +2450,17 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
                 low,
                 high,
             } => {
-                let expr = self
+                let mut expr = self
                     .bind_expr(expr, arena)
                     .map(|expr| arena.alloc_expression(expr))?;
-                let left_expr = self
-                    .bind_expr(low, arena)
-                    .map(|expr| arena.alloc_expression(expr))?;
-                let right_expr = self
-                    .bind_expr(high, arena)
-                    .map(|expr| arena.alloc_expression(expr))?;
-                let mut operands = [expr, left_expr, right_expr];
-                self.coerce_comparison_operands(&mut operands, arena)?;
-                let [expr, left_expr, right_expr] = operands;
+                let mut bounds = [
+                    self.bind_expr(low, arena)
+                        .map(|expr| arena.alloc_expression(expr))?,
+                    self.bind_expr(high, arena)
+                        .map(|expr| arena.alloc_expression(expr))?,
+                ];
+                self.coerce_comparison_operands(&mut expr, &mut bounds, arena)?;
+                let [left_expr, right_expr] = bounds;
                 Ok(ScalarExpression::Between {
                     negated: *negated,
                     left_evaluator: None,

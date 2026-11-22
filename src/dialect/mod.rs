@@ -376,18 +376,20 @@ mod tests {
             .dialect(CoercionDialect::default())
             .build_in_memory()
             .await?;
-        let sql = "select 10 < '9', 10 = '10.0', cast(true as varchar), cast(1 = 0 as char(5))";
+        let sql = "select 10 < '9', 10 = '10.0', 10 in ('9', '10.0'), 10 between '9' and '11', \
+                   cast(true as varchar), cast(1 = 0 as char(5)), \
+                   cast(cast(null as boolean) as varchar) is null";
         let text = |rows: Vec<Vec<DataValue>>| -> Vec<String> {
             rows[0].iter().map(ToString::to_string).collect()
         };
 
         assert_eq!(
             text(query(&generic, sql).await?),
-            ["true", "false", "true", "false"]
+            ["true", "false", "false", "false", "true", "false", "true"]
         );
         assert_eq!(
             text(query(&custom, sql).await?),
-            ["false", "true", "1", "0"]
+            ["false", "true", "true", "true", "1", "0", "true"]
         );
 
         Ok(())
