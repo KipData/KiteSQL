@@ -353,7 +353,7 @@ If `unsafe_txdb_checkpoint` is not enabled, `build_rocksdb()` returns an explici
 
 ### Custom SQL Dialects
 
-KiteSQL supports pluggable SQL dialects through the `SqlDialect` trait. This allows you to customize parsing, data type mapping, and SQL rewriting. A `Database` holds one dialect, set when it is built, and every statement it runs is parsed and bound with it. Without one, it uses `GenericSqlDialect`, the standard behaviour.
+KiteSQL supports pluggable SQL dialects through the `SqlDialect` trait. This allows you to customize parsing, data type mapping, and SQL rewriting. A `Database` parses and binds statements with its current dialect. The default is `GenericSqlDialect`, the standard behaviour.
 
 #### Using a Custom Dialect
 
@@ -381,6 +381,8 @@ let db = DataBaseBuilder::path("./my_db")
     .dialect(dialect)
     .build_rocksdb()?;
 ```
+
+After opening a database with `DynDialect`, use `db.switch_dialect(name)` with mutable access to select another registered dialect for subsequent statements.
 
 #### Implementing a Custom Dialect
 

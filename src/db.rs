@@ -16,7 +16,7 @@ mod program;
 #[cfg(feature = "parser")]
 pub use crate::binder::Statement;
 use crate::binder::{Binder, BinderContext};
-use crate::dialect::{GenericSqlDialect, SqlDialect};
+use crate::dialect::{DynDialect, GenericSqlDialect, SqlDialect};
 use crate::errors::DatabaseError;
 pub use crate::execution::Executor;
 use crate::execution::{DDLApply, ExecArena, ExecBuffer, TxnPtr};
@@ -987,6 +987,14 @@ pub struct Database<S: Storage, D: SqlDialect = GenericSqlDialect> {
     pub(crate) storage: S,
     pub(crate) transaction_isolation: TransactionIsolationLevel,
     pub(crate) state: State<S, D>,
+}
+
+impl<S: Storage> Database<S, DynDialect> {
+    /// Selects a registered dialect for subsequent SQL parsing and binding.
+    /// Returns `false` and leaves the dialect unchanged if `name` is not registered.
+    pub fn switch_dialect(&mut self, name: &str) -> bool {
+        self.state.dialect.switch(name)
+    }
 }
 
 impl DDLApply {

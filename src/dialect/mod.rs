@@ -288,4 +288,21 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    async fn database_switches_dialect_after_build() -> Result<(), DatabaseError> {
+        let mut dialect = DynDialect::new();
+        dialect.register(TestDialect::default());
+        let mut db = DataBaseBuilder::path(".")
+            .dialect(dialect)
+            .build_in_memory()
+            .await?;
+
+        let sql = "select cast(7 as test_int)";
+        assert!(query(&db, sql).await.is_err());
+        assert!(db.switch_dialect("test"));
+        assert_eq!(query(&db, sql).await?, vec![vec![DataValue::Int32(7)]]);
+
+        Ok(())
+    }
 }
