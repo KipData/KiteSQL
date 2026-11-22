@@ -815,13 +815,11 @@ where
             columns.push(self.bind_column(column, Some(i))?);
         }
         let mut composite_unique_keys = Vec::new();
-        let supports_prefix_length = self.binder.context.dialect.supports_index_prefix_length();
         for constraint in create.constraints {
             match constraint {
                 TableConstraint::PrimaryKey(primary) => {
                     for (i, part) in primary.columns.iter().enumerate() {
-                        let (position, prefix_len) =
-                            Self::constraint_column(&columns, part, supports_prefix_length)?;
+                        let (position, prefix_len) = Self::constraint_column(&columns, part)?;
                         if prefix_len.is_some() {
                             return Err(DatabaseError::UnsupportedStmt(
                                 "PRIMARY KEY index prefixes".into(),
@@ -835,18 +833,15 @@ where
                     match unique.columns.as_slice() {
                         [] => return Err(DatabaseError::InvalidIndex),
                         [part] if matches!(part.column.expr, Expr::Identifier(_)) => {
-                            let (position, _) = Self::constraint_column(&columns, part, false)?;
+                            let (position, _) = Self::constraint_column(&columns, part)?;
                             columns[position].desc_mut().set_unique();
                         }
                         parts => {
                             let mut column_positions = Vec::with_capacity(parts.len());
                             let mut index_val_ty = Vec::with_capacity(parts.len());
                             for part in parts {
-                                let (position, prefix_len) = Self::constraint_column(
-                                    &columns,
-                                    part,
-                                    supports_prefix_length,
-                                )?;
+                                let (position, prefix_len) =
+                                    Self::constraint_column(&columns, part)?;
                                 column_positions.push(position);
                                 index_val_ty.push(IndexValType::new(
                                     columns[position].datatype().clone(),
@@ -945,15 +940,11 @@ where
     fn constraint_column(
         table_columns: &[ColumnCatalog],
         index_column: &IndexColumn,
-        supports_prefix_length: bool,
     ) -> Result<(usize, Option<u32>), DatabaseError> {
         let expr = &index_column.column.expr;
         let part = match expr {
             Expr::Identifier(ident) => Some((ident, None)),
-            _ if supports_prefix_length => {
-                prefix_key_part(expr).map(|(ident, len)| (ident, Some(len)))
-            }
-            _ => None,
+            _ => prefix_key_part(expr).map(|(ident, len)| (ident, Some(len))),
         };
         let (ident, prefix_len) = part.ok_or_else(|| {
             DatabaseError::UnsupportedStmt(
@@ -1002,7 +993,6 @@ where
             .binder
             .bind_create_index_source(&table_name, self.arena)?;
         let table_id = self.binder.context.table_id(&table_name)?;
-        let supports_prefix_length = self.binder.context.dialect.supports_index_prefix_length();
         let key_parts = create.columns.into_iter().map(|index_column| {
             if index_column.operator_class.is_some()
                 || index_column.column.options.asc == Some(false)
@@ -1014,12 +1004,7 @@ where
                 ));
             }
             let ast = &index_column.column.expr;
-            let prefix = if supports_prefix_length {
-                prefix_key_part(ast)
-            } else {
-                None
-            };
-            let (expr, prefix_len) = match prefix {
+            let (expr, prefix_len) = match prefix_key_part(ast) {
                 Some((ident, len)) => (
                     self.binder
                         .bind_expr(&Expr::Identifier(ident.clone()), self.arena)?,

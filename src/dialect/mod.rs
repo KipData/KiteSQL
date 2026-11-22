@@ -89,18 +89,6 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
     fn boolean_text(&self, _value: bool) -> Option<&'static str> {
         None
     }
-
-    /// Whether index key parts may give a prefix length, as in `col(n)`.
-    ///
-    /// When this returns `true`, a key part `col(n)` with a positive integer `n` in a
-    /// `UNIQUE` constraint or in `CREATE INDEX` indexes the first `n` characters of a
-    /// string or the first `n` bytes of a binary value. Other types and primary key
-    /// prefixes are not supported.
-    ///
-    /// The default implementation returns `false`. [`GenericSqlDialect`] enables this syntax.
-    fn supports_index_prefix_length(&self) -> bool {
-        false
-    }
 }
 
 /// Standard SQL behavior with no customizations; the default dialect.
@@ -130,10 +118,6 @@ impl SqlDialect for GenericSqlDialect {
 
     fn parser_dialect(&self) -> &dyn SqlParserDialect {
         &self.parser
-    }
-
-    fn supports_index_prefix_length(&self) -> bool {
-        true
     }
 }
 
@@ -236,10 +220,6 @@ impl SqlDialect for DynDialect {
 
     fn boolean_text(&self, value: bool) -> Option<&'static str> {
         self.current().boolean_text(value)
-    }
-
-    fn supports_index_prefix_length(&self) -> bool {
-        self.current().supports_index_prefix_length()
     }
 }
 
@@ -412,19 +392,6 @@ mod tests {
             ["false", "true", "true", "true", "1", "0", "true"]
         );
 
-        Ok(())
-    }
-
-    #[test]
-    async fn custom_dialect_rejects_index_prefix_by_default() -> Result<(), DatabaseError> {
-        let mut db = DataBaseBuilder::path(".")
-            .dialect(TestDialect::default())
-            .build_in_memory()
-            .await?;
-        assert!(db
-            .ddl("create table t1 (id int primary key, b varchar(20), unique (b(2)))")
-            .await
-            .is_err());
         Ok(())
     }
 }

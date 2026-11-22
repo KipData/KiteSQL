@@ -251,6 +251,7 @@ If `unsafe_txdb_checkpoint` is not enabled, `build_rocksdb()` returns an explici
 - Unique
 - Normal
 - Composite
+- Prefix: `col(n)` in `UNIQUE` constraints and `CREATE INDEX` indexes the first `n` characters of a string or the first `n` bytes of a binary value. Other types and primary key prefixes are rejected. Prefix indexes cannot cover queries; equality candidates are checked against the full row.
 
 ### Supports multiple primary key types
 - Tinyint
@@ -439,6 +440,5 @@ The `SqlDialect` trait methods:
 - `rewrite()` — Optional hook to transform each parsed statement before it is bound
 - `comparison_type()` — Optional hook to pick the type both operands of a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `BETWEEN`) are cast to
 - `boolean_text()` — Optional hook to choose the text of a boolean in `CAST(.. AS CHAR)` or `CAST(.. AS VARCHAR)` (default `'true'`/`'false'`)
-- `supports_index_prefix_length()` — Controls `col(n)` in `UNIQUE` constraints and `CREATE INDEX`. The built-in `GenericSqlDialect` enables it; custom dialects must opt in. String keys take the first `n` characters; binary keys take the first `n` bytes. Other types and primary key prefixes are rejected. Prefix indexes cannot cover queries; equality candidates are checked against the full row.
 
 By default, the `GenericSqlDialect` is used, which provides standard SQL behavior with no custom transformations.
