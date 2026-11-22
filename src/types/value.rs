@@ -1385,30 +1385,29 @@ impl DataValue {
 
     pub(crate) fn truncate_index_key(
         &self,
-        ty: Option<&LogicalType>,
+        prefix_len: Option<u32>,
     ) -> Result<Option<Self>, DatabaseError> {
-        Ok(match (self, ty) {
-            (Self::Utf8 { value, .. }, Some(LogicalType::Varchar(Some(len), unit))) => {
+        let Some(len) = prefix_len else {
+            return Ok(None);
+        };
+        Ok(match self {
+            Self::Utf8 { value, .. } => {
                 let end = value
                     .char_indices()
-                    .nth(*len as usize)
+                    .nth(len as usize)
                     .map_or(value.len(), |(i, _)| i);
                 Some(Self::Utf8 {
                     value: (&value[..end]).into(),
-                    ty: Utf8Type::Variable(Some(*len)),
-                    unit: *unit,
+                    ty: Utf8Type::Variable(Some(len)),
+                    unit: CharLengthUnits::Characters,
                 })
             }
-            (Self::Binary { value, .. }, Some(LogicalType::Varbinary(Some(len)))) => {
-                Some(Self::Binary {
-                    value: (&value[..value.len().min(*len as usize)]).into(),
-                    len: Some(*len),
-                })
-            }
-            (value, Some(ty)) if !value.is_null() && ty.index_prefix_len().is_some() => {
-                return Err(DatabaseError::InvalidIndex);
-            }
-            _ => None,
+            Self::Binary { value, .. } => Some(Self::Binary {
+                value: (&value[..value.len().min(len as usize)]).into(),
+                len: Some(len),
+            }),
+            Self::Null => None,
+            _ => return Err(DatabaseError::InvalidIndex),
         })
     }
 
@@ -2308,18 +2307,12 @@ mod test {
 
     #[test]
     fn index_key_len_hint_bounds_prefix_encoding() -> Result<(), DatabaseError> {
-        for (value, ty) in [
-            (
-                DataValue::new_utf8("😀😀a long suffix".into()),
-                LogicalType::Varchar(Some(2), CharLengthUnits::Characters),
-            ),
-            (
-                DataValue::from(vec![1; 32]),
-                LogicalType::Varbinary(Some(8)),
-            ),
+        for (value, prefix_len) in [
+            (DataValue::new_utf8("😀😀a long suffix".into()), 2),
+            (DataValue::from(vec![1; 32]), 8),
         ] {
-            let hint = value.index_key_len_hint(ty.index_prefix_len());
-            let key = value.truncate_index_key(Some(&ty))?.unwrap();
+            let hint = value.index_key_len_hint(Some(prefix_len));
+            let key = value.truncate_index_key(Some(prefix_len))?.unwrap();
             let mut bytes = Vec::new();
             key.memcomparable_encode(&mut bytes)?;
             assert!(bytes.len() <= hint);

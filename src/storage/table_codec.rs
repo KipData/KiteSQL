@@ -24,7 +24,7 @@ use crate::optimizer::core::top_n::ColumnTopN;
 use crate::planner::MetaArena;
 use crate::serdes::{ReferenceDecodeContext, ReferenceSerialization};
 use crate::storage::StorageTransaction;
-use crate::types::index::{Index, IndexId, IndexMeta, IndexType, INDEX_ID_LEN};
+use crate::types::index::{Index, IndexId, IndexMeta, IndexType, IndexValType, INDEX_ID_LEN};
 use crate::types::mapped::MappedScope;
 use crate::types::serialize::{BytesPool, TupleValueSerializableImpl};
 use crate::types::tuple::{Tuple, TupleId, TupleLike};
@@ -442,14 +442,9 @@ impl TableCodec {
         {
             let prefix = table_id.to_be_bytes();
             let (lower, value) = self.slots_mut();
+            let prefix_len = |i: usize| index.key_types.get(i).and_then(|ty| ty.prefix_len);
             let values_len = (0..index.values.len())
-                .map(|i| {
-                    let prefix_len = index
-                        .key_types
-                        .get(i)
-                        .and_then(LogicalType::index_prefix_len);
-                    index.values.value_at(i).index_key_len_hint(prefix_len)
-                })
+                .map(|i| index.values.value_at(i).index_key_len_hint(prefix_len(i)))
                 .sum::<usize>();
             let tuple_id_len = tuple_id.map_or(0, DataValue::memcomparable_len_hint);
             lower.reserve(
@@ -465,7 +460,7 @@ impl TableCodec {
             lower.push(BOUND_MIN_TAG);
             for i in 0..index.values.len() {
                 let value = index.values.value_at(i);
-                let truncated = value.truncate_index_key(index.key_types.get(i))?;
+                let truncated = value.truncate_index_key(prefix_len(i))?;
                 truncated
                     .as_ref()
                     .unwrap_or(value)
@@ -918,7 +913,7 @@ impl TableCodec {
         tuple: &mut Tuple,
         key: &[u8],
         value: &[u8],
-        ty: &LogicalType,
+        types: &[IndexValType],
         mapping: &M,
         with_pk: bool,
     ) -> Result<(), DatabaseError> {
@@ -936,12 +931,11 @@ impl TableCodec {
         let start = TUPLE_KEY_PREFIX_LEN + INDEX_ID_LEN + KEY_BOUND_LEN;
         let bytes = key.get(start..).ok_or(DatabaseError::InvalidIndex)?;
         let mut reader = Cursor::new(bytes);
-        let types = ty.as_slice();
         tuple.values.clear();
         tuple
             .values
             .resize(mapping.target_len(types.len()), DataValue::Null);
-        for (index_pos, ty) in types.iter().enumerate() {
+        for (index_pos, IndexValType { ty, .. }) in types.iter().enumerate() {
             match mapping_value(&mut tuple.values, mapping, index_pos)? {
                 Some(target) => *target = DataValue::memcomparable_decode(&mut reader, ty)?,
                 None => DataValue::memcomparable_skip(&mut reader, ty)?,
@@ -1148,7 +1142,7 @@ mod tests {
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::table_codec::{Bytes, TableCodec};
     use crate::storage::TestTransaction;
-    use crate::types::index::{Index, IndexImpl, IndexMeta, IndexType};
+    use crate::types::index::{Index, IndexMeta, IndexType, IndexValType};
     use crate::types::tuple::Tuple;
     use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef, Utf8Type};
     use crate::types::LogicalType;
@@ -1202,13 +1196,13 @@ mod tests {
                 Ok((key.to_vec(), value.to_vec()))
             })
             .await?;
-        let index_ty = LogicalType::Tuple(vec![
-            LogicalType::Integer,
-            varchar.clone(),
-            varchar,
-            char_type,
-            LogicalType::Integer,
-        ]);
+        let index_ty: Vec<IndexValType> = vec![
+            LogicalType::Integer.into(),
+            varchar.clone().into(),
+            varchar.into(),
+            char_type.into(),
+            LogicalType::Integer.into(),
+        ];
         let mapping = TupleMappingRef::new(&[1, usize::MAX, usize::MAX, usize::MAX, 0], 2);
         let mut tuple = Tuple::new(None, Vec::with_capacity(8));
         let allocation = (tuple.values.as_ptr(), tuple.values.capacity());
@@ -1336,10 +1330,9 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "pk_c1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
-            r#impl: IndexImpl::PrimaryKey,
         };
         let mut builder = HistogramBuilder::new(
             &index_meta,
@@ -1511,10 +1504,9 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "index_1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
-            r#impl: IndexImpl::PrimaryKey,
         };
         let bytes =
             table_codec.with_index_meta(0, 0, Some(&index_meta), &plan_arena, |_, value| {
@@ -1766,10 +1758,9 @@ mod tests {
                 column_ids: vec![],
                 table_id,
                 pk_ty: LogicalType::Integer,
-                value_ty: LogicalType::Integer,
+                value_ty: vec![LogicalType::Integer.into()],
                 name: format!("{index_id}_index"),
                 ty: IndexType::PrimaryKey { is_multiple: false },
-                r#impl: IndexImpl::PrimaryKey,
             };
 
             let table_arena = TableArenaCell::default();

@@ -800,10 +800,10 @@ mod test {
     use crate::storage::rocksdb::{OptimisticRocksStorage, RocksStorage};
     use crate::storage::table_codec::TableCodec;
     use crate::storage::{
-        IndexImplParams, IndexIter, IndexIterState, IndexScanView, InnerIter, Iter, IterBounds,
-        Storage, StorageTransaction, TupleMapping,
+        IndexImplEnum, IndexImplParams, IndexIter, IndexIterState, IndexScanView, InnerIter, Iter,
+        IterBounds, PrimaryKeyIndexImpl, Storage, StorageTransaction, TupleMapping,
     };
-    use crate::types::index::{IndexImpl, IndexType};
+    use crate::types::index::IndexType;
     use crate::types::serialize::BytesPool;
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
@@ -1103,7 +1103,7 @@ mod test {
             },
             range_pos: 0,
             state: IndexIterState::Init,
-            inner: &IndexImpl::PrimaryKey,
+            inner: IndexImplEnum::PrimaryKey(PrimaryKeyIndexImpl),
         };
         let range = Range::SortedRanges(ranges.to_vec());
         let mut result = Vec::new();

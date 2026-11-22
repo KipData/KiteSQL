@@ -822,10 +822,9 @@ mod tests {
             column_ids: vec![1, 2],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]),
+            value_ty: vec![LogicalType::Integer.into(); 2],
             name: "unique_c1_c2".to_string(),
             ty: IndexType::Unique,
-            r#impl: crate::types::index::IndexImpl::Unique,
         });
         let first_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 2);
         let second_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c2, 1, 3);
@@ -914,14 +913,9 @@ mod tests {
             column_ids: vec![1, 2, 3],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Tuple(vec![
-                LogicalType::Integer,
-                LogicalType::Integer,
-                LogicalType::Integer,
-            ]),
+            value_ty: vec![LogicalType::Integer.into(); 3],
             name: "idx_c1_c2_c3".to_string(),
             ty: IndexType::Composite,
-            r#impl: crate::types::index::IndexImpl::Composite,
         });
         let c1_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 1);
         let c2_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c2, 1, 2);
@@ -977,14 +971,9 @@ mod tests {
             column_ids: vec![1, 2, 3],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Tuple(vec![
-                LogicalType::Integer,
-                LogicalType::Integer,
-                LogicalType::Integer,
-            ]),
+            value_ty: vec![LogicalType::Integer.into(); 3],
             name: "idx_c1_c2_c3".to_string(),
             ty: IndexType::Composite,
-            r#impl: crate::types::index::IndexImpl::Composite,
         });
         let c1_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 1);
         let c2_gt = cmp_predicate(&mut arena, BinaryOperator::Gt, c2, 1, 2);
@@ -1061,24 +1050,18 @@ mod tests {
             column_ids: vec![c2_id, c3_id, c1_id],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Tuple(vec![
-                LogicalType::Integer,
-                LogicalType::Integer,
-                LogicalType::Integer,
-            ]),
+            value_ty: vec![LogicalType::Integer.into(); 3],
             name: "idx_c2_c3_c1".to_string(),
             ty: IndexType::Composite,
-            r#impl: crate::types::index::IndexImpl::Composite,
         });
         let index_meta_aligned = arena.alloc_index(IndexMeta {
             id: 1,
             column_ids: vec![c1_id, c2_id],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]),
+            value_ty: vec![LogicalType::Integer.into(); 2],
             name: "idx_c1_c2".to_string(),
             ty: IndexType::Composite,
-            r#impl: crate::types::index::IndexImpl::Composite,
         });
 
         let scan_plan = LogicalPlan::new(

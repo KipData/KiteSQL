@@ -1159,7 +1159,7 @@ mod tests {
     use crate::planner::test::PlanArenaTestExt;
     use crate::planner::ExprRef;
     use crate::planner::{Childrens, LogicalPlan, TableArenaCell};
-    use crate::types::index::{IndexInfo, IndexMeta, IndexMetaRef, IndexType};
+    use crate::types::index::{IndexInfo, IndexMeta, IndexMetaRef, IndexType, IndexValType};
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
 
@@ -1348,10 +1348,9 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "idx_users_id".to_string(),
             ty: IndexType::Normal,
-            r#impl: crate::types::index::IndexImpl::Normal,
         });
         assert_eq!(
             PlanImpl::IndexScan(Box::new(index_info(meta)))
@@ -1682,10 +1681,13 @@ mod tests {
                 Operator::CreateIndex(CreateIndexOperator {
                     table_id: 0,
                     columns: vec![id, name],
-                    index_val_ty: LogicalType::Tuple(vec![
-                        LogicalType::Integer,
-                        LogicalType::Varbinary(Some(2)),
-                    ]),
+                    index_val_ty: vec![
+                        LogicalType::Integer.into(),
+                        IndexValType {
+                            ty: LogicalType::Varbinary(None),
+                            prefix_len: Some(2),
+                        },
+                    ],
                     index_name: "idx_users_name".to_string(),
                     if_not_exists: false,
                     ty: IndexType::Composite,
@@ -1761,10 +1763,9 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "idx_users_id".to_string(),
             ty: IndexType::Normal,
-            r#impl: crate::types::index::IndexImpl::Normal,
         });
 
         let cases = [

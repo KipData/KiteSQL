@@ -343,10 +343,9 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "pk".into(),
             ty: IndexType::PrimaryKey { is_multiple: false },
-            r#impl: crate::types::index::IndexImpl::PrimaryKey,
         });
         let original = Range::Scope {
             min: Bound::Unbounded,
@@ -423,10 +422,9 @@ mod tests {
                 column_ids: vec![1],
                 table_id: 0,
                 pk_ty: LogicalType::Integer,
-                value_ty: LogicalType::Integer,
+                value_ty: vec![LogicalType::Integer.into()],
                 name: "other".into(),
                 ty: IndexType::Normal,
-                r#impl: crate::types::index::IndexImpl::Normal,
             });
             let mut scan = LogicalPlan::new(
                 Operator::TableScan(TableScanOperator {

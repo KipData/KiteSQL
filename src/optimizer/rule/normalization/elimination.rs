@@ -1394,12 +1394,11 @@ mod tests {
             column_ids: (1..=len as ColumnId).collect(),
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "idx".to_string(),
             ty: IndexType::PrimaryKey {
                 is_multiple: len > 1,
             },
-            r#impl: crate::types::index::IndexImpl::PrimaryKey,
         });
         let index_info = IndexInfo {
             meta,
@@ -1484,10 +1483,9 @@ mod tests {
                 column_ids: vec![c1_id],
                 table_id: 0,
                 pk_ty: LogicalType::Integer,
-                value_ty: LogicalType::Integer,
+                value_ty: vec![LogicalType::Integer.into()],
                 name: "idx".to_string(),
                 ty: IndexType::PrimaryKey { is_multiple: false },
-                r#impl: crate::types::index::IndexImpl::PrimaryKey,
             }),
             sort_option: sort_option.clone(),
             lookup: None,

@@ -636,7 +636,7 @@ impl<'a, A: MetaArena + ?Sized> RangeDetacher<'a, IndexRangeColumn, A> {
         if prefix_len >= index.column_ids.len() {
             return Ok(None);
         }
-        let composite = matches!(index.value_ty, LogicalType::Tuple(_));
+        let composite = index.value_ty.len() > 1;
         let Range::Scope { min, max } = original else {
             return Ok(None);
         };

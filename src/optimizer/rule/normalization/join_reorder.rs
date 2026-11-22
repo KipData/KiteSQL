@@ -783,8 +783,7 @@ mod tests {
             column_ids: vec![0],
             ty: IndexType::Normal,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
-            r#impl: crate::types::index::IndexImpl::Normal,
+            value_ty: vec![LogicalType::Integer.into()],
         });
         let info = IndexInfo {
             meta,
@@ -1068,7 +1067,7 @@ mod tests {
         for index in [&mut l_index, &mut r_index] {
             index.column_ids.push(1);
             index.ty = IndexType::Composite;
-            index.value_ty = LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]);
+            index.value_ty = vec![LogicalType::Integer.into(); 2];
         }
         let ScalarExpression::ColumnRef { column: l_col, .. } = arena.expression(l) else {
             unreachable!()

@@ -46,6 +46,7 @@ use crate::planner::operator::{CommandType, Operator};
 use crate::planner::MetaArena;
 use crate::planner::{Childrens, ExprRef, LogicalPlan, PlanArena};
 use crate::storage::{Storage, StorageTransaction};
+use crate::types::index::IndexValType;
 use crate::types::value::{DataValue, Utf8Type};
 use crate::types::{CharLengthUnits, ColumnId, LogicalType};
 pub(super) use sqlparser::ast::{
@@ -839,16 +840,19 @@ where
                         }
                         parts => {
                             let mut column_positions = Vec::with_capacity(parts.len());
-                            let index_val_ty =
-                                LogicalType::from_key_types(parts.iter().map(|part| {
-                                    let (position, prefix_len) = Self::constraint_column(
-                                        &columns,
-                                        part,
-                                        supports_prefix_length,
-                                    )?;
-                                    column_positions.push(position);
-                                    columns[position].datatype().index_key_type(prefix_len)
-                                }))?;
+                            let mut index_val_ty = Vec::with_capacity(parts.len());
+                            for part in parts {
+                                let (position, prefix_len) = Self::constraint_column(
+                                    &columns,
+                                    part,
+                                    supports_prefix_length,
+                                )?;
+                                column_positions.push(position);
+                                index_val_ty.push(IndexValType::new(
+                                    columns[position].datatype().clone(),
+                                    prefix_len,
+                                )?);
+                            }
                             composite_unique_keys.push(UniqueKey {
                                 column_positions,
                                 index_val_ty,
@@ -1028,11 +1032,8 @@ where
                     "'CREATE INDEX' by {expr:?}"
                 )));
             };
-            let key_ty = self
-                .arena
-                .column(column)
-                .datatype()
-                .index_key_type(prefix_len)?;
+            let key_ty =
+                IndexValType::new(self.arena.column(column).datatype().clone(), prefix_len)?;
             Ok((column, key_ty))
         });
 

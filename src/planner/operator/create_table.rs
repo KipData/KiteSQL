@@ -14,7 +14,7 @@
 
 use crate::catalog::{ColumnCatalog, TableName};
 use crate::iter_ext::Itertools;
-use crate::types::LogicalType;
+use crate::types::index::IndexValType;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
@@ -22,7 +22,7 @@ use std::fmt::Formatter;
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct UniqueKey {
     pub column_positions: Vec<usize>,
-    pub index_val_ty: LogicalType,
+    pub index_val_ty: Vec<IndexValType>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]

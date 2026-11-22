@@ -17,7 +17,7 @@ use crate::errors::DatabaseError;
 use crate::expression::ScalarExpression;
 use crate::iter_ext::Itertools;
 use crate::planner::{ExprRef, MetaArena, PlanArena};
-use crate::types::index::{IndexImpl, IndexMeta, IndexMetaRef, IndexType};
+use crate::types::index::{IndexMeta, IndexMetaRef, IndexType, IndexValType};
 use crate::types::serialize::TupleValueSerializableImpl;
 use crate::types::tuple::Schema;
 use crate::types::{ColumnId, LogicalType};
@@ -205,9 +205,8 @@ impl TableCatalog {
         &mut self,
         name: String,
         column_ids: Vec<ColumnId>,
-        value_ty: LogicalType,
+        value_ty: Vec<IndexValType>,
         ty: IndexType,
-        r#impl: IndexImpl,
         arena: &mut (impl MetaArena + ?Sized),
     ) -> Result<IndexMetaRef, DatabaseError> {
         for index in self.indexes.iter() {
@@ -221,7 +220,7 @@ impl TableCatalog {
             .last()
             .map(|index| arena.index(*index).id + 1)
             .unwrap_or(0);
-        let index_ref = arena.alloc_index(IndexMeta {
+        let index = IndexMeta {
             id: index_id,
             column_ids,
             table_id: self.id,
@@ -229,8 +228,8 @@ impl TableCatalog {
             value_ty,
             name,
             ty,
-            r#impl,
-        });
+        };
+        let index_ref = arena.alloc_index(index);
         self.indexes.push(index_ref);
         Ok(index_ref)
     }

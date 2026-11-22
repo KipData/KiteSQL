@@ -68,6 +68,7 @@ mod tests {
     use crate::binder::BinderContext;
     use crate::catalog::ColumnDesc;
     use crate::storage::Storage;
+    use crate::types::index::IndexValType;
     use crate::types::value::DataValue;
     use crate::types::CharLengthUnits;
     use crate::types::LogicalType;
@@ -104,6 +105,7 @@ mod tests {
         let mut plan_arena = crate::planner::PlanArena::new(&table_arena);
         let plan1 = binder.bind(&stmt, &mut plan_arena).unwrap();
 
+        let name_ty = LogicalType::Varchar(Some(10), CharLengthUnits::Characters);
         match plan1.operator {
             Operator::CreateTable(op) => {
                 assert_eq!(op.table_name, "t1");
@@ -112,17 +114,11 @@ mod tests {
                     vec![
                         UniqueKey {
                             column_positions: vec![1, 0],
-                            index_val_ty: LogicalType::Tuple(vec![
-                                LogicalType::Varchar(None, CharLengthUnits::Characters),
-                                LogicalType::Integer,
-                            ]),
+                            index_val_ty: vec![name_ty.clone().into(), LogicalType::Integer.into()],
                         },
                         UniqueKey {
                             column_positions: vec![1],
-                            index_val_ty: LogicalType::Varchar(
-                                Some(3),
-                                CharLengthUnits::Characters
-                            ),
+                            index_val_ty: vec![IndexValType::new(name_ty, Some(3))?],
                         },
                     ]
                 );

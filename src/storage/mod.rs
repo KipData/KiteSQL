@@ -40,9 +40,7 @@ use crate::planner::operator::create_table::UniqueKey;
 use crate::planner::{MetaArena, TableArenaCell};
 use crate::serdes::ReferenceDecodeContext;
 use crate::storage::table_codec::{Bytes, IndexStatisticsCodecType, TableCodec, BOUND_MAX_TAG};
-use crate::types::index::{
-    CoveredIndexImpl, Index, IndexId, IndexImpl, IndexMeta, IndexMetaRef, IndexType,
-};
+use crate::types::index::{Index, IndexId, IndexMeta, IndexMetaRef, IndexType, IndexValType};
 use crate::types::mapped::MappedScope;
 use crate::types::serialize::{BytesPool, TupleValueSerializableImpl};
 use crate::types::tuple::{Tuple, TupleId, TupleImpl, TupleLike};
@@ -257,14 +255,13 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         deserializers: &'a TupleDeserializers,
         covered: bool,
     ) -> Result<IndexIter<'a, Self>, DatabaseError> {
-        let meta_arena = arena.table_arena_cell().borrow();
-        let inner = IndexImpl::instance(meta_arena.index(index_meta), covered);
+        let inner = IndexImplEnum::instance(arena.index(index_meta).ty, covered);
 
         Ok(IndexIter {
             bounds: IterBounds::new(offset_option.unwrap_or(0), limit_option),
             params: IndexImplParams {
                 index_meta,
-                meta_arena,
+                meta_arena: arena.table_arena_cell().borrow(),
                 table_id,
                 deserializers,
                 tx: self,
@@ -285,8 +282,8 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         plan_arena: &mut (dyn MetaArena + '_),
         table_name: &str,
         index_name: String,
-        columns: &[ColumnRef],
-        value_ty: LogicalType,
+        column_ids: Vec<ColumnId>,
+        value_ty: Vec<IndexValType>,
         ty: IndexType,
         context: &mut ReferenceDecodeContext<'_, Self>,
     ) -> Result<(TableCatalog, IndexMetaRef), DatabaseError> {
@@ -294,13 +291,7 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
             .load_table(table_codec, plan_arena, table_name, context)
             .await?
             .ok_or(DatabaseError::TableNotFound)?;
-        let (column_ids, index_impl) = IndexImpl::prepare(
-            ty,
-            &value_ty,
-            columns.iter().map(|&column| Ok(plan_arena.column(column))),
-        )?;
-        let index_ref =
-            table.add_index_meta(index_name, column_ids, value_ty, ty, index_impl, plan_arena)?;
+        let index_ref = table.add_index_meta(index_name, column_ids, value_ty, ty, plan_arena)?;
         let index_meta = plan_arena.index(index_ref);
         let index_id = index_meta.id;
         table_codec.with_index_meta(
@@ -514,11 +505,19 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         let index_metas = table
             .indexes()
             .map(|index_meta| {
-                let mut meta = plan_arena.index(*index_meta).clone();
-                meta.pk_ty = temp_table.primary_keys_type().clone();
-                meta
+                let index_meta = plan_arena.index(*index_meta);
+                Ok(IndexMeta {
+                    id: index_meta.id,
+                    column_ids: index_meta.column_ids.clone(),
+                    table_id: index_meta.table_id,
+                    pk_ty: temp_table.primary_keys_type().clone(),
+                    // Indexed column types cannot change during this metadata rewrite.
+                    value_ty: index_meta.value_ty.clone(),
+                    name: index_meta.name.clone(),
+                    ty: index_meta.ty,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, DatabaseError>>()?;
         let updated_table = TableCatalog::reload(
             table.id(),
             table.name().clone(),
@@ -570,9 +569,8 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
             let meta_ref = table.add_index_meta(
                 format!("uk_{}", column.name()),
                 vec![col_id],
-                column.datatype().index_key_type(None)?,
+                vec![column.datatype().clone().into()],
                 IndexType::Unique,
-                IndexImpl::covered(column.datatype().clone()),
                 plan_arena,
             )?;
             let meta = plan_arena.index(meta_ref);
@@ -1259,16 +1257,8 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
                 continue;
             }
             let index_name = format!("uk_{}_index", col.name());
-            let value_ty = col.datatype().index_key_type(None)?;
-            let index_impl = IndexImpl::covered(col.datatype().clone());
-            table.add_index_meta(
-                index_name,
-                vec![col_id],
-                value_ty,
-                IndexType::Unique,
-                index_impl,
-                arena,
-            )?;
+            let value_ty = vec![col.datatype().clone().into()];
+            table.add_index_meta(index_name, vec![col_id], value_ty, IndexType::Unique, arena)?;
         }
         let primary_keys = table
             .primary_keys()
@@ -1278,34 +1268,35 @@ pub trait StorageTransaction: Sized + MaybeSend + MaybeSync + MaybeStatic {
         let pk_index_ty = IndexType::PrimaryKey {
             is_multiple: primary_keys.len() != 1,
         };
+        let pk_value_ty = table
+            .primary_keys_type()
+            .as_slice()
+            .iter()
+            .cloned()
+            .map(IndexValType::from)
+            .collect();
         table.add_index_meta(
             "pk_index".to_string(),
             primary_keys,
-            table.primary_keys_type().clone(),
+            pk_value_ty,
             pk_index_ty,
-            IndexImpl::PrimaryKey,
             arena,
         )?;
 
         for (i, key) in composite_unique_keys.iter().enumerate() {
-            let (column_ids, index_impl) = IndexImpl::prepare(
-                IndexType::Unique,
-                &key.index_val_ty,
-                key.column_positions.iter().map(|&position| {
+            let column_ids = key
+                .column_positions
+                .iter()
+                .map(|&position| {
                     table
                         .column_ref(position)
-                        .map(|column| arena.column(column))
+                        .and_then(|column| arena.column(column).id())
                         .ok_or(DatabaseError::InvalidIndex)
-                }),
-            )?;
-            table.add_index_meta(
-                format!("uk_composite_index_{}", i + 1),
-                column_ids,
-                key.index_val_ty.clone(),
-                IndexType::Unique,
-                index_impl,
-                arena,
-            )?;
+                })
+                .collect::<Result<_, _>>()?;
+            let name = format!("uk_composite_index_{}", i + 1);
+            let value_ty = key.index_val_ty.clone();
+            table.add_index_meta(name, column_ids, value_ty, IndexType::Unique, arena)?;
         }
 
         for &meta_ref in table.indexes() {
@@ -1462,7 +1453,7 @@ async fn encode_bound<'a>(
     is_upper: bool,
     buffer: &'a mut Bytes,
     params: &IndexImplParams<'_, impl StorageTransaction>,
-    inner: &IndexImpl,
+    inner: &IndexImplEnum,
 ) -> Result<Bound<&'a [u8]>, DatabaseError> {
     match bound {
         Bound::Included(val) => {
@@ -1482,7 +1473,7 @@ async fn encode_bound<'a>(
 }
 
 #[maybe_async]
-trait IndexAccess<T: StorageTransaction> {
+trait IndexImpl<T: StorageTransaction> {
     async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1513,52 +1504,22 @@ trait IndexAccess<T: StorageTransaction> {
     ) -> Result<(), DatabaseError>;
 }
 
-impl IndexImpl {
-    fn covered(cover_ty: LogicalType) -> Self {
-        Self::Covered(CoveredIndexImpl { cover_ty })
-    }
+enum IndexImplEnum {
+    PrimaryKey(PrimaryKeyIndexImpl),
+    Unique(UniqueIndexImpl),
+    Normal(NormalIndexImpl),
+    Composite(CompositeIndexImpl),
+    Covered(CoveredIndexImpl),
+}
 
-    fn prepare<'a>(
-        ty: IndexType,
-        value_ty: &LogicalType,
-        columns: impl ExactSizeIterator<Item = Result<&'a ColumnCatalog, DatabaseError>>,
-    ) -> Result<(Vec<ColumnId>, Self), DatabaseError> {
-        let can_cover = !matches!(ty, IndexType::PrimaryKey { .. }) && !ty.has_prefix(value_ty);
-        let mut column_ids = Vec::with_capacity(columns.len());
-        let mut cover_types = Vec::with_capacity(if can_cover { columns.len() } else { 0 });
-        for column in columns {
-            let column = column?;
-            column_ids.push(column.id().ok_or(DatabaseError::InvalidIndex)?);
-            if can_cover {
-                cover_types.push(column.datatype().clone());
-            }
-        }
-
-        let index_impl = if can_cover {
-            Self::covered(match <[LogicalType; 1]>::try_from(cover_types) {
-                Ok([cover_ty]) => cover_ty,
-                Err(cover_types) => LogicalType::Tuple(cover_types),
-            })
-        } else {
-            match ty {
-                IndexType::PrimaryKey { .. } => Self::PrimaryKey,
-                IndexType::Unique => Self::Unique,
-                IndexType::Normal => Self::Normal,
-                IndexType::Composite => Self::Composite,
-            }
-        };
-        Ok((column_ids, index_impl))
-    }
-
-    fn instance(meta: &IndexMeta, covered: bool) -> &Self {
-        if covered || !matches!(meta.r#impl, Self::Covered(_)) {
-            return &meta.r#impl;
-        }
-        match meta.ty {
-            IndexType::PrimaryKey { .. } => &Self::PrimaryKey,
-            IndexType::Unique => &Self::Unique,
-            IndexType::Normal => &Self::Normal,
-            IndexType::Composite => &Self::Composite,
+impl IndexImplEnum {
+    fn instance(index_type: IndexType, covered: bool) -> IndexImplEnum {
+        match index_type {
+            IndexType::PrimaryKey { .. } => IndexImplEnum::PrimaryKey(PrimaryKeyIndexImpl),
+            _ if covered => IndexImplEnum::Covered(CoveredIndexImpl),
+            IndexType::Unique => IndexImplEnum::Unique(UniqueIndexImpl),
+            IndexType::Normal => IndexImplEnum::Normal(NormalIndexImpl),
+            IndexType::Composite => IndexImplEnum::Composite(CompositeIndexImpl),
         }
     }
 }
@@ -1567,6 +1528,7 @@ struct PrimaryKeyIndexImpl;
 struct UniqueIndexImpl;
 struct NormalIndexImpl;
 struct CompositeIndexImpl;
+struct CoveredIndexImpl;
 
 pub(crate) struct TupleMapping {
     index_to_scan: Vec<usize>,
@@ -1582,10 +1544,7 @@ impl TupleMapping {
         if matches!(meta.ty, IndexType::PrimaryKey { .. }) {
             return None;
         }
-        let tuple_len = match &meta.value_ty {
-            LogicalType::Tuple(tys) => tys.len(),
-            _ => 1,
-        };
+        let tuple_len = meta.value_ty.len();
         let columns_len = deserializers.read_columns().count();
         match indices {
             Some(slots) => Some(TupleMapping::new(slots.iter().copied(), tuple_len)),
@@ -1715,7 +1674,7 @@ impl<'a, T: StorageTransaction + 'a> InnerIter for RangeIter<'a, T> {
 }
 
 #[maybe_async]
-impl<T: StorageTransaction> IndexAccess<T> for IndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for IndexImplEnum {
     async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1726,27 +1685,27 @@ impl<T: StorageTransaction> IndexAccess<T> for IndexImpl {
         cover_mapping: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
         match self {
-            Self::PrimaryKey => {
-                PrimaryKeyIndexImpl
+            IndexImplEnum::PrimaryKey(inner) => {
+                inner
                     .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
                     .await
             }
-            Self::Unique => {
-                UniqueIndexImpl
+            IndexImplEnum::Unique(inner) => {
+                inner
                     .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
                     .await
             }
-            Self::Normal => {
-                NormalIndexImpl
+            IndexImplEnum::Normal(inner) => {
+                inner
                     .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
                     .await
             }
-            Self::Composite => {
-                CompositeIndexImpl
+            IndexImplEnum::Composite(inner) => {
+                inner
                     .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
                     .await
             }
-            Self::Covered(inner) => {
+            IndexImplEnum::Covered(inner) => {
                 inner
                     .index_lookup_into(table_codec, tuple, key, value, params, cover_mapping)
                     .await
@@ -1764,27 +1723,27 @@ impl<T: StorageTransaction> IndexAccess<T> for IndexImpl {
         encode_max: &mut Bytes,
     ) -> Result<IndexResult<'a, T>, DatabaseError> {
         match self {
-            Self::PrimaryKey => {
-                PrimaryKeyIndexImpl
+            IndexImplEnum::PrimaryKey(inner) => {
+                inner
                     .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
                     .await
             }
-            Self::Unique => {
-                UniqueIndexImpl
+            IndexImplEnum::Unique(inner) => {
+                inner
                     .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
                     .await
             }
-            Self::Normal => {
-                NormalIndexImpl
+            IndexImplEnum::Normal(inner) => {
+                inner
                     .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
                     .await
             }
-            Self::Composite => {
-                CompositeIndexImpl
+            IndexImplEnum::Composite(inner) => {
+                inner
                     .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
                     .await
             }
-            Self::Covered(inner) => {
+            IndexImplEnum::Covered(inner) => {
                 inner
                     .eq_to_res(table_codec, tuple, value, params, encode_min, encode_max)
                     .await
@@ -1801,27 +1760,27 @@ impl<T: StorageTransaction> IndexAccess<T> for IndexImpl {
         out: &mut Bytes,
     ) -> Result<(), DatabaseError> {
         match self {
-            Self::PrimaryKey => {
-                PrimaryKeyIndexImpl
+            IndexImplEnum::PrimaryKey(inner) => {
+                inner
                     .bound_key(table_codec, params, value, is_upper, out)
                     .await
             }
-            Self::Unique => {
-                UniqueIndexImpl
+            IndexImplEnum::Unique(inner) => {
+                inner
                     .bound_key(table_codec, params, value, is_upper, out)
                     .await
             }
-            Self::Normal => {
-                NormalIndexImpl
+            IndexImplEnum::Normal(inner) => {
+                inner
                     .bound_key(table_codec, params, value, is_upper, out)
                     .await
             }
-            Self::Composite => {
-                CompositeIndexImpl
+            IndexImplEnum::Composite(inner) => {
+                inner
                     .bound_key(table_codec, params, value, is_upper, out)
                     .await
             }
-            Self::Covered(inner) => {
+            IndexImplEnum::Covered(inner) => {
                 inner
                     .bound_key(table_codec, params, value, is_upper, out)
                     .await
@@ -1831,7 +1790,7 @@ impl<T: StorageTransaction> IndexAccess<T> for IndexImpl {
 }
 
 #[maybe_async]
-impl<T: StorageTransaction> IndexAccess<T> for PrimaryKeyIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for PrimaryKeyIndexImpl {
     async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -1936,7 +1895,7 @@ async fn secondary_index_lookup<T: StorageTransaction>(
 }
 
 #[maybe_async]
-impl<T: StorageTransaction> IndexAccess<T> for UniqueIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for UniqueIndexImpl {
     async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -2019,7 +1978,7 @@ impl<T: StorageTransaction> IndexAccess<T> for UniqueIndexImpl {
 }
 
 #[maybe_async]
-impl<T: StorageTransaction> IndexAccess<T> for NormalIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for NormalIndexImpl {
     async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -2072,7 +2031,7 @@ impl<T: StorageTransaction> IndexAccess<T> for NormalIndexImpl {
 }
 
 #[maybe_async]
-impl<T: StorageTransaction> IndexAccess<T> for CompositeIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for CompositeIndexImpl {
     async fn index_lookup_into(
         &self,
         table_codec: &mut TableCodec,
@@ -2125,7 +2084,7 @@ impl<T: StorageTransaction> IndexAccess<T> for CompositeIndexImpl {
 }
 
 #[maybe_async]
-impl<T: StorageTransaction> IndexAccess<T> for CoveredIndexImpl {
+impl<T: StorageTransaction> IndexImpl<T> for CoveredIndexImpl {
     async fn index_lookup_into(
         &self,
         _: &mut TableCodec,
@@ -2135,12 +2094,13 @@ impl<T: StorageTransaction> IndexAccess<T> for CoveredIndexImpl {
         params: &IndexImplParams<'_, T>,
         cover_mapping: Option<&TupleMapping>,
     ) -> Result<(), DatabaseError> {
+        let types = &params.index_meta().value_ty;
         match cover_mapping {
             Some(mapping) => TableCodec::decode_index_into(
                 tuple,
                 key,
                 value,
-                &self.cover_ty,
+                types,
                 &mapping.as_ref(),
                 params.with_pk,
             ),
@@ -2148,7 +2108,7 @@ impl<T: StorageTransaction> IndexAccess<T> for CoveredIndexImpl {
                 tuple,
                 key,
                 value,
-                &self.cover_ty,
+                types,
                 &OrderedMapping,
                 params.with_pk,
             ),
@@ -2199,7 +2159,7 @@ impl<T: StorageTransaction> IndexAccess<T> for CoveredIndexImpl {
 async fn eq_to_res_scope<'a, T: StorageTransaction + 'a>(
     table_codec: &mut TableCodec,
     tuple: &mut Tuple,
-    index_impl: &impl IndexAccess<T>,
+    index_impl: &impl IndexImpl<T>,
     value: &DataValue,
     params: &IndexImplParams<'a, T>,
     encode_min: &mut Bytes,
@@ -2444,7 +2404,7 @@ pub(crate) struct IndexScanView<'s> {
 pub struct IndexIter<'a, T: StorageTransaction> {
     bounds: IterBounds,
     params: IndexImplParams<'a, T>,
-    inner: &'a IndexImpl,
+    inner: IndexImplEnum,
     range_pos: usize,
     state: IndexIterState<'a, T>,
 }
@@ -2512,7 +2472,7 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
                                 false,
                                 encode_min,
                                 &self.params,
-                                self.inner,
+                                &self.inner,
                             )
                             .await?;
                             let encode_max = encode_bound(
@@ -2521,7 +2481,7 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
                                 true,
                                 encode_max,
                                 &self.params,
-                                self.inner,
+                                &self.inner,
                             )
                             .await?;
 
@@ -2552,7 +2512,7 @@ impl<'a, T: StorageTransaction> IndexIter<'a, T> {
                         Range::Eq(val) => {
                             let [encode_min, encode_max] = &mut *bound_buffers;
                             if self.params.cursor.is_none()
-                                && matches!(self.inner, IndexImpl::PrimaryKey)
+                                && matches!(self.inner, IndexImplEnum::PrimaryKey(_))
                             {
                                 self.params.cursor = Some(self.params.tx.point_cursor()?);
                             }
@@ -2942,7 +2902,7 @@ mod test {
         project_deserializers_for_test, IndexIter, IndexScanView, InnerIter, Iter, Storage,
         StorageTransaction, TableCache, TupleDeserializers,
     };
-    use crate::types::index::{Index, IndexImpl, IndexType};
+    use crate::types::index::{Index, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::DataValue;
     use crate::types::LogicalType;
@@ -3278,11 +3238,14 @@ mod test {
         )
         .await?;
         let mut plan_arena = PlanArena::new(&table_arena);
-        let t1_table = transaction.table(&names, &table_cache, "t1")?.unwrap();
-        let c2_column = t1_table.get_column_by_name("c2").unwrap();
-        let c3_column = t1_table.get_column_by_name("c3").unwrap();
-        let c2_column_id = *t1_table.get_column_id_by_name("c2").unwrap();
-        let c3_column_id = *t1_table.get_column_id_by_name("c3").unwrap();
+        let (c2_column_id, c3_column_id) = {
+            let t1_table = transaction.table(&names, &table_cache, "t1")?.unwrap();
+
+            (
+                *t1_table.get_column_id_by_name("c2").unwrap(),
+                *t1_table.get_column_id_by_name("c3").unwrap(),
+            )
+        };
 
         let (table, _) = transaction
             .add_index_meta(
@@ -3290,8 +3253,8 @@ mod test {
                 &mut plan_arena,
                 "t1",
                 "i1".to_string(),
-                &[c3_column],
-                LogicalType::Integer,
+                vec![c3_column_id],
+                vec![LogicalType::Integer.into()],
                 IndexType::Normal,
                 &mut Default::default(),
             )
@@ -3305,8 +3268,8 @@ mod test {
                 &mut plan_arena,
                 "t1",
                 "i2".to_string(),
-                &[c3_column, c2_column],
-                LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Boolean]),
+                vec![c3_column_id, c2_column_id],
+                vec![LogicalType::Integer.into(), LogicalType::Boolean.into()],
                 IndexType::Composite,
                 &mut Default::default(),
             )
@@ -3326,7 +3289,7 @@ mod test {
             assert_eq!(i1_meta.column_ids, vec![c3_column_id]);
             assert_eq!(i1_meta.table_id, 0);
             assert_eq!(i1_meta.pk_ty, LogicalType::Integer);
-            assert_eq!(i1_meta.value_ty, LogicalType::Integer);
+            assert_eq!(i1_meta.value_ty, vec![LogicalType::Integer.into()]);
             assert_eq!(i1_meta.name, "i1".to_string());
             assert_eq!(i1_meta.ty, IndexType::Normal);
 
@@ -3337,17 +3300,10 @@ mod test {
             assert_eq!(i2_meta.pk_ty, LogicalType::Integer);
             assert_eq!(
                 i2_meta.value_ty,
-                LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Boolean])
+                vec![LogicalType::Integer.into(), LogicalType::Boolean.into()]
             );
             assert_eq!(i2_meta.name, "i2".to_string());
             assert_eq!(i2_meta.ty, IndexType::Composite);
-            let inner = IndexImpl::instance(i2_meta, true);
-            assert!(std::ptr::eq(inner, &i2_meta.r#impl));
-            let IndexImpl::Covered(cover) = inner else {
-                panic!("expected a covered index implementation");
-            };
-            assert_eq!(cover.cover_ty, i2_meta.value_ty);
-            assert_eq!(IndexImpl::instance(i2_meta, false), &IndexImpl::Composite);
 
             Ok(())
         };
@@ -3492,7 +3448,7 @@ mod test {
         .await?;
         let mut plan_arena = PlanArena::new(&table_arena);
         let t1_table = transaction.table(&names, &table_cache, "t1")?.unwrap();
-        let c3_column = t1_table.get_column_by_name("c3").unwrap();
+        let c3_column_id = *t1_table.get_column_id_by_name("c3").unwrap();
 
         let (table, _) = transaction
             .add_index_meta(
@@ -3500,8 +3456,8 @@ mod test {
                 &mut plan_arena,
                 "t1",
                 "i1".to_string(),
-                &[c3_column],
-                LogicalType::Integer,
+                vec![c3_column_id],
+                vec![LogicalType::Integer.into()],
                 IndexType::Normal,
                 &mut Default::default(),
             )

@@ -1576,10 +1576,9 @@ mod tests {
             column_ids: vec![1],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: name.to_string(),
             ty: IndexType::Normal,
-            r#impl: crate::types::index::IndexImpl::Normal,
         }
     }
 

@@ -470,8 +470,7 @@ async fn execute_create_index<S: Storage, D: SqlDialect>(
                     .copied()
                     .find(|column| arena.column(*column).name() == column_name)
                     .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
-                let key_ty = arena.column(column).datatype().index_key_type(None)?;
-                Ok((column, key_ty))
+                Ok((column, arena.column(column).datatype().clone().into()))
             });
             CreateIndexOperator::build(
                 table_id,

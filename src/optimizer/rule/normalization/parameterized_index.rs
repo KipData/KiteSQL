@@ -197,7 +197,14 @@ fn parameterize_right_subtree(
             else {
                 return Ok(None);
             };
-            let key_type = &arena.index(scan.index_infos[position].meta).value_ty;
+            let [key] = arena
+                .index(scan.index_infos[position].meta)
+                .value_ty
+                .as_slice()
+            else {
+                return Ok(None);
+            };
+            let key_type = &key.ty;
             let left_type = left_expr.return_type(arena);
             if left_type.as_ref() != key_type {
                 let common = LogicalType::max_logical_type(&left_type, key_type)?;
@@ -793,35 +800,27 @@ mod inner_join_tests {
         let index_infos = indexes
             .iter()
             .enumerate()
-            .map(|(id, keys)| {
-                use crate::types::index::IndexImpl;
-                let (ty, index_impl) = if keys.len() == 1 {
-                    (IndexType::Normal, IndexImpl::Normal)
-                } else {
-                    (IndexType::Composite, IndexImpl::Composite)
-                };
-                IndexInfo {
-                    meta: arena.alloc_index(IndexMeta {
-                        id: id as _,
-                        column_ids: keys.iter().map(|id| *id as _).collect(),
-                        table_id: table_id(name),
-                        pk_ty: LogicalType::Integer,
-                        value_ty: LogicalType::from_key_types(
-                            keys.iter().map(|&id| Ok(types[id].clone())),
-                        )
-                        .unwrap(),
-                        name: format!("idx{id}"),
-                        ty,
-                        r#impl: index_impl,
-                    }),
-                    lookup: None,
-                    residual_predicate: None,
-                    sort_option: SortOption::None,
-                    covered: false,
-                    cover_mapping: None,
-                    sort_elimination_hint: None,
-                    stream_aggregate_hint: None,
-                }
+            .map(|(id, keys)| IndexInfo {
+                meta: arena.alloc_index(IndexMeta {
+                    id: id as _,
+                    column_ids: keys.iter().map(|id| *id as _).collect(),
+                    table_id: table_id(name),
+                    pk_ty: LogicalType::Integer,
+                    value_ty: keys.iter().map(|&id| types[id].clone().into()).collect(),
+                    name: format!("idx{id}"),
+                    ty: if keys.len() == 1 {
+                        IndexType::Normal
+                    } else {
+                        IndexType::Composite
+                    },
+                }),
+                lookup: None,
+                residual_predicate: None,
+                sort_option: SortOption::None,
+                covered: false,
+                cover_mapping: None,
+                sort_elimination_hint: None,
+                stream_aggregate_hint: None,
             })
             .collect();
         LogicalPlan::new(

@@ -56,31 +56,6 @@ pub enum IndexType {
     Composite,
 }
 
-impl IndexType {
-    pub(crate) fn has_prefix(self, value_ty: &LogicalType) -> bool {
-        !matches!(self, Self::PrimaryKey { .. })
-            && value_ty
-                .as_slice()
-                .iter()
-                .any(|ty| ty.index_prefix_len().is_some())
-    }
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
-pub(crate) enum IndexImpl {
-    PrimaryKey,
-    Unique,
-    Normal,
-    Composite,
-    Covered(CoveredIndexImpl),
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
-pub(crate) struct CoveredIndexImpl {
-    /// Original column types, not the normalized secondary key types.
-    pub(crate) cover_ty: LogicalType,
-}
-
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub enum RuntimeIndexProbe {
     Eq(DataValue),
@@ -146,47 +121,61 @@ pub struct IndexMeta {
     pub column_ids: Vec<ColumnId>,
     pub table_id: TableId,
     pub pk_ty: LogicalType,
-    /// Secondary key types discard column length limits. A length here is an explicit prefix.
-    pub value_ty: LogicalType,
+    /// One entry per indexed column, in key order.
+    pub value_ty: Vec<IndexValType>,
     pub name: String,
     pub ty: IndexType,
-    pub(crate) r#impl: IndexImpl,
+}
+
+/// An index key part: the column's own type and an optional prefix length.
+/// A string prefix counts characters, a binary prefix counts bytes.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
+pub struct IndexValType {
+    pub ty: LogicalType,
+    pub prefix_len: Option<u32>,
+}
+
+impl IndexValType {
+    pub(crate) fn new(ty: LogicalType, prefix_len: Option<u32>) -> Result<Self, DatabaseError> {
+        if prefix_len.is_some()
+            && !matches!(
+                ty,
+                LogicalType::Char(..) | LogicalType::Varchar(..) | LogicalType::Varbinary(_)
+            )
+        {
+            return Err(DatabaseError::UnsupportedStmt(format!(
+                "index prefix length requires a string or binary column, got {ty}"
+            )));
+        }
+        Ok(Self { ty, prefix_len })
+    }
+}
+
+impl From<LogicalType> for IndexValType {
+    fn from(ty: LogicalType) -> Self {
+        Self {
+            ty,
+            prefix_len: None,
+        }
+    }
 }
 
 impl IndexMeta {
     pub(crate) fn has_prefix(&self) -> bool {
-        self.ty.has_prefix(&self.value_ty)
+        self.value_ty.iter().any(|ty| ty.prefix_len.is_some())
     }
 
     pub(crate) fn truncate_key(
         &self,
         value: Cow<'_, DataValue>,
     ) -> Result<DataValue, DatabaseError> {
-        let mut key_types = self.value_ty.as_slice().iter();
-        let value = match value {
-            Cow::Owned(mut value) => {
-                for (part, ty) in value.as_mut_slice().iter_mut().zip(key_types) {
-                    if let Some(truncated) = part.truncate_index_key(Some(ty))? {
-                        *part = truncated;
-                    }
-                }
-                return Ok(value);
+        let mut value = value.into_owned();
+        for (part, ty) in value.as_mut_slice().iter_mut().zip(&self.value_ty) {
+            if let Some(truncated) = part.truncate_index_key(ty.prefix_len)? {
+                *part = truncated;
             }
-            Cow::Borrowed(value) => value,
-        };
-        let mut truncate = |part: &DataValue| {
-            Ok(part
-                .truncate_index_key(key_types.next())?
-                .unwrap_or_else(|| part.clone()))
-        };
-        match value {
-            DataValue::Tuple(parts) => parts
-                .iter()
-                .map(truncate)
-                .collect::<Result<_, _>>()
-                .map(DataValue::Tuple),
-            part => truncate(part),
         }
+        Ok(value)
     }
 
     pub(crate) fn column_exprs<'a>(
@@ -207,7 +196,7 @@ pub struct Index<'a, V: TupleLike + ?Sized = [DataValue]> {
     pub id: IndexId,
     pub values: &'a V,
     pub ty: IndexType,
-    pub(crate) key_types: &'a [LogicalType],
+    pub(crate) key_types: &'a [IndexValType],
 }
 
 impl<V: TupleLike + ?Sized> Clone for Index<'_, V> {
@@ -229,16 +218,11 @@ impl<'a, V: TupleLike + ?Sized> Index<'a, V> {
     }
 
     pub(crate) fn from_meta(meta: &'a IndexMeta, values: &'a V) -> Self {
-        let key_types = if matches!(meta.ty, IndexType::PrimaryKey { .. }) {
-            &[]
-        } else {
-            meta.value_ty.as_slice()
-        };
         Self {
             id: meta.id,
             values,
             ty: meta.ty,
-            key_types,
+            key_types: &meta.value_ty,
         }
     }
 
@@ -327,10 +311,9 @@ mod tests {
             column_ids: vec![10],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "idx_t".to_string(),
             ty: IndexType::Normal,
-            r#impl: IndexImpl::Normal,
         }
     }
 
@@ -527,10 +510,9 @@ mod tests {
             column_ids: vec![id_column],
             table_id: 0,
             pk_ty: LogicalType::Integer,
-            value_ty: LogicalType::Integer,
+            value_ty: vec![LogicalType::Integer.into()],
             name: "idx_id".to_string(),
             ty: IndexType::Normal,
-            r#impl: IndexImpl::Normal,
         };
 
         assert_eq!(
