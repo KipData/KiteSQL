@@ -1773,6 +1773,7 @@ mod tests {
                 Operator::Insert(InsertOperator {
                     table: crate::catalog::table::DmlTable::default(),
                     is_overwrite: true,
+                    on_duplicate_key_update: None,
                 }),
                 "Insert users, Is Overwrite: true",
             ),

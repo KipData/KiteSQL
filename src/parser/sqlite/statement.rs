@@ -75,6 +75,7 @@ fn statement(stmt: &Stmt<'_>, cmd: &Cmd<'_>) -> Result<ast::Statement, DatabaseE
                     .collect(),
                 overwrite,
                 source: Box::new(source),
+                on_duplicate_key_update: None,
             }))
         }
         Stmt::Update {

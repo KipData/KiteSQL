@@ -436,7 +436,10 @@ The `SqlDialect` trait methods:
 - `parse()` — Parses SQL text into KiteSQL statements; the dialect rejects syntax it does not support and may rewrite the statements
 - `comparison_type()` — Optional hook to pick the type both operands of a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `BETWEEN`) are cast to
 - `boolean_text()` — Optional hook to choose the text of a boolean in `CAST(.. AS CHAR)` or `CAST(.. AS VARCHAR)` (default `'true'`/`'false'`)
+- `upsert_affected_rows()` — Optional hook to choose the affected rows `INSERT ... ON DUPLICATE KEY UPDATE` reports for an inserted, changed or unchanged row (default: 1 each)
 
 `DataTypeMapper::map_data_type()` maps types inside expressions (`CAST`, typed literals); `map_column_type()` maps the types of column definitions and defaults to `map_data_type()`.
+
+`SqlParser::with_on_duplicate_key_update()` accepts `INSERT ... ON DUPLICATE KEY UPDATE`, which updates the row a primary or unique key conflicts with instead of inserting; assignments read the proposed row through `VALUES(col)` or a row alias (`INSERT ... AS new ON DUPLICATE KEY UPDATE v = new.v`). Without it the clause is rejected, as it is by `GenericSqlDialect`.
 
 By default, the `GenericSqlDialect` is used, which provides standard SQL behavior with no custom transformations.

@@ -60,6 +60,17 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
     fn boolean_text(&self, _value: bool) -> Option<&'static str> {
         None
     }
+
+    /// Returns the affected rows `INSERT .. ON DUPLICATE KEY UPDATE` reports for one input row.
+    ///
+    /// `inserted` is set when the row was inserted and `updated` when it changed an existing
+    /// row; neither is set when it matched an existing row that the assignments left
+    /// unchanged. Only called for statements whose [`parse`](Self::parse) returned the clause.
+    ///
+    /// The default implementation counts every row as 1.
+    fn upsert_affected_rows(&self, _inserted: bool, _updated: bool) -> u64 {
+        1
+    }
 }
 
 /// Standard SQL behavior with no customizations; the default dialect.
@@ -205,6 +216,10 @@ impl SqlDialect for DynDialect {
 
     fn boolean_text(&self, value: bool) -> Option<&'static str> {
         self.current().boolean_text(value)
+    }
+
+    fn upsert_affected_rows(&self, inserted: bool, updated: bool) -> u64 {
+        self.current().upsert_affected_rows(inserted, updated)
     }
 }
 
@@ -378,6 +393,77 @@ mod tests {
             text(query(&custom, sql).await?),
             ["false", "true", "true", "true", "1", "0", "true"]
         );
+
+        Ok(())
+    }
+
+    #[derive(Debug, Default)]
+    struct UpsertDialect {
+        counts: bool,
+    }
+
+    impl SqlDialect for UpsertDialect {
+        fn name(&self) -> &str {
+            "test_upsert"
+        }
+
+        fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
+            SqlParser::new(&GenericDialect {})
+                .with_on_duplicate_key_update()
+                .parse(sql)
+        }
+
+        fn upsert_affected_rows(&self, inserted: bool, updated: bool) -> u64 {
+            match (self.counts, inserted, updated) {
+                (false, ..) | (true, true, _) => 1,
+                (true, false, true) => 2,
+                (true, false, false) => 0,
+            }
+        }
+    }
+
+    async fn upsert_rows<S: Storage, D: SqlDialect>(
+        db: &mut Database<S, D>,
+    ) -> Result<Vec<String>, DatabaseError> {
+        db.ddl("create table t1 (id int primary key, v int, u varchar(10) unique)")
+            .await?;
+        db.run("insert into t1 values (1, 10, 'a')")
+            .await?
+            .done()
+            .await?;
+        let mut affected = Vec::new();
+        for sql in [
+            "insert into t1 values (1, 10, 'x') on duplicate key update v = values(v)",
+            "insert into t1 values (1, 20, 'x') as new on duplicate key update v = new.v",
+            "insert into t1 values (2, 5, 'a'), (3, 1, 'b') on duplicate key update v = v + 1",
+        ] {
+            affected.push(query(db, sql).await?[0][0].to_string());
+        }
+        for row in query(db, "select id, v from t1 order by id").await? {
+            affected.push(format!("{} {}", row[0], row[1]));
+        }
+        Ok(affected)
+    }
+
+    #[test]
+    async fn on_duplicate_key_update() -> Result<(), DatabaseError> {
+        let mut generic = DataBaseBuilder::path(".").build_in_memory().await?;
+        let err = upsert_rows(&mut generic).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("ON DUPLICATE KEY UPDATE is not supported"),
+            "{err}"
+        );
+
+        for (counts, expected) in [(false, ["1", "1", "2"]), (true, ["0", "2", "3"])] {
+            let mut db = DataBaseBuilder::path(".")
+                .dialect(UpsertDialect { counts })
+                .build_in_memory()
+                .await?;
+            let rows = upsert_rows(&mut db).await?;
+            assert_eq!(rows[..3], expected);
+            assert_eq!(rows[3..], ["1 21", "3 1"]);
+        }
 
         Ok(())
     }

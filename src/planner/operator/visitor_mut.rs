@@ -526,6 +526,21 @@ impl<'a, V: ExprVisitorMut<A>, A: MetaArena + ?Sized> OperatorVisitorMut<'a>
         Ok(())
     }
 
+    fn visit_insert(
+        &mut self,
+        op: &'a mut InsertOperator,
+        _children: &mut ChildrenVisitMut<'a>,
+    ) -> Result<(), DatabaseError> {
+        for (_, expr) in op
+            .on_duplicate_key_update
+            .iter_mut()
+            .flat_map(|update| update.assignments.iter_mut())
+        {
+            ExprVisitorMut::visit(self.visitor, expr, self.arena)?;
+        }
+        Ok(())
+    }
+
     fn visit_update(
         &mut self,
         op: &'a mut UpdateOperator,

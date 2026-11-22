@@ -502,6 +502,21 @@ impl<'a, V: ExprVisitor<A>, A: MetaArena + ?Sized> OperatorVisitor<'a>
         Ok(())
     }
 
+    fn visit_insert(
+        &mut self,
+        op: &'a InsertOperator,
+        _children: &mut ChildrenVisit<'a>,
+    ) -> Result<(), DatabaseError> {
+        for (_, expr) in op
+            .on_duplicate_key_update
+            .iter()
+            .flat_map(|update| update.assignments.iter())
+        {
+            ExprVisitor::visit(self.visitor, *expr, self.arena)?;
+        }
+        Ok(())
+    }
+
     fn visit_update(
         &mut self,
         op: &'a UpdateOperator,
@@ -748,6 +763,7 @@ pub(crate) mod tests {
             Operator::Insert(InsertOperator {
                 table: crate::catalog::table::DmlTable::default(),
                 is_overwrite: false,
+                on_duplicate_key_update: None,
             }),
             Operator::Update(UpdateOperator {
                 table: crate::catalog::table::DmlTable::default(),

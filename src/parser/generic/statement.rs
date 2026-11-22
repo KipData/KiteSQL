@@ -19,8 +19,8 @@ use sqlparser::ast::{
     AlterColumnOperation, AlterTableOperation, Assignment, AssignmentTarget, ColumnDef,
     ColumnOption, CopyOption, CopySource, CopyTarget, CreateIndex, CreateTable, DescribeAlias,
     Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, IndexColumn,
-    IndexOption, IndexType, Insert, NullsDistinctOption, ObjectNamePart, ObjectType, OnInsert,
-    Spanned, SqliteOnConflict, Statement, TableConstraint, TableFactor, TableObject,
+    IndexOption, IndexType, Insert, InsertAliases, NullsDistinctOption, ObjectNamePart, ObjectType,
+    OnInsert, Spanned, SqliteOnConflict, Statement, TableConstraint, TableFactor, TableObject,
     TableWithJoins, Value,
 };
 
@@ -181,19 +181,34 @@ impl Lower<'_> {
             source,
             returning,
             on,
+            insert_alias,
             ..
         } = insert;
         if returning.is_some() {
             return Err(unsupported("INSERT RETURNING is not supported"));
         }
-        if let Some(on) = on {
-            let clause = match on {
-                OnInsert::OnConflict(_) => "ON CONFLICT",
-                OnInsert::DuplicateKeyUpdate(_) => "ON DUPLICATE KEY UPDATE",
-                _ => "conflict clause",
-            };
-            return Err(unsupported(format!("INSERT {clause} is not supported")));
-        }
+        let on_duplicate_key_update = match on {
+            Some(OnInsert::DuplicateKeyUpdate(assignments)) if self.on_duplicate_key_update => {
+                Some(ast::OnDuplicateKeyUpdate {
+                    row_alias: insert_alias
+                        .map(|alias| self.row_alias(alias))
+                        .transpose()?,
+                    assignments: assignments
+                        .into_iter()
+                        .map(|assignment| self.assignment(assignment))
+                        .collect::<Result<_, _>>()?,
+                })
+            }
+            Some(on) => {
+                let clause = match on {
+                    OnInsert::OnConflict(_) => "ON CONFLICT",
+                    OnInsert::DuplicateKeyUpdate(_) => "ON DUPLICATE KEY UPDATE",
+                    _ => "conflict clause",
+                };
+                return Err(unsupported(format!("INSERT {clause} is not supported")));
+            }
+            None => None,
+        };
         let TableObject::TableName(table_name) = table else {
             return Err(unsupported("insert into table function is not supported"));
         };
@@ -204,7 +219,20 @@ impl Lower<'_> {
             columns: self.idents(columns),
             overwrite: overwrite || replace_into || matches!(or, Some(SqliteOnConflict::Replace)),
             source: self.query(*source).map(Box::new)?,
+            on_duplicate_key_update,
         })
+    }
+
+    fn row_alias(&self, alias: InsertAliases) -> Result<ast::Ident, DatabaseError> {
+        if alias.col_aliases.is_some_and(|columns| !columns.is_empty()) {
+            return Err(unsupported(
+                "column aliases on the INSERT row alias are not supported",
+            ));
+        }
+        match alias.row_alias.0.as_slice() {
+            [ObjectNamePart::Identifier(ident)] => Ok(self.ident(ident.clone())),
+            _ => Err(unsupported("INSERT row alias must be a single name")),
+        }
     }
 
     fn target_table(
@@ -607,9 +635,12 @@ mod tests {
             drop_behavior: None,
         };
         assert_unsupported(
-            Lower { types: &() }
-                .alter_table_operation(operation)
-                .unwrap_err(),
+            Lower {
+                types: &(),
+                on_duplicate_key_update: false,
+            }
+            .alter_table_operation(operation)
+            .unwrap_err(),
             "only dropping a single column",
         );
     }

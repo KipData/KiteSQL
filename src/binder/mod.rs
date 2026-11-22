@@ -41,7 +41,7 @@ mod drop_table;
 mod drop_view;
 mod explain;
 pub mod expr;
-mod insert;
+pub(crate) mod insert;
 mod parser;
 mod select;
 mod show_table;
@@ -258,6 +258,31 @@ pub(crate) struct BoundScalarQuery {
     param_bindings: Vec<(ScalarQueryRef, ExprRef)>,
 }
 
+pub(crate) struct OdkuContext {
+    pub(crate) original_columns: Vec<ColumnRef>,
+    pub(crate) excluded_columns: Vec<ColumnRef>,
+    pub(crate) row_alias: Option<String>,
+}
+
+impl OdkuContext {
+    /// The proposed row's columns follow the existing row's, so column `i` is at `n + i`.
+    pub(crate) fn proposed_column(
+        &self,
+        name: &str,
+        arena: &PlanArena<'_>,
+    ) -> Result<ScalarExpression, DatabaseError> {
+        let position = self
+            .original_columns
+            .iter()
+            .position(|column| arena.column(*column).name() == name)
+            .ok_or_else(|| DatabaseError::column_not_found(name.to_string()))?;
+        Ok(ScalarExpression::column_expr(
+            self.excluded_columns[position],
+            self.original_columns.len() + position,
+        ))
+    }
+}
+
 pub struct BinderContext<'a, T: StorageTransaction> {
     pub(crate) scala_functions: &'a ScalaFunctions,
     pub(crate) table_functions: &'a TableFunctions,
@@ -274,6 +299,7 @@ pub struct BinderContext<'a, T: StorageTransaction> {
     // and do not share the current FROM namespace.
     source_scope_start: usize,
     ctes: Vec<CteBinding>,
+    odku_context: Option<OdkuContext>,
     pub(crate) cte_depth: usize,
     // alias
     expr_aliases: BTreeMap<(Option<String>, String), ExprRef>,
@@ -352,6 +378,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             expr_aliases: Default::default(),
             group_by_exprs: vec![],
             agg_calls: Default::default(),
+            odku_context: None,
             using: Default::default(),
             bind_step: QueryBindStep::From,
             sub_queries: Default::default(),
@@ -384,6 +411,7 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
             expr_aliases: self.expr_aliases.clone(),
             group_by_exprs: self.group_by_exprs.clone(),
             agg_calls: self.agg_calls.clone(),
+            odku_context: None,
             using: self.using.clone(),
             bind_step: self.bind_step,
             sub_queries: Default::default(),
@@ -472,6 +500,14 @@ impl<'a, T: StorageTransaction> BinderContext<'a, T> {
 
     pub fn has_join_outer_ref(&self) -> bool {
         self.has_join_outer_ref
+    }
+
+    pub(crate) fn set_odku_context(&mut self, context: Option<OdkuContext>) {
+        self.odku_context = context;
+    }
+
+    pub(crate) fn odku_context(&self) -> Option<&OdkuContext> {
+        self.odku_context.as_ref()
     }
 
     pub fn table(&self, table_name: &str) -> Result<Option<&'a TableCatalog>, DatabaseError> {

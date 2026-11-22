@@ -37,6 +37,7 @@ pub struct SqlParser<'a> {
     dialect: &'a dyn SqlParserDialect,
     recursion_limit: Option<usize>,
     types: &'a dyn DataTypeMapper,
+    on_duplicate_key_update: bool,
 }
 
 impl<'a> SqlParser<'a> {
@@ -46,6 +47,7 @@ impl<'a> SqlParser<'a> {
             dialect,
             recursion_limit: None,
             types: &(),
+            on_duplicate_key_update: false,
         }
     }
 
@@ -61,12 +63,22 @@ impl<'a> SqlParser<'a> {
         self
     }
 
+    /// Accepts `INSERT .. ON DUPLICATE KEY UPDATE` and its row alias, which are rejected by
+    /// default.
+    pub fn with_on_duplicate_key_update(mut self) -> Self {
+        self.on_duplicate_key_update = true;
+        self
+    }
+
     pub fn parse(&self, sql: &str) -> Result<Vec<Statement>, DatabaseError> {
         let mut parser = Parser::new(self.dialect);
         if let Some(limit) = self.recursion_limit {
             parser = parser.with_recursion_limit(limit);
         }
-        let lower = Lower { types: self.types };
+        let lower = Lower {
+            types: self.types,
+            on_duplicate_key_update: self.on_duplicate_key_update,
+        };
         parser
             .try_with_sql(sql)?
             .parse_statements()?
@@ -95,6 +107,7 @@ pub fn parse_sql<S: AsRef<str>>(sql: S) -> Result<Vec<Statement>, DatabaseError>
 /// Converts sqlparser statements into KiteSQL statements.
 struct Lower<'a> {
     types: &'a dyn DataTypeMapper,
+    on_duplicate_key_update: bool,
 }
 
 impl Lower<'_> {

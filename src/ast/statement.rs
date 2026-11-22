@@ -55,6 +55,16 @@ pub struct Insert {
     /// `INSERT OVERWRITE` or `REPLACE INTO`: rows replace those with the same primary key.
     pub overwrite: bool,
     pub source: Box<Query>,
+    pub on_duplicate_key_update: Option<OnDuplicateKeyUpdate>,
+}
+
+/// `[AS row_alias] ON DUPLICATE KEY UPDATE assignments`: a row whose primary or unique key
+/// already exists updates that row instead of being inserted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnDuplicateKeyUpdate {
+    /// Names the proposed row in `assignments`, as `VALUES(col)` does.
+    pub row_alias: Option<Ident>,
+    pub assignments: Vec<Assignment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

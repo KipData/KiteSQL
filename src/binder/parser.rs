@@ -46,6 +46,7 @@ use crate::iter_ext::Itertools;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::operator::create_table::UniqueKey;
+use crate::planner::operator::insert::OnDuplicateKeyUpdate;
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::project::ProjectOperator;
@@ -840,14 +841,22 @@ where
 
     fn insert(mut self, insert: &Insert) -> Result<LogicalPlan, DatabaseError> {
         let table_name = sql_table_name(&insert.table_name)?;
+        let on_duplicate_key_update = insert.on_duplicate_key_update.as_ref();
         if let SetExpr::Values(rows) = insert.source.body.as_ref() {
-            self.insert_values(table_name, &insert.columns, rows, insert.overwrite)
+            self.insert_values(
+                table_name,
+                &insert.columns,
+                rows,
+                insert.overwrite,
+                on_duplicate_key_update,
+            )
         } else {
             self.insert_query(
                 table_name,
                 &insert.columns,
                 &insert.source,
                 insert.overwrite,
+                on_duplicate_key_update,
             )
         }
     }
@@ -858,6 +867,7 @@ where
         idents: &[Ident],
         expr_rows: &[Vec<Expr>],
         is_overwrite: bool,
+        on_duplicate_key_update: Option<&crate::ast::OnDuplicateKeyUpdate>,
     ) -> Result<LogicalPlan, DatabaseError> {
         self.binder.context.allow_default = true;
         let source = self
@@ -914,15 +924,116 @@ where
             }
         }
         self.binder.context.allow_default = false;
+        let on_duplicate_key_update = on_duplicate_key_update
+            .map(|clause| self.bind_on_duplicate_key_update(clause, &table_name))
+            .transpose()?;
 
         self.binder.bind_insert_values(
-            &table_name,
-            schema_ref,
-            rows,
-            expr_rows.len(),
-            is_overwrite,
+            crate::binder::insert::InsertValuesParams {
+                table_name: &table_name,
+                targets: schema_ref,
+                rows,
+                row_count: expr_rows.len(),
+                is_overwrite,
+                on_duplicate_key_update,
+            },
             self.arena,
         )
+    }
+
+    fn bind_on_duplicate_key_update(
+        &mut self,
+        clause: &crate::ast::OnDuplicateKeyUpdate,
+        table_name: &str,
+    ) -> Result<OnDuplicateKeyUpdate, DatabaseError> {
+        let table_name_ref: TableName = table_name.into();
+        let source = self
+            .binder
+            .context
+            .source_and_bind(&table_name_ref, None, None, false, self.arena)?
+            .ok_or(DatabaseError::TableNotFound)?;
+
+        let excluded_source_id = self.arena.alloc_source();
+        let original_columns = source.schema().to_vec();
+        let mut excluded_columns = Vec::with_capacity(original_columns.len());
+        for (position, &original) in original_columns.iter().enumerate() {
+            let mut excluded = self.arena.column(original).clone();
+            excluded.set_source(excluded_source_id, position as u64, true);
+            excluded_columns.push(self.arena.alloc_column(excluded));
+        }
+
+        self.binder
+            .context
+            .set_odku_context(Some(crate::binder::OdkuContext {
+                original_columns: original_columns.clone(),
+                excluded_columns: excluded_columns.clone(),
+                row_alias: clause
+                    .row_alias
+                    .as_ref()
+                    .map(|alias| lower_ident(alias).into_owned()),
+            }));
+        let assignments = self.bind_on_duplicate_assignments(
+            &clause.assignments,
+            table_name,
+            &original_columns,
+            &excluded_columns,
+        );
+        self.binder.context.set_odku_context(None);
+        let dialect = self.binder.context.dialect;
+        Ok(OnDuplicateKeyUpdate {
+            assignments: assignments?,
+            inserted_rows: dialect.upsert_affected_rows(true, false),
+            updated_rows: dialect.upsert_affected_rows(false, true),
+            unchanged_rows: dialect.upsert_affected_rows(false, false),
+        })
+    }
+
+    fn bind_on_duplicate_assignments(
+        &mut self,
+        assignments: &[Assignment],
+        table_name: &str,
+        original_columns: &[ColumnRef],
+        excluded_columns: &[ColumnRef],
+    ) -> Result<Vec<(usize, ExprRef)>, DatabaseError> {
+        let mut update_exprs = Vec::with_capacity(assignments.len());
+        for Assignment { target, value } in assignments {
+            let AssignmentTarget::ColumnName(name) = target else {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "tuple assignment in ON DUPLICATE KEY UPDATE".to_string(),
+                ));
+            };
+            let [ident] = name.0.as_slice() else {
+                return Err(DatabaseError::UnsupportedStmt(
+                    "qualified column names in ON DUPLICATE KEY UPDATE".to_string(),
+                ));
+            };
+            let column_index = match self.binder.bind_column_ref_from_identifiers(
+                slice::from_ref(ident),
+                Some(table_name),
+                self.arena,
+            )? {
+                ScalarExpression::ColumnRef { column, .. } => original_columns
+                    .iter()
+                    .position(|&original| self.arena.same_column(original, column))
+                    .ok_or_else(|| DatabaseError::column_not_found(ident.to_string()))?,
+                _ => {
+                    return Err(attach_span_if_absent(
+                        DatabaseError::invalid_column(ident.to_string()),
+                        ident.span,
+                    ))
+                }
+            };
+
+            let value = self.binder.bind_expr(value, self.arena)?;
+            let mut value = self.arena.alloc_expression(value);
+            OdkuPositionBinder {
+                original_columns,
+                excluded_columns,
+            }
+            .visit(&mut value, self.arena)?;
+            update_exprs.push((column_index, value));
+        }
+        Ok(update_exprs)
     }
 
     fn insert_query(
@@ -931,6 +1042,7 @@ where
         idents: &[Ident],
         query: &Query,
         is_overwrite: bool,
+        on_duplicate_key_update: Option<&crate::ast::OnDuplicateKeyUpdate>,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut input_plan = self.binder.bind_query(query, self.arena)?;
         let input_len = input_plan.output_schema(self.arena).len();
@@ -964,8 +1076,20 @@ where
             Cow::Owned(targets)
         };
 
-        self.binder
-            .bind_insert_query(&table_name, input_plan, &targets, is_overwrite, self.arena)
+        let on_duplicate_key_update = on_duplicate_key_update
+            .map(|clause| self.bind_on_duplicate_key_update(clause, &table_name))
+            .transpose()?;
+
+        self.binder.bind_insert_query(
+            crate::binder::insert::InsertQueryParams {
+                table_name: &table_name,
+                input_plan,
+                targets: &targets,
+                is_overwrite,
+                on_duplicate_key_update,
+            },
+            self.arena,
+        )
     }
 
     fn update(self, update: &Update) -> Result<LogicalPlan, DatabaseError> {
@@ -1337,6 +1461,40 @@ where
     ) -> Result<BindPlanComplete, DatabaseError> {
         let table_name = into.map(lower_case_name).transpose()?;
         self.insert_into(table_name.as_deref())
+    }
+}
+
+/// Existing-row column `i` reads slot `i`; proposed-row column `i` reads slot `n + i`.
+struct OdkuPositionBinder<'c> {
+    original_columns: &'c [ColumnRef],
+    excluded_columns: &'c [ColumnRef],
+}
+
+impl<A: MetaArena + ?Sized> ExprVisitorMut<A> for OdkuPositionBinder<'_> {
+    fn visit_column_ref(
+        &mut self,
+        column: &mut ColumnRef,
+        position: &mut usize,
+        arena: &mut A,
+    ) -> Result<(), DatabaseError> {
+        if let Some(i) = self.excluded_columns.iter().position(|c| c == column) {
+            *position = self.original_columns.len() + i;
+            return Ok(());
+        }
+        match self
+            .original_columns
+            .iter()
+            .position(|c| arena.same_column(*c, *column))
+        {
+            Some(i) => {
+                *position = i;
+                Ok(())
+            }
+            None => Err(DatabaseError::UnsupportedStmt(format!(
+                "ON DUPLICATE KEY UPDATE can only read the target table, not `{}`",
+                arena.column(*column).name()
+            ))),
+        }
     }
 }
 
@@ -1954,6 +2112,11 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         bind_table_name: Option<&str>,
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
+        if let (Some(odku), [row_alias, column]) = (self.context.odku_context(), idents) {
+            if odku.row_alias.as_deref() == Some(lower_ident(row_alias).as_ref()) {
+                return odku.proposed_column(&lower_ident(column), arena);
+            }
+        }
         let full_name = match idents {
             [column] => (None, lower_ident(column)),
             [table, column] => (Some(lower_ident(table)), lower_ident(column)),
@@ -1988,6 +2151,15 @@ impl<'a, 'parent, T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>>
         arena: &mut PlanArena,
     ) -> Result<ScalarExpression, DatabaseError> {
         // Only this call may be a FROM-clause table function, not the calls in its arguments.
+        if let (Some(odku), [name], [FunctionArg::Expr(Expr::Identifier(column))]) = (
+            self.context.odku_context(),
+            func.name.0.as_slice(),
+            func.args.as_slice(),
+        ) {
+            if func.over.is_none() && name.value.eq_ignore_ascii_case("values") {
+                return odku.proposed_column(&lower_ident(column), arena);
+            }
+        }
         let table_function_source = std::mem::take(&mut self.table_function_source);
         let func_span = func.span;
         let mut args = Vec::with_capacity(func.args.len());
