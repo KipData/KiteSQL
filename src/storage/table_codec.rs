@@ -1148,7 +1148,7 @@ mod tests {
     use crate::planner::{PlanArena, TableArenaCell};
     use crate::storage::table_codec::{Bytes, TableCodec};
     use crate::storage::TestTransaction;
-    use crate::types::index::{Index, IndexMeta, IndexType};
+    use crate::types::index::{Index, IndexImpl, IndexMeta, IndexType};
     use crate::types::tuple::Tuple;
     use crate::types::value::{DataValue, OrderedMapping, TupleMappingRef, Utf8Type};
     use crate::types::LogicalType;
@@ -1339,6 +1339,7 @@ mod tests {
             value_ty: LogicalType::Integer,
             name: "pk_c1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
+            r#impl: IndexImpl::PrimaryKey,
         };
         let mut builder = HistogramBuilder::new(
             &index_meta,
@@ -1513,6 +1514,7 @@ mod tests {
             value_ty: LogicalType::Integer,
             name: "index_1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
+            r#impl: IndexImpl::PrimaryKey,
         };
         let bytes =
             table_codec.with_index_meta(0, 0, Some(&index_meta), &plan_arena, |_, value| {
@@ -1767,6 +1769,7 @@ mod tests {
                 value_ty: LogicalType::Integer,
                 name: format!("{index_id}_index"),
                 ty: IndexType::PrimaryKey { is_multiple: false },
+                r#impl: IndexImpl::PrimaryKey,
             };
 
             let table_arena = TableArenaCell::default();

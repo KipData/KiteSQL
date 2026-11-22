@@ -86,19 +86,13 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
             return Ok(());
         }
 
-        let mut column_ids = Vec::with_capacity(columns.len());
         let mut column_exprs = Vec::with_capacity(columns.len());
         for &column in columns {
-            let id = plan_arena
-                .column(column)
-                .id()
-                .ok_or(DatabaseError::InvalidIndex)?;
             let position = self
                 .input_schema
                 .iter()
                 .position(|c| *c == column)
                 .ok_or(DatabaseError::InvalidIndex)?;
-            column_ids.push(id);
             column_exprs.push(ScalarExpression::column_expr(column, position));
         }
         let index_id_result = {
@@ -110,7 +104,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for CreateIndex<'a> {
                     plan_arena,
                     table_catalog.name(),
                     index_name.clone(),
-                    column_ids,
+                    columns,
                     index_val_ty.clone(),
                     *ty,
                     &mut decode,

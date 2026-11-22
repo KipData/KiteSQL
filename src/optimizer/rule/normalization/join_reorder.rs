@@ -784,6 +784,7 @@ mod tests {
             ty: IndexType::Normal,
             pk_ty: LogicalType::Integer,
             value_ty: LogicalType::Integer,
+            r#impl: crate::types::index::IndexImpl::Normal,
         });
         let info = IndexInfo {
             meta,

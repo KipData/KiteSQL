@@ -1351,6 +1351,7 @@ mod tests {
             value_ty: LogicalType::Integer,
             name: "idx_users_id".to_string(),
             ty: IndexType::Normal,
+            r#impl: crate::types::index::IndexImpl::Normal,
         });
         assert_eq!(
             PlanImpl::IndexScan(Box::new(index_info(meta)))
@@ -1763,6 +1764,7 @@ mod tests {
             value_ty: LogicalType::Integer,
             name: "idx_users_id".to_string(),
             ty: IndexType::Normal,
+            r#impl: crate::types::index::IndexImpl::Normal,
         });
 
         let cases = [

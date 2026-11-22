@@ -14,9 +14,16 @@
 
 use crate::catalog::{ColumnCatalog, TableName};
 use crate::iter_ext::Itertools;
+use crate::types::LogicalType;
 use kite_sql_serde_macros::ReferenceSerialization;
 use std::fmt;
 use std::fmt::Formatter;
+
+#[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
+pub struct UniqueKey {
+    pub column_positions: Vec<usize>,
+    pub index_val_ty: LogicalType,
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, ReferenceSerialization)]
 pub struct CreateTableOperator {
@@ -24,8 +31,8 @@ pub struct CreateTableOperator {
     pub table_name: TableName,
     /// List of columns of the table
     pub columns: Vec<ColumnCatalog>,
-    /// Composite or prefixed unique keys; each part holds a column position and optional prefix.
-    pub composite_unique_keys: Vec<Vec<(usize, Option<u32>)>>,
+    /// Bound composite or prefixed unique keys.
+    pub composite_unique_keys: Vec<UniqueKey>,
     pub if_not_exists: bool,
 }
 

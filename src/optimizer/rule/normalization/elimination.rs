@@ -1399,6 +1399,7 @@ mod tests {
             ty: IndexType::PrimaryKey {
                 is_multiple: len > 1,
             },
+            r#impl: crate::types::index::IndexImpl::PrimaryKey,
         });
         let index_info = IndexInfo {
             meta,
@@ -1486,6 +1487,7 @@ mod tests {
                 value_ty: LogicalType::Integer,
                 name: "idx".to_string(),
                 ty: IndexType::PrimaryKey { is_multiple: false },
+                r#impl: crate::types::index::IndexImpl::PrimaryKey,
             }),
             sort_option: sort_option.clone(),
             lookup: None,

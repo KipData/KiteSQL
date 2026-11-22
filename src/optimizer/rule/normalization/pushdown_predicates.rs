@@ -825,6 +825,7 @@ mod tests {
             value_ty: LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]),
             name: "unique_c1_c2".to_string(),
             ty: IndexType::Unique,
+            r#impl: crate::types::index::IndexImpl::Unique,
         });
         let first_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 2);
         let second_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c2, 1, 3);
@@ -920,6 +921,7 @@ mod tests {
             ]),
             name: "idx_c1_c2_c3".to_string(),
             ty: IndexType::Composite,
+            r#impl: crate::types::index::IndexImpl::Composite,
         });
         let c1_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 1);
         let c2_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c2, 1, 2);
@@ -982,6 +984,7 @@ mod tests {
             ]),
             name: "idx_c1_c2_c3".to_string(),
             ty: IndexType::Composite,
+            r#impl: crate::types::index::IndexImpl::Composite,
         });
         let c1_eq = cmp_predicate(&mut arena, BinaryOperator::Eq, c1, 0, 1);
         let c2_gt = cmp_predicate(&mut arena, BinaryOperator::Gt, c2, 1, 2);
@@ -1065,6 +1068,7 @@ mod tests {
             ]),
             name: "idx_c2_c3_c1".to_string(),
             ty: IndexType::Composite,
+            r#impl: crate::types::index::IndexImpl::Composite,
         });
         let index_meta_aligned = arena.alloc_index(IndexMeta {
             id: 1,
@@ -1074,6 +1078,7 @@ mod tests {
             value_ty: LogicalType::Tuple(vec![LogicalType::Integer, LogicalType::Integer]),
             name: "idx_c1_c2".to_string(),
             ty: IndexType::Composite,
+            r#impl: crate::types::index::IndexImpl::Composite,
         });
 
         let scan_plan = LogicalPlan::new(

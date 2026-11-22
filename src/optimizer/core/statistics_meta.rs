@@ -179,6 +179,7 @@ mod tests {
             value_ty: LogicalType::Integer,
             name: "pk_c1".to_string(),
             ty: IndexType::PrimaryKey { is_multiple: false },
+            r#impl: crate::types::index::IndexImpl::PrimaryKey,
         };
 
         let mut builder = HistogramBuilder::new(

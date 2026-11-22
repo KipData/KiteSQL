@@ -1579,6 +1579,7 @@ mod tests {
             value_ty: LogicalType::Integer,
             name: name.to_string(),
             ty: IndexType::Normal,
+            r#impl: crate::types::index::IndexImpl::Normal,
         }
     }
 

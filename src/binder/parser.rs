@@ -36,6 +36,7 @@ use crate::iter_ext::Itertools;
 use crate::parser::parse_sql_with_recursion_limit;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
 use crate::planner::operator::create_index::CreateIndexOperator;
+use crate::planner::operator::create_table::UniqueKey;
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::project::ProjectOperator;
@@ -817,12 +818,9 @@ where
         for constraint in create.constraints {
             match constraint {
                 TableConstraint::PrimaryKey(primary) => {
-                    let key = Self::constraint_columns(
-                        &columns,
-                        primary.columns,
-                        supports_prefix_length,
-                    )?;
-                    for (i, (position, prefix_len)) in key.into_iter().enumerate() {
+                    for (i, part) in primary.columns.iter().enumerate() {
+                        let (position, prefix_len) =
+                            Self::constraint_column(&columns, part, supports_prefix_length)?;
                         if prefix_len.is_some() {
                             return Err(DatabaseError::UnsupportedStmt(
                                 "PRIMARY KEY index prefixes".into(),
@@ -833,12 +831,29 @@ where
                 }
                 TableConstraint::Unique(unique) => {
                     Self::check_unique_nulls_option(unique.nulls_distinct)?;
-                    let key =
-                        Self::constraint_columns(&columns, unique.columns, supports_prefix_length)?;
-                    match key.as_slice() {
+                    match unique.columns.as_slice() {
                         [] => return Err(DatabaseError::InvalidIndex),
-                        [(position, None)] => columns[*position].desc_mut().set_unique(),
-                        _ => composite_unique_keys.push(key),
+                        [part] if matches!(part.column.expr, Expr::Identifier(_)) => {
+                            let (position, _) = Self::constraint_column(&columns, part, false)?;
+                            columns[position].desc_mut().set_unique();
+                        }
+                        parts => {
+                            let mut column_positions = Vec::with_capacity(parts.len());
+                            let index_val_ty =
+                                LogicalType::from_key_types(parts.iter().map(|part| {
+                                    let (position, prefix_len) = Self::constraint_column(
+                                        &columns,
+                                        part,
+                                        supports_prefix_length,
+                                    )?;
+                                    column_positions.push(position);
+                                    columns[position].datatype().index_key_type(prefix_len)
+                                }))?;
+                            composite_unique_keys.push(UniqueKey {
+                                column_positions,
+                                index_val_ty,
+                            });
+                        }
                     }
                 }
                 constraint => {
@@ -923,44 +938,35 @@ where
         Ok(())
     }
 
-    fn constraint_columns(
+    fn constraint_column(
         table_columns: &[ColumnCatalog],
-        index_columns: Vec<IndexColumn>,
+        index_column: &IndexColumn,
         supports_prefix_length: bool,
-    ) -> Result<Vec<(usize, Option<u32>)>, DatabaseError> {
-        let mut positions = Vec::with_capacity(index_columns.len());
-        for index_column in index_columns {
-            let expr = &index_column.column.expr;
-            let part = match expr {
-                Expr::Identifier(ident) => Some((ident, None)),
-                _ if supports_prefix_length => {
-                    prefix_key_part(expr).map(|(ident, len)| (ident, Some(len)))
-                }
-                _ => None,
-            };
-            let (ident, prefix_len) = part.ok_or_else(|| {
-                DatabaseError::UnsupportedStmt(
-                    "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".into(),
+    ) -> Result<(usize, Option<u32>), DatabaseError> {
+        let expr = &index_column.column.expr;
+        let part = match expr {
+            Expr::Identifier(ident) => Some((ident, None)),
+            _ if supports_prefix_length => {
+                prefix_key_part(expr).map(|(ident, len)| (ident, Some(len)))
+            }
+            _ => None,
+        };
+        let (ident, prefix_len) = part.ok_or_else(|| {
+            DatabaseError::UnsupportedStmt(
+                "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".into(),
+            )
+        })?;
+        let column_name = lower_ident(ident);
+        let position = table_columns
+            .iter()
+            .position(|column| column.name() == column_name.as_ref())
+            .ok_or_else(|| {
+                attach_span_if_absent(
+                    DatabaseError::column_not_found(column_name.into_owned()),
+                    ident.span,
                 )
             })?;
-            let column_name = lower_ident(ident);
-            let position = table_columns
-                .iter()
-                .position(|column| column.name() == column_name.as_ref())
-                .ok_or_else(|| {
-                    attach_span_if_absent(
-                        DatabaseError::column_not_found(column_name.into_owned()),
-                        ident.span,
-                    )
-                })?;
-            if prefix_len.is_some() {
-                table_columns[position]
-                    .datatype()
-                    .index_key_type(prefix_len)?;
-            }
-            positions.push((position, prefix_len));
-        }
-        Ok(positions)
+        Ok((position, prefix_len))
     }
 
     fn create_index(self, create: CreateIndex) -> Result<LogicalPlan, DatabaseError> {

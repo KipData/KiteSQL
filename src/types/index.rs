@@ -56,6 +56,31 @@ pub enum IndexType {
     Composite,
 }
 
+impl IndexType {
+    pub(crate) fn has_prefix(self, value_ty: &LogicalType) -> bool {
+        !matches!(self, Self::PrimaryKey { .. })
+            && value_ty
+                .as_slice()
+                .iter()
+                .any(|ty| ty.index_prefix_len().is_some())
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
+pub(crate) enum IndexImpl {
+    PrimaryKey,
+    Unique,
+    Normal,
+    Composite,
+    Covered(CoveredIndexImpl),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
+pub(crate) struct CoveredIndexImpl {
+    /// Original column types, not the normalized secondary key types.
+    pub(crate) cover_ty: LogicalType,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, ReferenceSerialization)]
 pub enum RuntimeIndexProbe {
     Eq(DataValue),
@@ -125,16 +150,12 @@ pub struct IndexMeta {
     pub value_ty: LogicalType,
     pub name: String,
     pub ty: IndexType,
+    pub(crate) r#impl: IndexImpl,
 }
 
 impl IndexMeta {
     pub(crate) fn has_prefix(&self) -> bool {
-        !matches!(self.ty, IndexType::PrimaryKey { .. })
-            && self
-                .value_ty
-                .as_slice()
-                .iter()
-                .any(|ty| ty.index_prefix_len().is_some())
+        self.ty.has_prefix(&self.value_ty)
     }
 
     pub(crate) fn truncate_key(
@@ -309,6 +330,7 @@ mod tests {
             value_ty: LogicalType::Integer,
             name: "idx_t".to_string(),
             ty: IndexType::Normal,
+            r#impl: IndexImpl::Normal,
         }
     }
 
@@ -508,6 +530,7 @@ mod tests {
             value_ty: LogicalType::Integer,
             name: "idx_id".to_string(),
             ty: IndexType::Normal,
+            r#impl: IndexImpl::Normal,
         };
 
         assert_eq!(
