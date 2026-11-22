@@ -24,8 +24,8 @@ pub struct CreateTableOperator {
     pub table_name: TableName,
     /// List of columns of the table
     pub columns: Vec<ColumnCatalog>,
-    /// Each key lists positions in `columns` in constraint order.
-    pub composite_unique_keys: Vec<Vec<usize>>,
+    /// Composite or prefixed unique keys; each part holds a column position and optional prefix.
+    pub composite_unique_keys: Vec<Vec<(usize, Option<u32>)>>,
     pub if_not_exists: bool,
 }
 

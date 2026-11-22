@@ -35,6 +35,7 @@ use crate::expression::{AliasType, ScalarExpression, TypeCast};
 use crate::iter_ext::Itertools;
 use crate::parser::parse_sql_with_recursion_limit;
 use crate::planner::operator::alter_table::change_column::{DefaultChange, NotNullChange};
+use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::operator::join::{JoinCondition, JoinOperator as LJoinOperator, JoinType};
 use crate::planner::operator::mark_apply::MarkApplyQuantifier;
 use crate::planner::operator::project::ProjectOperator;
@@ -812,22 +813,32 @@ where
             columns.push(self.bind_column(column, Some(i))?);
         }
         let mut composite_unique_keys = Vec::new();
-        let dialect = self.binder.context.dialect;
+        let supports_prefix_length = self.binder.context.dialect.supports_index_prefix_length();
         for constraint in create.constraints {
             match constraint {
                 TableConstraint::PrimaryKey(primary) => {
-                    let positions = Self::constraint_columns(&columns, primary.columns, dialect)?;
-                    for (i, position) in positions.into_iter().enumerate() {
+                    let key = Self::constraint_columns(
+                        &columns,
+                        primary.columns,
+                        supports_prefix_length,
+                    )?;
+                    for (i, (position, prefix_len)) in key.into_iter().enumerate() {
+                        if prefix_len.is_some() {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "PRIMARY KEY index prefixes".into(),
+                            ));
+                        }
                         columns[position].desc_mut().set_primary(Some(i));
                     }
                 }
                 TableConstraint::Unique(unique) => {
                     Self::check_unique_nulls_option(unique.nulls_distinct)?;
-                    let positions = Self::constraint_columns(&columns, unique.columns, dialect)?;
-                    match positions.as_slice() {
+                    let key =
+                        Self::constraint_columns(&columns, unique.columns, supports_prefix_length)?;
+                    match key.as_slice() {
                         [] => return Err(DatabaseError::InvalidIndex),
-                        [position] => columns[*position].desc_mut().set_unique(),
-                        _ => composite_unique_keys.push(positions),
+                        [(position, None)] => columns[*position].desc_mut().set_unique(),
+                        _ => composite_unique_keys.push(key),
                     }
                 }
                 constraint => {
@@ -915,22 +926,23 @@ where
     fn constraint_columns(
         table_columns: &[ColumnCatalog],
         index_columns: Vec<IndexColumn>,
-        dialect: &dyn crate::dialect::SqlDialect,
-    ) -> Result<Vec<usize>, DatabaseError> {
+        supports_prefix_length: bool,
+    ) -> Result<Vec<(usize, Option<u32>)>, DatabaseError> {
         let mut positions = Vec::with_capacity(index_columns.len());
         for index_column in index_columns {
-            let ident = match &index_column.column.expr {
-                Expr::Identifier(ident) => ident,
-                expr => match prefix_key_part(expr) {
-                    Some(ident) if dialect.supports_index_prefix_length() => ident,
-                    _ => {
-                        return Err(DatabaseError::UnsupportedStmt(
-                            "only identifier columns are supported in `PRIMARY KEY/UNIQUE`"
-                                .to_string(),
-                        ))
-                    }
-                },
+            let expr = &index_column.column.expr;
+            let part = match expr {
+                Expr::Identifier(ident) => Some((ident, None)),
+                _ if supports_prefix_length => {
+                    prefix_key_part(expr).map(|(ident, len)| (ident, Some(len)))
+                }
+                _ => None,
             };
+            let (ident, prefix_len) = part.ok_or_else(|| {
+                DatabaseError::UnsupportedStmt(
+                    "only identifier columns are supported in `PRIMARY KEY/UNIQUE`".into(),
+                )
+            })?;
             let column_name = lower_ident(ident);
             let position = table_columns
                 .iter()
@@ -941,7 +953,12 @@ where
                         ident.span,
                     )
                 })?;
-            positions.push(position);
+            if prefix_len.is_some() {
+                table_columns[position]
+                    .datatype()
+                    .index_key_type(prefix_len)?;
+            }
+            positions.push((position, prefix_len));
         }
         Ok(positions)
     }
@@ -974,10 +991,9 @@ where
         let input = self
             .binder
             .bind_create_index_source(&table_name, self.arena)?;
-        let mut columns = Vec::with_capacity(create.columns.len());
-        let dialect = self.binder.context.dialect;
-
-        for index_column in create.columns {
+        let table_id = self.binder.context.table_id(&table_name)?;
+        let supports_prefix_length = self.binder.context.dialect.supports_index_prefix_length();
+        let key_parts = create.columns.into_iter().map(|index_column| {
             if index_column.operator_class.is_some()
                 || index_column.column.options.asc == Some(false)
                 || index_column.column.options.nulls_first.is_some()
@@ -987,27 +1003,37 @@ where
                     "CREATE INDEX column options".to_string(),
                 ));
             }
-            let prefix_column = prefix_key_part(&index_column.column.expr)
-                .filter(|_| dialect.supports_index_prefix_length())
-                .map(|ident| Expr::Identifier(ident.clone()));
-            let expr = self.binder.bind_expr(
-                prefix_column.as_ref().unwrap_or(&index_column.column.expr),
-                self.arena,
-            )?;
-            match &expr {
-                ScalarExpression::ColumnRef { column, .. } => columns.push(*column),
-                _ => {
-                    return Err(DatabaseError::UnsupportedStmt(format!(
-                        "'CREATE INDEX' by {expr:?}"
-                    )))
-                }
-            }
-        }
+            let ast = &index_column.column.expr;
+            let prefix = if supports_prefix_length {
+                prefix_key_part(ast)
+            } else {
+                None
+            };
+            let (expr, prefix_len) = match prefix {
+                Some((ident, len)) => (
+                    self.binder
+                        .bind_expr(&Expr::Identifier(ident.clone()), self.arena)?,
+                    Some(len),
+                ),
+                None => (self.binder.bind_expr(ast, self.arena)?, None),
+            };
+            let ScalarExpression::ColumnRef { column, .. } = expr else {
+                return Err(DatabaseError::UnsupportedStmt(format!(
+                    "'CREATE INDEX' by {expr:?}"
+                )));
+            };
+            let key_ty = self
+                .arena
+                .column(column)
+                .datatype()
+                .index_key_type(prefix_len)?;
+            Ok((column, key_ty))
+        });
 
-        self.binder.bind_create_index(
-            &table_name,
+        CreateIndexOperator::build(
+            table_id,
             index_name,
-            columns,
+            key_parts,
             create.if_not_exists,
             create.unique,
             input,
@@ -2020,8 +2046,8 @@ fn sql_object_name(name: ObjectName) -> Result<String, DatabaseError> {
     Ok(lower_case_name(&name)?.into_owned())
 }
 
-/// `col` of a prefix key part `col(n)` with a positive integer `n`, which parses as a call.
-fn prefix_key_part(expr: &Expr) -> Option<&Ident> {
+/// A prefix key part `col(n)` parses as a call.
+fn prefix_key_part(expr: &Expr) -> Option<(&Ident, u32)> {
     let Expr::Function(func) = expr else {
         return None;
     };
@@ -2031,12 +2057,14 @@ fn prefix_key_part(expr: &Expr) -> Option<&Ident> {
     let FunctionArguments::List(list) = &func.args else {
         return None;
     };
-    let is_prefix_length = matches!(
-        list.args.as_slice(),
-        [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))]
-            if matches!(&value.value, Value::Number(length, false)
-                if length.parse::<u32>().is_ok_and(|length| length > 0))
-    );
+    let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))] = list.args.as_slice()
+    else {
+        return None;
+    };
+    let Value::Number(length, false) = &value.value else {
+        return None;
+    };
+    let length = length.parse::<u32>().ok().filter(|len| *len > 0)?;
     let is_plain_call = !func.uses_odbc_syntax
         && matches!(func.parameters, FunctionArguments::None)
         && list.duplicate_treatment.is_none()
@@ -2045,7 +2073,7 @@ fn prefix_key_part(expr: &Expr) -> Option<&Ident> {
         && func.null_treatment.is_none()
         && func.over.is_none()
         && func.within_group.is_empty();
-    (is_prefix_length && is_plain_call).then_some(ident)
+    is_plain_call.then_some((ident, length))
 }
 
 pub(super) fn lower_ident(ident: &Ident) -> Cow<'_, str> {

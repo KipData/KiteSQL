@@ -27,7 +27,7 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
         &mut self,
         table_name: TableName,
         columns: Vec<ColumnCatalog>,
-        composite_unique_keys: Vec<Vec<usize>>,
+        composite_unique_keys: Vec<Vec<(usize, Option<u32>)>>,
         if_not_exists: bool,
     ) -> Result<LogicalPlan, DatabaseError> {
         let mut names = HashSet::new();
@@ -107,7 +107,7 @@ mod tests {
         match plan1.operator {
             Operator::CreateTable(op) => {
                 assert_eq!(op.table_name, "t1");
-                assert_eq!(op.composite_unique_keys, vec![vec![1, 0]]);
+                assert_eq!(op.composite_unique_keys, vec![vec![(1, None), (0, None)]]);
                 let id = &op.columns[0];
                 assert_eq!(id.name(), "id");
                 assert!(!id.nullable());

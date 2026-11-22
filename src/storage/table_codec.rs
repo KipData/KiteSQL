@@ -443,7 +443,13 @@ impl TableCodec {
             let prefix = table_id.to_be_bytes();
             let (lower, value) = self.slots_mut();
             let values_len = (0..index.values.len())
-                .map(|i| index.values.value_at(i).memcomparable_len_hint())
+                .map(|i| {
+                    let prefix_len = index
+                        .key_types
+                        .get(i)
+                        .and_then(LogicalType::index_prefix_len);
+                    index.values.value_at(i).index_key_len_hint(prefix_len)
+                })
                 .sum::<usize>();
             let tuple_id_len = tuple_id.map_or(0, DataValue::memcomparable_len_hint);
             lower.reserve(
@@ -458,7 +464,12 @@ impl TableCodec {
             lower.extend_from_slice(&index.id.to_le_bytes());
             lower.push(BOUND_MIN_TAG);
             for i in 0..index.values.len() {
-                index.values.value_at(i).memcomparable_encode(lower)?;
+                let value = index.values.value_at(i);
+                let truncated = value.truncate_index_key(index.key_types.get(i))?;
+                truncated
+                    .as_ref()
+                    .unwrap_or(value)
+                    .memcomparable_encode(lower)?;
             }
 
             if let Some(tuple_id) = tuple_id {
@@ -925,10 +936,7 @@ impl TableCodec {
         let start = TUPLE_KEY_PREFIX_LEN + INDEX_ID_LEN + KEY_BOUND_LEN;
         let bytes = key.get(start..).ok_or(DatabaseError::InvalidIndex)?;
         let mut reader = Cursor::new(bytes);
-        let types = match ty {
-            LogicalType::Tuple(types) => types.as_slice(),
-            ty => std::slice::from_ref(ty),
-        };
+        let types = ty.as_slice();
         tuple.values.clear();
         tuple
             .values

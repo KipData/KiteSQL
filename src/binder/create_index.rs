@@ -13,14 +13,10 @@
 // limitations under the License.
 
 use crate::binder::{Binder, Source};
-use crate::catalog::ColumnRef;
 use crate::errors::DatabaseError;
-use crate::planner::operator::create_index::CreateIndexOperator;
 use crate::planner::operator::table_scan::TableScanOperator;
-use crate::planner::operator::Operator;
-use crate::planner::{Childrens, LogicalPlan};
+use crate::planner::LogicalPlan;
 use crate::storage::StorageTransaction;
-use crate::types::index::IndexType;
 use crate::types::LogicalType;
 
 impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, A> {
@@ -40,34 +36,5 @@ impl<T: StorageTransaction, A: AsRef<[(usize, LogicalType)]>> Binder<'_, '_, T, 
                 "derived source cannot be rebound as a base relation".to_string(),
             )),
         }
-    }
-
-    pub(crate) fn bind_create_index(
-        &mut self,
-        table_name: &str,
-        index_name: String,
-        columns: Vec<ColumnRef>,
-        if_not_exists: bool,
-        is_unique: bool,
-        input: LogicalPlan,
-    ) -> Result<LogicalPlan, DatabaseError> {
-        let ty = if is_unique {
-            IndexType::Unique
-        } else if columns.len() == 1 {
-            IndexType::Normal
-        } else {
-            IndexType::Composite
-        };
-
-        Ok(LogicalPlan::new(
-            Operator::CreateIndex(CreateIndexOperator {
-                table_id: self.context.table_id(table_name)?,
-                columns,
-                index_name,
-                if_not_exists,
-                ty,
-            }),
-            Childrens::Only(Box::new(input)),
-        ))
     }
 }

@@ -243,6 +243,7 @@ fn pick_parameterized_index_position(
         .filter(|(_, index_info)| {
             let index_meta = arena.index(index_info.meta);
             index_meta.table_id == table_id
+                && !index_meta.has_prefix()
                 && index_meta.column_ids.len() == 1
                 && index_meta.column_ids.first().copied() == Some(column_id)
         })
@@ -339,7 +340,9 @@ pub(crate) fn probe_index(
             let mut probe = Vec::new();
             'indexes: for (position, info) in scan.index_infos.iter().enumerate() {
                 let meta = arena.index(info.meta);
-                if !matches!(meta.ty, IndexType::PrimaryKey { .. } | IndexType::Unique) {
+                if meta.has_prefix()
+                    || !matches!(meta.ty, IndexType::PrimaryKey { .. } | IndexType::Unique)
+                {
                     continue;
                 }
                 probe.clear();
@@ -796,11 +799,10 @@ mod inner_join_tests {
                     column_ids: keys.iter().map(|id| *id as _).collect(),
                     table_id: table_id(name),
                     pk_ty: LogicalType::Integer,
-                    value_ty: if keys.len() == 1 {
-                        types[keys[0]].clone()
-                    } else {
-                        LogicalType::Tuple(keys.iter().map(|id| types[*id].clone()).collect())
-                    },
+                    value_ty: LogicalType::from_key_types(
+                        keys.iter().map(|&id| Ok(types[id].clone())),
+                    )
+                    .unwrap(),
                     name: format!("idx{id}"),
                     ty: if keys.len() == 1 {
                         IndexType::Normal

@@ -76,6 +76,50 @@ pub enum LogicalType {
 }
 
 impl LogicalType {
+    pub(crate) fn index_key_type(&self, prefix_len: Option<u32>) -> Result<Self, DatabaseError> {
+        Ok(match self {
+            Self::Char(_, unit) | Self::Varchar(_, unit) => Self::Varchar(
+                prefix_len,
+                if prefix_len.is_some() {
+                    CharLengthUnits::Characters
+                } else {
+                    *unit
+                },
+            ),
+            Self::Varbinary(_) => Self::Varbinary(prefix_len),
+            ty if prefix_len.is_none() => ty.clone(),
+            ty => {
+                return Err(DatabaseError::UnsupportedStmt(format!(
+                    "index prefix length requires a string or binary column, got {ty}"
+                )))
+            }
+        })
+    }
+
+    pub(crate) fn from_key_types(
+        mut key_types: impl ExactSizeIterator<Item = Result<Self, DatabaseError>>,
+    ) -> Result<Self, DatabaseError> {
+        if key_types.len() == 1 {
+            key_types.next().ok_or(DatabaseError::InvalidIndex)?
+        } else {
+            key_types.collect::<Result<_, _>>().map(Self::Tuple)
+        }
+    }
+
+    pub(crate) fn as_slice(&self) -> &[Self] {
+        match self {
+            Self::Tuple(types) => types,
+            ty => std::slice::from_ref(ty),
+        }
+    }
+
+    pub(crate) fn index_prefix_len(&self) -> Option<u32> {
+        match self {
+            Self::Varchar(len, _) | Self::Varbinary(len) => *len,
+            _ => None,
+        }
+    }
+
     pub fn type_trans<T: 'static>() -> Option<LogicalType> {
         let type_id = TypeId::of::<T>();
 

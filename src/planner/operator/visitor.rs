@@ -791,6 +791,7 @@ pub(crate) mod tests {
             Operator::CreateIndex(CreateIndexOperator {
                 table_id: 0,
                 columns: vec![column_ref],
+                index_val_ty: LogicalType::Integer,
                 index_name: "idx".to_string(),
                 if_not_exists: false,
                 ty: IndexType::Normal,

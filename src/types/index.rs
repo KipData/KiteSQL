@@ -24,6 +24,7 @@ use crate::types::tuple::TupleLike;
 use crate::types::value::DataValue;
 use crate::types::{ColumnId, LogicalType};
 use kite_sql_serde_macros::ReferenceSerialization;
+use std::borrow::Cow;
 use std::collections::Bound;
 use std::fmt;
 use std::fmt::Formatter;
@@ -120,12 +121,53 @@ pub struct IndexMeta {
     pub column_ids: Vec<ColumnId>,
     pub table_id: TableId,
     pub pk_ty: LogicalType,
+    /// Secondary key types discard column length limits. A length here is an explicit prefix.
     pub value_ty: LogicalType,
     pub name: String,
     pub ty: IndexType,
 }
 
 impl IndexMeta {
+    pub(crate) fn has_prefix(&self) -> bool {
+        !matches!(self.ty, IndexType::PrimaryKey { .. })
+            && self
+                .value_ty
+                .as_slice()
+                .iter()
+                .any(|ty| ty.index_prefix_len().is_some())
+    }
+
+    pub(crate) fn truncate_key(
+        &self,
+        value: Cow<'_, DataValue>,
+    ) -> Result<DataValue, DatabaseError> {
+        let mut key_types = self.value_ty.as_slice().iter();
+        let value = match value {
+            Cow::Owned(mut value) => {
+                for (part, ty) in value.as_mut_slice().iter_mut().zip(key_types) {
+                    if let Some(truncated) = part.truncate_index_key(Some(ty))? {
+                        *part = truncated;
+                    }
+                }
+                return Ok(value);
+            }
+            Cow::Borrowed(value) => value,
+        };
+        let mut truncate = |part: &DataValue| {
+            Ok(part
+                .truncate_index_key(key_types.next())?
+                .unwrap_or_else(|| part.clone()))
+        };
+        match value {
+            DataValue::Tuple(parts) => parts
+                .iter()
+                .map(truncate)
+                .collect::<Result<_, _>>()
+                .map(DataValue::Tuple),
+            part => truncate(part),
+        }
+    }
+
     pub(crate) fn column_exprs<'a>(
         &'a self,
         table: &'a TableCatalog,
@@ -144,6 +186,7 @@ pub struct Index<'a, V: TupleLike + ?Sized = [DataValue]> {
     pub id: IndexId,
     pub values: &'a V,
     pub ty: IndexType,
+    pub(crate) key_types: &'a [LogicalType],
 }
 
 impl<V: TupleLike + ?Sized> Clone for Index<'_, V> {
@@ -156,7 +199,26 @@ impl<V: TupleLike + ?Sized> Copy for Index<'_, V> {}
 
 impl<'a, V: TupleLike + ?Sized> Index<'a, V> {
     pub fn new(id: IndexId, values: &'a V, ty: IndexType) -> Self {
-        Index { id, values, ty }
+        Index {
+            id,
+            values,
+            ty,
+            key_types: &[],
+        }
+    }
+
+    pub(crate) fn from_meta(meta: &'a IndexMeta, values: &'a V) -> Self {
+        let key_types = if matches!(meta.ty, IndexType::PrimaryKey { .. }) {
+            &[]
+        } else {
+            meta.value_ty.as_slice()
+        };
+        Self {
+            id: meta.id,
+            values,
+            ty: meta.ty,
+            key_types,
+        }
     }
 
     pub(crate) fn is_unique_with_null(&self) -> bool {

@@ -106,7 +106,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 arena.rewrite(exprs, plan_arena, Some(&tuple))?;
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
-                let old_index = Index::new(index_meta.id, values, index_meta.ty);
+                let old_index = Index::from_meta(index_meta, values);
                 transaction
                     .del_index(table_codec, table.table_id, &old_index, &old_pk)
                     .await?;
@@ -131,7 +131,7 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Update<'a> {
                 arena.rewrite(exprs, plan_arena, Some(&tuple))?;
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
-                let new_index = Index::new(index_meta.id, values, index_meta.ty);
+                let new_index = Index::from_meta(index_meta, values);
                 transaction
                     .add_index(table_codec, table.table_id, new_index, &new_pk)
                     .await?;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::planner::operator::create_index::CreateIndexOperator;
 
 enum OrmDefaultChange {
     NoChange,
@@ -458,24 +459,24 @@ async fn execute_create_index<S: Storage, D: SqlDialect>(
 ) -> Result<(), DatabaseError> {
     let (index_name, index_columns, unique) = *index;
     let index_name = index_name.to_string();
-    let column_names = index_columns.to_vec();
     database
         .execute_mut("ORM CREATE INDEX", &[], move |binder, arena| {
             let mut input = binder.bind_create_index_source(table_name, arena)?;
+            let table_id = binder.context.table_id(table_name)?;
             let schema = input.output_schema(arena).clone();
-            let mut columns = Vec::with_capacity(column_names.len());
-            for column_name in column_names {
+            let key_parts = index_columns.iter().copied().map(|column_name| {
                 let column = schema
                     .iter()
                     .copied()
                     .find(|column| arena.column(*column).name() == column_name)
                     .ok_or_else(|| DatabaseError::column_not_found(column_name.to_string()))?;
-                columns.push(column);
-            }
-            binder.bind_create_index(
-                table_name,
+                let key_ty = arena.column(column).datatype().index_key_type(None)?;
+                Ok((column, key_ty))
+            });
+            CreateIndexOperator::build(
+                table_id,
                 index_name,
-                columns,
+                key_parts,
                 if_not_exists,
                 unique,
                 input,

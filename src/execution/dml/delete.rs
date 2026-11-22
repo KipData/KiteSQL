@@ -85,12 +85,11 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
                         IndexType::PrimaryKey { .. }
                     )
                 })
-                .map(|index_meta| {
-                    let index_meta = plan_arena.index(*index_meta);
+                .map(|&index_meta| {
                     Ok((
-                        index_meta.id,
-                        index_meta.ty,
-                        index_meta
+                        index_meta,
+                        plan_arena
+                            .index(index_meta)
                             .column_exprs(table)
                             .collect::<Result<Vec<_>, _>>()?,
                     ))
@@ -104,11 +103,11 @@ impl<'a, T: StorageTransaction + 'a> ExecutorNode<'a, T> for Delete<'a> {
             let Some(tuple_id) = tuple.pk() else {
                 continue;
             };
-            for (index_id, index_ty, exprs) in index_templates.iter() {
+            for (index_meta, exprs) in index_templates.iter() {
                 arena.rewrite(exprs, plan_arena, Some(&tuple))?;
                 let mut state = arena.local_state(plan_arena);
                 let (values, transaction, table_codec) = state.tuple_transaction_codec_mut();
-                let index = Index::new(*index_id, values, *index_ty);
+                let index = Index::from_meta(plan_arena.index(*index_meta), values);
                 transaction
                     .del_index(table_codec, table_id, &index, tuple_id)
                     .await?;

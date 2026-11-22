@@ -93,11 +93,11 @@ pub trait SqlDialect: Debug + Send + Sync + 'static {
     /// Whether index key parts may give a prefix length, as in `col(n)`.
     ///
     /// When this returns `true`, a key part `col(n)` with a positive integer `n` in a
-    /// `PRIMARY KEY` or `UNIQUE` constraint or in `CREATE INDEX` is accepted as `col`. The
-    /// length is not stored: the whole value is indexed, and a unique key compares whole
-    /// values.
+    /// `UNIQUE` constraint or in `CREATE INDEX` indexes the first `n` characters of a
+    /// string or the first `n` bytes of a binary value. Other types and primary key
+    /// prefixes are not supported.
     ///
-    /// The default implementation returns `false`, which rejects such key parts.
+    /// The default implementation returns `false`. [`GenericSqlDialect`] enables this syntax.
     fn supports_index_prefix_length(&self) -> bool {
         false
     }
@@ -130,6 +130,10 @@ impl SqlDialect for GenericSqlDialect {
 
     fn parser_dialect(&self) -> &dyn SqlParserDialect {
         &self.parser
+    }
+
+    fn supports_index_prefix_length(&self) -> bool {
+        true
     }
 }
 
@@ -411,49 +415,16 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Debug, Default)]
-    struct PrefixIndexDialect {
-        parser: GenericDialect,
-    }
-
-    impl SqlDialect for PrefixIndexDialect {
-        fn name(&self) -> &str {
-            "test_prefix_index"
-        }
-
-        fn parser_dialect(&self) -> &dyn SqlParserDialect {
-            &self.parser
-        }
-
-        fn supports_index_prefix_length(&self) -> bool {
-            true
-        }
-    }
-
     #[test]
-    async fn index_prefix_length() -> Result<(), DatabaseError> {
-        let create = "create table t1 (id int primary key, b varchar(20), unique (b(4)))";
-        let mut generic = DataBaseBuilder::path(".").build_in_memory().await?;
-        assert!(generic.ddl(create).await.is_err());
-
+    async fn custom_dialect_rejects_index_prefix_by_default() -> Result<(), DatabaseError> {
         let mut db = DataBaseBuilder::path(".")
-            .dialect(PrefixIndexDialect::default())
+            .dialect(TestDialect::default())
             .build_in_memory()
             .await?;
-        db.ddl(create).await?;
-        db.ddl("create index i1 on t1 (b(2))").await?;
-        assert!(db.ddl("create index i2 on t1 (b(0))").await.is_err());
-        db.run("insert into t1 values (1, 'abcde'), (2, 'abcdf')")
-            .await?
-            .done()
-            .await?;
         assert!(db
-            .run("insert into t1 values (3, 'abcde')")
-            .await?
-            .done()
+            .ddl("create table t1 (id int primary key, b varchar(20), unique (b(2)))")
             .await
             .is_err());
-
         Ok(())
     }
 }

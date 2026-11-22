@@ -1383,6 +1383,47 @@ impl DataValue {
         self.memcomparable_encode_with_null_order(b, false)
     }
 
+    pub(crate) fn truncate_index_key(
+        &self,
+        ty: Option<&LogicalType>,
+    ) -> Result<Option<Self>, DatabaseError> {
+        Ok(match (self, ty) {
+            (Self::Utf8 { value, .. }, Some(LogicalType::Varchar(Some(len), unit))) => {
+                let end = value
+                    .char_indices()
+                    .nth(*len as usize)
+                    .map_or(value.len(), |(i, _)| i);
+                Some(Self::Utf8 {
+                    value: (&value[..end]).into(),
+                    ty: Utf8Type::Variable(Some(*len)),
+                    unit: *unit,
+                })
+            }
+            (Self::Binary { value, .. }, Some(LogicalType::Varbinary(Some(len)))) => {
+                Some(Self::Binary {
+                    value: (&value[..value.len().min(*len as usize)]).into(),
+                    len: Some(*len),
+                })
+            }
+            (value, Some(ty)) if !value.is_null() && ty.index_prefix_len().is_some() => {
+                return Err(DatabaseError::InvalidIndex);
+            }
+            _ => None,
+        })
+    }
+
+    pub(crate) fn index_key_len_hint(&self, prefix_len: Option<u32>) -> usize {
+        let len = match (self, prefix_len) {
+            // A UTF-8 character takes at most four bytes. No need to scan the string here.
+            (Self::Utf8 { value, .. }, Some(len)) => {
+                value.len().min((len as usize).saturating_mul(4))
+            }
+            (Self::Binary { value, .. }, Some(len)) => value.len().min(len as usize),
+            _ => return self.memcomparable_len_hint(),
+        };
+        1 + Self::encoded_string_len(len)
+    }
+
     pub(crate) fn memcomparable_len_hint(&self) -> usize {
         1 + match self {
             // Unbound values fail to encode, so they write nothing past the tag.
@@ -2261,6 +2302,28 @@ mod test {
             let mut bytes = Vec::new();
             value.memcomparable_encode(&mut bytes)?;
             assert!(bytes.len() <= value.memcomparable_len_hint(), "{value:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn index_key_len_hint_bounds_prefix_encoding() -> Result<(), DatabaseError> {
+        for (value, ty) in [
+            (
+                DataValue::new_utf8("😀😀a long suffix".into()),
+                LogicalType::Varchar(Some(2), CharLengthUnits::Characters),
+            ),
+            (
+                DataValue::from(vec![1; 32]),
+                LogicalType::Varbinary(Some(8)),
+            ),
+        ] {
+            let hint = value.index_key_len_hint(ty.index_prefix_len());
+            let key = value.truncate_index_key(Some(&ty))?.unwrap();
+            let mut bytes = Vec::new();
+            key.memcomparable_encode(&mut bytes)?;
+            assert!(bytes.len() <= hint);
+            assert!(hint < value.memcomparable_len_hint());
         }
         Ok(())
     }

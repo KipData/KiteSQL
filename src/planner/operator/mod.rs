@@ -1681,11 +1681,15 @@ mod tests {
                 Operator::CreateIndex(CreateIndexOperator {
                     table_id: 0,
                     columns: vec![id, name],
+                    index_val_ty: LogicalType::Tuple(vec![
+                        LogicalType::Integer,
+                        LogicalType::Varbinary(Some(2)),
+                    ]),
                     index_name: "idx_users_name".to_string(),
                     if_not_exists: false,
-                    ty: IndexType::Normal,
+                    ty: IndexType::Composite,
                 }),
-                "Create Index On users -> [id, name], If Not Exists: false",
+                "Create Index On users -> [id, name(2)], If Not Exists: false",
             ),
             (
                 Operator::CreateView(CreateViewOperator {

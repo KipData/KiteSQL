@@ -344,15 +344,23 @@ impl NormalizationRule for PushPredicateIntoScan {
             if lookup.is_some() {
                 continue;
             }
-            let SortOption::OrderBy {
-                ignore_prefix_len, ..
-            } = sort_option
-            else {
-                return Err(DatabaseError::InvalidIndex);
+            let index = arena.index(*meta);
+            let has_prefix = index.has_prefix();
+            let sort_skip = match sort_option {
+                SortOption::OrderBy {
+                    ignore_prefix_len, ..
+                } => Some(ignore_prefix_len),
+                SortOption::None if has_prefix => None,
+                _ => return Err(DatabaseError::InvalidIndex),
             };
             // Uniqueness does not determine key width: UNIQUE indexes can be composite too.
-            let detached = if arena.index(*meta).column_ids.len() > 1 {
-                Self::composite_range(filter_op, *meta, ignore_prefix_len, arena)?
+            let detached = if index.column_ids.len() > 1 {
+                let (detached, leading_eq_columns) =
+                    Self::composite_range(filter_op, *meta, arena)?;
+                if let Some(sort_skip) = sort_skip {
+                    *sort_skip = leading_eq_columns;
+                }
+                detached
             } else {
                 RangeDetacher::for_index(*meta, 0, arena).detach(filter_op.predicate)?
             };
@@ -361,10 +369,19 @@ impl NormalizationRule for PushPredicateIntoScan {
                 *residual_predicate = None;
                 continue;
             };
+            // Different full values can map to the same prefix. Only a single equality
+            // lookup can be used here without widening ranges or deduplicating candidates.
+            if has_prefix && !matches!(detached.range, Range::Eq(_)) {
+                continue;
+            }
             changed = true;
 
             *lookup = Some(IndexLookup::Static(detached.range));
-            *residual_predicate = detached.residual;
+            *residual_predicate = if has_prefix {
+                Some(filter_op.predicate)
+            } else {
+                detached.residual
+            };
             let columns = scan_op
                 .deserializers
                 .read_columns()
@@ -395,6 +412,9 @@ pub(crate) fn index_covering(
     arena: &PlanArena,
 ) -> Option<Option<Vec<usize>>> {
     let index_meta = arena.index(index);
+    if index_meta.has_prefix() {
+        return None;
+    }
     let mut mapping_slots = Vec::with_capacity(index_meta.column_ids.len());
     let mut needs_mapping = false;
 
@@ -414,7 +434,8 @@ pub(crate) fn is_index_covers(
     arena: &PlanArena,
 ) -> bool {
     let index_meta = arena.index(index);
-    columns.all(|column| covering_idx(column, index_meta, arena).is_some())
+    !index_meta.has_prefix()
+        && columns.all(|column| covering_idx(column, index_meta, arena).is_some())
 }
 
 fn covering_idx(column: ColumnRef, index_meta: &IndexMeta, arena: &PlanArena) -> Option<usize> {
@@ -437,9 +458,8 @@ impl PushPredicateIntoScan {
     fn composite_range(
         op: &FilterOperator,
         meta: IndexMetaRef,
-        ignore_prefix_len: &mut usize,
-        arena: &mut crate::planner::PlanArena,
-    ) -> Result<Option<DetachedPredicate>, DatabaseError> {
+        arena: &mut PlanArena<'_>,
+    ) -> Result<(Option<DetachedPredicate>, usize), DatabaseError> {
         let column_count = arena.index(meta).column_ids.len();
         let mut res = None;
         let mut eq_ranges = Vec::with_capacity(column_count);
@@ -468,7 +488,7 @@ impl PushPredicateIntoScan {
             res = range.combining_eqs(&eq_ranges);
             break;
         }
-        *ignore_prefix_len = eq_ranges.len();
+        let leading_eq_columns = eq_ranges.len();
 
         if res.is_none() {
             if let Some(range) = eq_ranges.pop() {
@@ -497,7 +517,10 @@ impl PushPredicateIntoScan {
             }
             range
         });
-        Ok(range.map(|range| DetachedPredicate { range, residual }))
+        Ok((
+            range.map(|range| DetachedPredicate { range, residual }),
+            leading_eq_columns,
+        ))
     }
 }
 
@@ -910,17 +933,11 @@ mod tests {
             is_optimized: false,
             having: false,
         };
-        let mut ignore_prefix_len = 0;
+        let (detached, leading_eq_columns) =
+            super::PushPredicateIntoScan::composite_range(&filter, index_meta, &mut arena)?;
+        let detached = detached.expect("composite prefix should be consumed");
 
-        let detached = super::PushPredicateIntoScan::composite_range(
-            &filter,
-            index_meta,
-            &mut ignore_prefix_len,
-            &mut arena,
-        )?
-        .expect("composite prefix should be consumed");
-
-        assert_eq!(ignore_prefix_len, 3);
+        assert_eq!(leading_eq_columns, 3);
         assert_eq!(
             detached.range,
             Range::Eq(
@@ -976,17 +993,11 @@ mod tests {
             is_optimized: false,
             having: false,
         };
-        let mut ignore_prefix_len = 0;
+        let (detached, leading_eq_columns) =
+            super::PushPredicateIntoScan::composite_range(&filter, index_meta, &mut arena)?;
+        let detached = detached.expect("composite prefix should be consumed");
 
-        let detached = super::PushPredicateIntoScan::composite_range(
-            &filter,
-            index_meta,
-            &mut ignore_prefix_len,
-            &mut arena,
-        )?
-        .expect("composite prefix should be consumed");
-
-        assert_eq!(ignore_prefix_len, 1);
+        assert_eq!(leading_eq_columns, 1);
         assert_eq!(
             detached.range,
             Range::Scope {
