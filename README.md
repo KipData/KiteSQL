@@ -89,7 +89,7 @@ fn main() -> Result<(), DatabaseError> {
 }
 ```
 
-More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction.rs), [program](examples/program.rs), [borrowed_parse](examples/borrowed_parse.rs) (zero-copy reads against SQLite).
+More: [hello_world](examples/hello_world.rs), [transaction](examples/transaction.rs) (Rust `Transaction` and SQL `BEGIN`/`COMMIT`/`ROLLBACK` via `Session`), [program](examples/program.rs), [borrowed_parse](examples/borrowed_parse.rs) (zero-copy reads against SQLite).
 
 ## Storage Backends
 | Builder | Storage |

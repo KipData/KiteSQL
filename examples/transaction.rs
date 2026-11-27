@@ -42,6 +42,8 @@ mod app {
         // Optimistic transactions are currently backed by RocksDB.
         let mut database = DataBaseBuilder::path(EXAMPLE_DB_PATH).build_optimistic()?;
         database.ddl("create table if not exists t1 (c1 int primary key, c2 int)")?;
+
+        // Rust API: the Transaction value owns the transaction until commit or drop.
         let mut transaction = database.new_transaction(false)?;
 
         transaction
@@ -75,6 +77,21 @@ mod app {
         );
         c2_iter.done()?;
         drop(tx2);
+
+        // SQL API: send each statement through the same session.
+        let mut session = database.session();
+        session.run("BEGIN")?.done()?;
+        session.run("update t1 set c2 = 42 where c1 = 0")?.done()?;
+        session.run("COMMIT")?.done()?;
+
+        session.run("BEGIN")?.done()?;
+        session.run("delete from t1 where c1 = 0")?.done()?;
+        session.run("ROLLBACK")?.done()?;
+
+        let mut rows = session.run("select c2 from t1 where c1 = 0")?;
+        assert_eq!(rows.next_tuple(|_, row| row[0].i32())?.flatten(), Some(42));
+        rows.done()?;
+        drop(session);
 
         database.ddl("drop table t1")?;
 
