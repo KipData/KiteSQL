@@ -35,7 +35,7 @@ use crate::storage::{
 };
 use crate::types::serialize::BytesPool;
 use slatedb::bytes::Bytes;
-use slatedb::config::ScanOptions;
+use slatedb::config::{ScanOptions, Settings};
 use slatedb::db_cache::foyer::{FoyerCache, FoyerCacheOptions};
 use slatedb::db_cache::foyer_hybrid::FoyerHybridCache;
 use slatedb::db_cache::{
@@ -45,11 +45,11 @@ use slatedb::object_store::path::Path;
 use slatedb::object_store::ObjectStore;
 use slatedb::{
     BlockCachePolicy, CacheTarget, Db, DbIterator, DbTransaction, IsolationLevel, IterationOrder,
-    KeyValue,
+    KeyValue, WriteHandle,
 };
 use std::collections::Bound;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
 pub struct SlateDbStorage {
@@ -57,6 +57,17 @@ pub struct SlateDbStorage {
     await_durable: bool,
     scan_options: SlateDbScanOptions,
     cache: Option<Arc<dyn DbCache>>,
+    last_write: LastWrite,
+}
+
+/// The handle of the latest write committed through a storage and its clones.
+type LastWrite = Arc<Mutex<Option<WriteHandle>>>;
+
+fn record_write(last_write: &LastWrite, handle: WriteHandle) {
+    let mut last = last_write.lock().unwrap_or_else(|e| e.into_inner());
+    if last.as_ref().is_none_or(|l| l.seqnum() < handle.seqnum()) {
+        *last = Some(handle);
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -109,6 +120,7 @@ impl SlateDbStorage {
             await_durable: true,
             scan_options: SlateDbScanOptions::default(),
             cache: None,
+            last_write: LastWrite::default(),
         }
     }
 
@@ -130,6 +142,20 @@ impl SlateDbStorage {
         &self.db
     }
 
+    /// The handle of the latest write committed through this storage or one of its clones, if
+    /// any. Its [`WriteHandle::await_durable`] returns once that write, and every write committed
+    /// before it, is durable in object storage.
+    ///
+    /// With [`await_durable(false)`](Self::await_durable), a caller can serialize its commits
+    /// under a lock of its own, release the lock, and only then wait for durability: concurrent
+    /// commits then share one WAL flush instead of each waiting for its own.
+    pub fn last_write(&self) -> Option<WriteHandle> {
+        self.last_write
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     /// Closes the database, flushing what is still in memory to object storage, and then the
     /// cache [`open`](Self::open) built for it.
     pub async fn close(&self) -> Result<(), DatabaseError> {
@@ -144,6 +170,17 @@ impl SlateDbStorage {
         path: impl Into<Path>,
         object_store: Arc<dyn ObjectStore>,
         cache: SlateDbCacheOptions,
+    ) -> Result<Self, DatabaseError> {
+        Self::open_with_settings(path, object_store, cache, Settings::default()).await
+    }
+
+    /// [`open`](Self::open) with SlateDB [`Settings`] of its own, such as the `flush_interval`
+    /// that sets how long writes gather in memory before the WAL is written to object storage.
+    pub async fn open_with_settings(
+        path: impl Into<Path>,
+        object_store: Arc<dyn ObjectStore>,
+        cache: SlateDbCacheOptions,
+        settings: Settings,
     ) -> Result<Self, DatabaseError> {
         let in_memory = |max_capacity| -> Arc<dyn DbCache> {
             Arc::new(FoyerCache::new_with_opts(FoyerCacheOptions {
@@ -191,7 +228,7 @@ impl SlateDbStorage {
             )
         });
 
-        let mut builder = Db::builder(path, object_store);
+        let mut builder = Db::builder(path, object_store).with_settings(settings);
         if let Some(db_cache) = &db_cache {
             builder = builder.with_db_cache(db_cache.clone(), 0);
         }
@@ -217,6 +254,18 @@ impl SlateDbStorage {
         cache: SlateDbCacheOptions,
     ) -> Result<Self, DatabaseError> {
         Self::open(path, config.object_store()?, cache).await
+    }
+
+    /// [`open_s3`](Self::open_s3) with SlateDB [`Settings`] of its own; see
+    /// [`open_with_settings`](Self::open_with_settings).
+    #[cfg(feature = "slatedb-s3")]
+    pub async fn open_s3_with_settings(
+        path: impl Into<Path>,
+        config: &S3Config,
+        cache: SlateDbCacheOptions,
+        settings: Settings,
+    ) -> Result<Self, DatabaseError> {
+        Self::open_with_settings(path, config.object_store()?, cache, settings).await
     }
 }
 
@@ -306,6 +355,7 @@ impl Storage for SlateDbStorage {
         Ok(SlateDbTransaction {
             txn: self.db.begin(IsolationLevel::Snapshot)?,
             await_durable: self.await_durable,
+            last_write: self.last_write.clone(),
             scan_options: self.scan_options,
             statements: 0,
         })
@@ -315,6 +365,7 @@ impl Storage for SlateDbStorage {
 pub struct SlateDbTransaction {
     txn: DbTransaction,
     await_durable: bool,
+    last_write: LastWrite,
     scan_options: SlateDbScanOptions,
     statements: u64,
 }
@@ -433,8 +484,11 @@ impl StorageTransaction for SlateDbTransaction {
     }
 
     async fn commit(self) -> Result<(), DatabaseError> {
-        let handle = self.txn.commit().await?;
-        if let (Some(handle), true) = (handle, self.await_durable) {
+        let Some(handle) = self.txn.commit().await? else {
+            return Ok(());
+        };
+        record_write(&self.last_write, handle.clone());
+        if self.await_durable {
             handle.await_durable().await?;
         }
         Ok(())
@@ -452,6 +506,26 @@ mod tests {
     async fn open() -> Result<SlateDbStorage, DatabaseError> {
         let db = Db::open("kitesql-test", Arc::new(InMemory::new())).await?;
         Ok(SlateDbStorage::new(Arc::new(db)))
+    }
+
+    async fn open_flushing_every(
+        flush_interval: std::time::Duration,
+    ) -> Result<SlateDbStorage, DatabaseError> {
+        let settings = Settings {
+            flush_interval: Some(flush_interval),
+            ..Settings::default()
+        };
+        SlateDbStorage::open_with_settings(
+            "kitesql-test",
+            Arc::new(InMemory::new()),
+            SlateDbCacheOptions::default(),
+            settings,
+        )
+        .await
+    }
+
+    fn durable_seq(storage: &SlateDbStorage) -> u64 {
+        storage.db().subscribe().borrow().durable_seq
     }
 
     async fn collect(mut iter: SlateDbIter) -> Result<Vec<Vec<u8>>, DatabaseError> {
@@ -560,6 +634,57 @@ mod tests {
         drop(txn);
         storage.close().await?;
         assert!(dir.path().join("cache").read_dir()?.next().is_some());
+        Ok(())
+    }
+
+    // Commits without awaiting durability leave the latest one's handle, which waits for it.
+    #[tokio::test]
+    async fn last_write_awaits_the_latest_commit() -> Result<(), DatabaseError> {
+        let storage = open_flushing_every(std::time::Duration::from_secs(3600))
+            .await?
+            .await_durable(false);
+        assert!(storage.last_write().is_none());
+        let mut seqs = Vec::new();
+        for key in [b"a", b"b"] {
+            let mut txn = storage.transaction()?;
+            txn.set(key, b"v")?;
+            txn.commit().await?;
+            seqs.push(storage.last_write().expect("a write handle").seqnum());
+        }
+        assert!(seqs[0] < seqs[1]);
+        // A commit that writes nothing leaves the handle as it was.
+        storage.transaction()?.commit().await?;
+        assert_eq!(storage.last_write().map(|h| h.seqnum()), Some(seqs[1]));
+        // Clones share it.
+        assert_eq!(
+            storage.clone().last_write().map(|h| h.seqnum()),
+            Some(seqs[1])
+        );
+
+        let handle = storage.last_write().unwrap();
+        assert!(durable_seq(&storage) < seqs[1]);
+        let waiter = tokio::spawn(async move { handle.await_durable().await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished());
+        storage.db().flush().await?;
+        waiter.await.unwrap()?;
+        assert!(durable_seq(&storage) >= seqs[1]);
+        Ok(())
+    }
+
+    // The flush interval passed to `open_with_settings` makes commits durable on its own.
+    #[tokio::test]
+    async fn opens_with_settings() -> Result<(), DatabaseError> {
+        let storage = open_flushing_every(std::time::Duration::from_millis(10))
+            .await?
+            .await_durable(false);
+        let mut txn = storage.transaction()?;
+        txn.set(b"k", b"v")?;
+        txn.commit().await?;
+        let handle = storage.last_write().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle.await_durable())
+            .await
+            .expect("durable within the flush interval")?;
         Ok(())
     }
 
