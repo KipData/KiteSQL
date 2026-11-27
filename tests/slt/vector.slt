@@ -1,0 +1,99 @@
+# Vector type tests
+
+statement ok
+create table docs (id int primary key, emb vector(3));
+
+statement ok
+insert into docs values (1, cast('[1.0, 0.0, 0.0]' as vector(3))), (2, cast('[0.0, 1.0, 0.0]' as vector(3))), (3, cast('[0.0, 0.0, 1.0]' as vector(3)));
+
+query IT
+select id, emb from docs order by id;
+----
+1 [1,0,0]
+2 [0,1,0]
+3 [0,0,1]
+
+statement ok
+insert into docs values (4, null);
+
+query IT
+select id, emb from docs where emb is null;
+----
+4 NULL
+
+# Test dimension mismatch error
+statement error
+insert into docs values (5, cast('[1.0, 2.0]' as vector(3)));
+
+statement error
+insert into docs values (6, cast('[1.0, 2.0, 3.0, 4.0]' as vector(3)));
+
+# Test cast from string
+query T
+select cast('[1.5, 2.5, 3.5]' as vector(3));
+----
+[1.5,2.5,3.5]
+
+# Test cast to string
+query T
+select cast(emb as varchar(50)) from docs where id = 1;
+----
+[1,0,0]
+
+# Test equality
+query I
+select id from docs where emb = cast('[1.0, 0.0, 0.0]' as vector(3));
+----
+1
+
+query I
+select id from docs where emb != cast('[1.0, 0.0, 0.0]' as vector(3)) order by id;
+----
+2
+3
+
+# Test negative and fractional values
+statement ok
+insert into docs values (7, cast('[-1.5, 0.25, 100.75]' as vector(3)));
+
+query IT
+select id, emb from docs where id = 7;
+----
+7 [-1.5,0.25,100.75]
+
+# Test describe shows vector type
+query TTTTTT
+describe docs;
+----
+id Integer 4 false PRIMARY NULL
+emb Vector(3) 12 true EMPTY NULL
+
+# Test empty vector literal parsing error
+statement error
+select cast('[]' as vector(3));
+
+# Test malformed vector literal
+statement error
+select cast('[1.0, 2.0' as vector(3));
+
+statement error
+select cast('1.0, 2.0, 3.0' as vector(3));
+
+# Test invalid float in vector
+statement error
+select cast('[1.0, abc, 3.0]' as vector(3));
+
+# Test zero dimension
+statement error
+create table zero_vec (v vector(0));
+
+# Test vector with different dimension
+statement ok
+create table docs2 (id int primary key, emb vector(5));
+
+statement ok
+insert into docs2 values (1, cast('[0.1, 0.2, 0.3, 0.4, 0.5]' as vector(5)));
+
+# This should error because dimension mismatch
+statement error
+insert into docs2 values (2, cast('[0.1]' as vector(5)));

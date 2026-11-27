@@ -44,6 +44,7 @@ const TAG_TIME64: u8 = 16;
 const TAG_DECIMAL: u8 = 17;
 const TAG_TUPLE: u8 = 18;
 const TAG_BINARY: u8 = 19;
+const TAG_VECTOR: u8 = 20;
 
 impl ReferenceSerialization for Utf8Type {
     fn encode<W: Write, A: MetaArena + ?Sized>(
@@ -186,6 +187,13 @@ impl DataValue {
                 }
                 Ok(())
             }
+            DataValue::Vector { value, dim } => {
+                write_u8(writer, TAG_VECTOR)?;
+                write_u32(writer, *dim)?;
+                write_len(writer, value.len())?;
+                writer.write_all(value)?;
+                Ok(())
+            }
         }
     }
 
@@ -251,6 +259,16 @@ impl DataValue {
                     values.push(DataValue::decode_reference_value(reader)?);
                 }
                 Ok(DataValue::Tuple(values))
+            }
+            TAG_VECTOR => {
+                let dim = read_u32(reader)?;
+                let size = read_len(reader)?;
+                let mut value = vec![0; size];
+                reader.read_exact(&mut value)?;
+                Ok(DataValue::Vector {
+                    value: value.into(),
+                    dim,
+                })
             }
             tag => Err(DatabaseError::InvalidValue(format!(
                 "invalid data value tag: {tag}"

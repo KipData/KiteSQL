@@ -91,6 +91,16 @@ impl ReferenceSerialization for CastEvaluatorParams {
                 6u8.encode(writer, is_direct, arena)?;
                 evaluators.encode(writer, is_direct, arena)
             }
+            CastEvaluatorParams::Vector { dim } => {
+                8u8.encode(writer, is_direct, arena)?;
+                dim.encode(writer, is_direct, arena)
+            }
+            CastEvaluatorParams::VectorToString { dim, len, unit } => {
+                9u8.encode(writer, is_direct, arena)?;
+                dim.encode(writer, is_direct, arena)?;
+                len.encode(writer, is_direct, arena)?;
+                unit.encode(writer, is_direct, arena)
+            }
         }
     }
 
@@ -131,6 +141,14 @@ impl ReferenceSerialization for CastEvaluatorParams {
             },
             6 => CastEvaluatorParams::Tuple {
                 evaluators: Vec::<CastEvaluatorRef>::decode(reader, context, arena)?,
+            },
+            8 => CastEvaluatorParams::Vector {
+                dim: u32::decode(reader, context.as_deref_mut(), arena)?,
+            },
+            9 => CastEvaluatorParams::VectorToString {
+                dim: u32::decode(reader, context.as_deref_mut(), arena)?,
+                len: Option::<u32>::decode(reader, context.as_deref_mut(), arena)?,
+                unit: crate::types::CharLengthUnits::decode(reader, context, arena)?,
             },
             _ => unreachable!(),
         })

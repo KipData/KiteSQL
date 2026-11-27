@@ -23,6 +23,9 @@ macro_rules! bytes_binary {
                 (DataValue::Binary { value: left, .. }, DataValue::Binary { value: right, .. }) => {
                     DataValue::Boolean(left $op right)
                 }
+                (DataValue::Vector { value: left, .. }, DataValue::Vector { value: right, .. }) => {
+                    DataValue::Boolean(left $op right)
+                }
                 (DataValue::Null, _) | (_, DataValue::Null) => DataValue::Null,
                 _ => unreachable!(),
             })

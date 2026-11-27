@@ -73,6 +73,8 @@ pub enum LogicalType {
     Decimal(Option<u8>, Option<u8>),
     Tuple(Vec<LogicalType>),
     Varbinary(Option<u32>),
+    // vector (dimension)
+    Vector(u32),
 }
 
 impl LogicalType {
@@ -169,6 +171,7 @@ impl LogicalType {
             LogicalType::DateTime => Some(8),
             LogicalType::Time(_) => Some(4),
             LogicalType::TimeStamp(_, _) => Some(8),
+            LogicalType::Vector(dim) => Some(*dim as usize * 4),
             LogicalType::Tuple(_) => unreachable!(),
         }
     }
@@ -470,7 +473,7 @@ impl LogicalType {
             LogicalType::Time(..) => {
                 matches!(to, LogicalType::Varchar(..) | LogicalType::Char(..))
             }
-            LogicalType::Decimal(_, _) | LogicalType::Tuple(_) => false,
+            LogicalType::Decimal(_, _) | LogicalType::Tuple(_) | LogicalType::Vector(_) => false,
         }
     }
 }
@@ -502,6 +505,7 @@ impl std::fmt::Display for LogicalType {
             LogicalType::Decimal(precision, scale) => {
                 write!(f, "Decimal({precision:?}, {scale:?})")?
             }
+            LogicalType::Vector(dim) => write!(f, "Vector({dim})")?,
             LogicalType::Tuple(types) => {
                 write!(f, "(")?;
                 let mut first = true;

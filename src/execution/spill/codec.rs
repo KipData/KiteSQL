@@ -188,6 +188,10 @@ impl SpillCodec for DataValue {
                 let _: u32 = value.len().try_into()?;
                 4 + value.len() + 1 + if len.is_some() { 4 } else { 0 }
             }
+            DataValue::Vector { value, .. } => {
+                let _: u32 = value.len().try_into()?;
+                4 + value.len() + 4
+            }
             DataValue::Utf8 { value, ty, .. } => {
                 let _: u32 = value.len().try_into()?;
                 4 + value.len()
@@ -376,6 +380,7 @@ fn estimated_dynamic_value_size(value: &DataValue) -> usize {
     match value {
         DataValue::Utf8 { value, .. } => value.heap_size(),
         DataValue::Binary { value, .. } => value.heap_size(),
+        DataValue::Vector { value, .. } => value.heap_size(),
         DataValue::Tuple(values) => values
             .capacity()
             .saturating_mul(size_of::<DataValue>())

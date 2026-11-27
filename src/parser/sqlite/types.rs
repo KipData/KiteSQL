@@ -61,6 +61,22 @@ pub(super) fn logical_type(ty: &Type<'_>) -> Result<LogicalType, DatabaseError> 
             first.map(u8::try_from).transpose()?,
             second.map(u8::try_from).transpose()?,
         ),
+        "VECTOR" => {
+            let Some(dim) = first else {
+                return Err(unsupported(
+                    "VECTOR type requires exactly one dimension argument",
+                ));
+            };
+            if second.is_some() {
+                return Err(unsupported(
+                    "VECTOR type requires exactly one dimension argument",
+                ));
+            }
+            if dim == 0 {
+                return Err(unsupported("VECTOR dimension must be greater than 0"));
+            }
+            LogicalType::Vector(dim)
+        }
         _ => return Err(unsupported(format!("unsupported data type: {}", ty.name))),
     })
 }

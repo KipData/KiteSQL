@@ -328,6 +328,13 @@ pub fn binary_create(
             }
             _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
         },
+        LogicalType::Vector(_) => match op {
+            BinaryOperator::Eq => unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_EQ_OFFSET)),
+            BinaryOperator::NotEq => {
+                unit_binary_ref(binary_pos(BINARY_BYTES_BASE, TUPLE_NOT_EQ_OFFSET))
+            }
+            _ => Err(DatabaseError::UnsupportedBinaryOperator(ty.clone(), op)),
+        },
     }
 }
 

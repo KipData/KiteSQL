@@ -123,6 +123,14 @@ pub enum CastEvaluatorParams {
     Binary {
         len: Option<u32>,
     },
+    Vector {
+        dim: u32,
+    },
+    VectorToString {
+        dim: u32,
+        len: Option<u32>,
+        unit: CharLengthUnits,
+    },
 }
 
 impl CastEvaluatorRef {

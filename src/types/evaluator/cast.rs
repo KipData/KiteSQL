@@ -75,6 +75,7 @@ const CAST_TIMESTAMP: u16 = 17;
 const CAST_DECIMAL: u16 = 18;
 const CAST_TUPLE: u16 = 19;
 const CAST_BINARY: u16 = 20;
+const CAST_VECTOR: u16 = 21;
 
 // Cast positions are serialized ABI. Type codes above must never be reordered
 // or reused; new cast families should append a new code and keep old positions.
@@ -104,6 +105,7 @@ fn cast_type_code(ty: &LogicalType) -> u16 {
         LogicalType::Decimal(_, _) => unreachable!("DECIMAL requires the `decimal` feature"),
         LogicalType::Tuple(_) => CAST_TUPLE,
         LogicalType::Varbinary(_) => CAST_BINARY,
+        LogicalType::Vector(_) => CAST_VECTOR,
     }
 }
 
@@ -833,6 +835,21 @@ pub fn cast_create(
             LogicalType::Varchar(len, unit) => cast_string_ref!(from, to, *len, *unit),
             _ => Err(cast_fail(from.clone(), to.clone())),
         },
+        (
+            LogicalType::Varchar(..) | LogicalType::Char(..) | LogicalType::Varbinary(..),
+            LogicalType::Vector(dim),
+        ) => Ok(CastEvaluatorRef::new(
+            cast_pos(from, to),
+            CastEvaluatorParams::Vector { dim: *dim },
+        )),
+        (LogicalType::Vector(dim), LogicalType::Varchar(len, unit)) => Ok(CastEvaluatorRef::new(
+            cast_pos(from, to),
+            CastEvaluatorParams::VectorToString {
+                dim: *dim,
+                len: *len,
+                unit: *unit,
+            },
+        )),
         (LogicalType::Tuple(from_types), LogicalType::Tuple(to_types)) => {
             let evaluators = from_types
                 .iter()
@@ -1218,9 +1235,126 @@ impl CastEvaluatorRef {
                 };
                 eval_tuple_cast(evaluators, value)
             }
+            (CAST_VARCHAR | CAST_CHAR | CAST_BINARY, CAST_VECTOR) => {
+                let CastEvaluatorParams::Vector { dim } = params else {
+                    unreachable!("vector cast must have vector parameters")
+                };
+                utf8_to_vector_cast_eval(*dim, value)
+            }
+            (CAST_VECTOR, CAST_VARCHAR) => {
+                let CastEvaluatorParams::VectorToString { dim, len, unit } = params else {
+                    unreachable!("vector to string cast must have VectorToString parameters")
+                };
+                vector_to_utf8_cast_eval(*dim, *len, *unit, value)
+            }
             _ => unreachable!("invalid cast evaluator position"),
         }
     }
+}
+
+fn utf8_to_vector_cast_eval(dim: u32, value: DataValue) -> Result<DataValue, DatabaseError> {
+    let text = match value {
+        DataValue::Utf8 { value, .. } => value.to_string(),
+        DataValue::Binary { value, .. } => String::from_utf8(value.to_vec()).map_err(|_| {
+            DatabaseError::InvalidValue("vector cast expects valid UTF-8 input".to_string())
+        })?,
+        DataValue::Null => return Ok(DataValue::Null),
+        _ => {
+            return Err(DatabaseError::InvalidValue(
+                "vector cast expects string input".to_string(),
+            ))
+        }
+    };
+
+    let trimmed = text.trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Err(DatabaseError::InvalidValue(format!(
+            "vector literal must be enclosed in brackets: {text}"
+        )));
+    }
+
+    let inner = &trimmed[1..trimmed.len() - 1];
+    if inner.is_empty() {
+        if dim == 0 {
+            return Ok(DataValue::Vector {
+                value: vec![].into(),
+                dim: 0,
+            });
+        } else {
+            return Err(DatabaseError::InvalidValue(format!(
+                "vector dimension mismatch: expected {dim}, got 0"
+            )));
+        }
+    }
+
+    let parts: Vec<&str> = inner.split(',').collect();
+    if parts.len() != dim as usize {
+        return Err(DatabaseError::InvalidValue(format!(
+            "vector dimension mismatch: expected {dim}, got {}",
+            parts.len()
+        )));
+    }
+
+    let mut bytes = Vec::with_capacity((dim as usize) * 4);
+    for part in parts {
+        let val = part.trim().parse::<f32>().map_err(|_| {
+            DatabaseError::InvalidValue(format!(
+                "invalid float in vector literal: '{}'",
+                part.trim()
+            ))
+        })?;
+        bytes.extend_from_slice(&val.to_le_bytes());
+    }
+
+    Ok(DataValue::Vector {
+        value: bytes.into(),
+        dim,
+    })
+}
+
+fn vector_to_utf8_cast_eval(
+    dim: u32,
+    len: Option<u32>,
+    unit: CharLengthUnits,
+    value: DataValue,
+) -> Result<DataValue, DatabaseError> {
+    let bytes = match value {
+        DataValue::Vector { value, .. } => value,
+        DataValue::Binary { value, .. } => value,
+        DataValue::Null => return Ok(DataValue::Null),
+        _ => {
+            return Err(DatabaseError::InvalidValue(
+                "vector to string cast expects vector or binary input".to_string(),
+            ))
+        }
+    };
+
+    let expected_len = (dim as usize) * 4;
+    if bytes.len() != expected_len {
+        return Err(DatabaseError::InvalidValue(format!(
+            "vector size mismatch: expected {} bytes, got {}",
+            expected_len,
+            bytes.len()
+        )));
+    }
+
+    let mut floats = Vec::with_capacity(dim as usize);
+    for i in 0..dim as usize {
+        let start = i * 4;
+        let float_bytes: [u8; 4] = bytes[start..start + 4].try_into().unwrap();
+        floats.push(f32::from_le_bytes(float_bytes));
+    }
+
+    let text = format!(
+        "[{}]",
+        floats
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+
+    to_varchar(text, len, unit)
 }
 
 // GRCOV_EXCL_START

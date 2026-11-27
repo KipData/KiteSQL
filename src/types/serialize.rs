@@ -116,6 +116,9 @@ pub enum TupleValueSerializableImpl {
     Varbinary {
         len: Option<u32>,
     },
+    Vector {
+        dim: u32,
+    },
 }
 
 impl TupleValueSerializable for TupleValueSerializableImpl {
@@ -157,6 +160,9 @@ impl TupleValueSerializable for TupleValueSerializableImpl {
             }
             .to_raw(value, writer),
             TupleValueSerializableImpl::Decimal => DecimalSerializable.to_raw(value, writer),
+            TupleValueSerializableImpl::Vector { dim } => {
+                VectorSerializable { dim: *dim }.to_raw(value, writer)
+            }
             TupleValueSerializableImpl::SkipFixed { len, null } => SkipFixed {
                 len: *len,
                 null: *null,
@@ -240,6 +246,9 @@ impl TupleValueSerializable for TupleValueSerializableImpl {
             .filling_value(reader, values, pool, scope),
             TupleValueSerializableImpl::Decimal => {
                 DecimalSerializable.filling_value(reader, values, pool, scope)
+            }
+            TupleValueSerializableImpl::Vector { dim } => {
+                VectorSerializable { dim: *dim }.filling_value(reader, values, pool, scope)
             }
             TupleValueSerializableImpl::SkipFixed { len, null } => SkipFixed {
                 len: *len,
@@ -393,6 +402,11 @@ struct VarcharSerializable {
 #[derive(Debug)]
 struct VarbinarySerializable {
     len: Option<u32>,
+}
+
+#[derive(Debug)]
+struct VectorSerializable {
+    dim: u32,
 }
 
 #[derive(Debug)]
@@ -660,6 +674,51 @@ impl TupleValueSerializable for VarbinarySerializable {
     }
 }
 
+impl TupleValueSerializable for VectorSerializable {
+    fn to_raw<W: Write>(&self, value: &DataValue, writer: &mut W) -> Result<(), DatabaseError> {
+        let value = match value {
+            DataValue::Vector { value, dim } => {
+                if *dim != self.dim {
+                    return Err(DatabaseError::InvalidValue(format!(
+                        "vector dimension mismatch: expected {}, got {}",
+                        self.dim, dim
+                    )));
+                }
+                value
+            }
+            DataValue::Binary { value, .. } => value,
+            _ => unsafe { std::hint::unreachable_unchecked() },
+        };
+        let expected_len = (self.dim as usize) * 4;
+        if value.len() != expected_len {
+            return Err(DatabaseError::InvalidValue(format!(
+                "vector dimension mismatch: expected {} bytes ({} dimensions), got {}",
+                expected_len,
+                self.dim,
+                value.len()
+            )));
+        }
+        writer.write_all(value)?;
+        Ok(())
+    }
+
+    unsafe fn filling_value(
+        &self,
+        reader: &mut Cursor<&[u8]>,
+        values: &mut Vec<DataValue>,
+        pool: &mut BytesPool,
+        scope: Option<&MappedScope>,
+    ) -> Result<(), DatabaseError> {
+        let len = (self.dim as usize) * 4;
+        values.push(DataValue::Vector {
+            // SAFETY: the caller's guarantee covers the bytes under `reader`.
+            value: unsafe { pool.binary(read_slice(reader, len)?, scope) },
+            dim: self.dim,
+        });
+        Ok(())
+    }
+}
+
 impl_tuple_value_serializable!(
     DateSerializable,
     Date32,
@@ -836,6 +895,7 @@ impl LogicalType {
                 zone: *zone,
             },
             LogicalType::Decimal(_, _) => TupleValueSerializableImpl::Decimal,
+            LogicalType::Vector(dim) => TupleValueSerializableImpl::Vector { dim: *dim },
             LogicalType::SqlNull | LogicalType::Tuple(_) => unreachable!(),
         }
     }

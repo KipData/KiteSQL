@@ -14,7 +14,7 @@
 
 use crate::errors::DatabaseError;
 use crate::types::{CharLengthUnits, LogicalType};
-use sqlparser::ast::{BinaryLength, CharacterLength, DataType, ExactNumberInfo};
+use sqlparser::ast::{BinaryLength, CharacterLength, DataType, ExactNumberInfo, ObjectNamePart};
 use std::cmp;
 
 /// Maps sqlparser data types to KiteSQL types while statements are converted.
@@ -159,6 +159,34 @@ pub(crate) fn logical_type(data_type: DataType) -> Result<LogicalType, DatabaseE
         | DataType::Dec(info)
         | DataType::DecUnsigned(info)
         | DataType::Numeric(info) => decimal(info)?,
+        DataType::Custom(name, args) => {
+            if name.0.len() == 1 {
+                if let ObjectNamePart::Identifier(ident) = &name.0[0] {
+                    if ident.value.eq_ignore_ascii_case("vector") {
+                        if args.len() != 1 {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "VECTOR type requires exactly one dimension argument".to_string(),
+                            ));
+                        }
+                        let dim = args[0].parse::<u32>().map_err(|_| {
+                            DatabaseError::UnsupportedStmt(format!(
+                                "VECTOR dimension must be a positive integer, got: {}",
+                                args[0]
+                            ))
+                        })?;
+                        if dim == 0 {
+                            return Err(DatabaseError::UnsupportedStmt(
+                                "VECTOR dimension must be greater than 0".to_string(),
+                            ));
+                        }
+                        return Ok(LogicalType::Vector(dim));
+                    }
+                }
+            }
+            return Err(DatabaseError::UnsupportedStmt(format!(
+                "unsupported custom data type: {name}"
+            )));
+        }
         other => {
             return Err(DatabaseError::UnsupportedStmt(format!(
                 "unsupported data type: {other}"
@@ -248,6 +276,22 @@ mod tests {
                 logical_type(DataType::Dec(ExactNumberInfo::PrecisionAndScale(12, 3)))?,
                 LogicalType::Decimal(Some(12), Some(3))
             );
+        }
+        {
+            use sqlparser::ast::{Ident, ObjectName, ObjectNamePart};
+            let vector = DataType::Custom(
+                ObjectName(vec![ObjectNamePart::Identifier(Ident::new("vector"))]),
+                vec!["3".to_string()],
+            );
+            assert_eq!(logical_type(vector)?, LogicalType::Vector(3));
+            let zero = DataType::Custom(
+                ObjectName(vec![ObjectNamePart::Identifier(Ident::new("VECTOR"))]),
+                vec!["0".to_string()],
+            );
+            assert!(matches!(
+                logical_type(zero),
+                Err(DatabaseError::UnsupportedStmt(_))
+            ));
         }
         Ok(())
     }

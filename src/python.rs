@@ -52,6 +52,7 @@ fn data_value_to_py(py: Python<'_>, value: &DataValue) -> PyResult<PyObject> {
         DataValue::UInt32(value) => value.into_py(py),
         DataValue::UInt64(value) => value.into_py(py),
         DataValue::Binary { value, .. } => PyBytes::new(py, value).into_any().unbind(),
+        DataValue::Vector { value, .. } => PyBytes::new(py, value).into_any().unbind(),
         DataValue::Utf8 { value, .. } => value.clone().into_py(py),
         DataValue::Date32(_)
         | DataValue::Date64(_)
