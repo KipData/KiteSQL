@@ -20,15 +20,20 @@ use crate::storage::{
 };
 use crate::types::mapped::MappedScope;
 use crate::types::serialize::BytesPool;
-use lmdb::{
-    Cursor, Database, DatabaseFlags, Environment, EnvironmentFlags, RoCursor, RoTransaction,
-    RwTransaction, Transaction as _, WriteFlags,
-};
+use lmdb::{Database, DatabaseFlags, Environment, EnvironmentFlags, RoTransaction, RwTransaction};
 use std::collections::Bound;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+fn mdb_result(code: i32) -> Result<(), lmdb::Error> {
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(lmdb::Error::from_err_code(code))
+    }
+}
 
 const DEFAULT_MAP_SIZE: usize = 16 * 1024 * 1024 * 1024;
 
@@ -125,7 +130,7 @@ impl Storage for LmdbStorage {
     type Metrics = LmdbMetrics;
 
     type TransactionType<'a>
-        = LmdbTransaction<'a>
+        = LmdbTransaction
     where
         Self: 'a;
 
@@ -139,13 +144,20 @@ impl Storage for LmdbStorage {
             // SAFETY: a read-only transaction reads its snapshot of the memory map, which stays
             // mapped and unchanged until the transaction ends, and the scope is dropped first.
             let mapped = unsafe { MappedScope::new() };
-            (LmdbTxn::Ro(self.env.begin_ro_txn()?), Some(mapped))
+            let ro_tx = self.env.begin_ro_txn()?;
+            let raw =
+                unsafe { std::mem::transmute::<RoTransaction<'_>, *mut lmdb_sys::MDB_txn>(ro_tx) };
+            (LmdbTxn::Ro(raw), Some(mapped))
         } else {
-            (LmdbTxn::Rw(self.env.begin_rw_txn()?), None)
+            let rw_tx = self.env.begin_rw_txn()?;
+            let raw =
+                unsafe { std::mem::transmute::<RwTransaction<'_>, *mut lmdb_sys::MDB_txn>(rw_tx) };
+            (LmdbTxn::Rw(raw), None)
         };
         Ok(LmdbTransaction {
             mapped,
-            tx,
+            _env: self.env.clone(),
+            tx: Some(tx),
             db: self.db,
             statements: 0,
         })
@@ -173,56 +185,95 @@ impl Storage for LmdbStorage {
     }
 }
 
-pub struct LmdbTransaction<'env> {
+pub struct LmdbTransaction {
     // Declared before `tx` so it is dropped before the snapshot its reads point into.
     mapped: Option<MappedScope>,
-    tx: LmdbTxn<'env>,
+    _env: Arc<Environment>,
+    tx: Option<LmdbTxn>,
     db: Database,
     statements: u64,
 }
 
 /// Read transactions do not take LMDB's single-writer lock.
-enum LmdbTxn<'env> {
-    Ro(RoTransaction<'env>),
-    Rw(RwTransaction<'env>),
+enum LmdbTxn {
+    Ro(*mut lmdb_sys::MDB_txn),
+    Rw(*mut lmdb_sys::MDB_txn),
 }
 
-impl<'env> LmdbTxn<'env> {
+/// SAFETY: LMDB write transactions are thread-affine (bound to the thread that created them).
+/// This implementation is safe only when:
+/// 1. The transaction's futures are polled on a single thread (e.g., `block_on` on a connection thread)
+/// 2. A work-stealing executor that moves write-txn futures across threads would be UNSAFE
+///
+/// Read transactions (NO_TLS flag set) may safely move between threads.
+unsafe impl Send for LmdbTransaction {}
+unsafe impl Sync for LmdbTransaction {}
+
+impl Drop for LmdbTransaction {
+    fn drop(&mut self) {
+        if let Some(tx) = self.tx.take() {
+            unsafe {
+                lmdb_sys::mdb_txn_abort(tx.raw());
+            }
+        }
+    }
+}
+
+impl LmdbTxn {
     fn raw(&self) -> *mut lmdb_sys::MDB_txn {
         match self {
-            LmdbTxn::Ro(tx) => tx.txn(),
-            LmdbTxn::Rw(tx) => tx.txn(),
+            LmdbTxn::Ro(txn) | LmdbTxn::Rw(txn) => *txn,
         }
     }
 
     fn get(&self, db: Database, key: &[u8]) -> Result<&[u8], lmdb::Error> {
-        match self {
-            LmdbTxn::Ro(tx) => tx.get(db, &key),
-            LmdbTxn::Rw(tx) => tx.get(db, &key),
+        let mut key_val = lmdb_sys::MDB_val {
+            mv_size: key.len(),
+            mv_data: key.as_ptr() as *mut std::ffi::c_void,
+        };
+        let mut data = lmdb_sys::MDB_val {
+            mv_size: 0,
+            mv_data: std::ptr::null_mut(),
+        };
+        unsafe {
+            mdb_result(lmdb_sys::mdb_get(
+                self.raw(),
+                db.dbi(),
+                &mut key_val,
+                &mut data,
+            ))?;
+            Ok(std::slice::from_raw_parts(
+                data.mv_data as *const u8,
+                data.mv_size,
+            ))
         }
     }
 
-    fn open_ro_cursor(&self, db: Database) -> Result<RoCursor<'_>, lmdb::Error> {
-        match self {
-            LmdbTxn::Ro(tx) => tx.open_ro_cursor(db),
-            LmdbTxn::Rw(tx) => tx.open_ro_cursor(db),
-        }
+    unsafe fn open_ro_cursor_raw(
+        &self,
+        db: Database,
+    ) -> Result<*mut lmdb_sys::MDB_cursor, lmdb::Error> {
+        let mut cursor: *mut lmdb_sys::MDB_cursor = std::ptr::null_mut();
+        mdb_result(lmdb_sys::mdb_cursor_open(self.raw(), db.dbi(), &mut cursor))?;
+        Ok(cursor)
     }
 
-    fn writable(&mut self) -> Result<&mut RwTransaction<'env>, DatabaseError> {
-        match self {
-            LmdbTxn::Ro(_) => Err(DatabaseError::UnsupportedStmt(
-                "cannot write in a read-only transaction".into(),
-            )),
-            LmdbTxn::Rw(tx) => Ok(tx),
-        }
+    fn is_writable(&self) -> bool {
+        matches!(self, LmdbTxn::Rw(_))
     }
 }
 
-pub struct LmdbIter<'txn> {
-    cursor: RoCursor<'txn>,
+pub struct LmdbIter {
+    cursor: *mut lmdb_sys::MDB_cursor,
     scan: Scan,
 }
+
+unsafe impl Send for LmdbIter {}
+
+pub struct PointCur(*mut lmdb_sys::MDB_cursor);
+
+unsafe impl Send for PointCur {}
+unsafe impl Sync for PointCur {}
 
 struct Scan {
     step: Step,
@@ -258,19 +309,16 @@ impl Scan {
         }
     }
 
-    fn start(&self) -> Bound<&[u8]> {
-        if self.reverse {
+    fn before_start(&self, key: &[u8]) -> bool {
+        let start = if self.reverse {
             bytes_bound_as_slice(&self.range.1)
         } else {
             bytes_bound_as_slice(&self.range.0)
-        }
-    }
-
-    fn before_start(&self, key: &[u8]) -> bool {
+        };
         if self.reverse {
-            !bounds_contain(Bound::Unbounded, self.start(), key)
+            !bounds_contain(Bound::Unbounded, start, key)
         } else {
-            !bounds_contain(self.start(), Bound::Unbounded, key)
+            !bounds_contain(start, Bound::Unbounded, key)
         }
     }
 
@@ -282,91 +330,135 @@ impl Scan {
         )
     }
 
-    fn next<'txn, C: Cursor<'txn>>(
+    fn next(
         &mut self,
-        cursor: &C,
-    ) -> Result<Option<KeyValueRef<'txn>>, DatabaseError> {
+        cursor: *mut lmdb_sys::MDB_cursor,
+    ) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
         loop {
-            let (key, op) = match self.step {
-                Step::Seek => match self.start() {
-                    Bound::Included(key) | Bound::Excluded(key) => {
-                        (Some(key), lmdb_sys::MDB_SET_RANGE)
+            let (key, op, positioning, is_seek, is_reverse) = {
+                let start_bound = if matches!(self.step, Step::Seek) {
+                    let min = bytes_bound_as_slice(&self.range.0);
+                    let max = bytes_bound_as_slice(&self.range.1);
+                    if self.reverse {
+                        max
+                    } else {
+                        min
                     }
-                    Bound::Unbounded if self.reverse => (None, lmdb_sys::MDB_LAST),
-                    Bound::Unbounded => (None, lmdb_sys::MDB_FIRST),
-                },
-                Step::Last => (None, lmdb_sys::MDB_LAST),
-                Step::Move if self.reverse => (None, lmdb_sys::MDB_PREV),
-                Step::Move => (None, lmdb_sys::MDB_NEXT),
-                Step::Done => return Ok(None),
+                } else {
+                    Bound::Unbounded
+                };
+                let positioning = !matches!(self.step, Step::Move);
+                let is_seek = matches!(self.step, Step::Seek);
+                let is_reverse = self.reverse;
+
+                let (key, op) = match self.step {
+                    Step::Seek => match start_bound {
+                        Bound::Included(key) | Bound::Excluded(key) => {
+                            (Some(key), lmdb_sys::MDB_SET_RANGE)
+                        }
+                        Bound::Unbounded if is_reverse => (None, lmdb_sys::MDB_LAST),
+                        Bound::Unbounded => (None, lmdb_sys::MDB_FIRST),
+                    },
+                    Step::Last => (None, lmdb_sys::MDB_LAST),
+                    Step::Move if is_reverse => (None, lmdb_sys::MDB_PREV),
+                    Step::Move => (None, lmdb_sys::MDB_NEXT),
+                    Step::Done => return Ok(None),
+                };
+                (key, op, positioning, is_seek, is_reverse)
             };
-            let positioning = !matches!(self.step, Step::Move);
+
             let Some(entry) = cursor_get(cursor, key, op)? else {
-                self.step = if self.reverse && key.is_some() && matches!(self.step, Step::Seek) {
+                self.step = if is_reverse && key.is_some() && is_seek {
                     Step::Last
                 } else {
                     Step::Done
                 };
                 continue;
             };
+            let (entry_key, entry_value) = entry;
+            let contains = self.contains(entry_key);
+            let before_start = positioning && self.before_start(entry_key);
             self.step = Step::Move;
-            if self.contains(entry.0) {
-                return Ok(Some(entry));
+            if contains {
+                return Ok(Some((entry_key, entry_value)));
             }
-            if !(positioning && self.before_start(entry.0)) {
+            if !before_start {
                 self.step = Step::Done;
             }
         }
     }
 }
 
-impl InnerIter for LmdbIter<'_> {
-    fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
-        self.scan.next(&self.cursor)
+#[maybe_async]
+impl InnerIter for LmdbIter {
+    async fn try_next(&mut self) -> Result<Option<KeyValueRef<'_>>, DatabaseError> {
+        self.scan.next(self.cursor)
     }
 
     fn recycle(self, pool: &mut BytesPool) {
         self.scan.recycle(pool);
+        unsafe {
+            lmdb_sys::mdb_cursor_close(self.cursor);
+        }
     }
 }
 
-fn cursor_get<'txn, C: Cursor<'txn>>(
-    cursor: &C,
+fn cursor_get(
+    cursor: *mut lmdb_sys::MDB_cursor,
     key: Option<&[u8]>,
     op: lmdb_sys::MDB_cursor_op,
-) -> Result<Option<KeyValueRef<'txn>>, lmdb::Error> {
-    match cursor.get(key, None, op) {
-        Ok((key, value)) => Ok(Some((key.unwrap_or_default(), value))),
-        Err(lmdb::Error::NotFound) => Ok(None),
-        Err(err) => Err(err),
+) -> Result<Option<KeyValueRef<'_>>, lmdb::Error> {
+    let mut key_val = match key {
+        Some(k) => lmdb_sys::MDB_val {
+            mv_size: k.len(),
+            mv_data: k.as_ptr() as *mut std::ffi::c_void,
+        },
+        None => lmdb_sys::MDB_val {
+            mv_size: 0,
+            mv_data: std::ptr::null_mut(),
+        },
+    };
+    let mut data = lmdb_sys::MDB_val {
+        mv_size: 0,
+        mv_data: std::ptr::null_mut(),
+    };
+    unsafe {
+        let rc = lmdb_sys::mdb_cursor_get(cursor, &mut key_val, &mut data, op);
+        if rc == lmdb_sys::MDB_NOTFOUND {
+            return Ok(None);
+        }
+        mdb_result(rc)?;
+        let key_slice = std::slice::from_raw_parts(key_val.mv_data as *const u8, key_val.mv_size);
+        let value_slice = std::slice::from_raw_parts(data.mv_data as *const u8, data.mv_size);
+        Ok(Some((key_slice, value_slice)))
     }
 }
 
-impl StorageTransaction for LmdbTransaction<'_> {
+#[maybe_async]
+impl StorageTransaction for LmdbTransaction {
     type BorrowedBytes<'a>
         = &'a [u8]
     where
         Self: 'a;
 
     type IterType<'a>
-        = LmdbIter<'a>
+        = LmdbIter
     where
         Self: 'a;
 
     type RevIterType<'a>
-        = LmdbIter<'a>
+        = LmdbIter
     where
         Self: 'a;
 
     type PointCursor<'a>
-        = RoCursor<'a>
+        = PointCur
     where
         Self: 'a;
     fn next_statement_stamp(&mut self) -> Result<u64, DatabaseError> {
         const STATEMENT_BITS: u32 = 20;
         self.statements += 1;
-        // SAFETY: `self.tx` is a live transaction handle owned by this value.
-        let txn_id = unsafe { lmdb_sys::mdb_txn_id(self.tx.raw()) } as u64;
+        let txn_id = unsafe { lmdb_sys::mdb_txn_id(self.tx.as_ref().unwrap().raw()) } as u64;
         if self.statements >= 1 << STATEMENT_BITS || txn_id >= 1 << (u64::BITS - STATEMENT_BITS) {
             return Err(DatabaseError::InvalidValue(
                 "statement stamps exhausted".into(),
@@ -375,11 +467,11 @@ impl StorageTransaction for LmdbTransaction<'_> {
         Ok((txn_id << STATEMENT_BITS) | self.statements)
     }
 
-    fn get_borrowed<'a>(
+    async fn get_borrowed<'a>(
         &'a self,
         key: &[u8],
     ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
-        match self.tx.get(self.db, key) {
+        match self.tx.as_ref().unwrap().get(self.db, key) {
             Ok(value) => Ok(Some(value)),
             Err(lmdb::Error::NotFound) => Ok(None),
             Err(err) => Err(err.into()),
@@ -391,80 +483,132 @@ impl StorageTransaction for LmdbTransaction<'_> {
     }
 
     fn point_cursor(&self) -> Result<Self::PointCursor<'_>, DatabaseError> {
-        Ok(self.tx.open_ro_cursor(self.db)?)
+        unsafe {
+            Ok(PointCur(
+                self.tx.as_ref().unwrap().open_ro_cursor_raw(self.db)?,
+            ))
+        }
     }
 
-    fn get_at<'a>(
+    async fn get_at<'a>(
         &'a self,
         cursor: &Self::PointCursor<'a>,
         key: &[u8],
     ) -> Result<Option<Self::BorrowedBytes<'a>>, DatabaseError> {
-        match cursor.get(Some(key), None, lmdb_sys::MDB_SET) {
-            Ok((_, value)) => Ok(Some(value)),
-            Err(lmdb::Error::NotFound) => Ok(None),
+        match cursor_get(cursor.0, Some(key), lmdb_sys::MDB_SET) {
+            Ok(Some((_, value))) => unsafe {
+                Ok(Some(std::mem::transmute::<&[u8], &'a [u8]>(value)))
+            },
+            Ok(None) => Ok(None),
             Err(err) => Err(err.into()),
         }
     }
 
     fn set(&mut self, key: &[u8], value: &[u8]) -> Result<(), DatabaseError> {
-        self.tx
-            .writable()?
-            .put(self.db, &key, &value, lmdb::WriteFlags::empty())?;
+        let tx = self.tx.as_ref().unwrap();
+        if !tx.is_writable() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "cannot write in a read-only transaction".into(),
+            ));
+        }
+        let mut key_val = lmdb_sys::MDB_val {
+            mv_size: key.len(),
+            mv_data: key.as_ptr() as *mut std::ffi::c_void,
+        };
+        let mut data = lmdb_sys::MDB_val {
+            mv_size: value.len(),
+            mv_data: value.as_ptr() as *mut std::ffi::c_void,
+        };
+        unsafe {
+            mdb_result(lmdb_sys::mdb_put(
+                tx.raw(),
+                self.db.dbi(),
+                &mut key_val,
+                &mut data,
+                0,
+            ))?;
+        }
         Ok(())
     }
 
     fn remove(&mut self, key: &[u8]) -> Result<(), DatabaseError> {
-        match self.tx.writable()?.del(self.db, &key, None) {
-            Ok(()) | Err(lmdb::Error::NotFound) => Ok(()),
-            Err(err) => Err(err.into()),
+        let tx = self.tx.as_ref().unwrap();
+        if !tx.is_writable() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "cannot write in a read-only transaction".into(),
+            ));
         }
+        let mut key_val = lmdb_sys::MDB_val {
+            mv_size: key.len(),
+            mv_data: key.as_ptr() as *mut std::ffi::c_void,
+        };
+        unsafe {
+            let rc = lmdb_sys::mdb_del(tx.raw(), self.db.dbi(), &mut key_val, std::ptr::null_mut());
+            if rc == lmdb_sys::MDB_NOTFOUND {
+                return Ok(());
+            }
+            mdb_result(rc)?;
+        }
+        Ok(())
     }
 
-    fn range<'txn, 'key>(
+    async fn range<'txn, 'key>(
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
         pool: &mut BytesPool,
     ) -> Result<Self::IterType<'txn>, DatabaseError> {
-        Ok(LmdbIter {
-            cursor: self.tx.open_ro_cursor(self.db)?,
-            scan: Scan::new(min, max, false, pool),
-        })
+        unsafe {
+            Ok(LmdbIter {
+                cursor: self.tx.as_ref().unwrap().open_ro_cursor_raw(self.db)?,
+                scan: Scan::new(min, max, false, pool),
+            })
+        }
     }
 
-    fn range_rev<'txn, 'key>(
+    async fn range_rev<'txn, 'key>(
         &'txn self,
         min: Bound<&'key [u8]>,
         max: Bound<&'key [u8]>,
         pool: &mut BytesPool,
     ) -> Result<Self::RevIterType<'txn>, DatabaseError> {
-        Ok(LmdbIter {
-            cursor: self.tx.open_ro_cursor(self.db)?,
-            scan: Scan::new(min, max, true, pool),
-        })
+        unsafe {
+            Ok(LmdbIter {
+                cursor: self.tx.as_ref().unwrap().open_ro_cursor_raw(self.db)?,
+                scan: Scan::new(min, max, true, pool),
+            })
+        }
     }
 
-    fn remove_range(
+    async fn remove_range(
         &mut self,
         min: Bound<&[u8]>,
         max: Bound<&[u8]>,
         pool: &mut BytesPool,
     ) -> Result<(), DatabaseError> {
-        let mut cursor = self.tx.writable()?.open_rw_cursor(self.db)?;
-        let mut scan = Scan::new(min, max, false, pool);
-        while scan.next(&cursor)?.is_some() {
-            cursor.del(WriteFlags::empty())?;
+        let tx = self.tx.as_ref().unwrap();
+        if !tx.is_writable() {
+            return Err(DatabaseError::UnsupportedStmt(
+                "cannot write in a read-only transaction".into(),
+            ));
         }
-        scan.recycle(pool);
+        unsafe {
+            let cursor = tx.open_ro_cursor_raw(self.db)?;
+            let mut scan = Scan::new(min, max, false, pool);
+            while scan.next(cursor)?.is_some() {
+                mdb_result(lmdb_sys::mdb_cursor_del(cursor, 0))?;
+            }
+            scan.recycle(pool);
+            lmdb_sys::mdb_cursor_close(cursor);
+        }
         Ok(())
     }
 
-    fn commit(self) -> Result<(), DatabaseError> {
-        let LmdbTransaction { mapped, tx, .. } = self;
-        drop(mapped);
-        match tx {
-            LmdbTxn::Ro(tx) => tx.commit()?,
-            LmdbTxn::Rw(tx) => tx.commit()?,
+    async fn commit(mut self) -> Result<(), DatabaseError> {
+        drop(self.mapped.take());
+        let tx = self.tx.take().unwrap();
+        unsafe {
+            mdb_result(lmdb_sys::mdb_txn_commit(tx.raw()))?;
         }
         Ok(())
     }
@@ -472,6 +616,8 @@ impl StorageTransaction for LmdbTransaction<'_> {
 
 // GRCOV_EXCL_START
 #[cfg(all(test, not(target_arch = "wasm32")))]
+#[maybe_async]
+#[allow(unused_imports)]
 mod tests {
     use super::{LmdbConfig, LmdbStorage};
     use crate::catalog::{ColumnCatalog, ColumnDesc};
@@ -486,6 +632,7 @@ mod tests {
     use std::borrow::Cow;
     use tempfile::TempDir;
 
+    #[sync_only]
     #[test]
     fn read_transactions_map_decoded_strings() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -553,6 +700,7 @@ mod tests {
         }
     }
 
+    #[sync_only]
     #[test]
     fn transaction_rows_lend_strings_until_the_transaction_ends() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -585,6 +733,7 @@ mod tests {
         }
     }
 
+    #[sync_only]
     #[test]
     fn rows_from_read_transactions_outlive_them() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -608,6 +757,7 @@ mod tests {
         assert_eq!(value, "kite");
     }
 
+    #[sync_only]
     #[test]
     fn materializing_operators_keep_strings_mapped_across_executions() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -709,6 +859,7 @@ mod tests {
         }
     }
 
+    #[sync_only]
     #[test]
     fn lmdb_backend_smoke() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -732,30 +883,37 @@ mod tests {
     }
 
     #[test]
-    fn lmdb_remove_range() {
+    async fn lmdb_remove_range() {
         use crate::storage::Storage;
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = LmdbStorage::new(temp_dir.path().join("kite_sql.lmdb")).unwrap();
         let mut transaction = storage.transaction().unwrap();
-        crate::storage::check_remove_range(&mut transaction).unwrap();
+        crate::storage::check_remove_range(&mut transaction)
+            .await
+            .unwrap();
     }
 
     #[test]
-    fn lmdb_range_rev_matches_range() {
+    async fn lmdb_range_rev_matches_range() {
         use crate::storage::Storage;
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let storage = LmdbStorage::new(temp_dir.path().join("kite_sql.lmdb")).unwrap();
         let mut transaction = storage.transaction().unwrap();
-        crate::storage::check_range_rev_matches_range(&mut transaction).unwrap();
+        crate::storage::check_range_rev_matches_range(&mut transaction)
+            .await
+            .unwrap();
     }
 
     #[test]
-    fn explicit_transaction_does_not_rescan_own_writes() {
+    async fn explicit_transaction_does_not_rescan_own_writes() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let db = DataBaseBuilder::path(temp_dir.path()).build_lmdb().unwrap();
-        crate::storage::check_explicit_transaction_does_not_rescan_own_writes(db).unwrap();
+        crate::storage::check_explicit_transaction_does_not_rescan_own_writes(db)
+            .await
+            .unwrap();
     }
 
+    #[sync_only]
     #[test]
     fn read_transactions_skip_the_writer_lock() {
         use crate::storage::{Storage, StorageTransaction};
@@ -779,6 +937,7 @@ mod tests {
         assert_eq!(reader.get_borrowed(b"k").unwrap(), Some(&b"v"[..]));
     }
 
+    #[sync_only]
     #[test]
     fn read_statements_and_plans_use_read_transactions() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -812,6 +971,7 @@ mod tests {
         writer.commit().unwrap();
     }
 
+    #[sync_only]
     #[test]
     fn build_with_lmdb_storage() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -824,6 +984,7 @@ mod tests {
         kite_sql.ddl("create table t1 (a int primary key)").unwrap();
     }
 
+    #[sync_only]
     #[test]
     fn collect_lmdb_metrics_snapshot() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
@@ -852,6 +1013,7 @@ mod tests {
         assert!(metrics.entries > 0);
     }
 
+    #[sync_only]
     #[test]
     fn build_lmdb_with_config() {
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");

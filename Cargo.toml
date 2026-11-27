@@ -40,7 +40,7 @@ python  = ["parser", "dep:pyo3"]
 shell   = ["parser", "dep:comfy-table", "dep:rustyline"]
 spill   = []
 # Compiles the storage traits, the executor and the database API as async, for storages whose
-# reads are asynchronous. Excludes the sync storages (`rocksdb`, `lmdb`) and `python`, `shell`
+# reads are asynchronous. Excludes the `rocksdb` storage and `python`, `shell`
 # and `wasm`; pick it in the final application, not in a library.
 async   = []
 # SlateDB storage, on object storage; needs the async path and a tokio runtime.
@@ -72,6 +72,10 @@ required-features = ["lmdb", "orm", "parser"]
 [[example]]
 name              = "async_s3"
 required-features = ["slatedb-s3", "orm"]
+
+[[example]]
+name              = "async_lmdb"
+required-features = ["async", "lmdb", "orm"]
 
 [dependencies]
 bumpalo               = { version = "3", default-features = false, features = ["collections"] }

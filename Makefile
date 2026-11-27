@@ -44,7 +44,7 @@ MIRI_FEATURES ?= spill,decimal,lmdb
 MIRI_TESTS ?= types::tuple:: execution::test::
 COVERAGE_REPORT_ARGS ?= --llvm --ignore-not-existing --keep-only 'src/**' --ignore 'src/**/tests/**' --ignore 'tests/**' --ignore 'tpcc/**' --excl-start 'GRCOV_EXCL_START' --excl-stop 'GRCOV_EXCL_STOP'
 
-.PHONY: test test-async test-slatedb test-python test-wasm test-slt test-slt-async test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz miri
+.PHONY: test test-async build-lmdb-async test-slatedb test-python test-wasm test-slt test-slt-async test-all codecov codecov-html wasm-build check tpcc tpcc-kitesql-rocksdb tpcc-kitesql-lmdb tpcc-lmdb-flamegraph tpcc-lmdb-heaptrack tpcc-sqlite tpcc-dual cargo-check build wasm-examples native-examples fmt clippy fuzz miri
 
 ## Run default Rust tests in the current environment (non-WASM).
 test:
@@ -53,6 +53,10 @@ test:
 ## Run the same unit tests through the async path (`async` feature, SlateDB on an in-memory object store).
 test-async:
 	$(CARGO) test -p kite_sql --lib --no-default-features --features $(ASYNC_FEATURES),slatedb
+
+## Build LMDB with the async feature to verify the async trait implementation.
+build-lmdb-async:
+	$(CARGO) build -p kite_sql --lib --no-default-features --features async,time,copy,decimal,macros,orm,parser,lmdb,spill
 
 ## Run the SlateDB storage unit tests (async path, in-memory object store, S3 config).
 test-slatedb:

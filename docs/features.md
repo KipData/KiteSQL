@@ -71,7 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`async` excludes the sync storages (`rocksdb`, `lmdb`) and the shell, Python and Wasm bindings: pick one path per build. The full example is [async_s3](../examples/async_s3.rs):
+`async` excludes the `rocksdb` storage and the shell, Python and Wasm bindings: pick one path per build. LMDB implements the async traits (as immediately-ready futures) and can be used with `async`, allowing mixed storage types in one build. The full S3 example is [async_s3](../examples/async_s3.rs), and [async_lmdb](../examples/async_lmdb.rs) demonstrates async API usage with LMDB:
 ```bash
 KITESQL_S3_BUCKET=my-bucket AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
 cargo run --example async_s3 --no-default-features --features slatedb-s3,orm

@@ -26,6 +26,9 @@ jobs:
 
       - name: Run cargo test through the async path
         run: make test-async
+
+      - name: Build LMDB with async feature
+        run: make build-lmdb-async
   # 2
   fmt:
     name: Rust fmt
