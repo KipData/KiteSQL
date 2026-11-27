@@ -13,17 +13,22 @@
 // limitations under the License.
 
 use crate::errors::DatabaseError;
+use crate::expression::UnaryOperator;
 use crate::types::evaluator::cast::{to_char, to_varbinary, to_varchar};
 use crate::types::evaluator::DataValue;
 use crate::types::CharLengthUnits;
 use ordered_float::OrderedFloat;
-use std::hint;
-pub fn boolean_not_unary_eval(value: &DataValue) -> DataValue {
-    match value {
+pub fn boolean_not_unary_eval(value: &DataValue) -> Result<DataValue, DatabaseError> {
+    Ok(match value {
         DataValue::Boolean(value) => DataValue::Boolean(!value),
         DataValue::Null => DataValue::Null,
-        _ => unsafe { hint::unreachable_unchecked() },
-    }
+        _ => {
+            return Err(DatabaseError::UnsupportedUnaryOperator(
+                value.logical_type(),
+                UnaryOperator::Not,
+            ))
+        }
+    })
 }
 pub fn boolean_and_binary_eval(
     left: &DataValue,
@@ -36,7 +41,12 @@ pub fn boolean_and_binary_eval(
         (DataValue::Null, DataValue::Null)
         | (DataValue::Boolean(true), DataValue::Null)
         | (DataValue::Null, DataValue::Boolean(true)) => DataValue::Null,
-        _ => unsafe { hint::unreachable_unchecked() },
+        _ => {
+            return Err(DatabaseError::Incomparable(
+                left.logical_type(),
+                right.logical_type(),
+            ))
+        }
     })
 }
 pub fn boolean_or_binary_eval(
@@ -50,7 +60,12 @@ pub fn boolean_or_binary_eval(
         (DataValue::Null, DataValue::Null)
         | (DataValue::Boolean(false), DataValue::Null)
         | (DataValue::Null, DataValue::Boolean(false)) => DataValue::Null,
-        _ => unsafe { hint::unreachable_unchecked() },
+        _ => {
+            return Err(DatabaseError::Incomparable(
+                left.logical_type(),
+                right.logical_type(),
+            ))
+        }
     })
 }
 pub fn boolean_eq_binary_eval(
@@ -62,7 +77,12 @@ pub fn boolean_eq_binary_eval(
         (DataValue::Null, DataValue::Boolean(_))
         | (DataValue::Boolean(_), DataValue::Null)
         | (DataValue::Null, DataValue::Null) => DataValue::Null,
-        _ => unsafe { hint::unreachable_unchecked() },
+        _ => {
+            return Err(DatabaseError::Incomparable(
+                left.logical_type(),
+                right.logical_type(),
+            ))
+        }
     })
 }
 
@@ -123,7 +143,12 @@ pub fn boolean_not_eq_binary_eval(
         (DataValue::Null, DataValue::Boolean(_))
         | (DataValue::Boolean(_), DataValue::Null)
         | (DataValue::Null, DataValue::Null) => DataValue::Null,
-        _ => unsafe { hint::unreachable_unchecked() },
+        _ => {
+            return Err(DatabaseError::Incomparable(
+                left.logical_type(),
+                right.logical_type(),
+            ))
+        }
     })
 }
 
@@ -132,15 +157,19 @@ pub fn boolean_not_eq_binary_eval(
 #[maybe_async]
 mod test {
     use super::*;
+    use crate::expression::UnaryOperator;
     use crate::types::value::Utf8Type;
 
     #[test]
     fn test_boolean_binary_evaluators() {
         assert_eq!(
-            boolean_not_unary_eval(&DataValue::Boolean(true)),
+            boolean_not_unary_eval(&DataValue::Boolean(true)).unwrap(),
             DataValue::Boolean(false)
         );
-        assert_eq!(boolean_not_unary_eval(&DataValue::Null), DataValue::Null);
+        assert_eq!(
+            boolean_not_unary_eval(&DataValue::Null).unwrap(),
+            DataValue::Null
+        );
         assert_eq!(
             boolean_and_binary_eval(&DataValue::Boolean(true), &DataValue::Boolean(true)).unwrap(),
             DataValue::Boolean(true)
@@ -182,6 +211,23 @@ mod test {
             boolean_not_eq_binary_eval(&DataValue::Boolean(true), &DataValue::Null).unwrap(),
             DataValue::Null
         );
+    }
+
+    #[test]
+    fn test_boolean_not_on_non_boolean_returns_error() {
+        let result = boolean_not_unary_eval(&DataValue::Int32(42));
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            DatabaseError::UnsupportedUnaryOperator(_, UnaryOperator::Not)
+        ));
+
+        let result = boolean_not_unary_eval(&DataValue::Utf8 {
+            value: "test".into(),
+            ty: Utf8Type::Variable(None),
+            unit: CharLengthUnits::Characters,
+        });
+        assert!(result.is_err());
     }
 
     #[test]

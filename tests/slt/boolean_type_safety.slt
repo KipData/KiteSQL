@@ -1,0 +1,60 @@
+# Boolean operators reject non-boolean operands instead of invoking undefined behaviour.
+
+query B
+SELECT NOT true
+----
+false
+
+query B
+SELECT NOT false
+----
+true
+
+query B
+SELECT NOT NULL
+----
+NULL
+
+query error
+SELECT NOT 42
+
+query error
+SELECT NOT 0
+
+query error
+SELECT NOT 'test'
+
+query error
+SELECT NOT 'false'
+
+query error
+SELECT NOT 1.5
+
+query error
+SELECT NOT CURRENT_TIMESTAMP
+
+query error
+SELECT NOT (1 + 1)
+
+query error
+SELECT NOT ('a' || 'b')
+
+query B
+SELECT NOT (1 = 1)
+----
+false
+
+query B
+SELECT NOT (1 <> 1)
+----
+true
+
+query B
+SELECT NOT (NULL IS NULL)
+----
+false
+
+query B
+SELECT NOT (1 IS NULL)
+----
+true
