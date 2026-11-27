@@ -211,6 +211,7 @@ let kite_sql = DataBaseBuilder::path("./data")
 - Pessimistic (Default)
 - Optimistic
 - Isolation level: repeatable read; every statement in a transaction reads the snapshot taken when it began
+- SQL transaction control through `Database::session()`: `BEGIN`/`START TRANSACTION`, `COMMIT` and `ROLLBACK` as statements; nested `BEGIN` follows the dialect, and `SET autocommit` is accepted by a dialect that parses it (`SqlParser::with_set_autocommit()`)
 
 ### Checkpoint
 KiteSQL exposes checkpoint as a storage capability rather than a full backup workflow. A checkpoint only creates a consistent local snapshot directory; compressing, uploading, retaining, and pruning backups should stay in application code.
@@ -436,6 +437,7 @@ The `SqlDialect` trait methods:
 - `parse()` — Parses SQL text into KiteSQL statements; the dialect rejects syntax it does not support and may rewrite the statements
 - `comparison_type()` — Optional hook to pick the type both operands of a comparison (`=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `BETWEEN`) are cast to
 - `boolean_text()` — Optional hook to choose the text of a boolean in `CAST(.. AS CHAR)` or `CAST(.. AS VARCHAR)` (default `'true'`/`'false'`)
+- `begin_commits_active_transaction()` — Optional hook to make `BEGIN` in a `Session` commit the open transaction and start a new one (default: rejected)
 
 `DataTypeMapper::map_data_type()` maps types inside expressions (`CAST`, typed literals); `map_column_type()` maps the types of column definitions and defaults to `map_data_type()`.
 

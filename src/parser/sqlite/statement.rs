@@ -19,7 +19,7 @@ use crate::ast;
 use crate::errors::DatabaseError;
 use sqlite3_parser::ast::{
     AlterTableBody, Cmd, ColumnConstraint, ColumnDefinition, CreateTableBody, Expr, InsertBody,
-    QualifiedName, ResolveType, SortOrder, SortedColumn, Stmt, TableConstraint,
+    QualifiedName, ResolveType, SortOrder, SortedColumn, Stmt, TableConstraint, TransactionType,
 };
 
 pub(super) fn cmd(cmd: &Cmd<'_>) -> Result<ast::Statement, DatabaseError> {
@@ -239,6 +239,14 @@ fn statement(stmt: &Stmt<'_>, cmd: &Cmd<'_>) -> Result<ast::Statement, DatabaseE
             table_name: qualified_name(table_name),
         },
         Stmt::Analyze(None) => return Err(unsupported("ANALYZE without table is not supported")),
+        Stmt::Begin(None | Some(TransactionType::Deferred), None) => {
+            ast::Statement::StartTransaction
+        }
+        Stmt::Commit(None) => ast::Statement::Commit,
+        Stmt::Rollback {
+            tx_name: None,
+            savepoint_name: None,
+        } => ast::Statement::Rollback,
         _ => return Err(unsupported(cmd.to_string())),
     })
 }

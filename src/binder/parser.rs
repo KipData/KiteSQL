@@ -80,7 +80,17 @@ pub fn command_type(stmt: &Statement) -> Result<CommandType, DatabaseError> {
         | Statement::Insert(_) => CommandType::DML,
         Statement::Copy(copy) if copy.to => CommandType::DQL,
         Statement::Copy(_) => CommandType::DML,
+        Statement::StartTransaction
+        | Statement::Commit
+        | Statement::Rollback
+        | Statement::SetAutocommit(_) => return Err(transaction_control_unsupported()),
     })
+}
+
+fn transaction_control_unsupported() -> DatabaseError {
+    DatabaseError::UnsupportedStmt(
+        "transaction control statements require `Database::session`".to_string(),
+    )
 }
 
 impl<S: Storage, D: SqlDialect> State<S, D> {
@@ -205,6 +215,14 @@ impl<S: Storage, D: SqlDialect> Database<S, D> {
             .state
             .prepare_all(sql)
             .map_err(|err| err.with_sql_context(sql))?;
+        self.run_statements(sql, statements).await
+    }
+
+    pub(crate) async fn run_statements(
+        &self,
+        sql: &str,
+        statements: Vec<Statement>,
+    ) -> Result<DatabaseIter<'_, S>, DatabaseError> {
         let has_catalog_mutation = statements
             .iter()
             .try_fold(false, |has_mutation, stmt| {
@@ -273,10 +291,18 @@ impl<'txn, S: Storage, D: SqlDialect> Transaction<'txn, S, D> {
         sql: T,
     ) -> Result<TransactionIter<'a, 'a, S::TransactionType<'txn>>, DatabaseError> {
         let sql = sql.as_ref();
-        let mut statements = self
+        let statements = self
             .state
             .prepare_all(sql)
             .map_err(|err| err.with_sql_context(sql))?;
+        self.run_statements(sql, statements).await
+    }
+
+    pub(crate) async fn run_statements<'a>(
+        &'a mut self,
+        sql: &str,
+        mut statements: Vec<Statement>,
+    ) -> Result<TransactionIter<'a, 'a, S::TransactionType<'txn>>, DatabaseError> {
         for statement in &statements {
             if statement_mutates_catalog_or_statistics(statement)? {
                 return Err(DatabaseError::UnsupportedStmt(
@@ -385,6 +411,10 @@ where
             }
             Statement::CreateIndex(create) => self.create_index(create)?,
             Statement::CreateView(create) => self.create_view(create)?,
+            Statement::StartTransaction
+            | Statement::Commit
+            | Statement::Rollback
+            | Statement::SetAutocommit(_) => return Err(transaction_control_unsupported()),
         };
 
         Ok(BindStatementComplete { plan })
@@ -2700,8 +2730,8 @@ mod tests {
         }
 
         assert_unsupported(
-            database.prepare_all("start transaction").unwrap_err(),
-            "START TRANSACTION",
+            command_type(&database.prepare_all("start transaction")?.pop().unwrap()).unwrap_err(),
+            "`Database::session`",
         );
 
         Ok(())
