@@ -61,7 +61,7 @@ pub(crate) fn eval_unary(
         UNARY_INT16_MINUS => int16_minus_unary_eval(value)?,
         UNARY_INT32_MINUS => int32_minus_unary_eval(value)?,
         UNARY_INT64_MINUS => int64_minus_unary_eval(value)?,
-        UNARY_BOOLEAN_NOT => boolean_not_unary_eval(value),
+        UNARY_BOOLEAN_NOT => boolean_not_unary_eval(value)?,
         UNARY_FLOAT32_MINUS => float32_minus_unary_eval(value),
         UNARY_FLOAT64_MINUS => float64_minus_unary_eval(value),
         UNARY_SQL_NULL => crate::types::value::DataValue::Null,
